@@ -186,8 +186,12 @@ async function serveStatic(res: http.ServerResponse, pathname: string): Promise<
     throw new HttpError(404, 'not found');
   }
   const data = await fs.readFile(real);
+  // hashed assets are immutable forever; the html shell must revalidate or a
+  // heuristic cache pins visitors to a stale bundle.
+  const hashed = /[.-][0-9A-Za-z_-]{8}\.(js|css|woff2)$/.test(real);
   res.writeHead(200, {
     'content-type': CONTENT_TYPES[path.extname(real)] ?? 'application/octet-stream',
+    'cache-control': hashed ? 'public, max-age=31536000, immutable' : 'no-cache',
     ...STATIC_HEADERS,
   });
   res.end(data);
