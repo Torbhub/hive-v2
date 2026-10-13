@@ -47,10 +47,11 @@ export async function hubAdd(root: string, name: string, folder: string): Promis
 
 export async function hubTask(root: string, project: string, text: string): Promise<string> {
   const pf = await readProjects(root);
-  if (!pf.projects.some((p) => p.name === project)) throw new Error(`unknown project: ${project}`);
+  if (!pf.projects.some((p) => p.name === project)) throw new Refusal(`unknown project: ${project}`);
   // The lock makes id allocation + task file + ledger append one step.
   return withHubLock(root, async () => {
     const id = await nextTaskId(root, project);
+    await fs.mkdir(hubPath(root, 'tasks'), { recursive: true });
     await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), `# ${id}\n\n${text}\n`);
     await appendTaskEvent(root, { id, project, event: 'asked', at: new Date().toISOString() });
     return id;

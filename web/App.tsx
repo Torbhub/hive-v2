@@ -88,8 +88,52 @@ function ContinueNeed({
   );
 }
 
+function NewTaskRow({
+  project, acting, busy, onStartTask,
+}: {
+  project: string;
+  acting: boolean;
+  busy: { project: string; what: string } | null;
+  onStartTask: (project: string, text: string) => Promise<boolean>;
+}) {
+  const [text, setText] = useState('');
+  if (busy?.project === project && busy.what === 'starting') {
+    return <div className="label-row"><span className="label">new task</span><span className="cyan">starting…</span></div>;
+  }
+  const submit = async () => {
+    const t = text.trim();
+    if (!t) return;
+    if (await onStartTask(project, t)) setText('');
+  };
+  return (
+    <div className="label-row">
+      <span className="label">new task</span>
+      <span className="content">
+        <span className="new-task">
+          <input
+            className="task-input"
+            value={text}
+            placeholder="describe the task…"
+            aria-label={`new task for ${project}`}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void submit();
+              }
+            }}
+          />
+          <button className="btn" disabled={acting || !text.trim()} onClick={() => void submit()}>
+            Start task
+          </button>
+        </span>
+      </span>
+    </div>
+  );
+}
+
 function ProjectCard({
-  project: p, view, now, acting, busy, onWake,
+  project: p, view, now, acting, busy, onWake, onStartTask,
 }: {
   project: HubProject;
   view: HubView;
@@ -97,6 +141,7 @@ function ProjectCard({
   acting: boolean;
   busy: { project: string; what: string } | null;
   onWake: (project: string) => void;
+  onStartTask: (project: string, text: string) => Promise<boolean>;
 }) {
   const look = orchestratorLook(p.orchestrator);
   const o = p.orchestrator;
@@ -174,6 +219,7 @@ function ProjectCard({
             )}
         </div>
       )}
+      <NewTaskRow project={p.name} acting={acting} busy={busy} onStartTask={onStartTask} />
     </div>
   );
 }
@@ -181,7 +227,7 @@ function ProjectCard({
 export function App() {
   const [view, setView] = useState<HubView>(EMPTY_VIEW);
   const [acting, setActing] = useState(false);
-  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' } | null>(null);
+  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const actingRef = useRef(false);
 
@@ -222,18 +268,20 @@ export function App() {
   // One action at a time: a click while another runs is ignored.
   const act = useCallback(async (
     project: string,
-    what: 'resuming' | 'continuing' | 'answering',
+    what: 'resuming' | 'continuing' | 'answering' | 'starting',
     who: string,
     runAction: () => Promise<string>,
-  ) => {
-    if (actingRef.current) return;
+  ): Promise<boolean> => {
+    if (actingRef.current) return false;
     actingRef.current = true;
     setActing(true);
     if (what !== 'answering') setBusy({ project, what });
     try {
       setToast(await runAction());
+      return true;
     } catch (e) {
       setToast(`${who}: ${e instanceof Error ? e.message.split('\n').pop() : String(e)}`);
+      return false;
     } finally {
       actingRef.current = false;
       setActing(false);
@@ -261,6 +309,14 @@ export function App() {
     void act(project, 'answering', who, async () => {
       const j = await post('/api/answer', { project, agent: agentRefArg, choice, fingerprint: seen });
       return `${who}: answered "${j.option}"${j.dialog_gone ? '' : ' (the dialog is still on its screen)'}`;
+    });
+  }, [act]);
+
+  const onStartTask = useCallback(async (project: string, text: string): Promise<boolean> => {
+    return act(project, 'starting', project, async () => {
+      const t = await post('/api/task', { project, text });
+      const j = await post('/api/start', { project, task: t.id });
+      return `${project}: its orchestrator is coming up on ${t.id}; it reports back when its team is up (pane ${j.pane})`;
     });
   }, [act]);
 
@@ -324,6 +380,7 @@ export function App() {
           acting={acting}
           busy={busy}
           onWake={onWake}
+          onStartTask={onStartTask}
         />
       ))}
 

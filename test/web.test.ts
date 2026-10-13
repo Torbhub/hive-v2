@@ -16,10 +16,10 @@ process.env.HIVE_TMUX_SOCKET = `hive-test-${process.pid}`;
 
 vi.mock('../src/hub.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/hub.js')>();
-  return { ...orig, wake: vi.fn(orig.wake) };
+  return { ...orig, wake: vi.fn(orig.wake), hubTask: vi.fn(orig.hubTask), startProject: vi.fn(orig.startProject) };
 });
 
-import { wake } from '../src/hub.js';
+import { hubTask, startProject, wake } from '../src/hub.js';
 import { createServer } from '../web/server.js';
 import { appendTaskEvent, hubPath, writeJson } from '../src/state.js';
 
@@ -218,6 +218,32 @@ describe('action serialization', () => {
       vi.mocked(wake).mockRestore();
     }
   });
+
+  it('task then start for the same project run in request order, never overlapped', async () => {
+    const order: string[] = [];
+    vi.mocked(hubTask).mockImplementation(async (root, project) => {
+      await new Promise((r) => setTimeout(r, 120));
+      order.push('task');
+      return `${project}-7`;
+    });
+    vi.mocked(startProject).mockImplementation(async () => {
+      order.push('start');
+      return '%2';
+    });
+    try {
+      const [t, s] = await Promise.all([
+        post('/api/task', { project: 'demo', text: 'queued behind nothing' }),
+        post('/api/start', { project: 'demo', task: 'demo-7' }),
+      ]);
+      expect(t.status).toBe(200);
+      expect(s.status).toBe(200);
+      expect((await s.json()).pane).toBe('%2');
+      expect(order).toEqual(['task', 'start']);
+    } finally {
+      vi.mocked(hubTask).mockRestore();
+      vi.mocked(startProject).mockRestore();
+    }
+  });
 });
 
 describe('HIVE_WEB_SECRET gate', () => {
@@ -233,5 +259,45 @@ describe('HIVE_WEB_SECRET gate', () => {
     } finally {
       delete process.env.HIVE_WEB_SECRET;
     }
+  });
+});
+
+describe('POST /api/task', () => {
+  it('records a task and returns its id', async () => {
+    const r = await post('/api/task', { project: 'demo', text: 'write the smoke docs' });
+    expect(r.status).toBe(200);
+    const j = await r.json();
+    expect(j.ok).toBe(true);
+    expect(j.id).toBe('demo-2');
+    const again = await post('/api/task', { project: 'demo', text: 'a second one' });
+    expect((await again.json()).id).toBe('demo-3');
+  });
+
+  it('unknown project is a clean 400', async () => {
+    const r = await post('/api/task', { project: 'nope', text: 'x' });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/unknown project/);
+  });
+
+  it('empty or blank text is a 400', async () => {
+    expect((await post('/api/task', { project: 'demo', text: '' })).status).toBe(400);
+    expect((await post('/api/task', { project: 'demo', text: '   ' })).status).toBe(400);
+    expect((await post('/api/task', { project: 'demo' })).status).toBe(400);
+  });
+
+  it('text past the cap is a 413', async () => {
+    const r = await post('/api/task', { project: 'demo', text: 'x'.repeat(4001) });
+    expect(r.status).toBe(413);
+  });
+});
+
+describe('POST /api/start', () => {
+  it('a malformed or missing task id is a clean 400 Refusal, no internals leak', async () => {
+    const bad = await post('/api/start', { project: 'demo', task: '../../etc' });
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).detail).toMatch(/task id/);
+    const missing = await post('/api/start', { project: 'demo', task: 'demo-99' });
+    expect(missing.status).toBe(400);
+    expect((await missing.json()).detail).toMatch(/no task file/);
   });
 });

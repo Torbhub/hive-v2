@@ -2,7 +2,7 @@ import http from 'node:http';
 import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Refusal, answerDialog, continueProject, wake } from '../src/hub.js';
+import { Refusal, answerDialog, continueProject, hubTask, startProject, wake } from '../src/hub.js';
 import { checkName } from '../src/names.js';
 import {
   ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
@@ -112,8 +112,10 @@ function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+const TASK_TEXT_CAP = 4000;
+
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
-  if (pathname !== '/api/wake' && pathname !== '/api/continue' && pathname !== '/api/answer') {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   const project = projectName(body);
@@ -124,6 +126,22 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
     }
     if (pathname === '/api/continue') {
       const pane = await withTimeout(continueProject(root, project), ACTION_TIMEOUT_MS, 'continue');
+      return { ok: true, pane };
+    }
+    if (pathname === '/api/task') {
+      // Task text only ever lands in tasks/<id>.md; the pickup line names the
+      // file path, so this text never touches a shell or send-keys.
+      const text = String(body.text ?? '');
+      if (!text.trim()) throw new HttpError(400, 'task text is empty');
+      if (text.length > TASK_TEXT_CAP) {
+        throw new HttpError(413, `task text is capped at ${TASK_TEXT_CAP} characters`);
+      }
+      return { ok: true, id: await hubTask(root, project, text) };
+    }
+    if (pathname === '/api/start') {
+      const pane = await withTimeout(
+        startProject(root, project, String(body.task ?? '')), ACTION_TIMEOUT_MS, 'start',
+      );
       return { ok: true, pane };
     }
     const r = await withTimeout(
