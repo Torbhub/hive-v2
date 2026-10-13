@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { HubTask, TaskEvent, TeamEntry } from './types.js';
-import { NEEDS_OWNER_STATES, TASK_EVENTS } from './types.js';
+import type { HubTask, ProjectMode, TaskEvent, TeamEntry } from './types.js';
+import { NEEDS_OWNER_STATES, PROJECT_MODES, TASK_EVENTS } from './types.js';
 
 export const HUB_DIR = '.hive-hub';
 export const HIVE_DIR = '.hive';
@@ -38,13 +38,20 @@ export async function writeJson(file: string, value: unknown): Promise<void> {
   await fs.rename(tmp, file);
 }
 
-export type ProjectsFile = { projects: { name: string; home: string; repos: { folder: string }[] }[] };
+export type ProjectsFile = {
+  projects: { name: string; home: string; repos: { folder: string }[]; mode?: ProjectMode }[];
+};
 
 export async function readProjects(root: string): Promise<ProjectsFile> {
   return (await readJson<ProjectsFile>(hubPath(root, 'projects.json'))) ?? { projects: [] };
 }
 
 export async function writeProjects(root: string, pf: ProjectsFile): Promise<void> {
+  for (const p of pf.projects) {
+    if (p.mode !== undefined && !(PROJECT_MODES as readonly string[]).includes(p.mode)) {
+      throw new Error(`a project mode is ask|yolo|auto: ${p.mode}`);
+    }
+  }
   await writeJson(hubPath(root, 'projects.json'), pf);
 }
 

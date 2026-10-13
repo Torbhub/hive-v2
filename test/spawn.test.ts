@@ -25,7 +25,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   };
 });
 
-import { closeAgent, respawnAgent } from '../src/spawn.js';
+import { closeAgent, launchCommand, respawnAgent } from '../src/spawn.js';
 import { hubAdd, hubInit } from '../src/hub.js';
 import { hivePath, manifestRead, writeJson } from '../src/state.js';
 
@@ -58,5 +58,16 @@ describe('closeAgent', () => {
   it('refuses to kill a pane whose identity was never recorded', async () => {
     const { root } = await setup({ name: 'builder', pane: '%1' });
     await expect(closeAgent(root, 'demo', 'builder')).rejects.toThrow(/no recorded pane identity/);
+  });
+});
+
+describe('launchCommand', () => {
+  it('builds the teamkimi run line per mode, resume included', () => {
+    expect(launchCommand(undefined, 'ask')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run');
+    expect(launchCommand(undefined, 'yolo')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- -y');
+    expect(launchCommand(undefined, 'auto')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --auto');
+    expect(launchCommand('session_abc', 'ask')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc');
+    expect(launchCommand('session_abc', 'yolo')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc -y');
+    expect(launchCommand('session_abc', 'auto')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc --auto');
   });
 });

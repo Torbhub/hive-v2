@@ -301,3 +301,24 @@ describe('POST /api/start', () => {
     expect((await missing.json()).detail).toMatch(/no task file/);
   });
 });
+
+describe('POST /api/mode', () => {
+  it('persists a valid mode and returns it', async () => {
+    const r = await post('/api/mode', { project: 'demo', mode: 'yolo' });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, mode: 'yolo' });
+    const view = await (await fetch(`${base}/api/view`)).json();
+    expect(view.projects[0].mode).toBe('yolo');
+    const back = await post('/api/mode', { project: 'demo', mode: 'ask' });
+    expect((await back.json()).mode).toBe('ask');
+  });
+
+  it('a bad mode is a 400, an unknown project is a 400', async () => {
+    const badEnum = await post('/api/mode', { project: 'demo', mode: 'chaos' });
+    expect(badEnum.status).toBe(400);
+    expect((await badEnum.json()).detail).toMatch(/mode is ask\|yolo\|auto/);
+    const noProject = await post('/api/mode', { project: 'nope', mode: 'yolo' });
+    expect(noProject.status).toBe(400);
+    expect((await noProject.json()).detail).toMatch(/unknown project/);
+  });
+});

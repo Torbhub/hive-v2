@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  hivePath, manifestRead, readJson, withTeamLock, writeJson,
+  hivePath, manifestRead, readJson, readProjects, withTeamLock, writeJson, writeProjects,
 } from '../src/state.js';
 
 function tmp(): string {
@@ -62,5 +62,17 @@ describe('withTeamLock', () => {
     setTimeout(() => fs.rmdir(hivePath(home, 'team.json.lock')).catch(() => {}), 300);
     await expect(withTeamLock(home, async () => 'ran')).resolves.toBe('ran');
     expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+  });
+});
+
+describe('project mode', () => {
+  it('round-trips through projects.json and rejects a bad mode at write', async () => {
+    const root = tmp();
+    const home = path.join(root, 'demo');
+    await writeProjects(root, { projects: [{ name: 'demo', home, repos: [], mode: 'yolo' }] });
+    expect((await readProjects(root)).projects[0].mode).toBe('yolo');
+    await expect(
+      writeProjects(root, { projects: [{ name: 'demo', home, repos: [], mode: 'chaos' as never }] }),
+    ).rejects.toThrow(/mode is ask\|yolo\|auto/);
   });
 });

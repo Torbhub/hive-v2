@@ -3,7 +3,8 @@ import { promises as fs } from 'node:fs';
 import type {
   HubAgent, HubDialog, HubFolder, HubOrchestrator, HubProject, HubStatus, HubTask, TaskEvent, TeamEntry,
 } from './types.js';
-import { CLOSED_STATES, TASK_EVENTS } from './types.js';
+import { CLOSED_STATES, PROJECT_MODES, TASK_EVENTS } from './types.js';
+import type { ProjectMode } from './types.js';
 import {
   capturePane, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep,
 } from './tmux.js';
@@ -43,6 +44,18 @@ export async function hubAdd(root: string, name: string, folder: string): Promis
   if (pf.projects.some((p) => p.name === name)) throw new Error(`a project named ${name} exists`);
   pf.projects.push({ name, home, repos: [{ folder: home }] });
   await writeProjects(root, pf);
+}
+
+export async function setProjectMode(root: string, project: string, mode: string): Promise<ProjectMode> {
+  if (!(PROJECT_MODES as readonly string[]).includes(mode)) {
+    throw new Refusal(`a mode is ask|yolo|auto: ${mode}`);
+  }
+  const pf = await readProjects(root);
+  const p = pf.projects.find((x) => x.name === project);
+  if (!p) throw new Refusal(`unknown project: ${project}`);
+  p.mode = mode as ProjectMode;
+  await writeProjects(root, pf);
+  return p.mode;
 }
 
 export async function hubTask(root: string, project: string, text: string): Promise<string> {
@@ -190,6 +203,7 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
     orchestrator,
     agents,
     open_tasks: tasks.filter((t) => t.project === p.name && !CLOSED_STATES.has(t.state)).length,
+    mode: p.mode ?? 'ask',
   };
 }
 
@@ -331,7 +345,7 @@ async function launchOrchestrator(
     }
 
     await ensureAgentFiles(cwd, name, 'orchestrator');
-    const { pane, identity } = await launchWindow(project, name, cwd, sessionId);
+    const { pane, identity } = await launchWindow(project, name, cwd, sessionId, p.mode ?? 'ask');
     await manifestAdd(p.home, {
       kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}`,
       pane_pid: identity.pid, pane_started: identity.started,

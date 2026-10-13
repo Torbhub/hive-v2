@@ -39,7 +39,9 @@ exactly like the Ink screen — same view assembly, same fingerprint-checked
 dialog answers, one action at a time. It is a plain foreground process, so a
 systemd unit is one `ExecStart=/path/to/hive web` line away. Set
 `HIVE_WEB_SECRET` to require that value in an `x-hive-auth` header on every
-request (unset = open on loopback, for development).
+request (unset = open on loopback, for development). The screen also creates
+tasks, starts teams, and sets a project's permission mode (`ask`/`yolo`/`auto`
+— passed to kimi as nothing/`-y`/`--auto` on the next launch, resume included).
 
 ## How a task flows
 

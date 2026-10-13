@@ -1,5 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import type { HubDialog, HubProject, HubView } from '../src/types';
+import React, {
+  createContext, useCallback, useContext, useEffect, useRef, useState,
+} from 'react';
+import type { HubDialog, HubProject, HubView, ProjectMode } from '../src/types';
+import { PROJECT_MODES } from '../src/types';
 import {
   agentGlyph, agentRef, ago, buildNeeds, homeTilde, orchestratorLook,
   ROTATE_AT_PERCENT, tasksLine, type Need,
@@ -22,7 +25,40 @@ async function post(pathname: string, body: unknown): Promise<Record<string, unk
   return j;
 }
 
-function DialogBlock({ dialog, onAnswer }: { dialog: HubDialog; onAnswer: (choice: string) => void }) {
+// Every action button reads this: while an action runs all of them disable,
+// and the one that was pressed holds the inverse "active" look until it ends.
+const ActionContext = createContext<{ acting: boolean; pressed: string | null }>({
+  acting: false,
+  pressed: null,
+});
+
+function Btn({
+  id, label, variant, active, disabled, onPress,
+}: {
+  id: string;
+  label: string;
+  variant?: 'primary' | 'plain';
+  active?: boolean;
+  disabled?: boolean;
+  onPress: () => void;
+}) {
+  const { acting, pressed } = useContext(ActionContext);
+  const cls = ['btn', variant ?? '', pressed === id || active ? 'active' : ''].filter(Boolean).join(' ');
+  return (
+    <button className={cls} disabled={disabled || acting} onClick={onPress}>
+      {label}
+    </button>
+  );
+}
+
+function DialogBlock({
+  dialog, answering, idPrefix, onAnswer,
+}: {
+  dialog: HubDialog;
+  answering: boolean;
+  idPrefix: string;
+  onAnswer: (choice: string) => void;
+}) {
   const textLines = dialog.text
     .split('\n')
     .filter((l) => !/^[\s─╌]*$/.test(l))
@@ -34,14 +70,18 @@ function DialogBlock({ dialog, onAnswer }: { dialog: HubDialog; onAnswer: (choic
       {textLines.map((l, i) => (
         <div key={i} className="gray truncate">{l}</div>
       ))}
+      {answering && <div className="cyan">answering…</div>}
       {(offered.length > 0 || dialog.esc) && (
         <div className="need-actions">
           {offered.map((o) => (
-            <button key={o.n} className="btn" onClick={() => onAnswer(String(o.n))}>
-              {`${o.n} ${o.label}${o.saves_rule ? ' (saves a rule)' : ''}`}
-            </button>
+            <Btn
+              key={o.n}
+              id={`${idPrefix}-${o.n}`}
+              label={`${o.n} ${o.label}${o.saves_rule ? ' (saves a rule)' : ''}`}
+              onPress={() => onAnswer(String(o.n))}
+            />
           ))}
-          {dialog.esc && <button className="btn" onClick={() => onAnswer('esc')}>Esc</button>}
+          {dialog.esc && <Btn id={`${idPrefix}-esc`} label="Esc" onPress={() => onAnswer('esc')} />}
         </div>
       )}
       {offered.filter((o) => o.detail !== '').map((o) => (
@@ -59,23 +99,31 @@ function DialogBlock({ dialog, onAnswer }: { dialog: HubDialog; onAnswer: (choic
 }
 
 function NeedDialog({
-  dialogKey, dialogs, onAnswer,
+  dialogKey, dialogs, busy, onAnswer,
 }: {
   dialogKey: string;
   dialogs: Record<string, HubDialog>;
-  onAnswer: (project: string, agentRefArg: string | undefined, seen: string, choice: string) => void;
+  busy: { project: string; what: string; who?: string } | null;
+  onAnswer: (project: string, agentRefArg: string | undefined, seen: string, choice: string, id: string) => void;
 }) {
   const dialog = dialogs[dialogKey];
   if (!dialog) return null;
   const [project, agent] = dialogKey.split('/');
-  return <DialogBlock dialog={dialog} onAnswer={(choice) => onAnswer(project, agent, dialog.fingerprint, choice)} />;
+  const answering = busy?.what === 'answering' && busy.project === project && busy.who === agent;
+  return (
+    <DialogBlock
+      dialog={dialog}
+      answering={answering}
+      idPrefix={dialogKey}
+      onAnswer={(choice) => onAnswer(project, agent, dialog.fingerprint, choice, `${dialogKey}-${choice}`)}
+    />
+  );
 }
 
 function ContinueNeed({
-  project, acting, busy, onContinue,
+  project, busy, onContinue,
 }: {
   project: string;
-  acting: boolean;
   busy: { project: string; what: string } | null;
   onContinue: (project: string) => void;
 }) {
@@ -83,16 +131,15 @@ function ContinueNeed({
     <div className="pl2">
       {busy?.project === project && busy.what === 'continuing'
         ? <span className="cyan">continuing…</span>
-        : <button className="btn" disabled={acting} onClick={() => onContinue(project)}>Continue</button>}
+        : <Btn id={`continue-${project}`} label="Continue" onPress={() => onContinue(project)} />}
     </div>
   );
 }
 
 function NewTaskRow({
-  project, acting, busy, onStartTask,
+  project, busy, onStartTask,
 }: {
   project: string;
-  acting: boolean;
   busy: { project: string; what: string } | null;
   onStartTask: (project: string, text: string) => Promise<boolean>;
 }) {
@@ -123,9 +170,7 @@ function NewTaskRow({
               }
             }}
           />
-          <button className="btn" disabled={acting || !text.trim()} onClick={() => void submit()}>
-            Start task
-          </button>
+          <Btn id={`start-${project}`} label="Start task" disabled={!text.trim()} onPress={() => void submit()} />
         </span>
       </span>
     </div>
@@ -133,15 +178,15 @@ function NewTaskRow({
 }
 
 function ProjectCard({
-  project: p, view, now, acting, busy, onWake, onStartTask,
+  project: p, view, now, busy, onWake, onStartTask, onSetMode,
 }: {
   project: HubProject;
   view: HubView;
   now: number;
-  acting: boolean;
   busy: { project: string; what: string } | null;
   onWake: (project: string) => void;
   onStartTask: (project: string, text: string) => Promise<boolean>;
+  onSetMode: (project: string, mode: ProjectMode) => void;
 }) {
   const look = orchestratorLook(p.orchestrator);
   const o = p.orchestrator;
@@ -208,18 +253,37 @@ function ProjectCard({
           ))}
         </span>
       </div>
+      <div className="label-row">
+        <span className="label">mode</span>
+        <span className="content">
+          <span className="need-actions">
+            {PROJECT_MODES.map((m) => (
+              <Btn
+                key={m}
+                id={`mode-${p.name}-${m}`}
+                label={m}
+                active={(p.mode ?? 'ask') === m}
+                onPress={() => onSetMode(p.name, m)}
+              />
+            ))}
+          </span>
+        </span>
+      </div>
       {canResume && (
         <div className="pl15">
           {busy?.project === p.name && busy.what === 'resuming'
             ? <span className="cyan">resuming…</span>
             : (
-              <button className="btn primary" disabled={acting} onClick={() => onWake(p.name)}>
-                {`Resume · ${back} session${back === 1 ? '' : 's'}`}
-              </button>
+              <Btn
+                id={`wake-${p.name}`}
+                label={`Resume · ${back} session${back === 1 ? '' : 's'}`}
+                variant="primary"
+                onPress={() => onWake(p.name)}
+              />
             )}
         </div>
       )}
-      <NewTaskRow project={p.name} acting={acting} busy={busy} onStartTask={onStartTask} />
+      <NewTaskRow project={p.name} busy={busy} onStartTask={onStartTask} />
     </div>
   );
 }
@@ -227,7 +291,8 @@ function ProjectCard({
 export function App() {
   const [view, setView] = useState<HubView>(EMPTY_VIEW);
   const [acting, setActing] = useState(false);
-  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' } | null>(null);
+  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering'; who?: string } | null>(null);
+  const [pressed, setPressed] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const actingRef = useRef(false);
 
@@ -265,17 +330,21 @@ export function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // One action at a time: a click while another runs is ignored.
+  // One action at a time: a click while another runs is ignored. The pressed
+  // button inverts and everything disables before the network round-trip.
   const act = useCallback(async (
+    id: string,
     project: string,
     what: 'resuming' | 'continuing' | 'answering' | 'starting',
     who: string,
     runAction: () => Promise<string>,
+    busyWho?: string,
   ): Promise<boolean> => {
     if (actingRef.current) return false;
     actingRef.current = true;
+    setPressed(id);
     setActing(true);
-    if (what !== 'answering') setBusy({ project, what });
+    setBusy({ project, what, who: busyWho });
     try {
       setToast(await runAction());
       return true;
@@ -286,37 +355,45 @@ export function App() {
       actingRef.current = false;
       setActing(false);
       setBusy(null);
+      setPressed(null);
       void refresh();
     }
   }, [refresh]);
 
   const onWake = useCallback((project: string) => {
-    void act(project, 'resuming', project, async () => {
+    void act(`wake-${project}`, project, 'resuming', project, async () => {
       const j = await post('/api/wake', { project });
       return `${project}: its orchestrator is coming up; it reports back when its team is up (pane ${j.pane})`;
     });
   }, [act]);
 
   const onContinue = useCallback((project: string) => {
-    void act(project, 'continuing', project, async () => {
+    void act(`continue-${project}`, project, 'continuing', project, async () => {
       const j = await post('/api/continue', { project });
       return `${project}: its first line was sent (pane ${j.pane})`;
     });
   }, [act]);
 
-  const onAnswer = useCallback((project: string, agentRefArg: string | undefined, seen: string, choice: string) => {
+  const onAnswer = useCallback((project: string, agentRefArg: string | undefined, seen: string, choice: string, id: string) => {
     const who = agentRefArg ? `${project} · ${agentRefArg}` : project;
-    void act(project, 'answering', who, async () => {
+    void act(id, project, 'answering', who, async () => {
       const j = await post('/api/answer', { project, agent: agentRefArg, choice, fingerprint: seen });
       return `${who}: answered "${j.option}"${j.dialog_gone ? '' : ' (the dialog is still on its screen)'}`;
-    });
+    }, agentRefArg);
   }, [act]);
 
   const onStartTask = useCallback(async (project: string, text: string): Promise<boolean> => {
-    return act(project, 'starting', project, async () => {
+    return act(`start-${project}`, project, 'starting', project, async () => {
       const t = await post('/api/task', { project, text });
       const j = await post('/api/start', { project, task: t.id });
       return `${project}: its orchestrator is coming up on ${t.id}; it reports back when its team is up (pane ${j.pane})`;
+    });
+  }, [act]);
+
+  const onSetMode = useCallback((project: string, mode: ProjectMode) => {
+    void act(`mode-${project}-${mode}`, project, 'answering', project, async () => {
+      await post('/api/mode', { project, mode });
+      return `${project}: permission mode is ${mode} (applies to the next launch)`;
     });
   }, [act]);
 
@@ -329,69 +406,71 @@ export function App() {
   const rule = <div className="rule">{'─'.repeat(400)}</div>;
 
   return (
-    <div className="screen">
-      <div className="row">
-        <span className="shrink">
-          <span className="bold white">HUB</span>
-          {where !== '' && <span className="gray">{`  ·  ${where}`}</span>}
-        </span>
-        <span className="grow0">
-          {view.updatedAt !== 0 && <span className="gray">relay  </span>}
-          <span className="gray">{clock}</span>
-        </span>
-      </div>
-      {rule}
-      {view.error !== '' && <div className="red">{view.error}</div>}
-
-      {needs.length > 0 && (
-        <div className="mt">
-          <div className="bold magenta">NEEDS YOU</div>
-          {needs.map((n: Need) => (
-            <div key={n.key} className="pl1">
-              <div className="row">
-                <span className="shrink">
-                  <span className={n.color}>{`${n.glyph} `}</span>
-                  <span className="bold white">{n.who}</span>
-                  <span className="white">{`  ${n.words}`}</span>
-                </span>
-                {n.when !== '' && <span className="gray">{n.when}</span>}
-              </div>
-              {n.dialogKey && (
-                <NeedDialog dialogKey={n.dialogKey} dialogs={view.dialogs} onAnswer={onAnswer} />
-              )}
-              {n.action === 'continue' && n.project && (
-                <ContinueNeed project={n.project} acting={acting} busy={busy} onContinue={onContinue} />
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {view.updatedAt !== 0 && view.projects.length === 0 && view.error === '' && (
-        <div className="mt gray">No projects yet: tell the hub which folders make up a project.</div>
-      )}
-
-      {view.projects.map((p) => (
-        <ProjectCard
-          key={p.name}
-          project={p}
-          view={view}
-          now={now}
-          acting={acting}
-          busy={busy}
-          onWake={onWake}
-          onStartTask={onStartTask}
-        />
-      ))}
-
-      <div className="mt">
-        {rule}
+    <ActionContext.Provider value={{ acting, pressed }}>
+      <div className="screen">
         <div className="row">
-          <span className="gray">● running  ○ stopped  ◌ no team</span>
-          <button className="btn plain" onClick={() => void refresh()}>refresh</button>
+          <span className="shrink">
+            <span className="bold white">HUB</span>
+            {where !== '' && <span className="gray">{`  ·  ${where}`}</span>}
+          </span>
+          <span className="grow0">
+            {view.updatedAt !== 0 && <span className="gray">relay  </span>}
+            <span className="gray">{clock}</span>
+          </span>
         </div>
+        {rule}
+        {view.error !== '' && <div className="red">{view.error}</div>}
+
+        {needs.length > 0 && (
+          <div className="mt">
+            <div className="bold magenta">NEEDS YOU</div>
+            {needs.map((n: Need) => (
+              <div key={n.key} className="pl1">
+                <div className="row">
+                  <span className="shrink">
+                    <span className={n.color}>{`${n.glyph} `}</span>
+                    <span className="bold white">{n.who}</span>
+                    <span className="white">{`  ${n.words}`}</span>
+                  </span>
+                  {n.when !== '' && <span className="gray">{n.when}</span>}
+                </div>
+                {n.dialogKey && (
+                  <NeedDialog dialogKey={n.dialogKey} dialogs={view.dialogs} busy={busy} onAnswer={onAnswer} />
+                )}
+                {n.action === 'continue' && n.project && (
+                  <ContinueNeed project={n.project} busy={busy} onContinue={onContinue} />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {view.updatedAt !== 0 && view.projects.length === 0 && view.error === '' && (
+          <div className="mt gray">No projects yet: tell the hub which folders make up a project.</div>
+        )}
+
+        {view.projects.map((p) => (
+          <ProjectCard
+            key={p.name}
+            project={p}
+            view={view}
+            now={now}
+            busy={busy}
+            onWake={onWake}
+            onStartTask={onStartTask}
+            onSetMode={onSetMode}
+          />
+        ))}
+
+        <div className="mt">
+          {rule}
+          <div className="row">
+            <span className="gray">● running  ○ stopped  ◌ no team</span>
+            <button className="btn plain" onClick={() => void refresh()}>refresh</button>
+          </div>
+        </div>
+        {toast && <div className="toast">{toast}</div>}
       </div>
-      {toast && <div className="toast">{toast}</div>}
-    </div>
+    </ActionContext.Provider>
   );
 }

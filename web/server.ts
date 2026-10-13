@@ -2,7 +2,7 @@ import http from 'node:http';
 import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Refusal, answerDialog, continueProject, hubTask, startProject, wake } from '../src/hub.js';
+import { Refusal, answerDialog, continueProject, hubTask, setProjectMode, startProject, wake } from '../src/hub.js';
 import { checkName } from '../src/names.js';
 import {
   ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
@@ -115,11 +115,14 @@ function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
 const TASK_TEXT_CAP = 4000;
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   const project = projectName(body);
   return serialized(project, async () => {
+    if (pathname === '/api/mode') {
+      return { ok: true, mode: await setProjectMode(root, project, String(body.mode ?? '')) };
+    }
     if (pathname === '/api/wake') {
       const pane = await withTimeout(wake(root, project), ACTION_TIMEOUT_MS, 'wake');
       return { ok: true, pane };

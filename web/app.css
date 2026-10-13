@@ -54,7 +54,11 @@ body {
 .btn:hover:not(:disabled) { border-color: #888; }
 .btn:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1px; }
 .btn:disabled { color: var(--gray); cursor: default; }
+.btn:active:not(:disabled) { background: var(--white); color: #000; }
+.btn.active { background: var(--white); color: #000; border-color: var(--white); }
+.btn.active:disabled { color: #000; }
 .btn.primary { color: var(--cyan); font-weight: 700; border-color: #2e6b7e; }
+.btn.primary.active, .btn.primary:active:not(:disabled) { background: var(--cyan); color: #000; border-color: var(--cyan); }
 .btn.plain { background: none; border: none; color: var(--gray); padding: 0; }
 .btn.plain:hover:not(:disabled) { text-decoration: underline; }
 

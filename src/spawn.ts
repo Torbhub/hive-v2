@@ -9,9 +9,9 @@ import {
 import { classify, lines } from './screen.js';
 import {
   hivePath, manifestAdd, readProjects, readTeam,
-  removeTeamEntry, upsertTeamEntry, clearPendingPane,
+  removeTeamEntry, upsertTeamEntry, clearPendingPane, type ProjectsFile,
 } from './state.js';
-import type { TeamEntry } from './types.js';
+import type { ProjectMode, TeamEntry } from './types.js';
 
 export function orchestratorName(project: string): string {
   return `${project}-orchestrator`;
@@ -100,17 +100,26 @@ export async function typeLine(pane: string, text: string, identity: PaneIdentit
   throw new Error(`the line stayed in the prompt of ${pane}; not typed`);
 }
 
+// -S combines with -y/--auto per kimi --help, so the mode applies to resumes too.
+export function launchCommand(sessionId: string | undefined, mode: ProjectMode = 'ask'): string {
+  const args = [
+    sessionId ? `--session ${sessionId}` : '',
+    mode === 'yolo' ? '-y' : mode === 'auto' ? '--auto' : '',
+  ].filter(Boolean);
+  return `KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run${args.length ? ` -- ${args.join(' ')}` : ''}`;
+}
+
 export async function launchWindow(
   project: string,
   agent: string,
   cwd: string,
   sessionId?: string,
+  mode: ProjectMode = 'ask',
 ): Promise<{ pane: string; identity: PaneIdentity }> {
-  const resume = sessionId ? ` -- --session ${sessionId}` : '';
   const pane = await newWindow(
     windowName(project, agent),
     cwd,
-    `KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run${resume}`,
+    launchCommand(sessionId, mode),
   );
   const deadline = Date.now() + 15_000;
   let identity: PaneIdentity | null = null;
@@ -157,11 +166,11 @@ export async function findLatestSession(cwd: string, agent?: string): Promise<st
   return best ? best.id : null;
 }
 
-async function projectHome(root: string, project: string): Promise<string> {
+async function projectEntry(root: string, project: string): Promise<ProjectsFile['projects'][number]> {
   const pf = await readProjects(root);
   const p = pf.projects.find((x) => x.name === project);
   if (!p) throw new Error(`unknown project: ${project} (add it with: hive hub add ${project} <path>)`);
-  return p.home;
+  return p;
 }
 
 export type SpawnOptions = { agent: string; role?: string; worktree?: string };
@@ -170,7 +179,8 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   const { agent, role = 'implementer' } = opts;
   if (!AGENT_NAME_RE.test(agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${agent}`);
   await preflight();
-  const home = await projectHome(root, project);
+  const p = await projectEntry(root, project);
+  const home = p.home;
   const team = await readTeam(home);
   if (team.agents.some((a) => a.name === agent)) {
     throw new Error(`${project} already has an agent named ${agent} (close or respawn it)`);
@@ -187,7 +197,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   }
 
   await ensureAgentFiles(worktree, agent, role);
-  const { pane, identity } = await launchWindow(project, agent, worktree);
+  const { pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask');
   await manifestAdd(home, {
     kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
     pane_pid: identity.pid, pane_started: identity.started,
@@ -220,7 +230,7 @@ function recordedIdentity(entry: TeamEntry): PaneIdentity {
 }
 
 export async function closeAgent(root: string, project: string, agent: string): Promise<void> {
-  const home = await projectHome(root, project);
+  const home = (await projectEntry(root, project)).home;
   const team = await readTeam(home);
   const entry = team.agents.find((a) => a.name === agent);
   if (!entry) throw new Error(`${project} has no agent named ${agent}`);
@@ -230,14 +240,15 @@ export async function closeAgent(root: string, project: string, agent: string): 
 }
 
 export async function respawnAgent(root: string, project: string, agent: string): Promise<string> {
-  const home = await projectHome(root, project);
+  const p = await projectEntry(root, project);
+  const home = p.home;
   const team = await readTeam(home);
   const old = team.agents.find((a) => a.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   await preflight();
   if (old.pane) await killWindow(old.pane, recordedIdentity(old));
   const worktree = old.worktree ?? home;
-  const { pane, identity } = await launchWindow(project, agent, worktree);
+  const { pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask');
   await manifestAdd(home, {
     kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
     pane_pid: identity.pid, pane_started: identity.started,

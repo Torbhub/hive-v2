@@ -42,6 +42,9 @@ export type HubOrchestrator = {
   };
 };
 
+export type ProjectMode = 'ask' | 'yolo' | 'auto';
+export const PROJECT_MODES = ['ask', 'yolo', 'auto'] as const;
+
 export type HubFolder = { folder: string; kind: string; branch?: string; changed?: number };
 
 export type HubProject = {
@@ -51,6 +54,7 @@ export type HubProject = {
   orchestrator: HubOrchestrator;
   agents: HubAgent[];
   open_tasks: number;
+  mode?: ProjectMode;
 };
 
 export type HubTask = {
