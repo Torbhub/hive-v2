@@ -1,12 +1,20 @@
 import React, {
   createContext, useCallback, useContext, useEffect, useRef, useState,
 } from 'react';
+import { Toaster, toast } from 'sonner';
 import type { Approvals, HubDialog, HubProject, HubView, ProjectMode } from '../src/types';
 import { APPROVALS_MODES, PROJECT_MODES } from '../src/types';
 import {
   agentGlyph, agentRef, ago, buildNeeds, homeTilde, orchestratorLook,
   ROTATE_AT_PERCENT, tasksLine, type Need,
 } from '../src/ui/look';
+import { cn } from './lib/utils';
+import { Button } from './components/ui/button';
+import { Badge } from './components/ui/badge';
+import { Card, CardContent, CardHeader } from './components/ui/card';
+import { Input } from './components/ui/input';
+import { Separator } from './components/ui/separator';
+import { ToggleGroup, ToggleGroupItem } from './components/ui/toggle-group';
 
 const EVERY_MS = 20_000;
 
@@ -26,28 +34,53 @@ async function post(pathname: string, body: unknown): Promise<Record<string, unk
 }
 
 // Every action button reads this: while an action runs all of them disable,
-// and the one that was pressed holds the inverse "active" look until it ends.
+// and the one that was pressed holds the inverted look until it ends.
 const ActionContext = createContext<{ acting: boolean; pressed: string | null }>({
   acting: false,
   pressed: null,
 });
 
 function Btn({
-  id, label, variant, active, disabled, onPress,
+  id, variant = 'outline', size = 'sm', disabled, onPress, children,
 }: {
   id: string;
-  label: string;
-  variant?: 'primary' | 'plain';
-  active?: boolean;
+  variant?: 'default' | 'primary' | 'outline' | 'ghost';
+  size?: 'default' | 'sm';
   disabled?: boolean;
   onPress: () => void;
+  children: React.ReactNode;
 }) {
   const { acting, pressed } = useContext(ActionContext);
-  const cls = ['btn', variant ?? '', pressed === id || active ? 'active' : ''].filter(Boolean).join(' ');
   return (
-    <button className={cls} disabled={disabled || acting} onClick={onPress}>
-      {label}
-    </button>
+    <Button
+      variant={variant}
+      size={size}
+      pressed={pressed === id}
+      disabled={disabled || acting}
+      onClick={onPress}
+    >
+      {children}
+    </Button>
+  );
+}
+
+function StatusDot({ color, className }: { color: string; className?: string }) {
+  const cls = {
+    green: 'bg-emerald-500', yellow: 'bg-amber-400', red: 'bg-red-500',
+    gray: 'bg-zinc-600', cyan: 'bg-sky-400', magenta: 'bg-fuchsia-400',
+  }[color] ?? 'bg-zinc-600';
+  return <span className={cn('inline-block h-2 w-2 rounded-full shrink-0', cls, className)} />;
+}
+
+const NEED_ACCENT: Record<string, string> = {
+  magenta: 'border-l-fuchsia-400', yellow: 'border-l-amber-400', red: 'border-l-red-500',
+};
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="inline-flex h-4 min-w-4 items-center justify-center rounded border border-zinc-700 bg-zinc-800 px-1 font-mono text-[10px] text-zinc-400">
+      {children}
+    </kbd>
   );
 }
 
@@ -66,29 +99,29 @@ function DialogBlock({
   const offered = dialog.options.filter((o) => o.offered);
   const notOffered = dialog.options.filter((o) => !o.offered);
   return (
-    <div className="pl3">
-      {textLines.map((l, i) => (
-        <div key={i} className="gray truncate">{l}</div>
-      ))}
-      {answering && <div className="cyan">answering…</div>}
+    <div className="mt-2 flex flex-col gap-2">
+      <div className="rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 font-mono text-xs text-zinc-400">
+        {textLines.map((l, i) => (
+          <div key={i} className="truncate">{l}</div>
+        ))}
+      </div>
+      {answering && <div className="text-xs text-sky-400">answering…</div>}
       {(offered.length > 0 || dialog.esc) && (
-        <div className="need-actions">
+        <div className="flex flex-wrap gap-1.5">
           {offered.map((o) => (
-            <Btn
-              key={o.n}
-              id={`${idPrefix}-${o.n}`}
-              label={`${o.n} ${o.label}${o.saves_rule ? ' (saves a rule)' : ''}`}
-              onPress={() => onAnswer(String(o.n))}
-            />
+            <Btn key={o.n} id={`${idPrefix}-${o.n}`} onPress={() => onAnswer(String(o.n))}>
+              <Kbd>{o.n}</Kbd>
+              {`${o.label}${o.saves_rule ? ' (saves a rule)' : ''}`}
+            </Btn>
           ))}
-          {dialog.esc && <Btn id={`${idPrefix}-esc`} label="Esc" onPress={() => onAnswer('esc')} />}
+          {dialog.esc && <Btn id={`${idPrefix}-esc`} onPress={() => onAnswer('esc')}>Esc</Btn>}
         </div>
       )}
       {offered.filter((o) => o.detail !== '').map((o) => (
-        <div key={o.n} className="gray truncate">{`${o.n}. ${o.label} ${o.detail}`}</div>
+        <div key={o.n} className="text-xs text-zinc-500 truncate">{`${o.n}. ${o.label} ${o.detail}`}</div>
       ))}
       {(notOffered.length > 0 || offered.length === 0) && (
-        <div className="yellow">
+        <div className="text-xs text-amber-300">
           {dialog.options.length === 0
             ? 'answer it in the pane'
             : `${notOffered.map((o) => o.label).join(', ') || 'this dialog'}: answer it in the pane`}
@@ -120,18 +153,46 @@ function NeedDialog({
   );
 }
 
-function ContinueNeed({
-  project, busy, onContinue,
+function NeedCard({
+  need, view, busy, onAnswer, onContinue,
 }: {
-  project: string;
-  busy: { project: string; what: string } | null;
+  need: Need;
+  view: HubView;
+  busy: { project: string; what: string; who?: string } | null;
+  onAnswer: (project: string, agentRefArg: string | undefined, seen: string, choice: string, id: string) => void;
   onContinue: (project: string) => void;
 }) {
+  const accent = NEED_ACCENT[need.color] ?? 'border-l-zinc-600';
+  const continuing = need.action === 'continue' && need.project
+    && busy?.project === need.project && busy.what === 'continuing';
   return (
-    <div className="pl2">
-      {busy?.project === project && busy.what === 'continuing'
-        ? <span className="cyan">continuing…</span>
-        : <Btn id={`continue-${project}`} label="Continue" onPress={() => onContinue(project)} />}
+    <div className={cn('rounded-md border border-zinc-800 border-l-2 bg-zinc-900/60 px-3 py-2', accent)}>
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="min-w-0 text-sm">
+          <span className="font-medium text-white">{need.who}</span>
+          <span className="text-zinc-300">{`  ${need.words}`}</span>
+        </div>
+        {need.when !== '' && <span className="shrink-0 text-xs text-zinc-500 tabular">{need.when}</span>}
+      </div>
+      {need.dialogKey && (
+        <NeedDialog dialogKey={need.dialogKey} dialogs={view.dialogs} busy={busy} onAnswer={onAnswer} />
+      )}
+      {need.action === 'continue' && need.project && (
+        <div className="mt-2">
+          {continuing
+            ? <span className="text-xs text-sky-400">continuing…</span>
+            : <Btn id={`continue-${need.project}`} onPress={() => onContinue(need.project!)}>Continue</Btn>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex gap-3 text-sm">
+      <span className="w-24 shrink-0 text-zinc-500">{label}</span>
+      <span className="min-w-0 flex-1">{children}</span>
     </div>
   );
 }
@@ -145,7 +206,9 @@ function NewTaskRow({
 }) {
   const [text, setText] = useState('');
   if (busy?.project === project && busy.what === 'starting') {
-    return <div className="label-row"><span className="label">new task</span><span className="cyan">starting…</span></div>;
+    return (
+      <div className="mt-2 border-t border-zinc-800 pt-2.5 text-xs text-sky-400">starting…</div>
+    );
   }
   const submit = async () => {
     const t = text.trim();
@@ -153,26 +216,23 @@ function NewTaskRow({
     if (await onStartTask(project, t)) setText('');
   };
   return (
-    <div className="label-row">
-      <span className="label">new task</span>
-      <span className="content">
-        <span className="new-task">
-          <input
-            className="task-input"
-            value={text}
-            placeholder="describe the task…"
-            aria-label={`new task for ${project}`}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                void submit();
-              }
-            }}
-          />
-          <Btn id={`start-${project}`} label="Start task" disabled={!text.trim()} onPress={() => void submit()} />
-        </span>
-      </span>
+    <div className="mt-2 flex gap-2 border-t border-zinc-800 pt-2.5">
+      <Input
+        className="font-mono text-xs"
+        value={text}
+        placeholder="describe the task…"
+        aria-label={`new task for ${project}`}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            void submit();
+          }
+        }}
+      />
+      <Btn id={`start-${project}`} variant="primary" disabled={!text.trim()} onPress={() => void submit()}>
+        Start task
+      </Btn>
     </div>
   );
 }
@@ -189,6 +249,7 @@ function ProjectCard({
   onSetMode: (project: string, mode: ProjectMode) => void;
   onSetApprovals: (project: string, approvals: Approvals) => void;
 }) {
+  const { acting } = useContext(ActionContext);
   const look = orchestratorLook(p.orchestrator);
   const o = p.orchestrator;
   const orchName = o.state === 'none' ? 'none yet' : o.name ?? '?';
@@ -197,111 +258,103 @@ function ProjectCard({
   const canResume =
     (o.state === 'stopped' || o.state === 'resumable') && Boolean(o.session_id) && !o.starting;
   const back = 1 + p.agents.filter((a) => a.state === 'stopped').length;
+  const resuming = busy?.project === p.name && busy.what === 'resuming';
 
   return (
-    <div className="mt">
-      <div className="row">
-        <span className="bold white">{p.name.toUpperCase()}</span>
-        <span className={look.color}>{`${look.dot} ${look.word}`}</span>
-      </div>
-      <div className="label-row">
-        <span className="label">orchestrator</span>
-        <span className="content">
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <StatusDot color={look.color} />
+          <span className="font-medium text-white">{p.name}</span>
+        </div>
+        <span className="text-xs text-zinc-500">{look.word}</span>
+      </CardHeader>
+      <CardContent>
+        <Row label="orchestrator">
           <span>
-            <span className="white">{orchName}</span>
-            {o.state === 'unregistered' && o.pane && <span className="gray">{`  pane ${o.pane}`}</span>}
+            <span className="text-zinc-100">{orchName}</span>
+            {o.state === 'unregistered' && o.pane && <span className="text-zinc-500">{`  pane ${o.pane}`}</span>}
             {typeof o.context === 'number' && (
-              <span className={o.context_assumed ? 'gray' : o.context >= ROTATE_AT_PERCENT ? 'yellow' : 'green'}>
+              <span className={o.context_assumed ? 'text-zinc-500' : o.context >= ROTATE_AT_PERCENT ? 'text-amber-300' : 'text-emerald-400'}>
                 {`  ${o.context}%`}
               </span>
             )}
-            {o.context_unknown && <span className="gray">  context unknown</span>}
+            {o.context_unknown && <span className="text-zinc-500">  context unknown</span>}
           </span>
-        </span>
-      </div>
-      <div className="label-row">
-        <span className="label">agents</span>
-        <span className="content">
+        </Row>
+        <Row label="agents">
           {p.agents.length === 0 ? (
-            <span className="gray">none</span>
+            <span className="text-zinc-500">none</span>
           ) : (
-            <>
-              <span>
-                {p.agents.map((a) => {
-                  const g = agentGlyph(a);
-                  return <span key={a.ref ?? a.name} className={g.color}>{`${g.glyph} `}</span>;
-                })}
-                <span className="white">{` ${up} of ${p.agents.length}`}</span>
+            <span className="flex flex-col">
+              <span className="flex items-center gap-1.5">
+                {p.agents.map((a) => (
+                  <StatusDot key={a.ref ?? a.name} color={agentGlyph(a).color} />
+                ))}
+                <span className="text-zinc-100">{` ${up} of ${p.agents.length}`}</span>
               </span>
               {notRunning.length > 0 && (
-                <span className="yellow">{notRunning.map((a) => `${agentRef(a)} ${a.state}`).join(', ')}</span>
+                <span className="text-amber-300 text-xs">{notRunning.map((a) => `${agentRef(a)} ${a.state}`).join(', ')}</span>
               )}
-            </>
-          )}
-        </span>
-      </div>
-      <div className="label-row">
-        <span className="label">tasks</span>
-        <span className="content"><span className="white">{tasksLine(view.tasks, p.name, p.open_tasks, now)}</span></span>
-      </div>
-      <div className="label-row">
-        <span className="label">folders</span>
-        <span className="content">
-          {p.repos.map((r) => (
-            <span key={r.folder} className="white truncate">
-              {`${r.folder}${r.changed ? `  ${r.changed} changed` : ''}`}
             </span>
-          ))}
-        </span>
-      </div>
-      <div className="label-row">
-        <span className="label">mode</span>
-        <span className="content">
-          <span className="need-actions">
+          )}
+        </Row>
+        <Row label="tasks">
+          <span className="text-zinc-100">{tasksLine(view.tasks, p.name, p.open_tasks, now)}</span>
+        </Row>
+        <Row label="folders">
+          <span className="flex flex-col">
+            {p.repos.map((r) => (
+              <span key={r.folder} className="truncate font-mono text-xs text-zinc-300">
+                {`${r.folder}${r.changed ? `  ${r.changed} changed` : ''}`}
+              </span>
+            ))}
+          </span>
+        </Row>
+        <Row label="mode">
+          <ToggleGroup
+            type="single"
+            value={p.mode ?? 'ask'}
+            disabled={acting}
+            onValueChange={(m) => {
+              if (m) onSetMode(p.name, m as ProjectMode);
+            }}
+            aria-label={`permission mode for ${p.name}`}
+          >
             {PROJECT_MODES.map((m) => (
-              <Btn
-                key={m}
-                id={`mode-${p.name}-${m}`}
-                label={m}
-                active={(p.mode ?? 'ask') === m}
-                onPress={() => onSetMode(p.name, m)}
-              />
+              <ToggleGroupItem key={m} value={m}>{m}</ToggleGroupItem>
             ))}
-          </span>
-        </span>
-      </div>
-      <div className="label-row">
-        <span className="label">approvals</span>
-        <span className="content">
-          <span className="need-actions">
+          </ToggleGroup>
+        </Row>
+        <Row label="approvals">
+          <ToggleGroup
+            type="single"
+            value={p.approvals ?? 'manual'}
+            disabled={acting}
+            onValueChange={(m) => {
+              if (m) onSetApprovals(p.name, m as Approvals);
+            }}
+            aria-label={`approvals for ${p.name}`}
+          >
             {APPROVALS_MODES.map((m) => (
-              <Btn
-                key={m}
-                id={`approvals-${p.name}-${m}`}
-                label={m}
-                active={(p.approvals ?? 'manual') === m}
-                onPress={() => onSetApprovals(p.name, m)}
-              />
+              <ToggleGroupItem key={m} value={m}>{m}</ToggleGroupItem>
             ))}
-          </span>
-        </span>
-      </div>
-      {canResume && (
-        <div className="pl15">
-          {busy?.project === p.name && busy.what === 'resuming'
-            ? <span className="cyan">resuming…</span>
-            : (
-              <Btn
-                id={`wake-${p.name}`}
-                label={`Resume · ${back} session${back === 1 ? '' : 's'}`}
-                variant="primary"
-                onPress={() => onWake(p.name)}
-              />
-            )}
-        </div>
-      )}
-      <NewTaskRow project={p.name} busy={busy} onStartTask={onStartTask} />
-    </div>
+          </ToggleGroup>
+        </Row>
+        {canResume && (
+          <div className="pt-1.5">
+            {resuming
+              ? <span className="text-xs text-sky-400">resuming…</span>
+              : (
+                <Btn id={`wake-${p.name}`} variant="primary" onPress={() => onWake(p.name)}>
+                  {`Resume · ${back} session${back === 1 ? '' : 's'}`}
+                </Btn>
+              )}
+          </div>
+        )}
+        <NewTaskRow project={p.name} busy={busy} onStartTask={onStartTask} />
+      </CardContent>
+    </Card>
   );
 }
 
@@ -310,7 +363,6 @@ export function App() {
   const [acting, setActing] = useState(false);
   const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
   const actingRef = useRef(false);
 
   // A failed read (network error, or updatedAt 0 from the server) keeps the
@@ -341,12 +393,6 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [refresh]);
 
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 6000);
-    return () => clearTimeout(t);
-  }, [toast]);
-
   // One action at a time: a click while another runs is ignored. The pressed
   // button inverts and everything disables before the network round-trip.
   const act = useCallback(async (
@@ -363,10 +409,10 @@ export function App() {
     setActing(true);
     setBusy({ project, what, who: busyWho });
     try {
-      setToast(await runAction());
+      toast(await runAction());
       return true;
     } catch (e) {
-      setToast(`${who}: ${e instanceof Error ? e.message.split('\n').pop() : String(e)}`);
+      toast(`${who}: ${e instanceof Error ? e.message.split('\n').pop() : String(e)}`);
       return false;
     } finally {
       actingRef.current = false;
@@ -427,90 +473,90 @@ export function App() {
     ? new Date(view.updatedAt).toTimeString().slice(0, 5)
     : 'reading…';
   const needs = buildNeeds(view, now);
-  const rule = <div className="rule">{'─'.repeat(400)}</div>;
 
   return (
     <ActionContext.Provider value={{ acting, pressed }}>
-      <div className="screen">
-        <div className="row">
-          <span className="shrink">
-            <span className="bold white">HUB</span>
-            {where !== '' && <span className="gray">{`  ·  ${where}`}</span>}
-          </span>
-          <span className="grow0">
-            {view.updatedAt !== 0 && <span className="gray">relay  </span>}
-            <span className="gray">{clock}</span>
-          </span>
-        </div>
-        {rule}
-        {view.error !== '' && <div className="red">{view.error}</div>}
+      <div className="min-h-screen bg-zinc-950">
+        <div className="mx-auto flex max-w-2xl flex-col gap-5 px-4 py-8">
+          <header className="flex items-baseline justify-between gap-3">
+            <div className="flex min-w-0 items-baseline gap-2.5">
+              <span className="text-lg font-semibold tracking-tight text-white">hive</span>
+              {where !== '' && <span className="truncate font-mono text-xs text-zinc-500">{where}</span>}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {view.updatedAt !== 0 && <Badge>relay</Badge>}
+              <span className="text-xs text-zinc-500 tabular">{clock}</span>
+            </div>
+          </header>
+          <Separator />
 
-        {needs.length > 0 && (
-          <div className="mt">
-            <div className="bold magenta">NEEDS YOU</div>
-            {needs.map((n: Need) => (
-              <div key={n.key} className="pl1">
-                <div className="row">
-                  <span className="shrink">
-                    <span className={n.color}>{`${n.glyph} `}</span>
-                    <span className="bold white">{n.who}</span>
-                    <span className="white">{`  ${n.words}`}</span>
-                  </span>
-                  {n.when !== '' && <span className="gray">{n.when}</span>}
+          {view.error !== '' && (
+            <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+              {view.error}
+            </div>
+          )}
+
+          {needs.length > 0 && (
+            <section className="flex flex-col gap-2">
+              <div className="text-xs font-medium uppercase tracking-widest text-fuchsia-400">Needs you</div>
+              {needs.map((n) => (
+                <NeedCard
+                  key={n.key}
+                  need={n}
+                  view={view}
+                  busy={busy}
+                  onAnswer={onAnswer}
+                  onContinue={onContinue}
+                />
+              ))}
+            </section>
+          )}
+
+          {view.updatedAt !== 0 && view.projects.length === 0 && view.error === '' && (
+            <div className="text-sm text-zinc-500">No projects yet: tell the hub which folders make up a project.</div>
+          )}
+
+          {view.decisions.length > 0 && (
+            <section className="flex flex-col gap-1.5">
+              <div className="text-xs font-medium uppercase tracking-widest text-zinc-500">Decisions</div>
+              {view.decisions.map((d, i) => (
+                <div key={`${d.at}-${i}`} className="flex items-baseline justify-between gap-3 text-sm">
+                  <div className="flex min-w-0 items-baseline gap-2">
+                    <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-600" />
+                    <span className="shrink-0 font-medium text-zinc-100">{d.task ?? d.project}</span>
+                    <span className="truncate text-zinc-400">{d.summary}</span>
+                  </div>
+                  <span className="shrink-0 text-xs text-zinc-500 tabular">{ago(d.at, now)}</span>
                 </div>
-                {n.dialogKey && (
-                  <NeedDialog dialogKey={n.dialogKey} dialogs={view.dialogs} busy={busy} onAnswer={onAnswer} />
-                )}
-                {n.action === 'continue' && n.project && (
-                  <ContinueNeed project={n.project} busy={busy} onContinue={onContinue} />
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </section>
+          )}
 
-        {view.updatedAt !== 0 && view.projects.length === 0 && view.error === '' && (
-          <div className="mt gray">No projects yet: tell the hub which folders make up a project.</div>
-        )}
+          {view.projects.map((p) => (
+            <ProjectCard
+              key={p.name}
+              project={p}
+              view={view}
+              now={now}
+              busy={busy}
+              onWake={onWake}
+              onStartTask={onStartTask}
+              onSetMode={onSetMode}
+              onSetApprovals={onSetApprovals}
+            />
+          ))}
 
-        {view.decisions.length > 0 && (
-          <div className="mt">
-            <div className="bold cyan">DECISIONS</div>
-            {view.decisions.map((d, i) => (
-              <div key={`${d.at}-${i}`} className="pl1 row">
-                <span className="shrink">
-                  <span className="bold white">{d.task ?? d.project}</span>
-                  <span className="white">{`  ${d.summary}`}</span>
-                </span>
-                <span className="gray">{ago(d.at, now)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {view.projects.map((p) => (
-          <ProjectCard
-            key={p.name}
-            project={p}
-            view={view}
-            now={now}
-            busy={busy}
-            onWake={onWake}
-            onStartTask={onStartTask}
-            onSetMode={onSetMode}
-            onSetApprovals={onSetApprovals}
-          />
-        ))}
-
-        <div className="mt">
-          {rule}
-          <div className="row">
-            <span className="gray">● running  ○ stopped  ◌ no team</span>
-            <button className="btn plain" onClick={() => void refresh()}>refresh</button>
-          </div>
+          <footer className="flex items-center justify-between pt-1">
+            <span className="flex items-center gap-3 text-xs text-zinc-500">
+              <span className="flex items-center gap-1.5"><StatusDot color="green" />running</span>
+              <span className="flex items-center gap-1.5"><StatusDot color="yellow" />stopped</span>
+              <span className="flex items-center gap-1.5"><StatusDot color="gray" />no team</span>
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => void refresh()}>refresh</Button>
+          </footer>
         </div>
-        {toast && <div className="toast">{toast}</div>}
       </div>
+      <Toaster theme="dark" position="bottom-right" />
     </ActionContext.Provider>
   );
 }

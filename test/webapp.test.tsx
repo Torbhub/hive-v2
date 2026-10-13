@@ -81,7 +81,7 @@ describe('instant click feedback', () => {
   });
 
   it('a typed task enables Start task, and clicking it swaps the row to starting… before the fetch resolves', async () => {
-    const input = container.querySelector('input.task-input') as HTMLInputElement;
+    const input = container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement;
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
     act(() => {
       setter.call(input, 'write the docs');
@@ -94,7 +94,7 @@ describe('instant click feedback', () => {
       startBtn.click();
     });
     expect(container.textContent).toContain('starting…');
-    expect(container.querySelector('input.task-input')).toBeNull();
+    expect(container.querySelector('input[aria-label="new task for demo"]')).toBeNull();
     // two POSTs: task then start; resolve both
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, id: 'demo-1' }), { status: 200 }));
@@ -133,14 +133,14 @@ describe('instant click feedback', () => {
       [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
     });
     const option = [...container.querySelectorAll('button')]
-      .find((b) => b.textContent === '1 Approve once');
+      .find((b) => b.textContent?.includes('Approve once'));
     if (!option) throw new Error('no dialog option button rendered');
     act(() => {
       option.click();
     });
     expect(container.textContent).toContain('answering…');
     expect(option.disabled).toBe(true);
-    expect(option.classList.contains('active')).toBe(true);
+    expect(option.getAttribute('data-pressed')).toBe('true');
     await act(async () => {
       resolveAction!(new Response(
         JSON.stringify({ ok: true, option: 'Approve once', dialog_gone: true }),
