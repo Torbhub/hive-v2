@@ -35,7 +35,7 @@ export function pickupLine(project: string, agent: string): string {
   return `You are ${agent} of project ${project}. Read .hive/handoffs/${agent}.md from the top: its START HERE block is your prompt. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. Report to the orchestrator; wait for its first message.`;
 }
 
-async function ensureAgentFiles(projectHome: string, agent: string, role: string): Promise<void> {
+export async function ensureAgentFiles(projectHome: string, agent: string, role: string): Promise<void> {
   const root = packageRoot();
   const dir = hivePath(projectHome, 'team', agent);
   await fs.mkdir(dir, { recursive: true });
@@ -117,7 +117,9 @@ export async function launchWindow(
 }
 
 // Newest kimi session recorded for a working directory; basis for wake --resume.
-export async function findLatestSession(cwd: string): Promise<string | null> {
+// Agents share a cwd, so a session is only trusted when its first prompt is
+// that agent's pickup line.
+export async function findLatestSession(cwd: string, agent?: string): Promise<string | null> {
   const base = path.join(os.homedir(), '.kimi-code', 'sessions');
   let best: { id: string; at: number } | null = null;
   let wds: string[];
@@ -138,10 +140,11 @@ export async function findLatestSession(cwd: string): Promise<string | null> {
       try {
         const st = JSON.parse(
           await fs.readFile(path.join(base, wd, s, 'state.json'), 'utf8'),
-        ) as { cwd?: string; updatedAt?: number };
+        ) as { cwd?: string; updatedAt?: number; lastPrompt?: string };
         if (st.cwd !== cwd) continue;
+        if (agent && !(st.lastPrompt ?? '').startsWith(`You are ${agent}`)) continue;
         const at = st.updatedAt ?? 0;
-        if (!best || at > best.at) best = { id: s.slice('session_'.length), at };
+        if (!best || at > best.at) best = { id: s, at };
       } catch {
         continue;
       }
@@ -195,7 +198,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
       : `${pane} never went idle; nothing was typed`);
   }
   await typeLine(pane, pickupLine(project, agent), identity);
-  const sid = await findLatestSession(worktree);
+  const sid = await findLatestSession(worktree, agent);
   if (sid) await upsertTeamEntry(home, { name: agent, session_id: sid });
   return pane;
 }
@@ -229,7 +232,7 @@ export async function respawnAgent(root: string, project: string, agent: string)
       : `${pane} never went idle; nothing was typed`);
   }
   await typeLine(pane, pickupLine(project, agent), identity);
-  const sid = await findLatestSession(worktree);
+  const sid = await findLatestSession(worktree, agent);
   if (sid) await upsertTeamEntry(home, { name: agent, session_id: sid });
   return pane;
 }

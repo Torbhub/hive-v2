@@ -9,12 +9,12 @@ import {
 } from './tmux.js';
 import { lines, parseDialog, scrapeContext } from './screen.js';
 import {
-  appendTaskEvent, clearPendingPane, foldTasks, hivePath, hubPath, nextTaskId,
+  appendTaskEvent, clearPendingPane, foldTasks, hivePath, hubPath, manifestAdd, nextTaskId,
   readPendingPane, readProjects, readTaskEvents, readTeam, writePendingPane,
   writeProjects, writeJson, readJson, upsertTeamEntry, type PendingPane,
 } from './state.js';
 import {
-  findLatestSession, launchWindow, orchestratorName, pickupLine, preflight, typeLine, waitIdle,
+  ensureAgentFiles, findLatestSession, launchWindow, orchestratorName, pickupLine, preflight, typeLine, waitIdle,
 } from './spawn.js';
 
 export async function hubInit(root: string, name = 'hub'): Promise<void> {
@@ -274,7 +274,8 @@ async function launchOrchestrator(
   const team = await readTeam(p.home);
   const old = team.agents.find((a) => a.orchestrator);
   const name = orchestratorName(project);
-  const sessionId = kind === 'wake' ? old?.session_id : undefined;
+  const cwd = old?.worktree ?? p.home;
+  const sessionId = kind === 'wake' ? old?.session_id ?? (await findLatestSession(cwd, name)) ?? undefined : undefined;
   if (kind === 'wake' && !sessionId) {
     throw new Error(`${project} has no recorded session to resume; start it instead`);
   }
@@ -282,8 +283,9 @@ async function launchOrchestrator(
     throw new Error(`${project}'s orchestrator is already running`);
   }
 
-  const cwd = old?.worktree ?? p.home;
+  await ensureAgentFiles(cwd, name, 'orchestrator');
   const { pane, identity } = await launchWindow(project, name, cwd, sessionId);
+  await manifestAdd(p.home, { kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}` });
   let line = pickupLine(project, name);
   if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
   const pending: PendingPane = { pane, kind, at: new Date().toISOString(), typed: false, task, line };
@@ -300,10 +302,8 @@ async function launchOrchestrator(
     worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`),
   });
   await writePendingPane(root, project, { ...pending, typed: true });
-  if (kind === 'start') {
-    const sid = await findLatestSession(cwd);
-    if (sid) await upsertTeamEntry(p.home, { name, session_id: sid });
-  }
+  const sid = kind === 'wake' ? sessionId : await findLatestSession(cwd, name);
+  if (sid) await upsertTeamEntry(p.home, { name, session_id: sid });
   return pane;
 }
 
@@ -343,7 +343,7 @@ export async function continueProject(root: string, project: string): Promise<st
       pane: pending.pane, pane_pid: id.pid, pane_started: id.started,
       worktree: p.home, handoff: hivePath(p.home, 'handoffs', `${orchestratorName(project)}.md`),
     });
-    const sid = await findLatestSession(p.home);
+    const sid = await findLatestSession(p.home, orchestratorName(project));
     if (sid) await upsertTeamEntry(p.home, { name: orchestratorName(project), session_id: sid });
   }
   await writePendingPane(root, project, { ...pending, typed: true });
