@@ -94,4 +94,46 @@ describe('buildNeeds', () => {
       words: 'waiting in pane %7 for its first line', when: '30m',
     });
   });
+  it('a plan task absorbs the orchestrator question into one card', () => {
+    const needs = buildNeeds({
+      ...base,
+      projects: [{
+        name: 'demo', home: '/r/demo', repos: [], agents: [], open_tasks: 1,
+        orchestrator: { state: 'running', question: true },
+      }],
+      tasks: [{
+        id: 'demo-1', project: 'demo', asked: '2026-10-13T10:00:00Z', state: 'plan',
+        updated: '2026-10-13T11:00:00Z', last_note: null, needs_owner: true,
+      }],
+    }, NOW);
+    expect(needs).toHaveLength(1);
+    expect(needs[0]).toMatchObject({
+      key: 'task-demo-1', action: 'plan', project: 'demo', taskId: 'demo-1', dialogKey: 'demo',
+    });
+  });
+  it('an orchestrator question with no plan task stays its own card', () => {
+    const needs = buildNeeds({
+      ...base,
+      projects: [{
+        name: 'demo', home: '/r/demo', repos: [], agents: [], open_tasks: 0,
+        orchestrator: { state: 'running', question: true },
+      }],
+    }, NOW);
+    expect(needs[0]).toMatchObject({ key: 'orch-demo', dialogKey: 'demo' });
+  });
+  it('a plan task with no screen question offers the plan action and no dialog', () => {
+    const needs = buildNeeds({
+      ...base,
+      projects: [{
+        name: 'demo', home: '/r/demo', repos: [], agents: [], open_tasks: 1,
+        orchestrator: { state: 'running' },
+      }],
+      tasks: [{
+        id: 'demo-1', project: 'demo', asked: '2026-10-13T10:00:00Z', state: 'plan',
+        updated: '2026-10-13T11:00:00Z', last_note: null, needs_owner: true,
+      }],
+    }, NOW);
+    expect(needs[0]).toMatchObject({ key: 'task-demo-1', action: 'plan', taskId: 'demo-1' });
+    expect(needs[0].dialogKey).toBeUndefined();
+  });
 });

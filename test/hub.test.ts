@@ -14,6 +14,8 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   return {
     ...orig,
     paneExists: vi.fn(async () => true),
+    paneIdentity: vi.fn(async () => ({ pid: 1, started: 'x' })),
+    paneIs: vi.fn(async () => true),
     capturePane: vi.fn(async () => DIALOG),
     sleep: vi.fn(async () => {}),
     sendEnter: vi.fn(async () => {}),
@@ -24,7 +26,10 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 });
 
 import { capturePane, sendArrow, sendEnter } from '../src/tmux.js';
-import { answerDialog, hubAdd, hubInit, hubLog, hubTask, menuKeys, readDialogFor, startProject } from '../src/hub.js';
+import {
+  answerDialog, hubAdd, hubInit, hubLog, hubTask, listTasks, menuKeys, planAnswer, readDialogFor,
+  startProject,
+} from '../src/hub.js';
 import { lines, parseDialog } from '../src/screen.js';
 import { hubPath, hivePath, readDecisions, writeJson } from '../src/state.js';
 
@@ -190,5 +195,57 @@ describe('decisions from hub actions', () => {
     // a non-decided event does not mirror
     await hubLog(root, id, 'note', 'just a note');
     expect(await readDecisions(root)).toHaveLength(1);
+  });
+});
+
+const IDLE = readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'idle-empty-prompt.txt'),
+  'utf8',
+);
+
+describe('planAnswer', () => {
+  async function setupPlan() {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
+    });
+    const id = await hubTask(root, 'demo', 'build it');
+    await hubLog(root, id, 'plan', 'the plan');
+    return { root, id };
+  }
+
+  it('approve types the verdict and moves the task to answered', async () => {
+    const { root, id } = await setupPlan();
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    const r = await planAnswer(root, 'demo', id, 'approve');
+    expect(r.typed).toBe(`${id}: the plan is approved — go ahead.`);
+    expect((await listTasks(root)).find((t) => t.id === id)?.state).toBe('answered');
+    const decisions = await readDecisions(root);
+    expect(decisions[0]).toMatchObject({ by: 'owner', project: 'demo', task: id, summary: 'approved the plan' });
+  });
+
+  it('sendback hands the task back with single-line feedback', async () => {
+    const { root, id } = await setupPlan();
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    const r = await planAnswer(root, 'demo', id, 'sendback', 'too big\nsplit it');
+    expect(r.typed).toBe(`${id}: the plan is sent back — too big split it.`);
+    const t = (await listTasks(root)).find((x) => x.id === id);
+    expect(t?.state).toBe('handed');
+    expect(t?.needs_owner).toBe(false);
+  });
+
+  it('refuses while a dialog is on the screen', async () => {
+    const { root, id } = await setupPlan();
+    vi.mocked(capturePane).mockImplementation(async () => DIALOG);
+    await expect(planAnswer(root, 'demo', id, 'approve')).rejects.toThrow(/answer it there/);
+    expect((await listTasks(root)).find((t) => t.id === id)?.state).toBe('plan');
+  });
+
+  it('refuses a task that is not waiting on a plan answer', async () => {
+    const { root } = await setup();
+    const id = await hubTask(root, 'demo', 'build it');
+    await expect(planAnswer(root, 'demo', id, 'approve')).rejects.toThrow(/not waiting on a plan answer/);
+    await expect(planAnswer(root, 'demo', 'demo-99', 'approve')).rejects.toThrow(/unknown task/);
+    await expect(planAnswer(root, 'demo', id, 'maybe')).rejects.toThrow(/approve\|sendback/);
   });
 });

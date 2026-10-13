@@ -328,6 +328,64 @@ export async function answerDialog(
   return { answered: true, session: dialog.session, choice, option, dialog_gone: after === null };
 }
 
+const PLAN_FEEDBACK_CAP = 500;
+
+// The plan card's fallback when no approval prompt is on the screen (a woken
+// orchestrator loses it): type the verdict as the orchestrator's next line.
+export async function planAnswer(
+  root: string,
+  project: string,
+  taskId: string,
+  verdict: string,
+  feedback?: string,
+): Promise<{ typed: string }> {
+  if (verdict !== 'approve' && verdict !== 'sendback') {
+    throw new Refusal(`a plan verdict is approve|sendback: ${verdict}`);
+  }
+  const pf = await readProjects(root);
+  const p = pf.projects.find((x) => x.name === project);
+  if (!p) throw new Refusal(`unknown project: ${project}`);
+  const task = (await listTasks(root)).find((t) => t.id === taskId);
+  if (!task || task.project !== project) throw new Refusal(`unknown task: ${taskId}`);
+  if (task.state !== 'plan') {
+    throw new Refusal(`${taskId} is ${task.state}, not waiting on a plan answer`);
+  }
+
+  const team = await readTeam(p.home);
+  const orch = team.agents.find((a) => a.orchestrator);
+  if (!orch?.pane || !(await paneExists(orch.pane))) {
+    throw new Refusal(`${project}'s orchestrator has no live pane; wake it first`);
+  }
+  const raw = await capturePane(orch.pane);
+  if (raw !== null && parseDialog(lines(raw)).kind !== 'none') {
+    throw new Refusal('the plan prompt is on its screen; answer it there');
+  }
+  const identity = await paneIdentity(orch.pane);
+  if (!identity) throw new Refusal(`cannot verify the identity of ${orch.pane}`);
+
+  const fb = (feedback ?? '').replace(/\s+/g, ' ').trim().slice(0, PLAN_FEEDBACK_CAP);
+  const line = verdict === 'approve'
+    ? `${taskId}: the plan is approved — go ahead.`
+    : `${taskId}: the plan is sent back${fb ? ` — ${fb}` : ''}.`;
+  await typeLine(orch.pane, line, identity);
+
+  await appendTaskEvent(root, {
+    id: taskId, project,
+    event: verdict === 'approve' ? 'answered' : 'handed',
+    at: new Date().toISOString(),
+    note: verdict === 'approve' ? 'plan approved by owner' : `plan sent back${fb ? `: ${fb}` : ''}`,
+  });
+  try {
+    await appendDecision(root, {
+      project, task: taskId, by: 'owner',
+      summary: verdict === 'approve' ? 'approved the plan' : `sent the plan back${fb ? `: ${fb}` : ''}`,
+    });
+  } catch (e) {
+    console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
+  }
+  return { typed: line };
+}
+
 type LaunchKind = 'wake' | 'start';
 
 async function launchOrchestrator(

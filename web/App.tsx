@@ -154,13 +154,14 @@ function NeedDialog({
 }
 
 function NeedCard({
-  need, view, busy, onAnswer, onContinue,
+  need, view, busy, onAnswer, onContinue, onPlanAnswer,
 }: {
   need: Need;
   view: HubView;
   busy: { project: string; what: string; who?: string } | null;
   onAnswer: (project: string, agentRefArg: string | undefined, seen: string, choice: string, id: string) => void;
   onContinue: (project: string) => void;
+  onPlanAnswer: (project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => void;
 }) {
   const accent = NEED_ACCENT[need.color] ?? 'border-l-zinc-600';
   const continuing = need.action === 'continue' && need.project
@@ -177,12 +178,63 @@ function NeedCard({
       {need.dialogKey && (
         <NeedDialog dialogKey={need.dialogKey} dialogs={view.dialogs} busy={busy} onAnswer={onAnswer} />
       )}
+      {need.action === 'plan' && need.project && need.taskId && !need.dialogKey && (
+        <PlanActions need={need} busy={busy} onPlanAnswer={onPlanAnswer} />
+      )}
       {need.action === 'continue' && need.project && (
         <div className="mt-2">
           {continuing
             ? <span className="text-xs text-sky-400">continuing…</span>
             : <Btn id={`continue-${need.project}`} onPress={() => onContinue(need.project!)}>Continue</Btn>}
         </div>
+      )}
+    </div>
+  );
+}
+
+function PlanActions({
+  need, busy, onPlanAnswer,
+}: {
+  need: Need;
+  busy: { project: string; what: string; who?: string } | null;
+  onPlanAnswer: (project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => void;
+}) {
+  const [sendingBack, setSendingBack] = useState(false);
+  const [feedback, setFeedback] = useState('');
+  const project = need.project!;
+  const taskId = need.taskId!;
+  if (busy?.project === project && busy.what === 'answering' && busy.who === taskId) {
+    return <div className="mt-2 text-xs text-sky-400">answering…</div>;
+  }
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      <div className="flex flex-wrap gap-1.5">
+        <Btn id={`plan-approve-${taskId}`} variant="primary" onPress={() => onPlanAnswer(project, taskId, 'approve')}>
+          Approve plan
+        </Btn>
+        {!sendingBack && (
+          <Btn id={`plan-sendback-${taskId}`} onPress={() => setSendingBack(true)}>Send back</Btn>
+        )}
+      </div>
+      {sendingBack && (
+        <form
+          className="flex gap-1.5"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onPlanAnswer(project, taskId, 'sendback', feedback.trim() || undefined);
+          }}
+        >
+          <Input
+            autoFocus
+            value={feedback}
+            onChange={(e) => setFeedback(e.target.value)}
+            placeholder="what should change? (optional)"
+            className="h-8 text-xs"
+          />
+          <Btn id={`plan-sendback-go-${taskId}`} onPress={() => onPlanAnswer(project, taskId, 'sendback', feedback.trim() || undefined)}>
+            Send
+          </Btn>
+        </form>
       )}
     </div>
   );
@@ -467,6 +519,13 @@ export function App() {
     });
   }, [act]);
 
+  const onPlanAnswer = useCallback((project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => {
+    void act(`plan-${taskId}-${verdict}`, project, 'answering', taskId, async () => {
+      await post('/api/plan-answer', { project, task: taskId, verdict, feedback });
+      return verdict === 'approve' ? `${taskId}: plan approved` : `${taskId}: plan sent back`;
+    }, taskId);
+  }, [act]);
+
   const now = Date.now();
   const where = homeTilde(view.root, '');
   const clock = view.updatedAt
@@ -507,6 +566,7 @@ export function App() {
                   busy={busy}
                   onAnswer={onAnswer}
                   onContinue={onContinue}
+                  onPlanAnswer={onPlanAnswer}
                 />
               ))}
             </section>

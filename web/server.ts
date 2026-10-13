@@ -2,7 +2,7 @@ import http from 'node:http';
 import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Refusal, answerDialog, continueProject, hubTask, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
+import { Refusal, answerDialog, continueProject, hubTask, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
 import { checkName } from '../src/names.js';
 import {
   ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
@@ -115,7 +115,7 @@ function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
 const TASK_TEXT_CAP = 4000;
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   const project = projectName(body);
@@ -149,6 +149,16 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
         startProject(root, project, String(body.task ?? '')), ACTION_TIMEOUT_MS, 'start',
       );
       return { ok: true, pane };
+    }
+    if (pathname === '/api/plan-answer') {
+      const r = await withTimeout(
+        planAnswer(
+          root, project, String(body.task ?? ''), String(body.verdict ?? ''),
+          body.feedback === undefined ? undefined : String(body.feedback),
+        ),
+        ACTION_TIMEOUT_MS, 'plan-answer',
+      );
+      return { ok: true, typed: r.typed };
     }
     const r = await withTimeout(
       answerDialog(root, project, agentRefOf(body), String(body.choice ?? ''), String(body.fingerprint ?? '')),

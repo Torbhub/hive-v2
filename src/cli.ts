@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import {
   answerDialog, buildStatus, continueProject, hubAdd, hubInit, hubLog, hubTask,
-  listTasks, readDialogFor, startProject, wake,
+  listTasks, planAnswer, readDialogFor, startProject, wake,
 } from './hub.js';
 import { closeAgent, respawnAgent, spawnAgent } from './spawn.js';
 import { parseSteps, pushByHash, runGate, verifyCommits, verifyLog } from './gate.js';
@@ -129,6 +129,15 @@ async function hubCommand(args: string[]): Promise<void> {
       }
       const result = await answerDialog(root, validName('project', project), agent && validAgentRef(agent), f.choice, f.seen);
       console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    case 'plan-answer': {
+      const [, project, task, verdict, ...fb] = args;
+      if (!project || !task || !verdict) {
+        throw new UsageError('usage: hive hub plan-answer <project> <task> <approve|sendback> [feedback]');
+      }
+      const r = await planAnswer(root, validName('project', project), task, verdict, fb.length ? fb.join(' ') : undefined);
+      console.log(`hive: typed into ${project}'s orchestrator: ${r.typed}`);
       return;
     }
     case 'wake': {

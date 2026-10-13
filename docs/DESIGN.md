@@ -106,6 +106,7 @@ Per project, `<project>/.hive/`:
 ```
 hive hub init|add <name> <path>|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note]
 hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
+hive hub plan-answer <project> <task-id> <approve|sendback> [feedback]
 hive hub wake <project> | start <project> <task-id> | continue <project>
 hive spawn <project> --agent <name> [--role r] [--worktree wt] | respawn | close
 hive gate --log <path> -- <name> <cmd>... | gate-verify log <path> [--commit sha] | gate-verify commits <base>..<tip>
