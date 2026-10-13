@@ -4,7 +4,8 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { promises as fs } from 'node:fs';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'node:http';
 
 const WEB_DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web', 'dist');
@@ -13,11 +14,25 @@ const WEB_DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '
 // throwaway socket anyway.
 process.env.HIVE_TMUX_SOCKET = `hive-test-${process.pid}`;
 
+vi.mock('../src/hub.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/hub.js')>();
+  return { ...orig, wake: vi.fn(orig.wake) };
+});
+
+import { wake } from '../src/hub.js';
 import { createServer } from '../web/server.js';
 import { appendTaskEvent, hubPath, writeJson } from '../src/state.js';
 
 let server: Server;
 let base: string;
+
+async function listenOn(root: string): Promise<{ s: Server; url: string }> {
+  const s = createServer(root);
+  await new Promise<void>((resolve) => {
+    s.listen(0, '127.0.0.1', resolve);
+  });
+  return { s, url: `http://127.0.0.1:${(s.address() as AddressInfo).port}` };
+}
 
 beforeAll(async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'hive-web-'));
@@ -43,10 +58,10 @@ afterAll(() => {
   server.close();
 });
 
-const post = (pathname: string, body: unknown) =>
+const post = (pathname: string, body: unknown, headers: Record<string, string> = {}) =>
   fetch(base + pathname, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
     body: typeof body === 'string' ? body : JSON.stringify(body),
   });
 
@@ -113,4 +128,110 @@ describe('static', () => {
       expect(await r.text()).toContain('hive hub');
     },
   );
+});
+
+describe('request hardening', () => {
+  it('rejects a non-JSON content type with 415', async () => {
+    const r = await fetch(`${base}/api/wake`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: '{"project":"demo"}',
+    });
+    expect(r.status).toBe(415);
+    expect((await r.json()).ok).toBe(false);
+  });
+
+  it('rejects a cross-site Origin and Sec-Fetch-Site, allows same-host', async () => {
+    const body = { project: 'demo', choice: '1', fingerprint: 'x' };
+    const cross = await post('/api/answer', body, { origin: 'https://evil.example' });
+    expect(cross.status).toBe(403);
+    const fetchSite = await post('/api/answer', body, { 'sec-fetch-site': 'cross-site' });
+    expect(fetchSite.status).toBe(403);
+    const sameHost = await post('/api/answer', body, {
+      origin: base,
+      'sec-fetch-site': 'same-origin',
+    });
+    expect(sameHost.status).toBe(400); // the usual no-dialog refusal, not a 403
+  });
+
+  it('sends cache-control: no-store on API responses', async () => {
+    const r = await fetch(`${base}/api/view`);
+    expect(r.headers.get('cache-control')).toBe('no-store');
+    const p = await post('/api/answer', { project: 'demo', choice: '1', fingerprint: 'x' });
+    expect(p.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('internal errors are generic 500s and never name filesystem paths', async () => {
+    const bad = mkdtempSync(path.join(tmpdir(), 'hive-web-bad-'));
+    await fs.mkdir(hubPath(bad), { recursive: true });
+    await fs.writeFile(hubPath(bad, 'projects.json'), '{"projects": [');
+    const { s, url } = await listenOn(bad);
+    try {
+      const r = await fetch(`${url}/api/wake`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ project: 'demo' }),
+      });
+      expect(r.status).toBe(500);
+      const text = await r.text();
+      expect(JSON.parse(text)).toEqual({ ok: false, detail: 'internal error' });
+      expect(text).not.toContain(bad);
+      // The view sanitizes its error line the same way (root is shown by design).
+      const view = await (await fetch(`${url}/api/view`)).json();
+      expect(view.error).toBe('the status read failed');
+      expect(view.error).not.toContain(bad);
+    } finally {
+      s.close();
+    }
+  });
+});
+
+describe('action serialization', () => {
+  it('two wakes for the same project never overlap; different projects run freely', async () => {
+    let active = 0;
+    let maxActive = 0;
+    vi.mocked(wake).mockImplementation(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 120));
+      active -= 1;
+      return '%1';
+    });
+    try {
+      const [r1, r2] = await Promise.all([
+        post('/api/wake', { project: 'demo' }),
+        post('/api/wake', { project: 'demo' }),
+      ]);
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(200);
+      expect((await r1.json()).pane).toBe('%1');
+      expect(maxActive).toBe(1);
+
+      const [r3, r4] = await Promise.all([
+        post('/api/wake', { project: 'demo' }),
+        post('/api/wake', { project: 'other' }),
+      ]);
+      expect(r3.status).toBe(200);
+      expect(r4.status).toBe(200);
+      expect(maxActive).toBe(2);
+    } finally {
+      vi.mocked(wake).mockRestore();
+    }
+  });
+});
+
+describe('HIVE_WEB_SECRET gate', () => {
+  it('403s every request without the header, allows with it', async () => {
+    process.env.HIVE_WEB_SECRET = 's3cret';
+    try {
+      expect((await fetch(`${base}/api/view`)).status).toBe(403);
+      expect((await fetch(`${base}/`)).status).toBe(403);
+      expect((await fetch(`${base}/api/view`, { headers: { 'x-hive-auth': 'nope' } })).status).toBe(403);
+      const ok = await fetch(`${base}/api/view`, { headers: { 'x-hive-auth': 's3cret' } });
+      expect(ok.status).toBe(200);
+      expect(ok.headers.get('cache-control')).toBe('no-store');
+    } finally {
+      delete process.env.HIVE_WEB_SECRET;
+    }
+  });
 });

@@ -17,6 +17,11 @@ import {
   ensureAgentFiles, findLatestSession, launchWindow, orchestratorName, pickupLine, preflight, typeLine, waitIdle,
 } from './spawn.js';
 
+// A deliberate refusal with an operator-safe message (unknown project, stale
+// fingerprint, already running…). The web layer shows these to the client;
+// every other error is infrastructure and stays server-side.
+export class Refusal extends Error {}
+
 export async function hubInit(root: string, name = 'hub'): Promise<void> {
   await fs.mkdir(hubPath(root), { recursive: true });
   await fs.mkdir(hubPath(root, 'tasks'), { recursive: true });
@@ -206,7 +211,7 @@ export async function readDialogFor(
 ): Promise<(HubDialog & { project: string; session: string; pane: string }) | null> {
   const pf = await readProjects(root);
   const p = pf.projects.find((x) => x.name === project);
-  if (!p) throw new Error(`unknown project: ${project}`);
+  if (!p) throw new Refusal(`unknown project: ${project}`);
   const team = await readTeam(p.home);
 
   let entry: TeamEntry | undefined;
@@ -219,9 +224,9 @@ export async function readDialogFor(
     if (wt) entry = matches.find((a) => a.worktree === wt);
     else if (matches.length === 1) entry = matches[0];
     else if (matches.length > 1) {
-      throw new Error(`${project} has ${matches.length} agents named ${name}; say which: ${name}@<worktree>`);
+      throw new Refusal(`${project} has ${matches.length} agents named ${name}; say which: ${name}@<worktree>`);
     }
-    if (!entry) throw new Error(`${project} has no agent named ${agentRefArg}`);
+    if (!entry) throw new Refusal(`${project} has no agent named ${agentRefArg}`);
     session = name;
   } else {
     entry = team.agents.find((a) => a.orchestrator);
@@ -247,17 +252,17 @@ export async function answerDialog(
   seen: string,
 ): Promise<{ answered: true; session: string; choice: string; option: string; dialog_gone: boolean }> {
   const dialog = await readDialogFor(root, project, agentRefArg);
-  if (!dialog) throw new Error('no dialog is on that screen');
+  if (!dialog) throw new Refusal('no dialog is on that screen');
   if (dialog.fingerprint !== seen) {
-    throw new Error('the dialog changed since it was read; read it again before answering');
+    throw new Refusal('the dialog changed since it was read; read it again before answering');
   }
   let option = 'Esc';
   if (choice === 'esc') {
     await sendEscape(dialog.pane);
   } else {
     const opt = dialog.options.find((o) => String(o.n) === choice);
-    if (!opt) throw new Error(`the dialog has no option ${choice}`);
-    if (!opt.offered) throw new Error(`option ${choice} needs your own text; answer it in the pane`);
+    if (!opt) throw new Refusal(`the dialog has no option ${choice}`);
+    if (!opt.offered) throw new Refusal(`option ${choice} needs your own text; answer it in the pane`);
     option = opt.label;
     await sendLiteral(dialog.pane, choice);
   }
@@ -276,43 +281,50 @@ async function launchOrchestrator(
 ): Promise<string> {
   const pf = await readProjects(root);
   const p = pf.projects.find((x) => x.name === project);
-  if (!p) throw new Error(`unknown project: ${project}`);
+  if (!p) throw new Refusal(`unknown project: ${project}`);
   if (kind === 'start') {
     if (!task || !new RegExp(`^${project}-\\d+$`).test(task)) {
-      throw new Error(`a task id is ${project}-<n>: ${task}`);
+      throw new Refusal(`a task id is ${project}-<n>: ${task}`);
     }
     const taskFile = await fs.stat(hubPath(root, 'tasks', `${task}.md`)).catch(() => null);
-    if (!taskFile?.isFile()) throw new Error(`no task file for ${task}`);
+    if (!taskFile?.isFile()) throw new Refusal(`no task file for ${task}`);
   }
-  const existing = await readPendingPane(root, project);
-  if (existing && (await paneExists(existing.pane))) {
-    throw new Error(`${project} is already starting in ${existing.pane}; continue it or close the window`);
-  }
-  await preflight();
+  // Claim-then-launch under the hub lock: a second start for the same project
+  // must see the pending record, never race past the check.
+  const launched = await withHubLock(root, async () => {
+    const existing = await readPendingPane(root, project);
+    if (existing && (await paneExists(existing.pane))) {
+      throw new Refusal(`${project} is already starting in ${existing.pane}; continue it or close the window`);
+    }
+    await preflight();
 
-  const team = await readTeam(p.home);
-  const old = team.agents.find((a) => a.orchestrator);
-  const name = orchestratorName(project);
-  const cwd = old?.worktree ?? p.home;
-  const sessionId = kind === 'wake' ? old?.session_id ?? (await findLatestSession(cwd, name)) ?? undefined : undefined;
-  if (kind === 'wake' && !sessionId) {
-    throw new Error(`${project} has no recorded session to resume; start it instead`);
-  }
-  // start and wake both refuse a live orchestrator: a second window would orphan the first.
-  if (old?.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
-    throw new Error(`${project}'s orchestrator is already running`);
-  }
+    const team = await readTeam(p.home);
+    const old = team.agents.find((a) => a.orchestrator);
+    const name = orchestratorName(project);
+    const cwd = old?.worktree ?? p.home;
+    const sessionId = kind === 'wake' ? old?.session_id ?? (await findLatestSession(cwd, name)) ?? undefined : undefined;
+    if (kind === 'wake' && !sessionId) {
+      throw new Refusal(`${project} has no recorded session to resume; start it instead`);
+    }
+    // start and wake both refuse a live orchestrator: a second window would orphan the first.
+    if (old?.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
+      throw new Refusal(`${project}'s orchestrator is already running`);
+    }
 
-  await ensureAgentFiles(cwd, name, 'orchestrator');
-  const { pane, identity } = await launchWindow(project, name, cwd, sessionId);
-  await manifestAdd(p.home, {
-    kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}`,
-    pane_pid: identity.pid, pane_started: identity.started,
+    await ensureAgentFiles(cwd, name, 'orchestrator');
+    const { pane, identity } = await launchWindow(project, name, cwd, sessionId);
+    await manifestAdd(p.home, {
+      kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}`,
+      pane_pid: identity.pid, pane_started: identity.started,
+    });
+    let line = pickupLine(project, name);
+    if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
+    const pending: PendingPane = { pane, kind, at: new Date().toISOString(), typed: false, task, line };
+    await writePendingPane(root, project, pending);
+    return { pane, identity, pending, sessionId, name, cwd };
   });
-  let line = pickupLine(project, name);
-  if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
-  const pending: PendingPane = { pane, kind, at: new Date().toISOString(), typed: false, task, line };
-  await writePendingPane(root, project, pending);
+  const { pane, identity, pending, sessionId, name, cwd } = launched;
+  const line = pending.line ?? '';
 
   const idle = await waitIdle(pane, { maxMs: 140_000 });
   if (idle !== 'idle') {
@@ -340,22 +352,22 @@ export async function startProject(root: string, project: string, task: string):
 
 export async function continueProject(root: string, project: string): Promise<string> {
   const pending = await readPendingPane(root, project);
-  if (!pending) throw new Error(`${project} is not waiting on a first line`);
-  if (pending.typed) throw new Error(`${project}'s first line was already sent`);
-  if (!pending.line) throw new Error(`${project}'s pending record has no line to type`);
+  if (!pending) throw new Refusal(`${project} is not waiting on a first line`);
+  if (pending.typed) throw new Refusal(`${project}'s first line was already sent`);
+  if (!pending.line) throw new Refusal(`${project}'s pending record has no line to type`);
   if (!(await paneExists(pending.pane))) {
     await clearPendingPane(root, project);
-    throw new Error(`${project}'s starting pane ${pending.pane} is gone; start again`);
+    throw new Refusal(`${project}'s starting pane ${pending.pane} is gone; start again`);
   }
   const raw = await capturePane(pending.pane);
   if (raw !== null && parseDialog(lines(raw)).kind !== 'none') {
     await writePendingPane(root, project, { ...pending, question: true });
-    throw new Error(`a dialog is on the screen of ${pending.pane}; answer it, then continue`);
+    throw new Refusal(`a dialog is on the screen of ${pending.pane}; answer it, then continue`);
   }
   const idle = await waitIdle(pending.pane, { maxMs: 140_000 });
-  if (idle !== 'idle') throw new Error(`${pending.pane} never went idle; nothing was typed`);
+  if (idle !== 'idle') throw new Refusal(`${pending.pane} never went idle; nothing was typed`);
   const id = await paneIdentity(pending.pane);
-  if (!id) throw new Error(`pane ${pending.pane} has no readable identity`);
+  if (!id) throw new Refusal(`pane ${pending.pane} has no readable identity`);
   await typeLine(pending.pane, pending.line, id);
 
   const pf = await readProjects(root);

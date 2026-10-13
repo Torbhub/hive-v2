@@ -37,7 +37,9 @@ no arguments.
 (port from `--port N` or `HIVE_WEB_PORT`, loopback only). It reads and acts
 exactly like the Ink screen — same view assembly, same fingerprint-checked
 dialog answers, one action at a time. It is a plain foreground process, so a
-systemd unit is one `ExecStart=/path/to/hive web` line away.
+systemd unit is one `ExecStart=/path/to/hive web` line away. Set
+`HIVE_WEB_SECRET` to require that value in an `x-hive-auth` header on every
+request (unset = open on loopback, for development).
 
 ## How a task flows
 
