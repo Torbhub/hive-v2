@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  hivePath, manifestRead, readJson, readProjects, withTeamLock, writeJson, writeProjects,
+  appendDecision, hivePath, manifestRead, readDecisions, readJson, readProjects, withTeamLock, writeJson, writeProjects,
 } from '../src/state.js';
 
 function tmp(): string {
@@ -74,5 +74,21 @@ describe('project mode', () => {
     await expect(
       writeProjects(root, { projects: [{ name: 'demo', home, repos: [], mode: 'chaos' as never }] }),
     ).rejects.toThrow(/mode is ask\|yolo\|auto/);
+  });
+});
+
+describe('decisions log', () => {
+  it('appends and reads the latest N, newest first', async () => {
+    const root = tmp();
+    for (let i = 1; i <= 10; i++) {
+      await appendDecision(root, { project: 'demo', by: 'watch', summary: `decision ${i}`, at: `2026-10-13T00:00:${String(i).padStart(2, '0')}Z` });
+    }
+    const latest = await readDecisions(root, 8);
+    expect(latest).toHaveLength(8);
+    expect(latest[0].summary).toBe('decision 10');
+    expect(latest[7].summary).toBe('decision 3');
+  });
+  it('reads an absent log as empty', async () => {
+    expect(await readDecisions(tmp())).toEqual([]);
   });
 });

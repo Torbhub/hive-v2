@@ -1,8 +1,8 @@
 import React, {
   createContext, useCallback, useContext, useEffect, useRef, useState,
 } from 'react';
-import type { HubDialog, HubProject, HubView, ProjectMode } from '../src/types';
-import { PROJECT_MODES } from '../src/types';
+import type { Approvals, HubDialog, HubProject, HubView, ProjectMode } from '../src/types';
+import { APPROVALS_MODES, PROJECT_MODES } from '../src/types';
 import {
   agentGlyph, agentRef, ago, buildNeeds, homeTilde, orchestratorLook,
   ROTATE_AT_PERCENT, tasksLine, type Need,
@@ -11,7 +11,7 @@ import {
 const EVERY_MS = 20_000;
 
 const EMPTY_VIEW: HubView = {
-  root: '', hubName: '', projects: [], tasks: [], dialogs: {}, updatedAt: 0, error: '',
+  root: '', hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], updatedAt: 0, error: '',
 };
 
 async function post(pathname: string, body: unknown): Promise<Record<string, unknown>> {
@@ -178,7 +178,7 @@ function NewTaskRow({
 }
 
 function ProjectCard({
-  project: p, view, now, busy, onWake, onStartTask, onSetMode,
+  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals,
 }: {
   project: HubProject;
   view: HubView;
@@ -187,6 +187,7 @@ function ProjectCard({
   onWake: (project: string) => void;
   onStartTask: (project: string, text: string) => Promise<boolean>;
   onSetMode: (project: string, mode: ProjectMode) => void;
+  onSetApprovals: (project: string, approvals: Approvals) => void;
 }) {
   const look = orchestratorLook(p.orchestrator);
   const o = p.orchestrator;
@@ -264,6 +265,22 @@ function ProjectCard({
                 label={m}
                 active={(p.mode ?? 'ask') === m}
                 onPress={() => onSetMode(p.name, m)}
+              />
+            ))}
+          </span>
+        </span>
+      </div>
+      <div className="label-row">
+        <span className="label">approvals</span>
+        <span className="content">
+          <span className="need-actions">
+            {APPROVALS_MODES.map((m) => (
+              <Btn
+                key={m}
+                id={`approvals-${p.name}-${m}`}
+                label={m}
+                active={(p.approvals ?? 'manual') === m}
+                onPress={() => onSetApprovals(p.name, m)}
               />
             ))}
           </span>
@@ -397,6 +414,13 @@ export function App() {
     });
   }, [act]);
 
+  const onSetApprovals = useCallback((project: string, approvals: Approvals) => {
+    void act(`approvals-${project}-${approvals}`, project, 'answering', project, async () => {
+      await post('/api/approvals', { project, approvals });
+      return `${project}: approvals are ${approvals}`;
+    });
+  }, [act]);
+
   const now = Date.now();
   const where = homeTilde(view.root, '');
   const clock = view.updatedAt
@@ -449,6 +473,21 @@ export function App() {
           <div className="mt gray">No projects yet: tell the hub which folders make up a project.</div>
         )}
 
+        {view.decisions.length > 0 && (
+          <div className="mt">
+            <div className="bold cyan">DECISIONS</div>
+            {view.decisions.map((d, i) => (
+              <div key={`${d.at}-${i}`} className="pl1 row">
+                <span className="shrink">
+                  <span className="bold white">{d.task ?? d.project}</span>
+                  <span className="white">{`  ${d.summary}`}</span>
+                </span>
+                <span className="gray">{ago(d.at, now)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {view.projects.map((p) => (
           <ProjectCard
             key={p.name}
@@ -459,6 +498,7 @@ export function App() {
             onWake={onWake}
             onStartTask={onStartTask}
             onSetMode={onSetMode}
+            onSetApprovals={onSetApprovals}
           />
         ))}
 

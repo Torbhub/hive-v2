@@ -58,6 +58,7 @@ src/
   spawn.ts     — spawn/respawn/close of orchestrator + agent sessions
   gate.ts      — gate runner + gate-verify (log, commits)
   cleanup.ts   — manifest-driven cleanup, trash-not-delete
+  watch.ts     — watchdog (dead-pane log + wake) and the safe/smart auto-approver
   ui/HubApp.tsx   — the hub screen (spec docs/hub-ui-spec.md)
   ui/look.ts      — the shared look: ago, look tables, needs-building (Ink and web both import it)
   ui/buttons.tsx  — keyboard-driven button (Tab focus, Enter press, hotkeys)
@@ -83,6 +84,9 @@ Work folder (hub root), holds `.hive-hub/`:
 - `tasks/<id>.md` — task text handed to the orchestrator as a path.
 - `panes/<project>.json` — a start/wake the hub launched that has not
   registered yet: `{pane, kind, at, typed, task}`.
+- `watch.log` — the watchdog's pane-death/cycle-error lines, timestamped.
+- `decisions.jsonl` — append-only permanent decisions: owner answers,
+  watch auto-approvals/wakes, orchestrator `decided` events.
 - `hub.json` — the hub's own name (written by `hive hub init`).
 
 Per project, `<project>/.hive/`:

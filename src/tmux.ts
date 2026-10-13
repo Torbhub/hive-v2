@@ -4,9 +4,9 @@ export const HIVE_SESSION = 'hive';
 
 export type RunResult = { code: number; stdout: string; stderr: string };
 
-export function run(cmd: string, args: string[], cwd?: string, env?: NodeJS.ProcessEnv): Promise<RunResult> {
+export function run(cmd: string, args: string[], cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number): Promise<RunResult> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { cwd, env, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(cmd, args, { cwd, env, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) => {
       const code = err && typeof err.code === 'number' ? err.code : err ? 1 : 0;
       resolve({ code, stdout: String(stdout), stderr: String(stderr) });
     });

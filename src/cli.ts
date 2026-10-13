@@ -33,7 +33,8 @@ const USAGE = `usage:
   hive push <remote> <sha> <branch>
   hive cleanup <project> [--dry-run]
   hive ui
-  hive web [--port N]`;
+  hive web [--port N]
+  hive watch`;
 
 class UsageError extends Error {}
 
@@ -252,6 +253,12 @@ async function main(): Promise<void> {
       const { createElement } = await import('react');
       const { HubApp } = await import('./ui/HubApp.js');
       render(createElement(HubApp, { root: process.cwd() }));
+      return;
+    }
+    case 'watch': {
+      const { watch } = await import('./watch.js');
+      console.log(`hive: watching ${process.cwd()} (deaths + approvals per projects.json)`);
+      await watch(process.cwd());
       return;
     }
     case 'web': {

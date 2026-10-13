@@ -25,6 +25,7 @@ import { appendTaskEvent, hubPath, writeJson } from '../src/state.js';
 
 let server: Server;
 let base: string;
+let root: string;
 
 async function listenOn(root: string): Promise<{ s: Server; url: string }> {
   const s = createServer(root);
@@ -35,7 +36,7 @@ async function listenOn(root: string): Promise<{ s: Server; url: string }> {
 }
 
 beforeAll(async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'hive-web-'));
+  root = mkdtempSync(path.join(tmpdir(), 'hive-web-'));
   const home = path.join(root, 'demo');
   await writeJson(hubPath(root, 'projects.json'), {
     projects: [{ name: 'demo', home, repos: [{ folder: home }] }],
@@ -320,5 +321,27 @@ describe('POST /api/mode', () => {
     const noProject = await post('/api/mode', { project: 'nope', mode: 'yolo' });
     expect(noProject.status).toBe(400);
     expect((await noProject.json()).detail).toMatch(/unknown project/);
+  });
+});
+
+describe('POST /api/approvals + decisions in the view', () => {
+  it('persists approvals and rejects a bad enum', async () => {
+    const r = await post('/api/approvals', { project: 'demo', approvals: 'safe' });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, approvals: 'safe' });
+    const bad = await post('/api/approvals', { project: 'demo', approvals: 'chaos' });
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).detail).toMatch(/manual\|safe\|smart/);
+    const back = await post('/api/approvals', { project: 'demo', approvals: 'manual' });
+    expect(back.status).toBe(200);
+  });
+
+  it('GET /api/view carries the latest decisions, newest first', async () => {
+    const { appendDecision } = await import('../src/state.js');
+    await appendDecision(root, { project: 'demo', by: 'watch', summary: 'auto-approved "Approve once" for: $ ls' });
+    const view = await (await fetch(`${base}/api/view`)).json();
+    expect(view.decisions.length).toBeGreaterThan(0);
+    expect(view.decisions[0].summary).toContain('auto-approved');
+    expect(view.decisions[0].by).toBe('watch');
   });
 });

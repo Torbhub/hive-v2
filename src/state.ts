@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { HubTask, ProjectMode, TaskEvent, TeamEntry } from './types.js';
-import { NEEDS_OWNER_STATES, PROJECT_MODES, TASK_EVENTS } from './types.js';
+import type { Approvals, Decision, HubTask, ProjectMode, TaskEvent, TeamEntry } from './types.js';
+import { APPROVALS_MODES, NEEDS_OWNER_STATES, PROJECT_MODES, TASK_EVENTS } from './types.js';
 
 export const HUB_DIR = '.hive-hub';
 export const HIVE_DIR = '.hive';
@@ -39,7 +39,7 @@ export async function writeJson(file: string, value: unknown): Promise<void> {
 }
 
 export type ProjectsFile = {
-  projects: { name: string; home: string; repos: { folder: string }[]; mode?: ProjectMode }[];
+  projects: { name: string; home: string; repos: { folder: string }[]; mode?: ProjectMode; approvals?: Approvals }[];
 };
 
 export async function readProjects(root: string): Promise<ProjectsFile> {
@@ -50,6 +50,9 @@ export async function writeProjects(root: string, pf: ProjectsFile): Promise<voi
   for (const p of pf.projects) {
     if (p.mode !== undefined && !(PROJECT_MODES as readonly string[]).includes(p.mode)) {
       throw new Error(`a project mode is ask|yolo|auto: ${p.mode}`);
+    }
+    if (p.approvals !== undefined && !(APPROVALS_MODES as readonly string[]).includes(p.approvals)) {
+      throw new Error(`project approvals is manual|safe|smart: ${p.approvals}`);
     }
   }
   await writeJson(hubPath(root, 'projects.json'), pf);
@@ -225,4 +228,32 @@ export async function writePendingPane(root: string, project: string, p: Pending
 
 export async function clearPendingPane(root: string, project: string): Promise<void> {
   await fs.rm(hubPath(root, 'panes', `${project}.json`), { force: true });
+}
+
+// The decisions log: append-only lore that survives every rotation.
+export async function appendDecision(root: string, d: Omit<Decision, 'at'> & { at?: string }): Promise<void> {
+  await fs.mkdir(hubPath(root), { recursive: true });
+  await fs.appendFile(
+    hubPath(root, 'decisions.jsonl'),
+    JSON.stringify({ ...d, at: d.at ?? new Date().toISOString() }) + '\n',
+  );
+}
+
+export async function readDecisions(root: string, latest = 8): Promise<Decision[]> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(hubPath(root, 'decisions.jsonl'), 'utf8');
+  } catch {
+    return [];
+  }
+  const out: Decision[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line) as Decision);
+    } catch {
+      // A torn last line (crashed append) is dropped, not fatal.
+    }
+  }
+  return out.slice(-latest).reverse();
 }

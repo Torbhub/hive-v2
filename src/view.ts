@@ -1,5 +1,6 @@
 import type { HubProject, HubTask, HubView } from './types.js';
 import { buildStatus, listTasks, readDialogFor } from './hub.js';
+import { readDecisions } from './state.js';
 
 export const READ_TIMEOUT_MS = 30_000;
 export const ACTION_TIMEOUT_MS = 150_000;
@@ -26,7 +27,7 @@ export async function buildView(root: string): Promise<HubView> {
   try {
     status = await withTimeout(buildStatus(root), READ_TIMEOUT_MS, 'status');
   } catch (e) {
-    return { root, hubName: '', projects: [], tasks: [], dialogs: {}, updatedAt: 0, error: lastLine(e) };
+    return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], updatedAt: 0, error: lastLine(e) };
   }
   let tasks: HubTask[] = [];
   let error = '';
@@ -36,12 +37,14 @@ export async function buildView(root: string): Promise<HubView> {
     error = `tasks not read: ${lastLine(e)}`;
   }
   const dialogs = await readDialogs(root, status.projects);
+  const decisions = await readDecisions(root, 8).catch(() => []);
   return {
     root,
     hubName: status.hub.name ?? '',
     projects: status.projects,
     tasks,
     dialogs,
+    decisions,
     updatedAt: Date.now(),
     error,
   };

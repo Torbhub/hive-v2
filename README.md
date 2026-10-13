@@ -43,6 +43,23 @@ request (unset = open on loopback, for development). The screen also creates
 tasks, starts teams, and sets a project's permission mode (`ask`/`yolo`/`auto`
 — passed to kimi as nothing/`-y`/`--auto` on the next launch, resume included).
 
+## The watchdog
+
+`hive watch` is a foreground daemon (one systemd unit:
+`ExecStart=/path/to/hive watch`, run from the hub root): every 5s it logs
+dead panes to `.hive-hub/watch.log` with timestamps and re-wakes a dead
+orchestrator by session id, and it auto-answers permission dialogs per the
+project's `approvals` setting (`manual`/`safe`/`smart`). `safe` approves only
+deterministic read-only commands (a whitelist over every segment of a
+`&&`/`;`/`|` chain; destructive patterns like `rm`, `git push`, `sudo`,
+curl-pipe-shell, or redirects into system paths are never approved). `smart`
+adds a fresh-context `kimi -p` classifier for unknown commands (60s timeout;
+only a reply starting with APPROVE counts). It only ever picks option 1,
+"Approve once" — never a saves-rule option. Every wake and auto-answer lands
+in `.hive-hub/decisions.jsonl` with `by:"watch"`, as do owner answers
+(`by:"owner"`) and `hive hub log <id> decided <reason>` (`by:"orchestrator"`);
+the web screen shows the latest eight under DECISIONS.
+
 ## How a task flows
 
 1. You record a task: `hive hub task demo "..."`. It lands in the ledger

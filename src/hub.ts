@@ -3,14 +3,14 @@ import { promises as fs } from 'node:fs';
 import type {
   HubAgent, HubDialog, HubFolder, HubOrchestrator, HubProject, HubStatus, HubTask, TaskEvent, TeamEntry,
 } from './types.js';
-import { CLOSED_STATES, PROJECT_MODES, TASK_EVENTS } from './types.js';
-import type { ProjectMode } from './types.js';
+import { APPROVALS_MODES, CLOSED_STATES, PROJECT_MODES, TASK_EVENTS } from './types.js';
+import type { Approvals, ProjectMode } from './types.js';
 import {
   capturePane, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep,
 } from './tmux.js';
 import { lines, parseDialog, scrapeContext } from './screen.js';
 import {
-  appendTaskEvent, clearPendingPane, foldTasks, hivePath, hubPath, manifestAdd, nextTaskId,
+  appendDecision, appendTaskEvent, clearPendingPane, foldTasks, hivePath, hubPath, manifestAdd, nextTaskId,
   readPendingPane, readProjects, readTaskEvents, readTeam, withHubLock, writePendingPane,
   writeProjects, writeJson, readJson, upsertTeamEntry, type PendingPane, type ProjectsFile,
 } from './state.js';
@@ -58,6 +58,18 @@ export async function setProjectMode(root: string, project: string, mode: string
   return p.mode;
 }
 
+export async function setProjectApprovals(root: string, project: string, approvals: string): Promise<Approvals> {
+  if (!(APPROVALS_MODES as readonly string[]).includes(approvals)) {
+    throw new Refusal(`approvals is manual|safe|smart: ${approvals}`);
+  }
+  const pf = await readProjects(root);
+  const p = pf.projects.find((x) => x.name === project);
+  if (!p) throw new Refusal(`unknown project: ${project}`);
+  p.approvals = approvals as Approvals;
+  await writeProjects(root, pf);
+  return p.approvals;
+}
+
 export async function hubTask(root: string, project: string, text: string): Promise<string> {
   const pf = await readProjects(root);
   if (!pf.projects.some((p) => p.name === project)) throw new Refusal(`unknown project: ${project}`);
@@ -75,9 +87,13 @@ export async function hubLog(root: string, id: string, event: string, note?: str
   const events = await readTaskEvents(root);
   if (!events.some((e) => e.id === id)) throw new Error(`unknown task: ${id}`);
   if (!(TASK_EVENTS as readonly string[]).includes(event)) throw new Error(`unknown task event: ${event}`);
+  const project = id.replace(/-\d+$/, '');
   await appendTaskEvent(root, {
-    id, project: id.replace(/-\d+$/, ''), event: event as TaskEvent['event'], at: new Date().toISOString(), note,
+    id, project, event: event as TaskEvent['event'], at: new Date().toISOString(), note,
   });
+  if (event === 'decided') {
+    await appendDecision(root, { project, task: id, by: 'orchestrator', summary: note ?? '' });
+  }
 }
 
 export async function listTasks(root: string): Promise<HubTask[]> {
@@ -204,6 +220,7 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
     agents,
     open_tasks: tasks.filter((t) => t.project === p.name && !CLOSED_STATES.has(t.state)).length,
     mode: p.mode ?? 'ask',
+    approvals: p.approvals ?? 'manual',
   };
 }
 
@@ -301,6 +318,13 @@ export async function answerDialog(
   }
   await sleep(2000);
   const after = await readDialogFor(root, project, agentRefArg);
+  // Lore: every owner answer lands in the permanent decisions log.
+  const firstLine = dialog.text.split('\n').map((l) => l.trim()).find((l) => l && !/^[─╌-]+$/.test(l)) ?? '';
+  try {
+    await appendDecision(root, { project, by: 'owner', summary: `answered "${option}" for: ${firstLine}` });
+  } catch (e) {
+    console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
+  }
   return { answered: true, session: dialog.session, choice, option, dialog_gone: after === null };
 }
 

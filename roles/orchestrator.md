@@ -21,3 +21,5 @@ plan the team, brief the agents, and land the work.
   finished. Log task state changes with `hive hub log <id> <event> [note]`.
 - Watch context: when an agent nears 50%, have it update the START HERE block
   of its handoff, then `hive spawn respawn <project> --agent <name>`.
+- Record decisions with `hive hub log <id> decided "<reason>"`; at every
+  pickup, read `.hive-hub/decisions.jsonl` — those decisions are permanent.

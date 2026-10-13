@@ -20,6 +20,7 @@ const VIEW: HubView = {
   }],
   tasks: [],
   dialogs: {},
+  decisions: [],
   updatedAt: Date.now(),
   error: '',
 };

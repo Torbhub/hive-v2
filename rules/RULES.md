@@ -26,3 +26,5 @@
 - Your memory is `.hive/handoffs/<you>.md`. Keep its START HERE block current:
   what you are doing, what is done, what is next, which paths matter.
 - Rotation is normal. A fresh copy of you reads that block and continues.
+- Decisions live in `.hive-hub/decisions.jsonl` (append via
+  `hive hub log <id> decided "<reason>"`); read them at pickup — they are permanent.

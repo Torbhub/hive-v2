@@ -45,6 +45,17 @@ export type HubOrchestrator = {
 export type ProjectMode = 'ask' | 'yolo' | 'auto';
 export const PROJECT_MODES = ['ask', 'yolo', 'auto'] as const;
 
+export type Approvals = 'manual' | 'safe' | 'smart';
+export const APPROVALS_MODES = ['manual', 'safe', 'smart'] as const;
+
+export type Decision = {
+  at: string;
+  project: string;
+  task?: string;
+  by: 'owner' | 'watch' | 'orchestrator';
+  summary: string;
+};
+
 export type HubFolder = { folder: string; kind: string; branch?: string; changed?: number };
 
 export type HubProject = {
@@ -55,6 +66,7 @@ export type HubProject = {
   agents: HubAgent[];
   open_tasks: number;
   mode?: ProjectMode;
+  approvals?: Approvals;
 };
 
 export type HubTask = {
@@ -91,6 +103,7 @@ export type HubView = {
   projects: HubProject[];
   tasks: HubTask[];
   dialogs: Record<string, HubDialog>;
+  decisions: Decision[];
   updatedAt: number;
   error: string;
 };

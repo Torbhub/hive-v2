@@ -24,9 +24,9 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 });
 
 import { capturePane, sendArrow, sendEnter } from '../src/tmux.js';
-import { answerDialog, hubAdd, hubInit, hubTask, menuKeys, readDialogFor, startProject } from '../src/hub.js';
+import { answerDialog, hubAdd, hubInit, hubLog, hubTask, menuKeys, readDialogFor, startProject } from '../src/hub.js';
 import { lines, parseDialog } from '../src/screen.js';
-import { writeJson, hivePath } from '../src/state.js';
+import { hubPath, hivePath, readDecisions, writeJson } from '../src/state.js';
 
 async function setup() {
   const root = mkdtempSync(path.join(tmpdir(), 'hive-hub-'));
@@ -162,5 +162,33 @@ describe('answerDialog on menus', () => {
     await expect(answerDialog(root, 'demo', undefined, '1', 'bogus')).rejects.toThrow(/dialog changed/);
     expect(vi.mocked(sendArrow).mock.calls).toEqual([]);
     expect(vi.mocked(sendEnter).mock.calls).toEqual([]);
+  });
+});
+
+describe('decisions from hub actions', () => {
+  it('answerDialog appends an owner decision', async () => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
+    });
+    vi.mocked(capturePane).mockImplementation(async () => DIALOG);
+    const fp = parseDialog(lines(DIALOG)).fingerprint;
+    await answerDialog(root, 'demo', undefined, '1', fp);
+    const raw = await fs.readFile(hubPath(root, 'decisions.jsonl'), 'utf8');
+    const d = JSON.parse(raw.trim());
+    expect(d.by).toBe('owner');
+    expect(d.project).toBe('demo');
+    expect(d.summary).toMatch(/^answered "Approve once" for: /);
+  });
+
+  it('hub log decided mirrors into decisions.jsonl as orchestrator', async () => {
+    const { root } = await setup();
+    const id = await hubTask(root, 'demo', 'pick a schema');
+    await hubLog(root, id, 'decided', 'postgres per the brief');
+    const decisions = await readDecisions(root);
+    expect(decisions[0]).toMatchObject({ by: 'orchestrator', project: 'demo', task: id, summary: 'postgres per the brief' });
+    // a non-decided event does not mirror
+    await hubLog(root, id, 'note', 'just a note');
+    expect(await readDecisions(root)).toHaveLength(1);
   });
 });
