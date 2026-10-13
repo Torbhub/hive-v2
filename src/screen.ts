@@ -60,20 +60,14 @@ function ruleIndexes(ls: string[]): number[] {
   return out;
 }
 
-// The prompt box and what is below it: from the second-to-last rule down, else everything.
-function boxRegion(ls: string[]): string[] {
-  const rules = ruleIndexes(ls);
-  if (rules.length >= 2) return ls.slice(rules[rules.length - 2]);
-  return ls;
-}
-
 export function hasEmptyPrompt(ls: string[]): boolean {
   const tail = ls.filter((l) => l.trim() !== '').slice(-6);
   return tail.some((l) => EMPTY_PROMPT_RE.test(l));
 }
 
 export function hasSpinner(ls: string[]): boolean {
-  return boxRegion(ls).some((l) => SPINNER_RE.test(l));
+  // Kimi clears the spinner when it goes idle, so any spinner line on screen is live.
+  return ls.some((l) => SPINNER_RE.test(l));
 }
 
 export type ScreenState = 'idle' | 'working' | 'dialog' | 'unknown';
@@ -83,9 +77,7 @@ export function classify(ls: string[]): ScreenState {
   if (hasSpinner(ls)) return 'working';
   if (hasEmptyPrompt(ls)) return 'idle';
   return 'unknown';
-}
-
-// Dialog text = the block between the last two plain rules, or the whole screen
+}// Dialog text = the block between the last two plain rules, or the whole screen
 // when there are too few rules (refusing to type is the safe error either way).
 function dialogRegion(ls: string[]): string[] {
   const rules = ruleIndexes(ls);

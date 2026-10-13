@@ -224,7 +224,7 @@ export async function verifyCommits(
       files = d.stdout.split('\n').filter((l) => l.trim()).length;
     }
     if (files > opts.maxFiles) problems.push(`${short} files: ${files}, more than ${opts.maxFiles}`);
-    if (opts.attribution === 'deny' && ATTRIBUTION_RE.test(msg)) {
+    if (opts.attribution === 'deny' && msg.split('\n').some((l) => ATTRIBUTION_RE.test(l))) {
       problems.push(`${short} attribution: an attribution line is not allowed`);
     }
     if (body.trim()) {
