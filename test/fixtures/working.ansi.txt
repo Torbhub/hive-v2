@@ -1,0 +1,60 @@
+[1m[32mubuntu@ip-172-31-79-150[0m:[1m[34m/tmp[0m$ teamkimi run
+
+ [38;5;111m╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮[39m
+ [38;5;111m│[39m                                                                                                                                                                                                                                                                                                                              [38;5;111m│[39m
+ [38;5;111m│[39m  [38;5;111m▐█▛█▛█▌[39m  [1m[38;5;111mWelcome to Kimi Code![0m                                                                                                                                                                                                                                                                                              [38;5;111m│[39m
+ [38;5;111m│[39m  [38;5;111m▐█████▌[39m  [38;5;244mSend /help for help information.[39m                                                                                                                                                                                                                                                                                   [38;5;111m│[39m
+ [38;5;111m│[39m                                                                                                                                                                                                                                                                                                                              [38;5;111m│[39m
+ [38;5;111m│[39m  [1m[38;5;244mDirectory: [0m/tmp                                                                                                                                                                                                                                                                                                             [38;5;111m│[39m
+ [38;5;111m│[39m  [1m[38;5;244mSession:   [0msession_ffa66719-6836-4915-bef8-55f6eba78a5e                                                                                                                                                                                                                                                                     [38;5;111m│[39m
+ [38;5;111m│[39m  [1m[38;5;244mModel:     [0mK3                                                                                                                                                                                                                                                                                                               [38;5;111m│[39m
+ [38;5;111m│[39m  [1m[38;5;244mVersion:   [0m2.1.1                                                                                                                                                                                                                                                                                                            [38;5;111m│[39m
+ [38;5;111m│[39m                                                                                                                                                                                                                                                                                                                              [38;5;111m│[39m
+ [38;5;111m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[39m
+
+ [1m[38;5;111m✦ Kimi Code Desktop is here[0m [1m[38;5;255m— Everything you love about Kimi Code, now on desktop[0m
+   [38;5;244mRun /desktop or visit https://www.kimi.com/code to install[39m
+
+   [38;5;244mNo session yet — one will be created on your first message.[39m
+   [38;5;215mtmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and restart tmux.[39m
+
+ [1m[38;5;222m✨ Reply with the word OK[0m
+
+ [38;5;244m● [3mUser asks to reply with OK.[0m
+
+ [38;5;253m● [39mOK
+
+ [1m[38;5;222m✨ Run this exact bash command: echo hive-calibration[0m
+
+ [38;5;244m● [3mJust run it.[0m
+
+ [38;5;210m✗ [1mRan a command[0;2m · $ echo hive-calibration[0m
+   [38;5;210mTool "Bash" was not run because the user rejected the approval request.[39m
+
+   [38;5;255mRejected: Running: echo hive-calibration[39m
+
+ [38;5;244m● [3mThe user rejected the approval request. So the command was declined. I should just report that.[0m
+
+ [38;5;253m● [39mThe command was declined at the approval prompt, so it didn't run. If you want it executed, approve the prompt when it appears — or let me know if you'd prefer something else.
+
+ [1m[38;5;222m✨ List the prime numbers under 60, one per line, then say DONE[0m
+
+ [38;5;244m⠼ thinking…[39m
+   [3m[38;5;244mPrimes under 60: 2, 3, 5, [0m
+
+  [38;5;111m⠼[39m Thinking…[38;5;244m · Tip: @: mention files[39m
+ [38;5;240m╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮[39m
+ [38;5;240m│[39m > [7m [0m                                                                                                                                                                                                                                                                                                                          [38;5;240m│[39m
+ [38;5;240m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[39m
+ [38;5;253mK3 thinking: high[39m  [38;5;244m/tmp[39m                                                                                                                                                                                                                                                      [38;5;242mask Kimi to schedule tasks, e.g. "remind me at 5pm"[39m
+                                                                                                                                                                                                                                                                                                           [38;5;253mcontext: 3% (26.9k/1M)[39m
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,124 @@
+export type HubOrchestratorState =
+  | 'running'
+  | 'stopped'
+  | 'unknown'
+  | 'none'
+  | 'unregistered'
+  | 'resumable';
+
+export type HubAgentState = 'running' | 'stopped' | 'unknown' | 'unrecorded';
+
+export type HubAgent = {
+  name: string;
+  state: HubAgentState;
+  question?: boolean;
+  context?: number;
+  context_assumed?: boolean;
+  context_unknown?: boolean;
+  context_tokens?: number;
+  worktree?: string;
+  ref?: string;
+};
+
+export type HubOrchestrator = {
+  state: HubOrchestratorState;
+  question?: boolean;
+  name?: string;
+  pid?: number;
+  pane?: string;
+  session_id?: string;
+  context?: number;
+  context_assumed?: boolean;
+  context_unknown?: boolean;
+  context_tokens?: number;
+  starting?: {
+    pane: string;
+    kind: string;
+    at: string;
+    typed?: boolean;
+    sending?: boolean;
+    question?: boolean;
+    task?: string;
+  };
+};
+
+export type HubFolder = { folder: string; kind: string; branch?: string; changed?: number };
+
+export type HubProject = {
+  name: string;
+  home: string;
+  repos: HubFolder[];
+  orchestrator: HubOrchestrator;
+  agents: HubAgent[];
+  open_tasks: number;
+};
+
+export type HubTask = {
+  id: string;
+  project: string;
+  asked: string;
+  state: string;
+  updated: string;
+  last_note: string | null;
+  needs_owner: boolean;
+  decisions?: { at: string; reason: string }[];
+};
+
+export type HubDialogOption = {
+  n: number;
+  label: string;
+  detail: string;
+  offered: boolean;
+  saves_rule: boolean;
+};
+
+export type HubDialog = {
+  kind: 'numbered' | 'menu' | 'none';
+  text: string;
+  options: HubDialogOption[];
+  cursor: number | null;
+  esc: boolean;
+  fingerprint: string;
+};
+
+export type HubView = {
+  root: string;
+  hubName: string;
+  projects: HubProject[];
+  tasks: HubTask[];
+  dialogs: Record<string, HubDialog>;
+  updatedAt: number;
+  error: string;
+};
+
+export type HubStatus = {
+  hub: { root: string; name?: string };
+  projects: HubProject[];
+};
+
+export type TeamEntry = {
+  name: string;
+  orchestrator?: boolean;
+  pane?: string;
+  pane_pid?: number;
+  pane_started?: string;
+  worktree?: string;
+  session_id?: string;
+  handoff?: string;
+};
+
+export type TaskEvent = {
+  id: string;
+  project: string;
+  event: string;
+  at: string;
+  note?: string;
+};
+
+export const TASK_EVENTS = [
+  'asked', 'handed', 'plan', 'question', 'answered', 'blocked',
+  'overnight', 'cleanup', 'decided', 'done', 'cancelled', 'note',
+] as const;
+
+export const NEEDS_OWNER_STATES = new Set(['plan', 'question', 'blocked']);
+export const CLOSED_STATES = new Set(['done', 'cancelled']);

@@ -1,0 +1,60 @@
+ubuntu@ip-172-31-79-150:/tmp$ teamkimi run
+
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │                                                                                                                                                                                                                                                                                                                              │
+ │  ▐█▛█▛█▌  Welcome to Kimi Code!                                                                                                                                                                                                                                                                                              │
+ │  ▐█████▌  Send /help for help information.                                                                                                                                                                                                                                                                                   │
+ │                                                                                                                                                                                                                                                                                                                              │
+ │  Directory: /tmp                                                                                                                                                                                                                                                                                                             │
+ │  Session:   session_ffa66719-6836-4915-bef8-55f6eba78a5e                                                                                                                                                                                                                                                                     │
+ │  Model:     K3                                                                                                                                                                                                                                                                                                               │
+ │  Version:   2.1.1                                                                                                                                                                                                                                                                                                            │
+ │                                                                                                                                                                                                                                                                                                                              │
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ✦ Kimi Code Desktop is here — Everything you love about Kimi Code, now on desktop
+   Run /desktop or visit https://www.kimi.com/code to install
+
+   No session yet — one will be created on your first message.
+   tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and restart tmux.
+
+ ✨ Reply with the word OK
+
+ ● User asks to reply with OK.
+
+ ● OK
+
+ ✨ Run this exact bash command: echo hive-calibration
+
+ ● Just run it.
+
+ ✗ Ran a command · $ echo hive-calibration
+   Tool "Bash" was not run because the user rejected the approval request.
+
+   Rejected: Running: echo hive-calibration
+
+ ● The user rejected the approval request. So the command was declined. I should just report that.
+
+ ● The command was declined at the approval prompt, so it didn't run. If you want it executed, approve the prompt when it appears — or let me know if you'd prefer something else.
+
+ ✨ List the prime numbers under 60, one per line, then say DONE
+
+ ⠼ thinking…
+   Primes under 60: 2, 3, 5,
+
+  ⠼ Thinking… · Tip: @: mention files
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ >                                                                                                                                                                                                                                                                                                                            │
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ K3 thinking: high  /tmp                                                                                                                                                                                                                                                      ask Kimi to schedule tasks, e.g. "remind me at 5pm"
+                                                                                                                                                                                                                                                                                                           context: 3% (26.9k/1M)
+
+
+
+
+
+
+
+
+
+

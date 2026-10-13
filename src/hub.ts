@@ -1,0 +1,351 @@
+import path from 'node:path';
+import { promises as fs } from 'node:fs';
+import type {
+  HubAgent, HubDialog, HubFolder, HubOrchestrator, HubProject, HubStatus, HubTask, TeamEntry,
+} from './types.js';
+import { CLOSED_STATES } from './types.js';
+import {
+  capturePane, paneExists, paneIdentity, paneIs, run, sendEscape, sleep,
+} from './tmux.js';
+import { lines, parseDialog, scrapeContext } from './screen.js';
+import {
+  appendTaskEvent, clearPendingPane, foldTasks, hivePath, hubPath, nextTaskId,
+  readPendingPane, readProjects, readTaskEvents, readTeam, writePendingPane,
+  writeProjects, writeJson, readJson, upsertTeamEntry, type PendingPane,
+} from './state.js';
+import {
+  findLatestSession, launchWindow, orchestratorName, pickupLine, preflight, typeLine, waitIdle,
+} from './spawn.js';
+
+export async function hubInit(root: string, name = 'hub'): Promise<void> {
+  await fs.mkdir(hubPath(root), { recursive: true });
+  await fs.mkdir(hubPath(root, 'tasks'), { recursive: true });
+  await fs.mkdir(hubPath(root, 'panes'), { recursive: true });
+  const existing = await readJson<{ name?: string }>(hubPath(root, 'hub.json'));
+  await writeJson(hubPath(root, 'hub.json'), { name: existing?.name ?? name });
+  const pf = await readProjects(root);
+  await writeProjects(root, pf);
+}
+
+export async function hubAdd(root: string, name: string, folder: string): Promise<void> {
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(name)) {
+    throw new Error(`a project name is lowercase letters, digits, '-': ${name}`);
+  }
+  const home = path.resolve(root, folder);
+  const st = await fs.stat(home).catch(() => null);
+  if (!st?.isDirectory()) throw new Error(`not a folder: ${home}`);
+  const pf = await readProjects(root);
+  if (pf.projects.some((p) => p.name === name)) throw new Error(`a project named ${name} exists`);
+  pf.projects.push({ name, home, repos: [{ folder: home }] });
+  await writeProjects(root, pf);
+}
+
+export async function hubTask(root: string, project: string, text: string): Promise<string> {
+  const pf = await readProjects(root);
+  if (!pf.projects.some((p) => p.name === project)) throw new Error(`unknown project: ${project}`);
+  const id = await nextTaskId(root, project);
+  await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), `# ${id}\n\n${text}\n`);
+  const at = new Date().toISOString();
+  await appendTaskEvent(root, { id, project, event: 'asked', at });
+  return id;
+}
+
+export async function hubLog(root: string, id: string, event: string, note?: string): Promise<void> {
+  const events = await readTaskEvents(root);
+  if (!events.some((e) => e.id === id)) throw new Error(`unknown task: ${id}`);
+  await appendTaskEvent(root, { id, project: id.replace(/-\d+$/, ''), event, at: new Date().toISOString(), note });
+}
+
+export async function listTasks(root: string): Promise<HubTask[]> {
+  return foldTasks(await readTaskEvents(root));
+}
+
+type PaneSnapshot = {
+  alive: 'running' | 'unknown' | 'gone';
+  dialog: HubDialog | null;
+  context: number | null;
+};
+
+async function snapshot(entry: TeamEntry): Promise<PaneSnapshot> {
+  const none: PaneSnapshot = { alive: 'gone', dialog: null, context: null };
+  if (!entry.pane || !entry.pane_pid || !entry.pane_started) return none;
+  if (!(await paneExists(entry.pane))) return none;
+  const same = await paneIs(entry.pane, { pid: entry.pane_pid, started: entry.pane_started });
+  const raw = await capturePane(entry.pane);
+  if (raw === null) return { alive: same ? 'running' : 'unknown', dialog: null, context: null };
+  const ls = lines(raw);
+  const dialog = parseDialog(ls);
+  const ctx = scrapeContext(ls);
+  return {
+    alive: same ? 'running' : 'unknown',
+    dialog: dialog.kind === 'none' ? null : dialog,
+    context: ctx ? ctx.percent : null,
+  };
+}
+
+function agentRef(name: string, names: Map<string, number>, worktree?: string): string {
+  return (names.get(name) ?? 0) > 1 && worktree ? `${name}@${worktree}` : name;
+}
+
+async function folderStatus(root: string, folder: string): Promise<HubFolder> {
+  const abs = path.isAbsolute(folder) ? folder : path.resolve(root, folder);
+  const shown = abs.startsWith(root + path.sep) ? path.relative(root, abs) : abs;
+  const st = await fs.stat(abs).catch(() => null);
+  if (!st) return { folder: shown, kind: 'missing' };
+  const gitDir = await fs.stat(path.join(abs, '.git')).catch(() => null);
+  let kind = 'folder';
+  if (gitDir?.isDirectory()) kind = 'repo';
+  else if (gitDir?.isFile()) kind = 'worktree';
+  if (kind === 'repo' || kind === 'worktree') {
+    const branch = await run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], abs);
+    const dirty = await run('git', ['status', '--porcelain'], abs);
+    const out: HubFolder = { folder: shown, kind };
+    if (branch.code === 0) out.branch = branch.stdout.trim();
+    if (dirty.code === 0) out.changed = dirty.stdout.split('\n').filter((l) => l.trim()).length;
+    return out;
+  }
+  return { folder: shown, kind };
+}
+
+export async function buildStatus(root: string): Promise<HubStatus> {
+  const hubJson = await readJson<{ name?: string }>(hubPath(root, 'hub.json'));
+  const pf = await readProjects(root);
+  const tasks = await listTasks(root);
+  const projects: HubProject[] = [];
+
+  for (const p of pf.projects) {
+    const team = await readTeam(p.home);
+    const pending = await readPendingPane(root, p.name);
+    const orchEntry = team.agents.find((a) => a.orchestrator);
+
+    const orchestrator: HubOrchestrator = { state: 'none', question: false };
+    if (orchEntry) {
+      orchestrator.name = orchEntry.name;
+      if (orchEntry.session_id) orchestrator.session_id = orchEntry.session_id;
+      const snap = await snapshot(orchEntry);
+      orchestrator.state = snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped';
+      if (snap.alive !== 'gone') {
+        orchestrator.question = snap.dialog !== null;
+        if (snap.context !== null) {
+          orchestrator.context = snap.context;
+          orchestrator.context_assumed = false;
+        }
+      }
+    }
+    if (pending) {
+      // A pending pane whose team entry already owns it has registered; the record is stale.
+      const registered =
+        orchEntry?.pane === pending.pane &&
+        (await paneIs(pending.pane, { pid: orchEntry.pane_pid ?? 0, started: orchEntry.pane_started ?? '' }));
+      if (registered) {
+        await clearPendingPane(root, p.name);
+      } else if (!(await paneExists(pending.pane))) {
+        await clearPendingPane(root, p.name);
+      } else {
+        const raw = await capturePane(pending.pane);
+        const question = raw !== null && parseDialog(lines(raw)).kind !== 'none';
+        orchestrator.starting = {
+          pane: pending.pane, kind: pending.kind, at: pending.at,
+          typed: Boolean(pending.typed), sending: false, question, task: pending.task,
+        };
+        if (question && !pending.question) {
+          await writePendingPane(root, p.name, { ...pending, question: true });
+        }
+      }
+    }
+
+    const nameCounts = new Map<string, number>();
+    for (const a of team.agents.filter((x) => !x.orchestrator)) {
+      nameCounts.set(a.name, (nameCounts.get(a.name) ?? 0) + 1);
+    }
+    const agents: HubAgent[] = [];
+    for (const a of team.agents.filter((x) => !x.orchestrator)) {
+      const snap = await snapshot(a);
+      const agent: HubAgent = {
+        name: a.name,
+        state: !a.pane ? 'unrecorded' : snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped',
+        question: snap.alive !== 'gone' && snap.dialog !== null,
+        worktree: a.worktree,
+        ref: agentRef(a.name, nameCounts, a.worktree),
+      };
+      if (snap.context !== null && snap.alive !== 'gone') {
+        agent.context = snap.context;
+        agent.context_assumed = false;
+      }
+      agents.push(agent);
+    }
+
+    const repos: HubFolder[] = [];
+    for (const r of p.repos) repos.push(await folderStatus(root, r.folder));
+
+    projects.push({
+      name: p.name,
+      home: p.home,
+      repos,
+      orchestrator,
+      agents,
+      open_tasks: tasks.filter((t) => t.project === p.name && !CLOSED_STATES.has(t.state)).length,
+    });
+  }
+
+  return {
+    hub: hubJson?.name ? { root, name: hubJson.name } : { root },
+    projects,
+  };
+}
+
+export async function readDialogFor(
+  root: string,
+  project: string,
+  agentRefArg?: string,
+): Promise<(HubDialog & { project: string; session: string; pane: string }) | null> {
+  const pf = await readProjects(root);
+  const p = pf.projects.find((x) => x.name === project);
+  if (!p) throw new Error(`unknown project: ${project}`);
+  const team = await readTeam(p.home);
+
+  let entry: TeamEntry | undefined;
+  let session: string;
+  if (agentRefArg) {
+    const name = agentRefArg.split('@')[0];
+    entry = team.agents.find((a) => !a.orchestrator && a.name === name);
+    if (!entry) throw new Error(`${project} has no agent named ${name}`);
+    session = name;
+  } else {
+    entry = team.agents.find((a) => a.orchestrator);
+    session = orchestratorName(project);
+    if (!entry?.pane) {
+      const pending = await readPendingPane(root, project);
+      if (pending) entry = { name: session, pane: pending.pane };
+    }
+  }
+  if (!entry?.pane || !(await paneExists(entry.pane))) return null;
+  const raw = await capturePane(entry.pane);
+  if (raw === null) return null;
+  const dialog = parseDialog(lines(raw));
+  if (dialog.kind === 'none') return null;
+  return { ...dialog, project, session, pane: entry.pane };
+}
+
+export async function answerDialog(
+  root: string,
+  project: string,
+  agentRefArg: string | undefined,
+  choice: string,
+  seen: string,
+): Promise<{ answered: true; session: string; choice: string; option: string; dialog_gone: boolean }> {
+  const dialog = await readDialogFor(root, project, agentRefArg);
+  if (!dialog) throw new Error('no dialog is on that screen');
+  if (dialog.fingerprint !== seen) {
+    throw new Error('the dialog changed since it was read; read it again before answering');
+  }
+  let option = 'Esc';
+  if (choice === 'esc') {
+    await sendEscape(dialog.pane);
+  } else {
+    const opt = dialog.options.find((o) => String(o.n) === choice);
+    if (!opt) throw new Error(`the dialog has no option ${choice}`);
+    if (!opt.offered) throw new Error(`option ${choice} needs your own text; answer it in the pane`);
+    option = opt.label;
+    await run('tmux', ['send-keys', '-t', dialog.pane, choice]);
+  }
+  await sleep(2000);
+  const after = await readDialogFor(root, project, agentRefArg);
+  return { answered: true, session: dialog.session, choice, option, dialog_gone: after === null };
+}
+
+type LaunchKind = 'wake' | 'start';
+
+async function launchOrchestrator(
+  root: string,
+  project: string,
+  kind: LaunchKind,
+  task?: string,
+): Promise<string> {
+  const pf = await readProjects(root);
+  const p = pf.projects.find((x) => x.name === project);
+  if (!p) throw new Error(`unknown project: ${project}`);
+  const existing = await readPendingPane(root, project);
+  if (existing && (await paneExists(existing.pane))) {
+    throw new Error(`${project} is already starting in ${existing.pane}; continue it or close the window`);
+  }
+  await preflight();
+
+  const team = await readTeam(p.home);
+  const old = team.agents.find((a) => a.orchestrator);
+  const name = orchestratorName(project);
+  const sessionId = kind === 'wake' ? old?.session_id : undefined;
+  if (kind === 'wake' && !sessionId) {
+    throw new Error(`${project} has no recorded session to resume; start it instead`);
+  }
+  if (kind === 'wake' && old?.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
+    throw new Error(`${project}'s orchestrator is already running`);
+  }
+
+  const cwd = old?.worktree ?? p.home;
+  const { pane, identity } = await launchWindow(project, name, cwd, sessionId);
+  let line = pickupLine(project, name);
+  if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
+  const pending: PendingPane = { pane, kind, at: new Date().toISOString(), typed: false, task, line };
+  await writePendingPane(root, project, pending);
+
+  const idle = await waitIdle(pane, { maxMs: 140_000 });
+  if (idle !== 'idle') {
+    if (idle === 'dialog') await writePendingPane(root, project, { ...pending, question: true });
+    return pane;
+  }
+  await typeLine(pane, line, identity);
+  await upsertTeamEntry(p.home, {
+    name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
+    worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`),
+  });
+  await writePendingPane(root, project, { ...pending, typed: true });
+  if (kind === 'start') {
+    const sid = await findLatestSession(cwd);
+    if (sid) await upsertTeamEntry(p.home, { name, session_id: sid });
+  }
+  return pane;
+}
+
+export async function wake(root: string, project: string): Promise<string> {
+  return launchOrchestrator(root, project, 'wake');
+}
+
+export async function startProject(root: string, project: string, task: string): Promise<string> {
+  return launchOrchestrator(root, project, 'start', task);
+}
+
+export async function continueProject(root: string, project: string): Promise<string> {
+  const pending = await readPendingPane(root, project);
+  if (!pending) throw new Error(`${project} is not waiting on a first line`);
+  if (pending.typed) throw new Error(`${project}'s first line was already sent`);
+  if (!pending.line) throw new Error(`${project}'s pending record has no line to type`);
+  if (!(await paneExists(pending.pane))) {
+    await clearPendingPane(root, project);
+    throw new Error(`${project}'s starting pane ${pending.pane} is gone; start again`);
+  }
+  const raw = await capturePane(pending.pane);
+  if (raw !== null && parseDialog(lines(raw)).kind !== 'none') {
+    await writePendingPane(root, project, { ...pending, question: true });
+    throw new Error(`a dialog is on the screen of ${pending.pane}; answer it, then continue`);
+  }
+  const idle = await waitIdle(pending.pane, { maxMs: 140_000 });
+  if (idle !== 'idle') throw new Error(`${pending.pane} never went idle; nothing was typed`);
+  const id = await paneIdentity(pending.pane);
+  if (!id) throw new Error(`pane ${pending.pane} has no readable identity`);
+  await typeLine(pending.pane, pending.line, id);
+
+  const pf = await readProjects(root);
+  const p = pf.projects.find((x) => x.name === project);
+  if (p) {
+    await upsertTeamEntry(p.home, {
+      name: orchestratorName(project), orchestrator: true,
+      pane: pending.pane, pane_pid: id.pid, pane_started: id.started,
+      worktree: p.home, handoff: hivePath(p.home, 'handoffs', `${orchestratorName(project)}.md`),
+    });
+    const sid = await findLatestSession(p.home);
+    if (sid) await upsertTeamEntry(p.home, { name: orchestratorName(project), session_id: sid });
+  }
+  await writePendingPane(root, project, { ...pending, typed: true });
+  return pending.pane;
+}
