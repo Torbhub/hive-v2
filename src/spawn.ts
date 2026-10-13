@@ -8,8 +8,8 @@ import {
 } from './tmux.js';
 import { classify, lines } from './screen.js';
 import {
-  hivePath, manifestAdd, readPendingPane, readProjects, readTeam,
-  removeTeamEntry, upsertTeamEntry, writePendingPane, clearPendingPane,
+  hivePath, manifestAdd, readProjects, readTeam,
+  removeTeamEntry, upsertTeamEntry, clearPendingPane,
 } from './state.js';
 import type { TeamEntry } from './types.js';
 
@@ -116,9 +116,7 @@ export async function launchWindow(
   throw new Error(`pane ${pane} never got a process identity`);
 }
 
-// Newest kimi session recorded for a working directory; basis for wake --resume.
-// Agents share a cwd, so a session is only trusted when its first prompt is
-// that agent's pickup line.
+// Agents share a cwd, so a session counts only when its first prompt is that agent's pickup line.
 export async function findLatestSession(cwd: string, agent?: string): Promise<string | null> {
   const base = path.join(os.homedir(), '.kimi-code', 'sessions');
   let best: { id: string; at: number } | null = null;
@@ -234,6 +232,10 @@ export async function respawnAgent(root: string, project: string, agent: string)
   if (old.pane) await killWindow(old.pane, recordedIdentity(old));
   const worktree = old.worktree ?? home;
   const { pane, identity } = await launchWindow(project, agent, worktree);
+  await manifestAdd(home, {
+    kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
+    pane_pid: identity.pid, pane_started: identity.started,
+  });
   await upsertTeamEntry(home, {
     name: agent, pane, pane_pid: identity.pid, pane_started: identity.started, session_id: undefined,
   });
@@ -248,5 +250,3 @@ export async function respawnAgent(root: string, project: string, agent: string)
   if (sid) await upsertTeamEntry(home, { name: agent, session_id: sid });
   return pane;
 }
-
-export { readPendingPane, writePendingPane };

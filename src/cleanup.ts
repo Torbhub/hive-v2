@@ -5,8 +5,7 @@ import { hivePath, manifestRead, manifestWrite, readProjects, type ManifestRecor
 
 export type CleanupAction = { record: ManifestRecord; action: string; acted: boolean };
 
-// Cleanup acts only on the manifest and trashes instead of deleting;
-// every record is re-judged at act time, never trusted from its line alone.
+// Cleanup acts only on the manifest, re-judges every record at act time, and trashes instead of deleting.
 export async function cleanupProject(
   root: string,
   project: string,
@@ -58,15 +57,29 @@ export async function cleanupProject(
     }
     if (rec.kind === 'worktree') {
       const wt = String(rec.path ?? '');
-      const st = wt ? await fs.stat(wt).catch(() => null) : null;
-      if (wt && st) {
-        const dest = path.join(trashDir, path.basename(wt));
-        actions.push({ record: rec, action: `trash worktree ${wt} -> ${dest}`, acted: !dryRun });
-        if (!dryRun) {
-          await fs.mkdir(trashDir, { recursive: true });
-          await fs.rename(wt, dest);
-          await run('git', ['worktree', 'prune'], p.home);
-        }
+      const abs = wt ? path.resolve(wt) : '';
+      const st = abs ? await fs.stat(abs).catch(() => null) : null;
+      if (!abs || !st) continue;
+      // The manifest is writable by the agents hive supervises: only trash a
+      // path that sits under the project home AND that git itself lists as a
+      // worktree of it.
+      const underHome = abs.startsWith(path.resolve(p.home) + path.sep);
+      const listed = underHome
+        ? (await run('git', ['worktree', 'list', '--porcelain'], p.home)).stdout
+            .split('\n')
+            .some((l) => l === `worktree ${abs}`)
+        : false;
+      if (!underHome || !listed) {
+        actions.push({ record: rec, action: `left worktree ${abs} alone: not a registered worktree under ${p.home}`, acted: false });
+        keep.push(rec);
+        continue;
+      }
+      const dest = path.join(trashDir, path.basename(abs));
+      actions.push({ record: rec, action: `trash worktree ${abs} -> ${dest}`, acted: !dryRun });
+      if (!dryRun) {
+        await fs.mkdir(trashDir, { recursive: true });
+        await fs.rename(abs, dest);
+        await run('git', ['worktree', 'prune'], p.home);
       }
       continue;
     }

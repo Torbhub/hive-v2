@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseSteps, verifyCommits, verifyLog } from '../src/gate.js';
+import { parseSteps, pushByHash, verifyCommits, verifyLog } from '../src/gate.js';
 
 const SHA = 'a'.repeat(40);
 
@@ -116,5 +116,17 @@ describe('verifyCommits', () => {
     tip = git(dir, ['rev-parse', 'HEAD']).trim();
     expect((await verifyCommits(`${base}..${tip}`, opts, dir)).out).toContain('attribution');
     expect((await verifyCommits(`${base}..${tip}`, { ...opts, maxFiles: 0 }, dir)).out).toContain('more than 0');
+  });
+
+  it('rejects a range with more than one ..', async () => {
+    const dir = repo();
+    commit(dir, 'feat: one', 'a.txt', '1');
+    await expect(verifyCommits('a..b..c', opts, dir)).rejects.toThrow(/not a range/);
+  });
+});
+
+describe('pushByHash', () => {
+  it('refuses a remote that looks like a flag', async () => {
+    await expect(pushByHash('--upload-pack=x', SHA, 'main', '/tmp')).rejects.toThrow(/remote/);
   });
 });

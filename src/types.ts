@@ -107,18 +107,18 @@ export type TeamEntry = {
   handoff?: string;
 };
 
-export type TaskEvent = {
-  id: string;
-  project: string;
-  event: string;
-  at: string;
-  note?: string;
-};
-
 export const TASK_EVENTS = [
   'asked', 'handed', 'plan', 'question', 'answered', 'blocked',
   'overnight', 'cleanup', 'decided', 'done', 'cancelled', 'note',
 ] as const;
+
+export type TaskEvent = {
+  id: string;
+  project: string;
+  event: (typeof TASK_EVENTS)[number];
+  at: string;
+  note?: string;
+};
 
 export const NEEDS_OWNER_STATES = new Set(['plan', 'question', 'blocked']);
 export const CLOSED_STATES = new Set(['done', 'cancelled']);

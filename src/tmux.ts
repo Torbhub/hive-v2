@@ -63,7 +63,8 @@ export async function assertPane(pane: string, identity?: PaneIdentity): Promise
 
 export async function killWindow(pane: string, identity: PaneIdentity): Promise<void> {
   await assertPane(pane, identity);
-  await tmux(['kill-window', '-t', pane]);
+  const r = await tmux(['kill-window', '-t', pane]);
+  if (r.code !== 0) throw new Error(`tmux: cannot kill ${pane}: ${r.stderr.trim()}`);
 }
 
 export async function paneExists(pane: string): Promise<boolean> {
@@ -110,12 +111,14 @@ export async function sendLiteral(pane: string, text: string, identity?: PaneIde
 
 export async function sendEnter(pane: string, identity?: PaneIdentity): Promise<void> {
   await assertPane(pane, identity);
-  await tmux(['send-keys', '-t', pane, 'Enter']);
+  const r = await tmux(['send-keys', '-t', pane, 'Enter']);
+  if (r.code !== 0) throw new Error(`tmux: cannot send Enter to ${pane}: ${r.stderr.trim()}`);
 }
 
 export async function sendEscape(pane: string, identity?: PaneIdentity): Promise<void> {
   await assertPane(pane, identity);
-  await tmux(['send-keys', '-t', pane, 'Escape']);
+  const r = await tmux(['send-keys', '-t', pane, 'Escape']);
+  if (r.code !== 0) throw new Error(`tmux: cannot send Escape to ${pane}: ${r.stderr.trim()}`);
 }
 
 export function sleep(ms: number): Promise<void> {

@@ -148,12 +148,11 @@ export function HubApp({ root }: { root: string }) {
       setView((v) => ({ ...v, error: lastLine(e) }));
       return;
     }
-    let tasks: HubTask[];
+    let tasks: HubTask[] | null = null;
     let error = '';
     try {
       tasks = await withTimeout(listTasks(root), READ_TIMEOUT_MS, 'tasks');
     } catch (e) {
-      tasks = view.tasks;
       error = `tasks not read: ${lastLine(e)}`;
     }
     const dialogs: Record<string, HubDialog> = {};
@@ -177,12 +176,12 @@ export function HubApp({ root }: { root: string }) {
       ...v,
       hubName: status.hub.name ?? '',
       projects: status.projects,
-      tasks,
+      tasks: tasks ?? v.tasks,
       dialogs,
       updatedAt: Date.now(),
       error,
     }));
-  }, [root, view.tasks]);
+  }, [root]);
 
   useEffect(() => {
     void refresh();
@@ -244,7 +243,8 @@ export function HubApp({ root }: { root: string }) {
   }, [act, root]);
 
   const now = Date.now();
-  const where = root.replace(process.env.HOME ?? '', '~');
+  const home = process.env.HOME ?? '';
+  const where = home && (root === home || root.startsWith(home + '/')) ? `~${root.slice(home.length)}` : root;
   const clock = view.updatedAt
     ? new Date(view.updatedAt).toTimeString().slice(0, 5)
     : 'reading…';
@@ -326,14 +326,8 @@ export function HubApp({ root }: { root: string }) {
                   </Box>
                   {n.when !== '' && <Text color="gray">{n.when}</Text>}
                 </Box>
-                {n.dialogKey && view.dialogs[n.dialogKey] && (
-                  <DialogBlock
-                    dialog={view.dialogs[n.dialogKey]}
-                    onAnswer={(choice) => {
-                      const [project, agent] = n.dialogKey!.split('/');
-                      onAnswer(project, agent, view.dialogs[n.dialogKey!].fingerprint, choice);
-                    }}
-                  />
+                {n.dialogKey && (
+                  <NeedDialog dialogKey={n.dialogKey} dialogs={view.dialogs} onAnswer={onAnswer} />
                 )}
                 {n.action === 'continue' && n.project && (
                   <Box paddingLeft={2}>
@@ -380,6 +374,19 @@ export function HubApp({ root }: { root: string }) {
       </Box>
     </ButtonScope>
   );
+}
+
+function NeedDialog({
+  dialogKey, dialogs, onAnswer,
+}: {
+  dialogKey: string;
+  dialogs: Record<string, HubDialog>;
+  onAnswer: (project: string, agentRef: string | undefined, seen: string, choice: string) => void;
+}) {
+  const dialog = dialogs[dialogKey];
+  if (!dialog) return null;
+  const [project, agent] = dialogKey.split('/');
+  return <DialogBlock dialog={dialog} onAnswer={(choice) => onAnswer(project, agent, dialog.fingerprint, choice)} />;
 }
 
 function agentGlyph(a: HubAgent): { glyph: string; color: string } {
@@ -445,9 +452,9 @@ function ProjectCard({
         ) : (
           <>
             <Box>
-              {p.agents.map((a, i) => {
+              {p.agents.map((a) => {
                 const g = agentGlyph(a);
-                return <Text key={i} color={g.color}>{`${g.glyph} `}</Text>;
+                return <Text key={a.ref ?? a.name} color={g.color}>{`${g.glyph} `}</Text>;
               })}
               <Text color="white">{` ${up} of ${p.agents.length}`}</Text>
             </Box>
@@ -461,8 +468,8 @@ function ProjectCard({
         <Text color="white">{tasksLine}</Text>
       </Row>
       <Row label="folders">
-        {p.repos.map((r, i) => (
-          <Text key={i} color="white" wrap="truncate-end">
+        {p.repos.map((r) => (
+          <Text key={r.folder} color="white" wrap="truncate-end">
             {`${r.folder}${r.changed ? `  ${r.changed} changed` : ''}`}
           </Text>
         ))}

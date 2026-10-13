@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { HubDialog, HubDialogOption } from './types.js';
 
-// Port of hh_pane_clean: dim runs (placeholder text), CSI/OSC escapes, no-break spaces.
+// Dim runs are placeholder text; escapes and nbsp would break the regexes below.
 export function ansiClean(raw: string): string {
   return raw
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
@@ -22,7 +22,7 @@ const EMPTY_PROMPT_RE = /^\s*│\s*>\s*│?\s*$/;
 // Kimi's spinner: a braille glyph, a word, an ellipsis — `⠼ thinking…`, `⠼ Thinking… · Tip: …`.
 const SPINNER_RE = /^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+\S[^…]*…/;
 const CONTEXT_RE = /context:\s*(\d+)%\s*\(([^/\s]+)\s*\/\s*([^)\s]+)\)/;
-const NUMBERED_OPTION_RE = /^\s*(▶)?\s*(\d)\.\s+(.+?)\s*$/;
+const NUMBERED_OPTION_RE = /^\s*(▶)?\s*(\d{1,2})\.\s+(.+?)\s*$/;
 const MENU_CURSOR_RE = /^\s*❯\s+(.+?)\s*$/;
 
 // Phrases a live Kimi dialog shows, calibrated on 2.1.1 captures (test/fixtures/).
@@ -77,8 +77,7 @@ export function classify(ls: string[]): ScreenState {
   if (hasSpinner(ls)) return 'working';
   if (hasEmptyPrompt(ls)) return 'idle';
   return 'unknown';
-}// Dialog text = the block between the last two plain rules, or the whole screen
-// when there are too few rules (refusing to type is the safe error either way).
+}// Dialog text is the block between the last two plain rules; with too few rules, the whole screen (a misread only refuses to type).
 function dialogRegion(ls: string[]): string[] {
   const rules = ruleIndexes(ls);
   if (rules.length >= 2) return ls.slice(rules[rules.length - 2], rules[rules.length - 1] + 1);

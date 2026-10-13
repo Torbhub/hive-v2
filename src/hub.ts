@@ -1,17 +1,17 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import type {
-  HubAgent, HubDialog, HubFolder, HubOrchestrator, HubProject, HubStatus, HubTask, TeamEntry,
+  HubAgent, HubDialog, HubFolder, HubOrchestrator, HubProject, HubStatus, HubTask, TaskEvent, TeamEntry,
 } from './types.js';
-import { CLOSED_STATES } from './types.js';
+import { CLOSED_STATES, TASK_EVENTS } from './types.js';
 import {
   capturePane, paneExists, paneIdentity, paneIs, run, sendEscape, sendLiteral, sleep,
 } from './tmux.js';
 import { lines, parseDialog, scrapeContext } from './screen.js';
 import {
   appendTaskEvent, clearPendingPane, foldTasks, hivePath, hubPath, manifestAdd, nextTaskId,
-  readPendingPane, readProjects, readTaskEvents, readTeam, writePendingPane,
-  writeProjects, writeJson, readJson, upsertTeamEntry, type PendingPane,
+  readPendingPane, readProjects, readTaskEvents, readTeam, withHubLock, writePendingPane,
+  writeProjects, writeJson, readJson, upsertTeamEntry, type PendingPane, type ProjectsFile,
 } from './state.js';
 import {
   ensureAgentFiles, findLatestSession, launchWindow, orchestratorName, pickupLine, preflight, typeLine, waitIdle,
@@ -43,17 +43,22 @@ export async function hubAdd(root: string, name: string, folder: string): Promis
 export async function hubTask(root: string, project: string, text: string): Promise<string> {
   const pf = await readProjects(root);
   if (!pf.projects.some((p) => p.name === project)) throw new Error(`unknown project: ${project}`);
-  const id = await nextTaskId(root, project);
-  await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), `# ${id}\n\n${text}\n`);
-  const at = new Date().toISOString();
-  await appendTaskEvent(root, { id, project, event: 'asked', at });
-  return id;
+  // The lock makes id allocation + task file + ledger append one step.
+  return withHubLock(root, async () => {
+    const id = await nextTaskId(root, project);
+    await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), `# ${id}\n\n${text}\n`);
+    await appendTaskEvent(root, { id, project, event: 'asked', at: new Date().toISOString() });
+    return id;
+  });
 }
 
 export async function hubLog(root: string, id: string, event: string, note?: string): Promise<void> {
   const events = await readTaskEvents(root);
   if (!events.some((e) => e.id === id)) throw new Error(`unknown task: ${id}`);
-  await appendTaskEvent(root, { id, project: id.replace(/-\d+$/, ''), event, at: new Date().toISOString(), note });
+  if (!(TASK_EVENTS as readonly string[]).includes(event)) throw new Error(`unknown task event: ${event}`);
+  await appendTaskEvent(root, {
+    id, project: id.replace(/-\d+$/, ''), event: event as TaskEvent['event'], at: new Date().toISOString(), note,
+  });
 }
 
 export async function listTasks(root: string): Promise<HubTask[]> {
@@ -107,86 +112,86 @@ async function folderStatus(root: string, folder: string): Promise<HubFolder> {
   return { folder: shown, kind };
 }
 
+type ProjectEntry = ProjectsFile['projects'][number];
+
+async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): Promise<HubProject> {
+  const team = await readTeam(p.home);
+  const pending = await readPendingPane(root, p.name);
+  const orchEntry = team.agents.find((a) => a.orchestrator);
+
+  const orchestrator: HubOrchestrator = { state: 'none', question: false };
+  if (orchEntry) {
+    orchestrator.name = orchEntry.name;
+    if (orchEntry.session_id) orchestrator.session_id = orchEntry.session_id;
+    const snap = await snapshot(orchEntry);
+    orchestrator.state = snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped';
+    if (snap.alive !== 'gone') {
+      orchestrator.question = snap.dialog !== null;
+      if (snap.context !== null) {
+        orchestrator.context = snap.context;
+        orchestrator.context_assumed = false;
+      }
+    }
+  }
+  if (pending) {
+    // A pending pane whose team entry already owns it has registered; the record is stale.
+    const registered =
+      orchEntry?.pane === pending.pane &&
+      (await paneIs(pending.pane, { pid: orchEntry.pane_pid ?? 0, started: orchEntry.pane_started ?? '' }));
+    if (registered) {
+      await clearPendingPane(root, p.name);
+    } else if (!(await paneExists(pending.pane))) {
+      await clearPendingPane(root, p.name);
+    } else {
+      const raw = await capturePane(pending.pane);
+      const question = raw !== null && parseDialog(lines(raw)).kind !== 'none';
+      orchestrator.starting = {
+        pane: pending.pane, kind: pending.kind, at: pending.at,
+        typed: Boolean(pending.typed), sending: false, question, task: pending.task,
+      };
+      if (question && !pending.question) {
+        await writePendingPane(root, p.name, { ...pending, question: true });
+      }
+    }
+  }
+
+  const nameCounts = new Map<string, number>();
+  for (const a of team.agents.filter((x) => !x.orchestrator)) {
+    nameCounts.set(a.name, (nameCounts.get(a.name) ?? 0) + 1);
+  }
+  const agents = await Promise.all(team.agents.filter((x) => !x.orchestrator).map(async (a) => {
+    const snap = await snapshot(a);
+    const agent: HubAgent = {
+      name: a.name,
+      state: !a.pane ? 'unrecorded' : snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped',
+      question: snap.alive !== 'gone' && snap.dialog !== null,
+      worktree: a.worktree,
+      ref: agentRef(a.name, nameCounts, a.worktree),
+    };
+    if (snap.context !== null && snap.alive !== 'gone') {
+      agent.context = snap.context;
+      agent.context_assumed = false;
+    }
+    return agent;
+  }));
+
+  const repos = await Promise.all(p.repos.map((r) => folderStatus(root, r.folder)));
+
+  return {
+    name: p.name,
+    home: p.home,
+    repos,
+    orchestrator,
+    agents,
+    open_tasks: tasks.filter((t) => t.project === p.name && !CLOSED_STATES.has(t.state)).length,
+  };
+}
+
 export async function buildStatus(root: string): Promise<HubStatus> {
   const hubJson = await readJson<{ name?: string }>(hubPath(root, 'hub.json'));
   const pf = await readProjects(root);
   const tasks = await listTasks(root);
-  const projects: HubProject[] = [];
-
-  for (const p of pf.projects) {
-    const team = await readTeam(p.home);
-    const pending = await readPendingPane(root, p.name);
-    const orchEntry = team.agents.find((a) => a.orchestrator);
-
-    const orchestrator: HubOrchestrator = { state: 'none', question: false };
-    if (orchEntry) {
-      orchestrator.name = orchEntry.name;
-      if (orchEntry.session_id) orchestrator.session_id = orchEntry.session_id;
-      const snap = await snapshot(orchEntry);
-      orchestrator.state = snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped';
-      if (snap.alive !== 'gone') {
-        orchestrator.question = snap.dialog !== null;
-        if (snap.context !== null) {
-          orchestrator.context = snap.context;
-          orchestrator.context_assumed = false;
-        }
-      }
-    }
-    if (pending) {
-      // A pending pane whose team entry already owns it has registered; the record is stale.
-      const registered =
-        orchEntry?.pane === pending.pane &&
-        (await paneIs(pending.pane, { pid: orchEntry.pane_pid ?? 0, started: orchEntry.pane_started ?? '' }));
-      if (registered) {
-        await clearPendingPane(root, p.name);
-      } else if (!(await paneExists(pending.pane))) {
-        await clearPendingPane(root, p.name);
-      } else {
-        const raw = await capturePane(pending.pane);
-        const question = raw !== null && parseDialog(lines(raw)).kind !== 'none';
-        orchestrator.starting = {
-          pane: pending.pane, kind: pending.kind, at: pending.at,
-          typed: Boolean(pending.typed), sending: false, question, task: pending.task,
-        };
-        if (question && !pending.question) {
-          await writePendingPane(root, p.name, { ...pending, question: true });
-        }
-      }
-    }
-
-    const nameCounts = new Map<string, number>();
-    for (const a of team.agents.filter((x) => !x.orchestrator)) {
-      nameCounts.set(a.name, (nameCounts.get(a.name) ?? 0) + 1);
-    }
-    const agents: HubAgent[] = [];
-    for (const a of team.agents.filter((x) => !x.orchestrator)) {
-      const snap = await snapshot(a);
-      const agent: HubAgent = {
-        name: a.name,
-        state: !a.pane ? 'unrecorded' : snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped',
-        question: snap.alive !== 'gone' && snap.dialog !== null,
-        worktree: a.worktree,
-        ref: agentRef(a.name, nameCounts, a.worktree),
-      };
-      if (snap.context !== null && snap.alive !== 'gone') {
-        agent.context = snap.context;
-        agent.context_assumed = false;
-      }
-      agents.push(agent);
-    }
-
-    const repos: HubFolder[] = [];
-    for (const r of p.repos) repos.push(await folderStatus(root, r.folder));
-
-    projects.push({
-      name: p.name,
-      home: p.home,
-      repos,
-      orchestrator,
-      agents,
-      open_tasks: tasks.filter((t) => t.project === p.name && !CLOSED_STATES.has(t.state)).length,
-    });
-  }
+  const projects = await Promise.all(pf.projects.map((p) => projectStatus(root, p, tasks)));
 
   return {
     hub: hubJson?.name ? { root, name: hubJson.name } : { root },
@@ -207,9 +212,16 @@ export async function readDialogFor(
   let entry: TeamEntry | undefined;
   let session: string;
   if (agentRefArg) {
-    const name = agentRefArg.split('@')[0];
-    entry = team.agents.find((a) => !a.orchestrator && a.name === name);
-    if (!entry) throw new Error(`${project} has no agent named ${name}`);
+    const [name, wt] = agentRefArg.split('@');
+    const matches = team.agents.filter((a) => !a.orchestrator && a.name === name);
+    // Two same-named agents are told apart by worktree; a bare name that
+    // matches more than one is an error, never a guess.
+    if (wt) entry = matches.find((a) => a.worktree === wt);
+    else if (matches.length === 1) entry = matches[0];
+    else if (matches.length > 1) {
+      throw new Error(`${project} has ${matches.length} agents named ${name}; say which: ${name}@<worktree>`);
+    }
+    if (!entry) throw new Error(`${project} has no agent named ${agentRefArg}`);
     session = name;
   } else {
     entry = team.agents.find((a) => a.orchestrator);
@@ -265,6 +277,13 @@ async function launchOrchestrator(
   const pf = await readProjects(root);
   const p = pf.projects.find((x) => x.name === project);
   if (!p) throw new Error(`unknown project: ${project}`);
+  if (kind === 'start') {
+    if (!task || !new RegExp(`^${project}-\\d+$`).test(task)) {
+      throw new Error(`a task id is ${project}-<n>: ${task}`);
+    }
+    const taskFile = await fs.stat(hubPath(root, 'tasks', `${task}.md`)).catch(() => null);
+    if (!taskFile?.isFile()) throw new Error(`no task file for ${task}`);
+  }
   const existing = await readPendingPane(root, project);
   if (existing && (await paneExists(existing.pane))) {
     throw new Error(`${project} is already starting in ${existing.pane}; continue it or close the window`);
@@ -279,7 +298,8 @@ async function launchOrchestrator(
   if (kind === 'wake' && !sessionId) {
     throw new Error(`${project} has no recorded session to resume; start it instead`);
   }
-  if (kind === 'wake' && old?.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
+  // start and wake both refuse a live orchestrator: a second window would orphan the first.
+  if (old?.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
     throw new Error(`${project}'s orchestrator is already running`);
   }
 

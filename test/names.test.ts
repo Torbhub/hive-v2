@@ -36,4 +36,16 @@ describe('cli boundary', () => {
     expect(r.status).toBe(64);
     expect(r.stderr).toMatch(/agent name is/);
   });
+
+  it('rejects a non-numeric --max-files', () => {
+    const r = cli(['gate-verify', 'commits', 'a..b', '--max-files', 'lots', '--style', 'free', '--attribution', 'allow']);
+    expect(r.status).toBe(64);
+    expect(r.stderr).toMatch(/--max-files is a non-negative integer/);
+  });
+
+  it('a value flag never eats the next flag as its value', () => {
+    const r = cli(['hub', 'answer', 'demo', '--choice', '--seen', 'x']);
+    expect(r.status).toBe(64);
+    expect(r.stderr).toMatch(/--choice needs a value/);
+  });
 });

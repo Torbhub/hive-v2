@@ -16,6 +16,13 @@ function validName(kind: string, value: string): string {
   }
 }
 
+// The @worktree suffix is a display disambiguator matched against recorded
+// team entries; only the name part needs the name rules.
+function validAgentRef(value: string): string {
+  validName('agent', value.split('@')[0]);
+  return value;
+}
+
 const USAGE = `usage:
   hive hub init|add <name> <path>|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note]
   hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
@@ -39,7 +46,14 @@ function parseFlags(args: string[], names: string[]): { flags: Record<string, st
     if (a.startsWith('--')) {
       const key = a.slice(2);
       if (!names.includes(key)) throw new UsageError(`unknown flag: ${a}`);
-      out[key] = VALUELESS_FLAGS.has(key) ? true : args[++i] ?? fail(`--${key} needs a value`);
+      if (VALUELESS_FLAGS.has(key)) {
+        out[key] = true;
+      } else {
+        const v = args[i + 1];
+        if (v === undefined || v.startsWith('--')) throw new UsageError(`--${key} needs a value`);
+        out[key] = v;
+        i++;
+      }
     } else {
       pos.push(a);
     }
@@ -100,7 +114,7 @@ async function hubCommand(args: string[]): Promise<void> {
     case 'dialog': {
       const [, project, agent] = args;
       if (!project) throw new UsageError('usage: hive hub dialog <project> [agent]');
-      const dialog = await readDialogFor(root, validName('project', project), agent && validName('agent', agent.split('@')[0]));
+      const dialog = await readDialogFor(root, validName('project', project), agent && validAgentRef(agent));
       if (!dialog) process.exit(3);
       console.log(JSON.stringify(dialog, null, 2));
       return;
@@ -111,7 +125,7 @@ async function hubCommand(args: string[]): Promise<void> {
       if (!project || typeof f.choice !== 'string' || typeof f.seen !== 'string') {
         throw new UsageError('usage: hive hub answer <project> [agent] --choice <n|esc> --seen <sha1>');
       }
-      const result = await answerDialog(root, validName('project', project), agent && validName('agent', agent.split('@')[0]), f.choice, f.seen);
+      const result = await answerDialog(root, validName('project', project), agent && validAgentRef(agent), f.choice, f.seen);
       console.log(JSON.stringify(result, null, 2));
       return;
     }
@@ -203,8 +217,10 @@ async function main(): Promise<void> {
         }
         if (f.style !== 'conventional' && f.style !== 'free') throw new UsageError('--style is conventional|free');
         if (f.attribution !== 'allow' && f.attribution !== 'deny') throw new UsageError('--attribution is allow|deny');
+        const maxFiles = Number(f['max-files']);
+        if (!Number.isInteger(maxFiles) || maxFiles < 0) throw new UsageError('--max-files is a non-negative integer');
         const result = await verifyCommits(range, {
-          maxFiles: Number(f['max-files']),
+          maxFiles,
           style: f.style,
           attribution: f.attribution,
           noBody: f['no-body'] === true,
