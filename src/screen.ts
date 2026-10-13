@@ -88,6 +88,42 @@ export function dialogFingerprint(text: string): string {
   return createHash('sha1').update(text).digest('hex');
 }
 
+// A menu's option labels sit at the cursor line's label column and each one
+// follows a blank or rule line; the lines under a label are its detail.
+// Calibrated on the 2.1.1 trust menu (test/fixtures/dialog-trust-menu.txt).
+function menuOptions(block: string[], cursorLine: number): { options: HubDialogOption[]; cursor: number } {
+  const marker = block[cursorLine].match(/^\s*❯\s+/);
+  const labelCol = marker ? marker[0].length : 0;
+  const options: HubDialogOption[] = [];
+  let cursor = 1;
+  let current: HubDialogOption | null = null;
+  for (let i = cursorLine; i < block.length; i++) {
+    const l = block[i];
+    // Strip the ❯ marker so the cursor line's label measures at labelCol too.
+    const stripped = i === cursorLine ? l.replace(/^(\s*)❯\s+/, '$1') : l;
+    const text = stripped.trim();
+    if (text === '' || RULE_RE.test(l)) {
+      current = null;
+      continue;
+    }
+    const indent = stripped.length - stripped.trimStart().length;
+    if ((i === cursorLine || indent === labelCol) && current === null) {
+      current = {
+        n: options.length + 1,
+        label: text,
+        detail: '',
+        offered: !NOT_OFFERED_RE.test(text),
+        saves_rule: SAVES_RULE_RE.test(text),
+      };
+      if (i === cursorLine) cursor = current.n;
+      options.push(current);
+    } else if (current) {
+      current.detail = current.detail ? `${current.detail} ${text}` : text;
+    }
+  }
+  return { options, cursor };
+}
+
 export function parseDialog(ls: string[]): HubDialog {
   const none: HubDialog = { kind: 'none', text: '', options: [], cursor: null, esc: false, fingerprint: '' };
   const block = dialogRegion(ls);
@@ -121,7 +157,11 @@ export function parseDialog(ls: string[]): HubDialog {
     block.some((l) => /Esc (to cancel|exit)/.test(l)) || options.length > 0 || menuCursor !== null;
   if (options.length > 0) return { kind: 'numbered', text, options, cursor, esc, fingerprint };
   if (menuCursor !== null || block.some((l) => /↑↓ navigate/.test(l))) {
-    return { kind: 'menu', text, options: [], cursor: menuCursor, esc, fingerprint };
+    if (menuCursor !== null) {
+      const m = menuOptions(block, menuCursor - 1);
+      return { kind: 'menu', text, options: m.options, cursor: m.cursor, esc, fingerprint };
+    }
+    return { kind: 'menu', text, options: [], cursor: null, esc, fingerprint };
   }
   return { kind: 'none', text, options: [], cursor: null, esc, fingerprint };
 }

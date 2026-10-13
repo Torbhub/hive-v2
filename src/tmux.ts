@@ -121,6 +121,12 @@ export async function sendEscape(pane: string, identity?: PaneIdentity): Promise
   if (r.code !== 0) throw new Error(`tmux: cannot send Escape to ${pane}: ${r.stderr.trim()}`);
 }
 
+export async function sendArrow(pane: string, key: 'Up' | 'Down', identity?: PaneIdentity): Promise<void> {
+  await assertPane(pane, identity);
+  const r = await tmux(['send-keys', '-t', pane, key]);
+  if (r.code !== 0) throw new Error(`tmux: cannot send ${key} to ${pane}: ${r.stderr.trim()}`);
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

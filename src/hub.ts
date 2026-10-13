@@ -5,7 +5,7 @@ import type {
 } from './types.js';
 import { CLOSED_STATES, TASK_EVENTS } from './types.js';
 import {
-  capturePane, paneExists, paneIdentity, paneIs, run, sendEscape, sendLiteral, sleep,
+  capturePane, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep,
 } from './tmux.js';
 import { lines, parseDialog, scrapeContext } from './screen.js';
 import {
@@ -245,6 +245,17 @@ export async function readDialogFor(
   return { ...dialog, project, session, pane: entry.pane };
 }
 
+// A menu answer is a walk: from the cursor's option to the chosen one, then Enter.
+export function menuKeys(choice: number, cursor: number): ('Up' | 'Down' | 'Enter')[] {
+  const delta = choice - cursor;
+  const keys: ('Up' | 'Down' | 'Enter')[] = Array.from(
+    { length: Math.abs(delta) },
+    () => (delta > 0 ? 'Down' : 'Up'),
+  );
+  keys.push('Enter');
+  return keys;
+}
+
 export async function answerDialog(
   root: string,
   project: string,
@@ -265,7 +276,14 @@ export async function answerDialog(
     if (!opt) throw new Refusal(`the dialog has no option ${choice}`);
     if (!opt.offered) throw new Refusal(`option ${choice} needs your own text; answer it in the pane`);
     option = opt.label;
-    await sendLiteral(dialog.pane, choice);
+    if (dialog.kind === 'menu') {
+      for (const key of menuKeys(opt.n, dialog.cursor ?? 1)) {
+        if (key === 'Enter') await sendEnter(dialog.pane);
+        else await sendArrow(dialog.pane, key);
+      }
+    } else {
+      await sendLiteral(dialog.pane, choice);
+    }
   }
   await sleep(2000);
   const after = await readDialogFor(root, project, agentRefArg);

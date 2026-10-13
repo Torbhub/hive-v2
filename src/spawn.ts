@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,8 +17,14 @@ export function orchestratorName(project: string): string {
   return `${project}-orchestrator`;
 }
 
+// Compiled this lives in dist/src/, in tests in src/ — walk up to the dir holding roles/.
 export function packageRoot(): string {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 5; i++) {
+    if (existsSync(path.join(dir, 'roles', 'orchestrator.md'))) return dir;
+    dir = path.dirname(dir);
+  }
+  throw new Error('hive: cannot find roles/ above the running module');
 }
 
 export async function preflight(): Promise<void> {

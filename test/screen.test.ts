@@ -66,12 +66,16 @@ describe('dialog parse', () => {
     expect(classify(fixture('dialog-permission.txt'))).toBe('dialog');
   });
 
-  it('parses the trust menu as a menu', () => {
+  it('parses the trust menu as a menu with options and cursor', () => {
     const d = parseDialog(fixture('dialog-trust-menu.txt'));
     expect(d.kind).toBe('menu');
-    expect(d.cursor).not.toBeNull();
+    expect(d.cursor).toBe(1);
     expect(d.esc).toBe(true);
     expect(d.text).toContain('Trust this folder');
+    expect(d.options.map((o) => [o.n, o.label, o.detail, o.offered])).toEqual([
+      [1, 'Trust this folder', 'Enable project MCP servers. Remembered for this folder.', true],
+      [2, "Don't trust", 'Exit Kimi Code. Asked again next launch.', true],
+    ]);
   });
 
   it('sees no dialog on an idle screen', () => {
