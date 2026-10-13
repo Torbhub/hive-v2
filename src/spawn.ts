@@ -79,9 +79,9 @@ export async function waitIdle(
 // The first Enter after a literal send is sometimes swallowed by the TUI; one retry, then give up.
 export async function typeLine(pane: string, text: string, identity: PaneIdentity): Promise<void> {
   if (!(await paneIs(pane, identity))) throw new Error(`pane ${pane} is no longer the session it was`);
-  await sendLiteral(pane, text);
+  await sendLiteral(pane, text, identity);
   await sleep(500);
-  await sendEnter(pane);
+  await sendEnter(pane, identity);
   for (let i = 0; i < 6; i++) {
     await sleep(1000);
     const raw = await capturePane(pane);
@@ -89,7 +89,7 @@ export async function typeLine(pane: string, text: string, identity: PaneIdentit
     const ls = lines(raw);
     const promptLine = [...ls].reverse().find((l) => /^\s*│\s*>/.test(l));
     if (!promptLine || !promptLine.includes(text.slice(0, 40))) return;
-    await sendEnter(pane);
+    await sendEnter(pane, identity);
   }
   throw new Error(`the line stayed in the prompt of ${pane}; not typed`);
 }
@@ -184,7 +184,10 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
 
   await ensureAgentFiles(worktree, agent, role);
   const { pane, identity } = await launchWindow(project, agent, worktree);
-  await manifestAdd(home, { kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent) });
+  await manifestAdd(home, {
+    kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
+    pane_pid: identity.pid, pane_started: identity.started,
+  });
   const entry: TeamEntry = {
     name: agent, pane, pane_pid: identity.pid, pane_started: identity.started,
     worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`),
@@ -203,12 +206,21 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   return pane;
 }
 
+function recordedIdentity(entry: TeamEntry): PaneIdentity {
+  if (!entry.pane || !entry.pane_pid || !entry.pane_started) {
+    throw new Error(
+      `${entry.name} has no recorded pane identity; refusing to kill ${entry.pane ?? 'it'} — close the window by hand on the hive socket`,
+    );
+  }
+  return { pid: entry.pane_pid, started: entry.pane_started };
+}
+
 export async function closeAgent(root: string, project: string, agent: string): Promise<void> {
   const home = await projectHome(root, project);
   const team = await readTeam(home);
   const entry = team.agents.find((a) => a.name === agent);
   if (!entry) throw new Error(`${project} has no agent named ${agent}`);
-  if (entry.pane) await killWindow(entry.pane);
+  if (entry.pane) await killWindow(entry.pane, recordedIdentity(entry));
   await removeTeamEntry(home, agent);
   if (entry.orchestrator) await clearPendingPane(root, project);
 }
@@ -219,7 +231,7 @@ export async function respawnAgent(root: string, project: string, agent: string)
   const old = team.agents.find((a) => a.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   await preflight();
-  if (old.pane) await killWindow(old.pane);
+  if (old.pane) await killWindow(old.pane, recordedIdentity(old));
   const worktree = old.worktree ?? home;
   const { pane, identity } = await launchWindow(project, agent, worktree);
   await upsertTeamEntry(home, {

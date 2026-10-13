@@ -8,6 +8,7 @@ import { typeLine } from '../dist/spawn.js';
 const DIR = '/tmp/hive-smoke';
 const NAME = 'smoke';
 let pane = null;
+let identity = null;
 
 function fail(msg) {
   console.error(`smoke: FAIL: ${msg}`);
@@ -45,7 +46,7 @@ try {
   await waitFor((ls) => classify(ls) === 'idle', 120_000, 'idle');
   console.log('smoke: idle detected');
 
-  const identity = await paneIdentity(pane);
+  identity = await paneIdentity(pane);
   await typeLine(pane, 'Reply with the word OK', identity);
   console.log('smoke: prompt typed');
 
@@ -58,5 +59,5 @@ try {
 } catch (e) {
   fail(e instanceof Error ? e.message : String(e));
 } finally {
-  if (pane) await killWindow(pane);
+  if (pane && identity) await killWindow(pane, identity);
 }

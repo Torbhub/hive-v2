@@ -13,8 +13,15 @@ export function run(cmd: string, args: string[], cwd?: string, env?: NodeJS.Proc
   });
 }
 
+// All hive tmux traffic goes to a private server socket so the user's own
+// tmux sessions are structurally unreachable. HIVE_TMUX_SOCKET exists for
+// tests, which must never touch the default socket either.
+export function tmuxSocket(): string {
+  return process.env.HIVE_TMUX_SOCKET ?? 'hive-v2';
+}
+
 async function tmux(args: string[]): Promise<RunResult> {
-  return run('tmux', args);
+  return run('tmux', ['-L', tmuxSocket(), ...args]);
 }
 
 export async function ensureHiveSession(): Promise<void> {
@@ -31,15 +38,31 @@ export function windowName(project: string, agent: string): string {
 
 export async function newWindow(name: string, cwd: string, shellCommand: string): Promise<string> {
   await ensureHiveSession();
+  // Trailing colon: target the session, not the window that shares its name.
   const r = await tmux([
-    'new-window', '-t', HIVE_SESSION, '-n', name, '-c', cwd,
+    'new-window', '-t', `${HIVE_SESSION}:`, '-n', name, '-c', cwd,
     '-P', '-F', '#{pane_id}', shellCommand,
   ]);
   if (r.code !== 0) throw new Error(`tmux: cannot open window ${name}: ${r.stderr.trim()}`);
   return r.stdout.trim();
 }
 
-export async function killWindow(pane: string): Promise<void> {
+// Every mutation re-proves the target first: the pane must live in the hive
+// session on our private socket, and (when recorded) still be the same process.
+export async function assertPane(pane: string, identity?: PaneIdentity): Promise<void> {
+  const r = await tmux(['display-message', '-p', '-t', pane, '#{pane_id} #{session_name}']);
+  const [id, session] = r.stdout.trim().split(' ');
+  if (r.code !== 0 || id !== pane) throw new Error(`pane ${pane} does not exist on the hive tmux socket`);
+  if (session !== HIVE_SESSION) {
+    throw new Error(`pane ${pane} is in session ${session}, not ${HIVE_SESSION}; refusing to act on it`);
+  }
+  if (identity && !(await paneIs(pane, identity))) {
+    throw new Error(`pane ${pane} is no longer the process it was recorded as; refusing to act on it`);
+  }
+}
+
+export async function killWindow(pane: string, identity: PaneIdentity): Promise<void> {
+  await assertPane(pane, identity);
   await tmux(['kill-window', '-t', pane]);
 }
 
@@ -79,16 +102,19 @@ export async function processStartTime(pid: number): Promise<string | null> {
   return r.code === 0 && started ? started : null;
 }
 
-export async function sendLiteral(pane: string, text: string): Promise<void> {
+export async function sendLiteral(pane: string, text: string, identity?: PaneIdentity): Promise<void> {
+  await assertPane(pane, identity);
   const r = await tmux(['send-keys', '-t', pane, '-l', text]);
   if (r.code !== 0) throw new Error(`tmux: cannot type into ${pane}: ${r.stderr.trim()}`);
 }
 
-export async function sendEnter(pane: string): Promise<void> {
+export async function sendEnter(pane: string, identity?: PaneIdentity): Promise<void> {
+  await assertPane(pane, identity);
   await tmux(['send-keys', '-t', pane, 'Enter']);
 }
 
-export async function sendEscape(pane: string): Promise<void> {
+export async function sendEscape(pane: string, identity?: PaneIdentity): Promise<void> {
+  await assertPane(pane, identity);
   await tmux(['send-keys', '-t', pane, 'Escape']);
 }
 

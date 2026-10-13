@@ -6,6 +6,15 @@ import {
 import { closeAgent, respawnAgent, spawnAgent } from './spawn.js';
 import { parseSteps, pushByHash, runGate, verifyCommits, verifyLog } from './gate.js';
 import { cleanupProject } from './cleanup.js';
+import { checkName } from './names.js';
+
+function validName(kind: string, value: string): string {
+  try {
+    return checkName(kind, value);
+  } catch (e) {
+    throw new UsageError(e instanceof Error ? e.message : String(e));
+  }
+}
 
 const USAGE = `usage:
   hive hub init|add <name> <path>|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note]
@@ -54,7 +63,7 @@ async function hubCommand(args: string[]): Promise<void> {
     case 'add': {
       const [name, folder] = [args[1], args[2]];
       if (!name || !folder) throw new UsageError('usage: hive hub add <name> <path>');
-      await hubAdd(root, name, folder);
+      await hubAdd(root, validName('project', name), folder);
       console.log(`hive: project ${name} added (${folder})`);
       return;
     }
@@ -78,7 +87,7 @@ async function hubCommand(args: string[]): Promise<void> {
     case 'task': {
       const [project, ...text] = args.slice(1);
       if (!project || text.length === 0) throw new UsageError('usage: hive hub task <project> <text>');
-      const id = await hubTask(root, project, text.join(' '));
+      const id = await hubTask(root, validName('project', project), text.join(' '));
       console.log(id);
       return;
     }
@@ -91,7 +100,7 @@ async function hubCommand(args: string[]): Promise<void> {
     case 'dialog': {
       const [, project, agent] = args;
       if (!project) throw new UsageError('usage: hive hub dialog <project> [agent]');
-      const dialog = await readDialogFor(root, project, agent);
+      const dialog = await readDialogFor(root, validName('project', project), agent && validName('agent', agent.split('@')[0]));
       if (!dialog) process.exit(3);
       console.log(JSON.stringify(dialog, null, 2));
       return;
@@ -102,23 +111,23 @@ async function hubCommand(args: string[]): Promise<void> {
       if (!project || typeof f.choice !== 'string' || typeof f.seen !== 'string') {
         throw new UsageError('usage: hive hub answer <project> [agent] --choice <n|esc> --seen <sha1>');
       }
-      const result = await answerDialog(root, project, agent, f.choice, f.seen);
+      const result = await answerDialog(root, validName('project', project), agent && validName('agent', agent.split('@')[0]), f.choice, f.seen);
       console.log(JSON.stringify(result, null, 2));
       return;
     }
     case 'wake': {
       if (!args[1]) throw new UsageError('usage: hive hub wake <project>');
-      console.log(await wake(root, args[1]));
+      console.log(await wake(root, validName('project', args[1])));
       return;
     }
     case 'start': {
       if (!args[1] || !args[2]) throw new UsageError('usage: hive hub start <project> <task-id>');
-      console.log(await startProject(root, args[1], args[2]));
+      console.log(await startProject(root, validName('project', args[1]), args[2]));
       return;
     }
     case 'continue': {
       if (!args[1]) throw new UsageError('usage: hive hub continue <project>');
-      console.log(await continueProject(root, args[1]));
+      console.log(await continueProject(root, validName('project', args[1])));
       return;
     }
     default:
@@ -135,19 +144,20 @@ async function spawnCommand(args: string[]): Promise<void> {
     rest = args.slice(1);
   }
   const { flags: f, pos } = parseFlags(rest, ['agent', 'role', 'worktree']);
-  const project = pos[0];
-  if (!project || typeof f.agent !== 'string') {
+  const project = pos[0] && validName('project', pos[0]);
+  const agent = typeof f.agent === 'string' ? validName('agent', f.agent) : f.agent;
+  if (!project || typeof agent !== 'string') {
     throw new UsageError('usage: hive spawn [respawn|close] <project> --agent <name> [--role r] [--worktree wt]');
   }
   if (sub === 'close') {
-    await closeAgent(root, project, f.agent);
-    console.log(`hive: ${project}/${f.agent} closed`);
+    await closeAgent(root, project, agent);
+    console.log(`hive: ${project}/${agent} closed`);
     return;
   }
   const pane = sub === 'respawn'
-    ? await respawnAgent(root, project, f.agent)
+    ? await respawnAgent(root, project, agent)
     : await spawnAgent(root, project, {
-        agent: f.agent,
+        agent,
         role: typeof f.role === 'string' ? f.role : undefined,
         worktree: typeof f.worktree === 'string' ? f.worktree : undefined,
       });
@@ -215,7 +225,7 @@ async function main(): Promise<void> {
       const project = args[1];
       if (!project) throw new UsageError('usage: hive cleanup <project> [--dry-run]');
       const dryRun = args.includes('--dry-run');
-      const actions = await cleanupProject(process.cwd(), project, { dryRun });
+      const actions = await cleanupProject(process.cwd(), validName('project', project), { dryRun });
       if (actions.length === 0) console.log(`hive: nothing to clean for ${project}`);
       for (const a of actions) console.log(`${dryRun ? 'would ' : ''}${a.action}`);
       return;

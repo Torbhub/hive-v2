@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { killWindow, paneExists, processStartTime, run } from './tmux.js';
+import { killWindow, paneExists, paneIs, processStartTime, run, type PaneIdentity } from './tmux.js';
 import { hivePath, manifestRead, manifestWrite, readProjects, type ManifestRecord } from './state.js';
 
 export type CleanupAction = { record: ManifestRecord; action: string; acted: boolean };
@@ -23,10 +23,24 @@ export async function cleanupProject(
   for (const rec of records) {
     if (rec.kind === 'tmux') {
       const pane = String(rec.pane ?? '');
-      if (pane && (await paneExists(pane))) {
-        actions.push({ record: rec, action: `kill tmux window ${rec.window ?? pane} (${pane})`, acted: !dryRun });
-        if (!dryRun) await killWindow(pane);
+      if (!pane || !(await paneExists(pane))) continue;
+      const pid = Number(rec.pane_pid ?? 0);
+      const started = String(rec.pane_started ?? '');
+      const identity: PaneIdentity | null = pid && started ? { pid, started } : null;
+      // A record without identity, or one whose pane was recycled since, is
+      // left alone and kept on the manifest — killing it could hit a window
+      // hive does not own.
+      if (!identity || !(await paneIs(pane, identity))) {
+        actions.push({
+          record: rec,
+          action: `left tmux window ${rec.window ?? pane} (${pane}) alone: ${identity ? 'pane identity no longer matches the record' : 'record has no pane identity'}`,
+          acted: false,
+        });
+        keep.push(rec);
+        continue;
       }
+      actions.push({ record: rec, action: `kill tmux window ${rec.window ?? pane} (${pane})`, acted: !dryRun });
+      if (!dryRun) await killWindow(pane, identity);
       continue;
     }
     if (rec.kind === 'process') {

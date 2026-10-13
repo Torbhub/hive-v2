@@ -35,7 +35,10 @@ an `overnight` state only as a display suffix, since the screen shows it.
 - Hub screen: [Ink](https://github.com/vadimdemedes/ink) (React for the
   terminal). The hivehouse screen is already React-ish TSX; the port is
   near-mechanical per `docs/hub-ui-spec.md`.
-- tmux is the process supervisor. No daemons of our own.
+- tmux is the process supervisor, on a private server socket (`tmux -L
+  hive-v2`) so hive can never see or touch the user's own sessions; every
+  mutation re-verifies the pane's session and pid+starttime first. No daemons
+  of our own.
 - Runtime deps: `ink`, `react`. Dev deps: `typescript`, `@types/react`,
   `@types/node`, `tsx` (dev runner), `vitest` (tests). Nothing else — no
   commander, no execa, no zod; `child_process` and hand-rolled arg parsing

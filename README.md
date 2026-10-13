@@ -39,6 +39,15 @@ no arguments.
    (`demo:demo-orchestrator` in the `hive` tmux session), waits for kimi to go
    idle, and types the pickup line: who it is, where its handoff is, where the
    task file is.
+
+All hive tmux windows live on a **private tmux server socket** (`tmux -L
+hive-v2`), never on the default socket — your own tmux sessions are invisible
+to hive and hive's kills and keystrokes cannot reach them. To watch an agent
+yourself:
+
+```bash
+tmux -L hive-v2 attach
+```
 3. The orchestrator plans, asks, and spawns agents (`hive spawn`). Every state
    change is a ledger event: `plan`, `question`, `blocked`, `done`.
 4. The hub screen (`hive ui`) is where you see all of it: tasks that need you,

@@ -5,7 +5,7 @@ import type {
 } from './types.js';
 import { CLOSED_STATES } from './types.js';
 import {
-  capturePane, paneExists, paneIdentity, paneIs, run, sendEscape, sleep,
+  capturePane, paneExists, paneIdentity, paneIs, run, sendEscape, sendLiteral, sleep,
 } from './tmux.js';
 import { lines, parseDialog, scrapeContext } from './screen.js';
 import {
@@ -247,7 +247,7 @@ export async function answerDialog(
     if (!opt) throw new Error(`the dialog has no option ${choice}`);
     if (!opt.offered) throw new Error(`option ${choice} needs your own text; answer it in the pane`);
     option = opt.label;
-    await run('tmux', ['send-keys', '-t', dialog.pane, choice]);
+    await sendLiteral(dialog.pane, choice);
   }
   await sleep(2000);
   const after = await readDialogFor(root, project, agentRefArg);
@@ -285,7 +285,10 @@ async function launchOrchestrator(
 
   await ensureAgentFiles(cwd, name, 'orchestrator');
   const { pane, identity } = await launchWindow(project, name, cwd, sessionId);
-  await manifestAdd(p.home, { kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}` });
+  await manifestAdd(p.home, {
+    kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}`,
+    pane_pid: identity.pid, pane_started: identity.started,
+  });
   let line = pickupLine(project, name);
   if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
   const pending: PendingPane = { pane, kind, at: new Date().toISOString(), typed: false, task, line };
