@@ -1,9 +1,9 @@
 import { mkdirSync } from 'node:fs';
 import {
   capturePane, ensureHiveSession, killWindow, newWindow, paneIdentity, sendEnter, sleep,
-} from '../dist/tmux.js';
-import { classify, lines, parseDialog } from '../dist/screen.js';
-import { typeLine } from '../dist/spawn.js';
+} from '../dist/src/tmux.js';
+import { classify, lines, parseDialog } from '../dist/src/screen.js';
+import { typeLine } from '../dist/src/spawn.js';
 
 const DIR = '/tmp/hive-smoke';
 const NAME = 'smoke';

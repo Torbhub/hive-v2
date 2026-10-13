@@ -31,7 +31,8 @@ an `overnight` state only as a display suffix, since the screen shows it.
 
 ## Stack
 
-- Node 20+, TypeScript, ESM, built with `tsc` to `dist/`. Single bin: `hive`.
+- Node 20+, TypeScript, ESM, built with `tsc` to `dist/` and `vite build` to
+  `web/dist/` (the browser hub screen). Single bin: `hive`.
 - Hub screen: [Ink](https://github.com/vadimdemedes/ink) (React for the
   terminal). The hivehouse screen is already React-ish TSX; the port is
   near-mechanical per `docs/hub-ui-spec.md`.
@@ -58,10 +59,13 @@ src/
   gate.ts      — gate runner + gate-verify (log, commits)
   cleanup.ts   — manifest-driven cleanup, trash-not-delete
   ui/HubApp.tsx   — the hub screen (spec docs/hub-ui-spec.md)
+  ui/look.ts      — the shared look: ago, look tables, needs-building (Ink and web both import it)
   ui/buttons.tsx  — keyboard-driven button (Tab focus, Enter press, hotkeys)
+  view.ts         — one HubView assembly (status + tasks + dialogs) for both screens
 roles/         — orchestrator.md, implementer.md, reviewer.md (read by spawned sessions)
 rules/RULES.md — the team's working rules (git, gate, reporting, handoff format)
 skills/        — start, gate, cleanup (Kimi Code skills; load with --skills-dir)
+web/           — server.ts (node:http, loopback) + the React/vite SPA (built to web/dist)
 docs/          — this file, hub-ui-spec.md, mechanics.md (what was kept/cut and why)
 test/          — vitest: screen parsing, gate-verify, task ledger, arg parsing
 README.md      — written for a new SWE: what it is, install, the 6 commands you actually use

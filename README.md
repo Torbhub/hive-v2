@@ -31,6 +31,14 @@ Everything else (`wake`, `continue`, `dialog`, `answer`, `spawn`, `cleanup`,
 `push`, `gate-verify`) is one `--help`-less usage line away: run `hive` with
 no arguments.
 
+## The web screen
+
+`hive web` serves the same hub screen in a browser: `http://127.0.0.1:7684`
+(port from `--port N` or `HIVE_WEB_PORT`, loopback only). It reads and acts
+exactly like the Ink screen — same view assembly, same fingerprint-checked
+dialog answers, one action at a time. It is a plain foreground process, so a
+systemd unit is one `ExecStart=/path/to/hive web` line away.
+
 ## How a task flows
 
 1. You record a task: `hive hub task demo "..."`. It lands in the ledger

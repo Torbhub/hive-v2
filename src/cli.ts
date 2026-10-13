@@ -32,7 +32,8 @@ const USAGE = `usage:
   hive gate-verify log <path> [--expect a,b] [--commit sha] | gate-verify commits <base>..<tip> --max-files <n> --style conventional|free --attribution allow|deny [--no-body]
   hive push <remote> <sha> <branch>
   hive cleanup <project> [--dry-run]
-  hive ui`;
+  hive ui
+  hive web [--port N]`;
 
 class UsageError extends Error {}
 
@@ -251,6 +252,16 @@ async function main(): Promise<void> {
       const { createElement } = await import('react');
       const { HubApp } = await import('./ui/HubApp.js');
       render(createElement(HubApp, { root: process.cwd() }));
+      return;
+    }
+    case 'web': {
+      const { flags: f } = parseFlags(args.slice(1), ['port']);
+      const raw = typeof f.port === 'string' ? f.port : process.env.HIVE_WEB_PORT ?? '7684';
+      const port = Number(raw);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new UsageError(`a port is 1-65535: ${raw}`);
+      const { listen } = await import('../web/server.js');
+      await listen(process.cwd(), port);
+      console.log(`hive: hub web on http://127.0.0.1:${port} (root ${process.cwd()})`);
       return;
     }
     default:

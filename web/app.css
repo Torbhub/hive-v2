@@ -1,0 +1,62 @@
+:root {
+  --gray: #8a8a8a;
+  --white: #f2f2f2;
+  --magenta: #ff5fd7;
+  --red: #ff5555;
+  --yellow: #ffd75f;
+  --green: #5fff87;
+  --cyan: #5fd7ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: #000;
+  color: var(--white);
+  font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.screen { min-height: 100vh; padding: 4px 16px 16px; }
+.row { display: flex; justify-content: space-between; align-items: baseline; }
+.shrink { flex-shrink: 1; min-width: 0; }
+.grow0 { flex-shrink: 0; padding-left: 2ch; }
+.gray { color: var(--gray); }
+.white { color: var(--white); }
+.magenta { color: var(--magenta); }
+.red { color: var(--red); }
+.yellow { color: var(--yellow); }
+.green { color: var(--green); }
+.cyan { color: var(--cyan); }
+.bold { font-weight: 700; }
+.mt { margin-top: 1em; }
+.pl1 { padding-left: 1ch; }
+.pl2 { padding-left: 2ch; }
+.pl3 { padding-left: 3ch; }
+.pl15 { padding-left: 15ch; }
+.rule { color: var(--gray); white-space: nowrap; overflow: hidden; user-select: none; }
+.truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.truncate-start { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+.pre { white-space: pre-wrap; }
+
+.label-row { display: flex; padding-left: 1ch; }
+.label-row .label { width: 14ch; flex-shrink: 0; color: var(--gray); }
+.label-row .content { flex-shrink: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.btn {
+  font: inherit;
+  background: #1c1c1c;
+  color: var(--white);
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 0 1ch;
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) { border-color: #888; }
+.btn:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1px; }
+.btn:disabled { color: var(--gray); cursor: default; }
+.btn.primary { color: var(--cyan); font-weight: 700; border-color: #2e6b7e; }
+.btn.plain { background: none; border: none; color: var(--gray); padding: 0; }
+.btn.plain:hover:not(:disabled) { text-decoration: underline; }
+
+.need-actions { display: flex; flex-wrap: wrap; column-gap: 1ch; }
+.toast { color: var(--cyan); margin-top: 1em; }

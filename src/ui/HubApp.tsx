@@ -1,67 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
-import type { HubAgent, HubDialog, HubOrchestrator, HubProject, HubTask, HubView } from '../types.js';
-import { answerDialog, buildStatus, continueProject, listTasks, readDialogFor, wake } from '../hub.js';
+import type { HubAgent, HubDialog, HubProject, HubTask, HubView } from '../types.js';
+import { answerDialog, continueProject, wake } from '../hub.js';
+import {
+  ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
+} from '../view.js';
+import {
+  agentGlyph, agentRef, ago, buildNeeds, homeTilde, orchestratorLook, tasksLine, type Need,
+} from './look.js';
 import { Button, ButtonScope } from './buttons.js';
 
 const EVERY_MS = 20_000;
-const READ_TIMEOUT_MS = 30_000;
-const ACTION_TIMEOUT_MS = 150_000;
-const ANSWER_TIMEOUT_MS = 30_000;
 const ROTATE_AT_PERCENT = 50;
-
-export function ago(iso: string, now: number): string {
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return '';
-  const s = Math.max(0, Math.floor((now - t) / 1000));
-  if (s < 60) return 'now';
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  return `${Math.floor(h / 24)}d`;
-}
-
-export type OrchestratorLook = { dot: string; word: string; color: string };
-
-export function orchestratorLook(o: HubOrchestrator): OrchestratorLook {
-  if (o.starting && o.state !== 'running') {
-    return o.starting.typed || o.starting.sending
-      ? { dot: '◐', word: 'coming up', color: 'cyan' }
-      : { dot: '◐', word: 'waiting on you', color: 'magenta' };
-  }
-  switch (o.state) {
-    case 'running': return { dot: '●', word: 'running', color: 'green' };
-    case 'stopped': return { dot: '○', word: 'stopped', color: 'yellow' };
-    case 'unknown': return { dot: '?', word: 'cannot tell', color: 'red' };
-    case 'none': return { dot: '◌', word: 'no team', color: 'gray' };
-    case 'unregistered': return { dot: '◑', word: 'not registered', color: 'magenta' };
-    case 'resumable': return { dot: '○', word: 'stopped, not registered', color: 'yellow' };
-    default: return { dot: '?', word: 'cannot tell', color: 'red' };
-  }
-}
-
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), ms)),
-  ]);
-}
-
-function lastLine(e: unknown): string {
-  const msg = e instanceof Error ? e.message : String(e);
-  const line = msg.split('\n').filter((l) => l.trim()).pop() ?? msg;
-  return line.replace(/^hive: /, '');
-}
-
-function waitLook(state: string): { glyph: string; words: string; color: string } {
-  switch (state) {
-    case 'plan': return { glyph: '▲', words: 'plan to approve', color: 'magenta' };
-    case 'question': return { glyph: '?', words: 'question', color: 'yellow' };
-    case 'blocked': return { glyph: '✖', words: 'blocked', color: 'red' };
-    default: return { glyph: '•', words: state, color: 'white' };
-  }
-}
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -119,17 +69,37 @@ function DialogBlock({
   );
 }
 
-type Need = {
-  key: string;
-  glyph: string;
-  color: string;
-  who: string;
-  words: string;
-  when: string;
-  dialogKey?: string;
-  action?: 'continue';
-  project?: string;
-};
+function NeedDialog({
+  dialogKey, dialogs, onAnswer,
+}: {
+  dialogKey: string;
+  dialogs: Record<string, HubDialog>;
+  onAnswer: (project: string, agentRefArg: string | undefined, seen: string, choice: string) => void;
+}) {
+  const dialog = dialogs[dialogKey];
+  if (!dialog) return null;
+  const [project, agent] = dialogKey.split('/');
+  return <DialogBlock dialog={dialog} onAnswer={(choice) => onAnswer(project, agent, dialog.fingerprint, choice)} />;
+}
+
+function NeedAction({
+  need, acting, busy, onContinue,
+}: {
+  need: Need;
+  acting: boolean;
+  busy: { project: string; what: string } | null;
+  onContinue: (project: string) => void;
+}) {
+  if (need.action !== 'continue' || !need.project) return null;
+  const project = need.project;
+  return (
+    <Box paddingLeft={2}>
+      {busy?.project === project && busy.what === 'continuing'
+        ? <Text color="cyan">continuing…</Text>
+        : <Button label="Continue" onPress={() => onContinue(project)} disabled={acting} />}
+    </Box>
+  );
+}
 
 export function HubApp({ root }: { root: string }) {
   const [view, setView] = useState<HubView>({
@@ -140,47 +110,10 @@ export function HubApp({ root }: { root: string }) {
   const [toast, setToast] = useState<string | null>(null);
   const actingRef = useRef(false);
 
+  // A failed status read (updatedAt 0) keeps the old data, shows the error.
   const refresh = useCallback(async () => {
-    let status;
-    try {
-      status = await withTimeout(buildStatus(root), READ_TIMEOUT_MS, 'status');
-    } catch (e) {
-      setView((v) => ({ ...v, error: lastLine(e) }));
-      return;
-    }
-    let tasks: HubTask[] | null = null;
-    let error = '';
-    try {
-      tasks = await withTimeout(listTasks(root), READ_TIMEOUT_MS, 'tasks');
-    } catch (e) {
-      error = `tasks not read: ${lastLine(e)}`;
-    }
-    const dialogs: Record<string, HubDialog> = {};
-    const jobs: Promise<void>[] = [];
-    for (const p of status.projects) {
-      if (p.orchestrator.question || p.orchestrator.starting?.question) {
-        jobs.push(readDialogFor(root, p.name).then((d) => {
-          if (d) dialogs[p.name] = d;
-        }).catch(() => {}));
-      }
-      for (const a of p.agents) {
-        if (a.question && a.ref) {
-          jobs.push(readDialogFor(root, p.name, a.ref).then((d) => {
-            if (d) dialogs[`${p.name}/${a.ref}`] = d;
-          }).catch(() => {}));
-        }
-      }
-    }
-    await Promise.all(jobs);
-    setView((v) => ({
-      ...v,
-      hubName: status.hub.name ?? '',
-      projects: status.projects,
-      tasks: tasks ?? v.tasks,
-      dialogs,
-      updatedAt: Date.now(),
-      error,
-    }));
+    const next = await buildView(root);
+    setView((v) => (next.updatedAt === 0 && next.error ? { ...v, error: next.error } : next));
   }, [root]);
 
   useEffect(() => {
@@ -232,64 +165,23 @@ export function HubApp({ root }: { root: string }) {
     });
   }, [act, root]);
 
-  const onAnswer = useCallback((project: string, agentRef: string | undefined, seen: string, choice: string) => {
-    const who = agentRef ? `${project} · ${agentRef}` : project;
+  const onAnswer = useCallback((project: string, agentRefArg: string | undefined, seen: string, choice: string) => {
+    const who = agentRefArg ? `${project} · ${agentRefArg}` : project;
     void act(project, 'answering', who, async () => {
       const r = await withTimeout(
-        answerDialog(root, project, agentRef, choice, seen), ANSWER_TIMEOUT_MS, 'answer',
+        answerDialog(root, project, agentRefArg, choice, seen), ANSWER_TIMEOUT_MS, 'answer',
       );
       return `${who}: answered "${r.option}"${r.dialog_gone ? '' : ' (the dialog is still on its screen)'}`;
     });
   }, [act, root]);
 
   const now = Date.now();
-  const home = process.env.HOME ?? '';
-  const where = home && (root === home || root.startsWith(home + '/')) ? `~${root.slice(home.length)}` : root;
+  const where = homeTilde(root, process.env.HOME ?? '');
   const clock = view.updatedAt
     ? new Date(view.updatedAt).toTimeString().slice(0, 5)
     : 'reading…';
 
-  const needs: Need[] = [];
-  if (view.updatedAt && !view.hubName) {
-    needs.push({
-      key: 'hub', glyph: '!', color: 'red', who: 'hub',
-      words: 'has not recorded its session, so nobody can reply to it', when: '',
-    });
-  }
-  for (const t of view.tasks.filter((t) => t.needs_owner)) {
-    const look = waitLook(t.state);
-    needs.push({
-      key: `task-${t.id}`, glyph: look.glyph, color: look.color, who: t.id,
-      words: look.words, when: ago(t.updated, now),
-    });
-  }
-  for (const p of view.projects) {
-    if (p.orchestrator.question) {
-      needs.push({
-        key: `orch-${p.name}`, glyph: '?', color: 'yellow', who: p.name,
-        words: 'its orchestrator has a question on its screen', when: '', dialogKey: p.name,
-      });
-    }
-    for (const a of p.agents.filter((a) => a.question)) {
-      needs.push({
-        key: `agent-${p.name}-${a.ref}`, glyph: '?', color: 'yellow',
-        who: `${p.name} · ${a.ref}`, words: 'a question on its screen', when: '',
-        dialogKey: `${p.name}/${a.ref}`,
-      });
-    }
-    const s = p.orchestrator.starting;
-    if (s && !s.typed && !s.sending) {
-      needs.push({
-        key: `starting-${p.name}`, glyph: '?', color: 'yellow', who: p.name,
-        words: s.question
-          ? `a question on the screen of pane ${s.pane}: answer it, then Continue`
-          : `waiting in pane ${s.pane} for its first line`,
-        when: ago(s.at, now),
-        dialogKey: s.question ? p.name : undefined,
-        action: 'continue', project: p.name,
-      });
-    }
-  }
+  const needs = buildNeeds(view, now);
 
   const columns = process.stdout.columns || 60;
   const rows = process.stdout.rows || 24;
@@ -329,13 +221,7 @@ export function HubApp({ root }: { root: string }) {
                 {n.dialogKey && (
                   <NeedDialog dialogKey={n.dialogKey} dialogs={view.dialogs} onAnswer={onAnswer} />
                 )}
-                {n.action === 'continue' && n.project && (
-                  <Box paddingLeft={2}>
-                    {busy?.project === n.project && busy.what === 'continuing'
-                      ? <Text color="cyan">continuing…</Text>
-                      : <Button label="Continue" onPress={() => onContinue(n.project!)} disabled={acting} />}
-                  </Box>
-                )}
+                <NeedAction need={n} acting={acting} busy={busy} onContinue={onContinue} />
               </Box>
             ))}
           </Box>
@@ -376,25 +262,6 @@ export function HubApp({ root }: { root: string }) {
   );
 }
 
-function NeedDialog({
-  dialogKey, dialogs, onAnswer,
-}: {
-  dialogKey: string;
-  dialogs: Record<string, HubDialog>;
-  onAnswer: (project: string, agentRef: string | undefined, seen: string, choice: string) => void;
-}) {
-  const dialog = dialogs[dialogKey];
-  if (!dialog) return null;
-  const [project, agent] = dialogKey.split('/');
-  return <DialogBlock dialog={dialog} onAnswer={(choice) => onAnswer(project, agent, dialog.fingerprint, choice)} />;
-}
-
-function agentGlyph(a: HubAgent): { glyph: string; color: string } {
-  if (a.state === 'running') return { glyph: '●', color: 'green' };
-  if (a.state === 'stopped') return { glyph: '○', color: 'yellow' };
-  return { glyph: '?', color: 'red' };
-}
-
 function ProjectCard({
   project: p, tasks, now, acting, busy, onWake,
 }: {
@@ -409,17 +276,6 @@ function ProjectCard({
   const o = p.orchestrator;
 
   const orchName = o.state === 'none' ? 'none yet' : o.name ?? '?';
-  const mine = tasks.filter((t) => t.project === p.name);
-  const overnight = mine.filter((t) => t.state === 'overnight').length;
-  const cleanup = mine.filter((t) => t.state === 'cleanup').length;
-  const today = new Date(now).toDateString();
-  const doneToday = mine.filter(
-    (t) => t.state === 'done' && new Date(t.updated).toDateString() === today,
-  ).length;
-  let tasksLine = `${p.open_tasks} open`;
-  if (overnight) tasksLine += ` · ${overnight} overnight run${overnight === 1 ? '' : 's'}`;
-  if (cleanup) tasksLine += ` · ${cleanup} cleanup`;
-  if (doneToday) tasksLine += ` · ${doneToday} done today`;
 
   const up = p.agents.filter((a) => a.state === 'running').length;
   const notRunning = p.agents.filter((a) => a.state !== 'running');
@@ -459,13 +315,13 @@ function ProjectCard({
               <Text color="white">{` ${up} of ${p.agents.length}`}</Text>
             </Box>
             {notRunning.length > 0 && (
-              <Text color="yellow">{notRunning.map((a) => `${a.ref} ${a.state}`).join(', ')}</Text>
+              <Text color="yellow">{notRunning.map((a) => `${agentRef(a)} ${a.state}`).join(', ')}</Text>
             )}
           </>
         )}
       </Row>
       <Row label="tasks">
-        <Text color="white">{tasksLine}</Text>
+        <Text color="white">{tasksLine(tasks, p.name, p.open_tasks, now)}</Text>
       </Row>
       <Row label="folders">
         {p.repos.map((r) => (
