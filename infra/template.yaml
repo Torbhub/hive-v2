@@ -68,6 +68,8 @@ Resources:
                 Resource: '*'
               - Sid: CloudFormationSelfDeploy
                 Effect: Allow
+                # the complete action set of a changeset-based
+                # `aws cloudformation deploy` against an existing stack
                 Action:
                   - cloudformation:CreateChangeSet
                   - cloudformation:ExecuteChangeSet
@@ -76,6 +78,7 @@ Resources:
                   - cloudformation:DescribeStacks
                   - cloudformation:DescribeStackEvents
                   - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
                 Resource: arn:aws:cloudformation:us-east-1:594552273052:stack/hive-v2-infra/*
               - Sid: ManageHiveRoles
                 Effect: Allow
