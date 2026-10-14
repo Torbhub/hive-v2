@@ -1,0 +1,14 @@
+[Unit]
+Description=hive-v2 watch daemon (pane watchdog + auto-approver)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hive-work
+ExecStart=/usr/local/bin/hive watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

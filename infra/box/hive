@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/node22/bin/node /home/ubuntu/hive-v2/dist/src/cli.js "$@"

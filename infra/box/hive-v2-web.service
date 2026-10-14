@@ -1,0 +1,16 @@
+[Unit]
+Description=hive-v2 hub webapp (loopback only; nginx fronts TLS + basic auth)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=HIVE_WEB_PORT=7684
+EnvironmentFile=/etc/hive-v2/web.env
+WorkingDirectory=/home/ubuntu/hive-work
+ExecStart=/usr/local/bin/hive web
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
