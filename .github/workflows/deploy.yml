@@ -32,7 +32,7 @@ jobs:
       - run: npm test
       - run: npm run build
       - name: Syntax-check the infra scripts
-        run: bash -n infra/provision-box.sh && bash -n infra/deploy-box.sh
+        run: bash -n infra/provision-box.sh && bash -n infra/deploy-box.sh && bash -n infra/deploy-mutex.sh
       - name: Lint the CloudFormation template
         run: |
           pipx install cfn-lint
@@ -146,7 +146,6 @@ jobs:
           echo "deploy did not reach a terminal state within 10 minutes"
           exit 1
       - name: Release the deploy mutex
-        # always() so a failed or cancelled deploy frees the lock; releasing a
-        # mutex this run never took is a no-op warn inside the script.
+        # Releasing a mutex this run never took is a no-op warn in the script.
         if: always() && steps.staleness.outputs.skip != 'true'
         run: bash infra/deploy-mutex.sh release aws-acts "hive-v2/${{ github.run_id }}"

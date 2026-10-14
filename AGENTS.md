@@ -2,7 +2,7 @@
 
 ## Build and test
 
-- Build: `npm run build` (needs Node 22; on the deploy box use `/opt/node22/bin/npm`).
+- Build: `npm run build` (needs Node 22. On the deploy box use `/opt/node22/bin/npm`).
 - Test: `npm test` (vitest). All tests must pass before a push.
 - UI changes: `docs/hub-ui-spec.md` is the byte-exact contract for the hub
   screen. When the screen changes, the spec changes in the same commit.
@@ -18,7 +18,7 @@
 
 ## Deploys
 
-- Deploys belong to the `deploy` workflow. Push to `main` deploys; nobody
+- Deploys belong to the `deploy` workflow. Push to `main` deploys. Nobody
   runs deploy steps by hand. The full ceremony lives in `infra/README.md`.
 - The workflow is newest-wins: a newer push cancels an older run, and a
   cancelled run is normal, not an incident.
@@ -32,6 +32,6 @@
 ## tmux discipline
 
 - hive owns a private tmux socket (`tmux -L hive-v2`). Never send keys or
-  kills to the default socket; the operator's own sessions live there.
+  kills to the default socket. The operator's own sessions live there.
 - Every pane kill or type re-verifies the pane's identity (pid + start
   time) first. See `src/tmux.ts`.

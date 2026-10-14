@@ -32,8 +32,9 @@ used to be hand-rolled.
   citadel #1811 rule). A cancelled run is normal, not an incident.
 - `deploy-mutex.sh` — a copy of citadel's `scripts/deploy-mutex.sh`. The
   deploy job acquires the fleet mutex (`aws-acts` resource, DynamoDB table
-  `citadel-deploy-mutex`) before any AWS act and releases it in cleanup.
-  Any hand AWS act must acquire it too — see the deploy-discipline skill.
+  `citadel-deploy-mutex`) before the SSM box deploy (the stack self-update
+  is exempt) and releases it in cleanup. Any hand AWS act must acquire it
+  too — see the deploy-discipline skill.
 
 ## Bootstrap ceremony (once, by the operator)
 
