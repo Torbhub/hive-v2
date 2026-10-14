@@ -13,6 +13,13 @@ Parameters:
     Type: String
     Default: arn:aws:iam::594552273052:oidc-provider/token.actions.githubusercontent.com
     Description: ARN of the account-existing GitHub Actions OIDC provider.
+  GithubSubjectPrefix:
+    Type: String
+    # The repo has GitHub's immutable OIDC subjects on, so the sub claim is
+    # the rename-proof org-id/repo-id form, not repo:Torbhub/hive-v2.
+    # Read it: gh api repos/Torbhub/hive-v2/actions/oidc/customization/sub
+    Default: repo:Torbhub@272689427/hive-v2@1416391580
+    Description: OIDC sub claim prefix for the hive-v2 repo (immutable-subject form).
 
 Resources:
   HiveSecret:
@@ -38,7 +45,7 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                token.actions.githubusercontent.com:sub: repo:Torbhub/hive-v2:*
+                token.actions.githubusercontent.com:sub: !Sub '${GithubSubjectPrefix}:*'
       Policies:
         - PolicyName: hive-v2-deploy
           PolicyDocument:
