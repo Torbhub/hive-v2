@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: hive-v2 deploy infrastructure — basic-auth secret and GitHub OIDC deploy role
+
+Parameters:
+  HiveBasicAuthPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    Description: >-
+      Basic-auth password for the hive-v2 hub site (user alex). Must be the
+      existing live password at first deploy so the running site never breaks.
+  GithubOidcProviderArn:
+    Type: String
+    Default: arn:aws:iam::594552273052:oidc-provider/token.actions.githubusercontent.com
+    Description: ARN of the account-existing GitHub Actions OIDC provider.
+
+Resources:
+  HiveSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: citadel/kimi-permanent-01/hive-basicauth
+      Description: Basic-auth credentials for the hive-v2 hub site (hive.44.192.48.70.sslip.io)
+      SecretString: !Sub '{"username":"alex","password":"${HiveBasicAuthPassword}"}'
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: hive-v2-gh-deploy
+      Description: Assumed by the Torbhub/hive-v2 deploy workflow via GitHub OIDC.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GithubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: repo:Torbhub/hive-v2:*
+      Policies:
+        - PolicyName: hive-v2-deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SsmSendCommandToKimiBox
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: arn:aws:ec2:us-east-1:594552273052:instance/*
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/Role: nexus-kimi-session
+              - Sid: SsmRunShellScriptDocument
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: arn:aws:ssm:us-east-1::document/AWS-RunShellScript
+              - Sid: SsmReadBack
+                Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommands
+                Resource: '*'
+              - Sid: ReadHiveSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref HiveSecret
+                  - arn:aws:secretsmanager:us-east-1:594552273052:secret:citadel/kimi-permanent-01/hive-basicauth*
+              - Sid: CloudFormationSelfDeploy
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplate
+                Resource: arn:aws:cloudformation:us-east-1:594552273052:stack/hive-v2-infra/*
+              - Sid: ManageHiveRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:UpdateRole
+                  - iam:DeleteRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource: arn:aws:iam::594552273052:role/hive-v2-*
+              - Sid: ManageHiveSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:TagResource
+                  - secretsmanager:PutResourcePolicy
+                Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:citadel/kimi-permanent-01/hive-basicauth*
+
+Outputs:
+  DeployRoleArn:
+    Description: ARN the GitHub workflow assumes (set as secret HIVE_DEPLOY_ROLE_ARN).
+    Value: !GetAtt DeployRole.Arn
+  SecretArn:
+    Description: ARN of the basic-auth secret.
+    Value: !Ref HiveSecret
