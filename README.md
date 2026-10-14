@@ -99,6 +99,14 @@ tmux -L hive-v2 attach
   `handoffs/<agent>.md` (the agent's persistent memory; rotation works because
   of it), `manifest.jsonl` (what hive created; cleanup's only input).
 
+## Deployment
+
+The hub site runs on the kimi session box behind nginx (TLS + basic auth) at
+`https://hive.44.192.48.70.sslip.io/`. Infrastructure lives in `infra/` (one
+CloudFormation stack plus the committed box config) and every push to main
+deploys through `.github/workflows/deploy.yml` over SSM. Bootstrap steps and
+the drift-adoption story: `infra/README.md`.
+
 ## Development
 
 ```bash
