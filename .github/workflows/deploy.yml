@@ -28,7 +28,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      - name: Shellcheck the infra scripts
+      - name: Syntax-check the infra scripts
         run: bash -n infra/provision-box.sh && bash -n infra/deploy-box.sh
       - name: Lint the CloudFormation template
         run: |
@@ -43,6 +43,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}
@@ -54,7 +56,8 @@ jobs:
           if [ "${{ github.event_name }}" = "push" ]; then
             CHANGED=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" -- infra/)
           else
-            CHANGED=$(git diff --name-only HEAD~1 HEAD -- infra/ || true)
+            # dispatch: no before-sha; a missing HEAD~1 means skip-with-log below
+            CHANGED=$(git diff --name-only HEAD~1 HEAD -- infra/ 2>/dev/null || true)
           fi
           if [ -z "$CHANGED" ]; then
             echo "infra/ unchanged; skipping stack update"

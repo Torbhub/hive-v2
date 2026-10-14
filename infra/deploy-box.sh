@@ -26,14 +26,7 @@ URL=http://127.0.0.1:7684/api/view
 
 fail=0
 
-code_noauth=$(curl -sf -o /dev/null -w '%{http_code}' "$URL" || true)
-if [ "$code_noauth" = 403 ]; then
-  echo "PASS: no auth header -> 403"
-else
-  echo "FAIL: no auth header -> $code_noauth (want 403)"
-  fail=1
-fi
-
+# The retrying authed check first: it proves the port is up after the restart.
 code_auth=""
 for _ in $(seq 1 6); do
   code_auth=$(curl -s -o /dev/null -w '%{http_code}' -H "x-hive-auth: $SECRET" "$URL" || true)
@@ -44,6 +37,14 @@ if [ "$code_auth" = 200 ]; then
   echo "PASS: auth header -> 200"
 else
   echo "FAIL: auth header -> $code_auth (want 200)"
+  fail=1
+fi
+
+code_noauth=$(curl -s -o /dev/null -w '%{http_code}' "$URL" || true)
+if [ "$code_noauth" = 403 ]; then
+  echo "PASS: no auth header -> 403"
+else
+  echo "FAIL: no auth header -> $code_noauth (want 403)"
   fail=1
 fi
 
