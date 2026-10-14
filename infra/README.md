@@ -27,6 +27,13 @@ used to be hand-rolled.
 - `deploy-box.sh` — what the workflow runs on the box over SSM: fetch, reset
   to the merged commit, `npm ci`, build, provision, health-check.
 - `.github/workflows/deploy.yml` — gate job (test, build, lint) then deploy.
+  Newest-wins: a newer push cancels an older run, and the staleness step
+  skips a survivor only when the newer head touches a deploy path (the
+  citadel #1811 rule). A cancelled run is normal, not an incident.
+- `deploy-mutex.sh` — a copy of citadel's `scripts/deploy-mutex.sh`. The
+  deploy job acquires the fleet mutex (`aws-acts` resource, DynamoDB table
+  `citadel-deploy-mutex`) before any AWS act and releases it in cleanup.
+  Any hand AWS act must acquire it too — see the deploy-discipline skill.
 
 ## Bootstrap ceremony (once, by the operator)
 

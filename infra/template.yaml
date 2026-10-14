@@ -92,6 +92,15 @@ Resources:
                   - secretsmanager:TagResource
                   - secretsmanager:PutResourcePolicy
                 Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:citadel/kimi-permanent-01/hive-basicauth*
+              # The fleet-wide deploy mutex lives in citadel's nexus stack;
+              # the workflow acquires it before any AWS act.
+              - Sid: DeployMutex
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: arn:aws:dynamodb:us-east-1:594552273052:table/citadel-deploy-mutex
 
 Outputs:
   DeployRoleArn:
