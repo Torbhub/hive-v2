@@ -81,11 +81,10 @@ jobs:
         with:
           role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
-      - name: Acquire the deploy mutex
-        if: ${{ steps.staleness.outputs.skip != 'true' }}
-        run: bash infra/deploy-mutex.sh acquire aws-acts "hive-v2/${{ github.run_id }}"
       - name: Update the infra stack when infra/ changed
         if: ${{ steps.staleness.outputs.skip != 'true' }}
+        # Stack deploys are exempt from the mutex: CloudFormation serializes
+        # per-stack, and this step is what grants the role its mutex access.
         env:
           HIVE_BASIC_AUTH_PASSWORD: ${{ secrets.HIVE_BASIC_AUTH_PASSWORD }}
         run: |
@@ -105,6 +104,9 @@ jobs:
             --template-file infra/template.yaml \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides HiveBasicAuthPassword="$HIVE_BASIC_AUTH_PASSWORD"
+      - name: Acquire the deploy mutex
+        if: ${{ steps.staleness.outputs.skip != 'true' }}
+        run: bash infra/deploy-mutex.sh acquire aws-acts "hive-v2/${{ github.run_id }}"
       - name: Deploy to the box over SSM
         if: ${{ steps.staleness.outputs.skip != 'true' }}
         env:
