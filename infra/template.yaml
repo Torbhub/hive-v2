@@ -1,14 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: hive-v2 deploy infrastructure — basic-auth secret and GitHub OIDC deploy role
+Description: hive-v2 deploy infrastructure — GitHub OIDC deploy role
 
 Parameters:
-  HiveBasicAuthPassword:
-    Type: String
-    NoEcho: true
-    MinLength: 12
-    Description: >-
-      Basic-auth password for the hive-v2 hub site (user alex). Must be the
-      existing live password at first deploy so the running site never breaks.
   GithubOidcProviderArn:
     Type: String
     Default: arn:aws:iam::594552273052:oidc-provider/token.actions.githubusercontent.com
@@ -22,13 +15,6 @@ Parameters:
     Description: OIDC sub claim prefix for the hive-v2 repo (immutable-subject form).
 
 Resources:
-  HiveSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: citadel/kimi-permanent-01/hive-basicauth
-      Description: Basic-auth credentials for the hive-v2 hub site (hive.44.192.48.70.sslip.io)
-      SecretString: !Sub '{"username":"alex","password":"${HiveBasicAuthPassword}"}'
-
   DeployRole:
     Type: AWS::IAM::Role
     Properties:
@@ -93,17 +79,8 @@ Resources:
                   - iam:TagRole
                   - iam:UntagRole
                 Resource: arn:aws:iam::594552273052:role/hive-v2-*
-              - Sid: ManageHiveSecret
-                Effect: Allow
-                Action:
-                  - secretsmanager:CreateSecret
-                  - secretsmanager:UpdateSecret
-                  - secretsmanager:DescribeSecret
-                  - secretsmanager:TagResource
-                  - secretsmanager:PutResourcePolicy
-                Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:citadel/kimi-permanent-01/hive-basicauth*
               # The fleet-wide deploy mutex lives in citadel's nexus stack;
-              # the workflow acquires it before any AWS act.
+              # the workflow acquires it before the SSM box deploy.
               - Sid: DeployMutex
                 Effect: Allow
                 Action:

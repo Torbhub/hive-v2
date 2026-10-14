@@ -85,8 +85,6 @@ jobs:
         if: ${{ steps.staleness.outputs.skip != 'true' }}
         # Stack deploys are exempt from the mutex: CloudFormation serializes
         # per-stack, and this step is what grants the role its mutex access.
-        env:
-          HIVE_BASIC_AUTH_PASSWORD: ${{ secrets.HIVE_BASIC_AUTH_PASSWORD }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             CHANGED=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" -- infra/)
@@ -98,12 +96,10 @@ jobs:
             echo "infra/ unchanged; skipping stack update"
             exit 0
           fi
-          echo "::add-mask::$HIVE_BASIC_AUTH_PASSWORD"
           aws cloudformation deploy \
             --stack-name hive-v2-infra \
             --template-file infra/template.yaml \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --parameter-overrides HiveBasicAuthPassword="$HIVE_BASIC_AUTH_PASSWORD"
+            --capabilities CAPABILITY_NAMED_IAM
       - name: Acquire the deploy mutex
         if: ${{ steps.staleness.outputs.skip != 'true' }}
         run: bash infra/deploy-mutex.sh acquire aws-acts "hive-v2/${{ github.run_id }}"

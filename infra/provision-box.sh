@@ -1,7 +1,7 @@
 #!/bin/bash
 # Idempotent provisioner for the hive-v2 box. Runs as root.
-# Adopts the live hand-rolled setup: only rewrites files whose content differs,
-# never clobbers an existing /etc/hive-v2/web.env or htpasswd file.
+# Only rewrites files whose content differs, never clobbers an existing
+# /etc/hive-v2/web.env.
 set -euo pipefail
 
 REPO=/home/ubuntu/hive-v2
@@ -9,7 +9,8 @@ BOX_DIR="$REPO/infra/box"
 ENV_FILE=/etc/hive-v2/web.env
 NGINX_AVAIL=/etc/nginx/sites-available/hive-v2
 NGINX_ENABLED=/etc/nginx/sites-enabled/hive-v2
-HTPASSWD=/etc/nginx/webterm/.htpasswd-hive
+# The basic-auth fallback is gone; its credential file dies on provision.
+HTPASSWD_STALE=/etc/nginx/webterm/.htpasswd-hive
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "FAIL: run as root" >&2
@@ -68,24 +69,9 @@ if [ ! -e "$NGINX_ENABLED" ]; then
   echo "linked:  $NGINX_ENABLED"
 fi
 
-mkdir -p /etc/nginx/webterm
-password=""
-if [ ! -t 0 ]; then
-  password=$(cat)
-fi
-if [ -n "$password" ]; then
-  if ! command -v htpasswd >/dev/null 2>&1; then
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq apache2-utils >/dev/null
-  fi
-  printf '%s' "$password" | htpasswd -i -B -c "$HTPASSWD" alex
-  chmod 644 "$HTPASSWD"
-  echo "updated: $HTPASSWD"
-elif [ -f "$HTPASSWD" ]; then
-  echo "kept:    $HTPASSWD"
-else
-  echo "FAIL: no password on stdin and $HTPASSWD does not exist" >&2
-  exit 1
+if [ -f "$HTPASSWD_STALE" ]; then
+  rm -f "$HTPASSWD_STALE"
+  echo "removed: $HTPASSWD_STALE (basic-auth fallback retired)"
 fi
 
 systemctl daemon-reload
