@@ -8,8 +8,19 @@ used to be hand-rolled.
 - `template.yaml` — stack `hive-v2-infra`: the basic-auth secret in Secrets
   Manager and the IAM role the GitHub deploy workflow assumes over OIDC.
 - `box/` — the live box config, adopted byte-for-byte: both systemd units,
-  the `hive` wrapper, and the nginx site (with the secret as a
-  `__HIVE_WEB_SECRET__` placeholder, rendered at provision time).
+  the `hive` wrapper, and the nginx site (with `__HIVE_WEB_SECRET__` and
+  `__HIVE_ORIGIN_KEY__` placeholders, rendered at provision time).
+
+## The two ways in
+
+- **nexus embed**: nexus.dexima.ai's CloudFront proxies `/hive/*` to the box's
+  nginx vhost with a custom origin header `x-hive-origin: <HIVE_ORIGIN_KEY>`.
+  The nexus session gate is the auth; nginx only checks the origin key on
+  `location /hive/` and never asks for basic auth there. The hive server
+  strips the `/hive` prefix before routing, so `/hive/api/view` and
+  `/api/view` are the same endpoint.
+- **standalone fallback**: `https://hive.44.192.48.70.sslip.io/` at the root
+  keeps the Let's Encrypt + basic-auth setup unchanged.
 - `provision-box.sh` — idempotent root provisioner. Installs units and
   wrapper only when content differs, keeps an existing
   `/etc/hive-v2/web.env` and htpasswd file, renders and reloads nginx.
@@ -37,6 +48,10 @@ used to be hand-rolled.
 2. In the GitHub repo settings, set:
    - secret `HIVE_DEPLOY_ROLE_ARN` = the stack's `DeployRoleArn` output
    - secret `HIVE_BASIC_AUTH_PASSWORD` = the same password
+   - secret `HIVE_ORIGIN_KEY` = the `HIVE_ORIGIN_KEY` line from
+     `/etc/hive-v2/web.env` on the box (`sudo grep HIVE_ORIGIN_KEY
+     /etc/hive-v2/web.env`). The citadel deploy-nexus workflow consumes it to
+     set the CloudFront origin header; this repo never reads it from GitHub.
    - variable `KIMI_BOX_ID` = `i-004e23820520cbf3c`
 
 3. Done. Every push to main that touches `src/`, `web/`, `infra/`, or the
