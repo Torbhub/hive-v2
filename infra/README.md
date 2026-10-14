@@ -58,6 +58,24 @@ origin (CloudFront cannot target a bare IP). It serves no public UI.
 3. Done. Every push to main that touches `src/`, `web/`, `infra/`, or the
    package files runs the gate and then deploys over SSM.
 
+## Swapping the origin hostname (e.g. to hive.dexima.ai)
+
+The CloudFront origin hostname is a deploy-time context on the citadel side,
+so the swap is four steps, no code archaeology:
+
+1. Point the new hostname's DNS at the box (`44.192.48.70`).
+2. Cert on the box: `sudo certbot --nginx -d hive.dexima.ai` (http-01 works
+   once DNS resolves; the le-http01 nginx site already answers challenges).
+3. Edit `infra/box/nginx-hive.conf`: `server_name` and both
+   `ssl_certificate*` paths to the new hostname, push. The deploy workflow
+   reprovisions the box. `nginx -t` gates the reload, so a missing cert
+   fails safe.
+4. On the citadel repo set the variable `HIVE_ORIGIN_HOST` to the new
+   hostname. The next deploy-nexus run points CloudFront at it.
+
+The old sslip hostname then serves nothing and its cert can lapse.
+
+
 ## Drift adoption
 
 The systemd units, wrapper, and nginx site on the box were hand-rolled and
