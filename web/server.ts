@@ -215,7 +215,11 @@ export function createServer(root: string): http.Server {
         throw new HttpError(403, 'missing or wrong x-hive-auth header');
       }
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      if (url.pathname === '/api/view' && req.method === 'GET') {
+      // nexus fronts this app under /hive/; standalone serving stays at root.
+      const pathname = url.pathname === '/hive' ? '/'
+        : url.pathname.startsWith('/hive/') ? url.pathname.slice('/hive'.length)
+        : url.pathname;
+      if (pathname === '/api/view' && req.method === 'GET') {
         const view = await buildView(root);
         if (view.error) {
           // The read-failure reason can name filesystem paths; the browser
@@ -230,16 +234,16 @@ export function createServer(root: string): http.Server {
         sendJson(res, 200, view);
         return;
       }
-      if (url.pathname.startsWith('/api/')) {
-        if (req.method !== 'POST') throw new HttpError(405, `${url.pathname} is POST only`);
+      if (pathname.startsWith('/api/')) {
+        if (req.method !== 'POST') throw new HttpError(405, `${pathname} is POST only`);
         checkBrowserHeaders(req);
         const contentType = req.headers['content-type'] ?? '';
         if (!contentType.startsWith('application/json')) throw new HttpError(415, 'POST a JSON body');
-        sendJson(res, 200, await handlePost(root, url.pathname, await readBody(req)));
+        sendJson(res, 200, await handlePost(root, pathname, await readBody(req)));
         return;
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'GET only');
-      await serveStatic(res, url.pathname);
+      await serveStatic(res, pathname);
     })().catch((e: unknown) => {
       if (e instanceof HttpError) {
         sendJson(res, e.code, { ok: false, detail: e.message });

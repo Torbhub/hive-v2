@@ -32,7 +32,7 @@ let resolveAction: ((v: Response) => void) | null;
 beforeEach(async () => {
   resolveAction = null;
   vi.stubGlobal('fetch', vi.fn((input: unknown) => {
-    if (String(input).endsWith('/api/view')) {
+    if (String(input).endsWith('api/view')) {
       return Promise.resolve(new Response(JSON.stringify(VIEW), { status: 200 }));
     }
     return new Promise<Response>((resolve) => {
@@ -121,7 +121,7 @@ describe('instant click feedback', () => {
       },
     };
     vi.mocked(fetch).mockImplementation((input: unknown) => {
-      if (String(input).endsWith('/api/view')) {
+      if (String(input).endsWith('api/view')) {
         return Promise.resolve(new Response(JSON.stringify(dialogView), { status: 200 }));
       }
       return new Promise<Response>((resolve) => {

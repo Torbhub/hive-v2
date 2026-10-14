@@ -219,10 +219,9 @@ function PlanActions({
       {sendingBack && (
         <form
           className="flex gap-1.5"
-          onSubmit={(e) => {
-            e.preventDefault();
-            onPlanAnswer(project, taskId, 'sendback', feedback.trim() || undefined);
-          }}
+          // Block the native reload; the Send button's onPress is the one
+          // submit path (Enter in the input clicks the submit button).
+          onSubmit={(e) => e.preventDefault()}
         >
           <Input
             autoFocus
@@ -422,7 +421,7 @@ export function App() {
   const refresh = useCallback(async () => {
     let next: HubView;
     try {
-      const r = await fetch('/api/view');
+      const r = await fetch('api/view');
       next = (await r.json()) as HubView;
     } catch (e) {
       setView((v) => ({ ...v, error: e instanceof Error ? e.message : String(e) }));
@@ -477,14 +476,14 @@ export function App() {
 
   const onWake = useCallback((project: string) => {
     void act(`wake-${project}`, project, 'resuming', project, async () => {
-      const j = await post('/api/wake', { project });
+      const j = await post('api/wake', { project });
       return `${project}: its orchestrator is coming up; it reports back when its team is up (pane ${j.pane})`;
     });
   }, [act]);
 
   const onContinue = useCallback((project: string) => {
     void act(`continue-${project}`, project, 'continuing', project, async () => {
-      const j = await post('/api/continue', { project });
+      const j = await post('api/continue', { project });
       return `${project}: its first line was sent (pane ${j.pane})`;
     });
   }, [act]);
@@ -492,36 +491,36 @@ export function App() {
   const onAnswer = useCallback((project: string, agentRefArg: string | undefined, seen: string, choice: string, id: string) => {
     const who = agentRefArg ? `${project} · ${agentRefArg}` : project;
     void act(id, project, 'answering', who, async () => {
-      const j = await post('/api/answer', { project, agent: agentRefArg, choice, fingerprint: seen });
+      const j = await post('api/answer', { project, agent: agentRefArg, choice, fingerprint: seen });
       return `${who}: answered "${j.option}"${j.dialog_gone ? '' : ' (the dialog is still on its screen)'}`;
     }, agentRefArg);
   }, [act]);
 
   const onStartTask = useCallback(async (project: string, text: string): Promise<boolean> => {
     return act(`start-${project}`, project, 'starting', project, async () => {
-      const t = await post('/api/task', { project, text });
-      const j = await post('/api/start', { project, task: t.id });
+      const t = await post('api/task', { project, text });
+      const j = await post('api/start', { project, task: t.id });
       return `${project}: its orchestrator is coming up on ${t.id}; it reports back when its team is up (pane ${j.pane})`;
     });
   }, [act]);
 
   const onSetMode = useCallback((project: string, mode: ProjectMode) => {
     void act(`mode-${project}-${mode}`, project, 'answering', project, async () => {
-      await post('/api/mode', { project, mode });
+      await post('api/mode', { project, mode });
       return `${project}: permission mode is ${mode} (applies to the next launch)`;
     });
   }, [act]);
 
   const onSetApprovals = useCallback((project: string, approvals: Approvals) => {
     void act(`approvals-${project}-${approvals}`, project, 'answering', project, async () => {
-      await post('/api/approvals', { project, approvals });
+      await post('api/approvals', { project, approvals });
       return `${project}: approvals are ${approvals}`;
     });
   }, [act]);
 
   const onPlanAnswer = useCallback((project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => {
     void act(`plan-${taskId}-${verdict}`, project, 'answering', taskId, async () => {
-      await post('/api/plan-answer', { project, task: taskId, verdict, feedback });
+      await post('api/plan-answer', { project, task: taskId, verdict, feedback });
       return verdict === 'approve' ? `${taskId}: plan approved` : `${taskId}: plan sent back`;
     }, taskId);
   }, [act]);

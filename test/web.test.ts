@@ -247,6 +247,41 @@ describe('action serialization', () => {
   });
 });
 
+describe('/hive prefix (nexus embed)', () => {
+  it('/hive/api/view answers identically to /api/view', async () => {
+    const [plain, prefixed] = await Promise.all([
+      fetch(`${base}/api/view`),
+      fetch(`${base}/hive/api/view`),
+    ]);
+    expect(prefixed.status).toBe(200);
+    // updatedAt is read-time; everything else must be identical.
+    const strip = (v: { updatedAt: number }) => ({ ...v, updatedAt: 0 });
+    expect(strip(await prefixed.json())).toEqual(strip(await plain.json()));
+  });
+
+  it('/hive/api/* POSTs route like their unprefixed twins', async () => {
+    const r = await post('/hive/api/wake', { project: 'nope' });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/unknown project/);
+  });
+
+  it('a lookalike prefix is not stripped', async () => {
+    // /hivex/... is not the API: a POST there is GET-only static territory.
+    expect((await post('/hivex/api/wake', { project: 'demo' })).status).toBe(405);
+  });
+
+  it.skipIf(!existsSync(path.join(WEB_DIST, 'index.html')))(
+    '/hive/ and /hive both serve the SPA shell',
+    async () => {
+      for (const p of ['/hive/', '/hive']) {
+        const r = await fetch(`${base}${p}`);
+        expect(r.status).toBe(200);
+        expect(await r.text()).toContain('hive hub');
+      }
+    },
+  );
+});
+
 describe('HIVE_WEB_SECRET gate', () => {
   it('403s every request without the header, allows with it', async () => {
     process.env.HIVE_WEB_SECRET = 's3cret';
