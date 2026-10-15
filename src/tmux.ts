@@ -20,8 +20,8 @@ export function tmuxSocket(): string {
   return process.env.HIVE_TMUX_SOCKET ?? 'hive-v2';
 }
 
-async function tmux(args: string[]): Promise<RunResult> {
-  return run('tmux', ['-L', tmuxSocket(), ...args]);
+export async function tmux(args: string[], timeoutMs?: number): Promise<RunResult> {
+  return run('tmux', ['-L', tmuxSocket(), ...args], undefined, undefined, timeoutMs);
 }
 
 export async function ensureHiveSession(): Promise<void> {

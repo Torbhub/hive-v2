@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import { captureDeathBundle } from './death-bundle.js';
 import { answerDialog, buildStatus, readDialogFor, Refusal, wake } from './hub.js';
 import { appendDecision, hubPath, readProjects, readTeam } from './state.js';
 import { paneExists, run, sleep } from './tmux.js';
@@ -106,6 +107,11 @@ export async function watchCycle(
       await appendWatchLog(
         root,
         `${new Date().toISOString()} ${p.name} ${a.name} pane ${a.pane} died (pid ${a.pane_pid}, started ${a.pane_started})`,
+      );
+      const bundle = await captureDeathBundle(root, p.name, a).catch(() => null);
+      await appendWatchLog(
+        root,
+        `${new Date().toISOString()} ${p.name} ${a.name} death bundle: ${bundle ?? 'capture failed'}`,
       );
       if (a.orchestrator) {
         await appendDecision(root, {
