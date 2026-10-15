@@ -1,7 +1,7 @@
 // Stretchtext markup: `{{short|long}}` in agent prose. The reader sees
 // `short`; opening it puts `long` in its place. `long` may hold further
 // stretches. Code spans and fences are copied as written, so braces in code
-// never open a stretch. Ported from pro-vi/cc-stretch's parse.ts.
+// never open a stretch.
 
 export type Segment = string | Stretch;
 
@@ -15,7 +15,7 @@ export type Stretch = {
   isClosed: boolean;
 };
 
-export const KEY_SEPARATOR = ' › ';
+const KEY_SEPARATOR = ' › ';
 
 export function isOpenable(stretch: Stretch): boolean {
   return stretch.isClosed && stretch.long !== undefined;
@@ -24,7 +24,7 @@ export function isOpenable(stretch: Stretch): boolean {
 type Frame = { stretch: Stretch; siblings: Map<string, number> };
 
 /** Where the code span opening at `i` ends: past the next run of as many backticks, or at the text's end. */
-export function codeSpanEnd(text: string, i: number): number {
+function codeSpanEnd(text: string, i: number): number {
   const run = /^`+/.exec(text.slice(i))?.[0] ?? '`';
   const end = text.indexOf(run, i + run.length);
   return end === -1 ? text.length : end + run.length;
@@ -88,7 +88,7 @@ export function parse(text: string): Segment[] {
       continue;
     }
 
-    write(text[i] ?? '');
+    write(text[i]);
     i += 1;
   }
 
