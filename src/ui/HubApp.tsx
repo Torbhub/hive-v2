@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import type { HubAgent, HubDialog, HubProject, HubTask, HubView } from '../types.js';
-import { answerDialog, continueProject, wake } from '../hub.js';
+import { answerDialog, continueProject, planAnswer, wake } from '../hub.js';
 import {
   ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
 } from '../view.js';
@@ -101,14 +101,75 @@ function NeedAction({
   );
 }
 
+// One-line text entry for the send-back verdict; Esc cancels, Enter sends.
+function FeedbackPrompt({ onSubmit, onCancel }: { onSubmit: (text: string) => void; onCancel: () => void }) {
+  const [text, setText] = useState('');
+  useInput((input, key) => {
+    if (key.escape) {
+      onCancel();
+      return;
+    }
+    if (key.return) {
+      onSubmit(text);
+      return;
+    }
+    if (key.backspace || key.delete) {
+      setText((t) => t.slice(0, -1));
+      return;
+    }
+    if (input && !key.ctrl && !key.meta && !key.tab) setText((t) => t + input);
+  });
+  return (
+    <Box paddingLeft={2}>
+      <Text color="white">feedback: </Text>
+      {text === ''
+        ? <Text color="gray">what should change? (optional)</Text>
+        : <Text color="white">{text}</Text>}
+      <Text inverse> </Text>
+    </Box>
+  );
+}
+
+function NeedPlan({
+  need, acting, busy, feedbackOpen, onApprove, onSendBack, onFeedback, onCancelFeedback,
+}: {
+  need: Need;
+  acting: boolean;
+  busy: { project: string; what: string; who?: string } | null;
+  feedbackOpen: boolean;
+  onApprove: (project: string, taskId: string) => void;
+  onSendBack: (taskId: string) => void;
+  onFeedback: (project: string, taskId: string, text: string) => void;
+  onCancelFeedback: () => void;
+}) {
+  if (need.action !== 'plan' || need.dialogKey || !need.project || !need.taskId) return null;
+  const project = need.project;
+  const taskId = need.taskId;
+  if (busy?.what === 'answering' && busy.who === taskId) {
+    return <Box paddingLeft={2}><Text color="cyan">answering…</Text></Box>;
+  }
+  if (feedbackOpen) {
+    return <FeedbackPrompt onSubmit={(text) => onFeedback(project, taskId, text)} onCancel={onCancelFeedback} />;
+  }
+  return (
+    <Box paddingLeft={2} columnGap={1}>
+      <Button label="a approve plan" hotkey="a" onPress={() => onApprove(project, taskId)} disabled={acting} />
+      <Button label="b send back" hotkey="b" onPress={() => onSendBack(taskId)} disabled={acting} />
+    </Box>
+  );
+}
+
 export function HubApp({ root }: { root: string }) {
   const [view, setView] = useState<HubView>({
     root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], updatedAt: 0, error: '',
   });
   const [acting, setActing] = useState(false);
-  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' } | null>(null);
+  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'answering'; who?: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [sendingBack, setSendingBack] = useState<string | null>(null);
   const actingRef = useRef(false);
+  // Read at key-event time, so keys in the same stdin chunk as `b` already see it.
+  const planInputActiveRef = useRef(false);
 
   // A failed status read (updatedAt 0) keeps the old data, shows the error.
   const refresh = useCallback(async () => {
@@ -138,7 +199,7 @@ export function HubApp({ root }: { root: string }) {
     if (actingRef.current) return;
     actingRef.current = true;
     setActing(true);
-    if (what !== 'answering') setBusy({ project, what });
+    setBusy({ project, what, who });
     try {
       setToast(await runAction());
     } catch (e) {
@@ -175,6 +236,33 @@ export function HubApp({ root }: { root: string }) {
     });
   }, [act, root]);
 
+  const onPlanAnswer = useCallback((project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => {
+    void act(project, 'answering', taskId, async () => {
+      await withTimeout(planAnswer(root, project, taskId, verdict, feedback), ANSWER_TIMEOUT_MS, 'plan-answer');
+      return verdict === 'approve' ? `${taskId}: plan approved` : `${taskId}: plan sent back`;
+    });
+  }, [act, root]);
+
+  const onPlanApprove = useCallback((project: string, taskId: string) => {
+    onPlanAnswer(project, taskId, 'approve');
+  }, [onPlanAnswer]);
+
+  const onSendBack = useCallback((taskId: string) => {
+    planInputActiveRef.current = true;
+    setSendingBack(taskId);
+  }, []);
+
+  const onFeedback = useCallback((project: string, taskId: string, text: string) => {
+    planInputActiveRef.current = false;
+    setSendingBack(null);
+    onPlanAnswer(project, taskId, 'sendback', text.trim() || undefined);
+  }, [onPlanAnswer]);
+
+  const onCancelFeedback = useCallback(() => {
+    planInputActiveRef.current = false;
+    setSendingBack(null);
+  }, []);
+
   const now = Date.now();
   const where = homeTilde(root, process.env.HOME ?? '');
   const clock = view.updatedAt
@@ -190,7 +278,7 @@ export function HubApp({ root }: { root: string }) {
   const rule = <Text color="gray">{'─'.repeat(inner)}</Text>;
 
   return (
-    <ButtonScope>
+    <ButtonScope suspended={planInputActiveRef}>
       <Box flexDirection="column" backgroundColor="black" width={width} minHeight={rows} paddingX={1}>
         <Box justifyContent="space-between">
           <Box flexShrink={1}>
@@ -222,6 +310,16 @@ export function HubApp({ root }: { root: string }) {
                   <NeedDialog dialogKey={n.dialogKey} dialogs={view.dialogs} onAnswer={onAnswer} />
                 )}
                 <NeedAction need={n} acting={acting} busy={busy} onContinue={onContinue} />
+                <NeedPlan
+                  need={n}
+                  acting={acting}
+                  busy={busy}
+                  feedbackOpen={sendingBack === n.taskId}
+                  onApprove={onPlanApprove}
+                  onSendBack={onSendBack}
+                  onFeedback={onFeedback}
+                  onCancelFeedback={onCancelFeedback}
+                />
               </Box>
             ))}
           </Box>
