@@ -28,7 +28,7 @@ printf '%s' "$ch" > "$2"
 // Answers ASK to anything that looks like a deploy, APPROVE to the rest.
 // Every call is logged so tests can prove the classifier was (not) invoked.
 const KIMI_STUB_SH = `#!/bin/bash
-printf '%s\\n' "$*" >> "${KIMI_STUB_LOG:?}"
+printf '%s\\n' "$*" >> "\${KIMI_STUB_LOG:?}"
 case "$*" in
   *deploy-prod*) echo ASK ;;
   *) echo "APPROVE decoy stub" ;;
