@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-// Decoy-pane e2e (issue #11): a real tmux pane plays a fake approval dialog,
+// Decoy-pane e2e: a real tmux pane plays a fake approval dialog,
 // the real watchCycle detects it, calls the classifier, and answers the pane.
 // Only the `kimi` binary is a stub on PATH — dialog scraping, classification
 // plumbing, and the pane answer are the shipping code.
