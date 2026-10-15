@@ -1,7 +1,7 @@
 import React from 'react';
 import { PassThrough } from 'node:stream';
 import { render } from 'ink';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/hub.js', () => ({
   buildStatus: vi.fn(async () => ({ hub: { root: '/r', name: 'hub' }, projects: [] })),
@@ -56,10 +56,6 @@ beforeEach(() => {
   vi.mocked(buildStatus).mockClear();
   vi.mocked(listTasks).mockClear().mockResolvedValue([]);
   vi.mocked(planAnswer).mockClear().mockResolvedValue({ typed: '' });
-});
-
-afterEach(() => {
-  vi.mocked(listTasks).mockResolvedValue([]);
 });
 
 describe('HubApp polling', () => {
@@ -137,6 +133,57 @@ describe('HubApp plan actions', () => {
     stdin.write('a');
     stdin.write('b');
     await tick(300);
+    expect(planAnswer).not.toHaveBeenCalled();
+    inst.unmount();
+  });
+
+  async function openPrompt() {
+    vi.mocked(listTasks).mockResolvedValue([planTask]);
+    const { stdout, stdin } = fakeStreams();
+    const frame = frameReader(stdout);
+    const inst = render(<HubApp root="/r" />, { stdout, stdin, debug: true, patchConsole: false });
+    await waitForFrame(frame, 'b send back');
+    await tick(200);
+    stdin.write('b');
+    await waitForFrame(frame, 'what should change? (optional)');
+    return { frame, stdin, inst };
+  }
+
+  it('with the prompt open, a and b type into it and Esc closes it with no call', async () => {
+    const { frame, stdin, inst } = await openPrompt();
+    stdin.write('ab');
+    await waitForFrame(frame, 'feedback: ab');
+    expect(planAnswer).not.toHaveBeenCalled();
+    const mark = frame().length;
+    stdin.write('\x1b');
+    await waitForFrame(() => frame().slice(mark), 'a approve plan');
+    expect(planAnswer).not.toHaveBeenCalled();
+    inst.unmount();
+  });
+
+  it('Enter with the prompt open sends the verdict; it never presses the focused button', async () => {
+    const { stdin, inst } = await openPrompt();
+    stdin.write('\r');
+    await tick(300);
+    expect(planAnswer).toHaveBeenCalledTimes(1);
+    expect(planAnswer).toHaveBeenCalledWith('/r', 'demo', 'demo-3', 'sendback', undefined);
+    inst.unmount();
+  });
+
+  it('keys in the same burst as b cannot fire a hotkey while the prompt opens', async () => {
+    vi.mocked(listTasks).mockResolvedValue([planTask]);
+    const { stdout, stdin } = fakeStreams();
+    const frame = frameReader(stdout);
+    const inst = render(<HubApp root="/r" />, { stdout, stdin, debug: true, patchConsole: false });
+    await waitForFrame(frame, 'a approve plan');
+    await tick(200);
+    // One burst, delivered a char at a time before React can re-render: b
+    // opens the prompt and the a in "change" must not approve.
+    for (const ch of 'b change it') {
+      stdin.write(ch);
+      await new Promise((r) => process.nextTick(r));
+    }
+    await waitForFrame(frame, 'what should change? (optional)');
     expect(planAnswer).not.toHaveBeenCalled();
     inst.unmount();
   });

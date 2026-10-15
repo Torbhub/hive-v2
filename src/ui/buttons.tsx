@@ -16,13 +16,10 @@ const ButtonScopeContext = createContext<Scope | null>(null);
 
 // Ink has no Button; this scope gives Tab/Shift-Tab focus, Enter to press, and letter hotkeys.
 // Unregistered slots stay as holes so a live button's slot never moves under it.
-export function ButtonScope({ children, suspended = false }: { children: React.ReactNode; suspended?: boolean }) {
+export function ButtonScope({ children, suspended }: { children: React.ReactNode; suspended?: React.RefObject<boolean> }) {
   const buttons = useRef<(Registered | null)[]>([]);
   const [focused, setFocused] = useState(0);
   const focusedRef = useRef(0);
-  // While a text prompt owns the keyboard, hotkeys and Enter stay inert.
-  const suspendedRef = useRef(suspended);
-  suspendedRef.current = suspended;
 
   const liveSlots = () => buttons.current.map((b, i) => (b ? i : -1)).filter((i) => i >= 0);
 
@@ -40,9 +37,11 @@ export function ButtonScope({ children, suspended = false }: { children: React.R
   }, []);
 
   // Registration mutates a ref, so a render can lag behind it: key handling
-  // reads the ref at event time, never the render-time snapshot.
+  // reads the ref at event time, never the render-time snapshot. The same goes
+  // for `suspended`: a text prompt sets it before its state lands, so keys in
+  // the same stdin chunk as the opener stay inert.
   useInput((input, key) => {
-    if (suspendedRef.current) return;
+    if (suspended?.current) return;
     const live = liveSlots();
     if (live.length === 0) return;
     if (key.tab) {

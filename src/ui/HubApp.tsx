@@ -137,20 +137,24 @@ function NeedPlan({
   acting: boolean;
   busy: { project: string; what: string; who?: string } | null;
   feedbackOpen: boolean;
-  onApprove: () => void;
-  onSendBack: () => void;
-  onFeedback: (text: string) => void;
+  onApprove: (project: string, taskId: string) => void;
+  onSendBack: (taskId: string) => void;
+  onFeedback: (project: string, taskId: string, text: string) => void;
   onCancelFeedback: () => void;
 }) {
   if (need.action !== 'plan' || need.dialogKey || !need.project || !need.taskId) return null;
-  if (busy?.what === 'answering' && busy.who === need.taskId) {
+  const project = need.project;
+  const taskId = need.taskId;
+  if (busy?.what === 'answering' && busy.who === taskId) {
     return <Box paddingLeft={2}><Text color="cyan">answering…</Text></Box>;
   }
-  if (feedbackOpen) return <FeedbackPrompt onSubmit={onFeedback} onCancel={onCancelFeedback} />;
+  if (feedbackOpen) {
+    return <FeedbackPrompt onSubmit={(text) => onFeedback(project, taskId, text)} onCancel={onCancelFeedback} />;
+  }
   return (
     <Box paddingLeft={2} columnGap={1}>
-      <Button label="a approve plan" hotkey="a" onPress={onApprove} disabled={acting} />
-      <Button label="b send back" hotkey="b" onPress={onSendBack} disabled={acting} />
+      <Button label="a approve plan" hotkey="a" onPress={() => onApprove(project, taskId)} disabled={acting} />
+      <Button label="b send back" hotkey="b" onPress={() => onSendBack(taskId)} disabled={acting} />
     </Box>
   );
 }
@@ -164,6 +168,8 @@ export function HubApp({ root }: { root: string }) {
   const [toast, setToast] = useState<string | null>(null);
   const [sendingBack, setSendingBack] = useState<string | null>(null);
   const actingRef = useRef(false);
+  // Read at key-event time, so keys in the same stdin chunk as `b` already see it.
+  const planInputActiveRef = useRef(false);
 
   // A failed status read (updatedAt 0) keeps the old data, shows the error.
   const refresh = useCallback(async () => {
@@ -237,6 +243,26 @@ export function HubApp({ root }: { root: string }) {
     });
   }, [act, root]);
 
+  const onPlanApprove = useCallback((project: string, taskId: string) => {
+    onPlanAnswer(project, taskId, 'approve');
+  }, [onPlanAnswer]);
+
+  const onSendBack = useCallback((taskId: string) => {
+    planInputActiveRef.current = true;
+    setSendingBack(taskId);
+  }, []);
+
+  const onFeedback = useCallback((project: string, taskId: string, text: string) => {
+    planInputActiveRef.current = false;
+    setSendingBack(null);
+    onPlanAnswer(project, taskId, 'sendback', text.trim() || undefined);
+  }, [onPlanAnswer]);
+
+  const onCancelFeedback = useCallback(() => {
+    planInputActiveRef.current = false;
+    setSendingBack(null);
+  }, []);
+
   const now = Date.now();
   const where = homeTilde(root, process.env.HOME ?? '');
   const clock = view.updatedAt
@@ -252,7 +278,7 @@ export function HubApp({ root }: { root: string }) {
   const rule = <Text color="gray">{'─'.repeat(inner)}</Text>;
 
   return (
-    <ButtonScope suspended={sendingBack !== null}>
+    <ButtonScope suspended={planInputActiveRef}>
       <Box flexDirection="column" backgroundColor="black" width={width} minHeight={rows} paddingX={1}>
         <Box justifyContent="space-between">
           <Box flexShrink={1}>
@@ -289,17 +315,10 @@ export function HubApp({ root }: { root: string }) {
                   acting={acting}
                   busy={busy}
                   feedbackOpen={sendingBack === n.taskId}
-                  onApprove={() => {
-                    if (n.project && n.taskId) onPlanAnswer(n.project, n.taskId, 'approve');
-                  }}
-                  onSendBack={() => {
-                    if (n.taskId) setSendingBack(n.taskId);
-                  }}
-                  onFeedback={(text) => {
-                    setSendingBack(null);
-                    if (n.project && n.taskId) onPlanAnswer(n.project, n.taskId, 'sendback', text.trim() || undefined);
-                  }}
-                  onCancelFeedback={() => setSendingBack(null)}
+                  onApprove={onPlanApprove}
+                  onSendBack={onSendBack}
+                  onFeedback={onFeedback}
+                  onCancelFeedback={onCancelFeedback}
                 />
               </Box>
             ))}
