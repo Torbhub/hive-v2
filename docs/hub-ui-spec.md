@@ -62,7 +62,7 @@ Needs, in order pushed:
    | `blocked` | `✖` | `blocked` | red |
    | anything else | `•` | the state name itself | white |
 
-   A `plan` task carries the `plan` action (`project`, `taskId` set). If its project's orchestrator has a live question, the first such task also absorbs it: the dialog block keyed `"<project>"` renders on this card and rule 3 is skipped for that project (one card, one answer). With no dialog, the web UI renders the plan action: an **Approve plan** button and a **Send back** button with an optional feedback line; both POST `/api/plan-answer`, which types the verdict as the orchestrator's next line and logs the task `answered` (approve) or `handed` (send back).
+   A `plan` task carries the `plan` action (`project`, `taskId` set). If its project's orchestrator has a live question, the first such task also absorbs it: the dialog block keyed `"<project>"` renders on this card and rule 3 is skipped for that project (one card, one answer). With no dialog, the web UI renders the plan action: an **Approve plan** button and a **Send back** button with an optional feedback line; both POST `/api/plan-answer`, which types the verdict as the orchestrator's next line and logs the task `answered` (approve) or `handed` (send back). With no dialog, the TUI renders the same action as two hotkey **Button**s (`paddingLeft: 2`, `columnGap: 1`): `a approve plan` (hotkey `a`) and `b send back` (hotkey `b`). When several plan needs show at once, a hotkey presses the first one. `b` swaps the buttons for a one-line feedback prompt: white `feedback: `, then the typed text in white (gray `what should change? (optional)` while the line is empty), then an inverse-space cursor. Enter sends, Esc cancels, and an empty line means no feedback. While the prompt is open, button hotkeys and Enter stay inert. While the answer runs, the card shows cyan `answering…`.
 3. **Orchestrator question** (per project with `orchestrator.question`, unless absorbed by a `plan` task per rule 2): glyph `?`, **yellow**, who = project name, words `its orchestrator has a question on its screen`, when empty, plus dialog block keyed `"<project>"`.
 4. **Agent question** (per agent with `question`): glyph `?`, **yellow**, who = `{project} · {agentRef}`, words `a question on its screen`, when empty, plus dialog block keyed `"<project>/<agentRef>"`.
 5. **Starting orchestrator waiting on owner** (`orchestrator.starting` exists, not `typed`, not `sending`): glyph `?`, **yellow**, who = project name, when = `ago(starting.at)`:
@@ -386,12 +386,14 @@ Success (exit 0) prints one line: the pane dialog parse plus identifiers:
 | `Continue` button | `hh-hub continue <project>` | 150 s | cyan `continuing…` on the need |
 | dialog option button | `hh-hub answer <project> [<agent>] --choice <n> --seen <fingerprint>` | 30 s | — |
 | `Esc` button | same with `--choice esc` | 30 s | — |
+| `a approve plan` / `b send back` hotkey buttons (TUI), `Approve plan` / `Send back` + feedback line (web) | `hh-hub plan-answer <project> <task> <approve|sendback> [feedback]` | 30 s (TUI), 150 s (web) | cyan `answering…` on the need |
 | `Seen` button | local state only (records the away-period start as seen); no subprocess | — | — |
 
 Toasts (on completion):
 - wake/continue success: `{project}: {done} (pane {stdout.trim()})` where `done` is `its orchestrator is coming up; it reports back when its team is up` (wake) or `its first line was sent` (continue).
 - wake/continue failure: `{project}: {last stderr line, "hivehouse: " stripped}`.
 - answer success: `{who}: answered "{option}"` + ` (the dialog is still on its screen)` when `dialog_gone` false; `who` = `{project} · {agent}` or `{project}`. Failure: `{who}: {stderr last line}`.
+- plan-answer success: `{taskId}: plan approved` / `{taskId}: plan sent back`. Failure: `{taskId}: {reason}` (for example the plan prompt came back on the orchestrator's screen).
 - After every action: refresh.
 
 ## 8. Notes for the Ink port
