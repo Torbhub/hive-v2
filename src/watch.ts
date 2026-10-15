@@ -3,7 +3,7 @@ import { captureDeathBundle } from './death-bundle.js';
 import { answerDialog, buildStatus, readDialogFor, Refusal, wake } from './hub.js';
 import { appendDecision, hubPath, readProjects, readTeam } from './state.js';
 import { paneExists, run, sleep } from './tmux.js';
-import { lastLine } from './view.js';
+import { lastLine, withTimeout } from './view.js';
 import type { Approvals } from './types.js';
 
 // Read-only leaders: a chain segment must start with one of these to be
@@ -37,6 +37,7 @@ export function tier1Approves(command: string): boolean {
 }
 
 const CLASSIFY_TIMEOUT_MS = 60_000;
+const CYCLE_TIMEOUT_MS = 120_000;
 
 export async function kimiEnv(): Promise<NodeJS.ProcessEnv> {
   const r = await run('teamkimi', ['env']);
@@ -144,11 +145,16 @@ export async function watchCycle(
 }
 
 // The watch loop is a foreground process; systemd owns restart-on-death.
-export async function watch(root: string, { intervalMs = 5000 }: { intervalMs?: number } = {}): Promise<void> {
+// A cycle that outlives cycleTimeoutMs is abandoned, logged, and the loop
+// moves on — one wedged await must never stop the daemon (issue #10).
+export async function watch(
+  root: string,
+  { intervalMs = 5000, cycleTimeoutMs = CYCLE_TIMEOUT_MS }: { intervalMs?: number; cycleTimeoutMs?: number } = {},
+): Promise<void> {
   const env = await kimiEnv().catch(() => ({} as NodeJS.ProcessEnv));
   const deaths = new Set<string>();
   for (;;) {
-    await watchCycle(root, env, deaths).catch(async (e: unknown) => {
+    await withTimeout(watchCycle(root, env, deaths), cycleTimeoutMs, 'watch cycle').catch(async (e: unknown) => {
       await appendWatchLog(root, `${new Date().toISOString()} cycle error: ${lastLine(e)}`);
     });
     await sleep(intervalMs);
