@@ -30,11 +30,11 @@ vi.mock('../src/hub.js', async (importOriginal) => {
 });
 
 import { buildStatus, readDialogFor, answerDialog, wake } from '../src/hub.js';
-import { paneExists, run, tmux } from '../src/tmux.js';
+import { paneExists, run, sleep, tmux } from '../src/tmux.js';
 import { hubPath, readDecisions, writeJson, hivePath } from '../src/state.js';
 import { captureDeathBundle } from '../src/death-bundle.js';
 import {
-  extractCommand, neverApprove, tier1Approves, watchCycle,
+  extractCommand, neverApprove, tier1Approves, watch, watchCycle,
 } from '../src/watch.js';
 
 function tmp(): string {
@@ -126,6 +126,25 @@ describe('watchCycle watchdog', () => {
     expect(wake).not.toHaveBeenCalled();
     const log2 = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
     expect(log2).toBe(log);
+  });
+});
+
+describe('watch loop cycle timeout', () => {
+  it('a cycle stuck on a never-resolving await times out and the loop continues', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 11, pane_started: 'a' }],
+    });
+    vi.mocked(run).mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+    vi.mocked(paneExists).mockImplementation(() => new Promise(() => {}));
+    let cycles = 0;
+    vi.mocked(sleep).mockImplementation(async () => {
+      cycles += 1;
+      if (cycles >= 3) throw new Error('test: stop the loop');
+    });
+    await expect(watch(root, { intervalMs: 1, cycleTimeoutMs: 20 })).rejects.toThrow('test: stop the loop');
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    const stalls = log.split('\n').filter((l) => l.includes('cycle error: watch cycle timed out'));
+    expect(stalls).toHaveLength(3);
   });
 });
 
