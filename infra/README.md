@@ -9,7 +9,7 @@ box (a dedicated EC2 instance). One CloudFormation stack plus the box config.
   the nginx site (with `__HIVE_WEB_SECRET__` and `__HIVE_ORIGIN_KEY__`
   placeholders, rendered at provision time). `hive-v2-tmux.service` owns the
   tmux server so deploy restarts of the web and watch units cannot kill the
-  panes; deploys never restart it.
+  panes. Deploys never restart it.
 
 ## The one way in
 

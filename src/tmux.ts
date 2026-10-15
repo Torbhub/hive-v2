@@ -27,7 +27,7 @@ export async function tmux(args: string[], timeoutMs?: number): Promise<RunResul
 }
 
 export function tmuxSocketPath(): string {
-  const uid = typeof process.getuid === 'function' ? process.getuid() : 1000;
+  const uid = process.getuid!();
   const dir = process.env.TMUX_TMPDIR ?? `/tmp/tmux-${uid}`;
   return path.join(dir, tmuxSocket());
 }

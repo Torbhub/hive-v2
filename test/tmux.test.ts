@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Tests run against private throwaway tmux servers only. The default socket
@@ -51,10 +52,11 @@ describe('private socket', () => {
 
 describe('serverReachable', () => {
   it('sees a live server and refuses absent or stale sockets', async () => {
+    const dir = path.dirname(tmuxSocketPath());
     expect(await serverReachable(tmuxSocketPath())).toBe(true);
-    expect(await serverReachable(`/tmp/tmux-1000/no-such-${process.pid}`)).toBe(false);
+    expect(await serverReachable(`${dir}/no-such-${process.pid}`)).toBe(false);
     // A stale socket file (dead server) is not reachable.
-    const stale = `/tmp/tmux-1000/hive-stale-${process.pid}`;
+    const stale = `${dir}/hive-stale-${process.pid}`;
     execFileSync('touch', [stale]);
     expect(await serverReachable(stale)).toBe(false);
     execFileSync('rm', ['-f', stale]);

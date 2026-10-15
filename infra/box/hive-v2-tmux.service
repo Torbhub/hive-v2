@@ -1,8 +1,9 @@
 [Unit]
 Description=hive-v2 tmux server (socket /tmp/tmux-1000/hive-v2)
 # This unit owns the tmux server and its cgroup. Deploys must never restart
-# it: a restart kills every agent pane. If the server dies, `systemctl start`
-# it (the watch wake path does this itself); the watchdog re-wakes the panes.
+# it: a restart kills every agent pane. If the server dies, `systemctl
+# restart` it (the watch wake path does this itself) and the watchdog
+# re-wakes the panes.
 
 [Service]
 Type=oneshot
