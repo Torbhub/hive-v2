@@ -45,6 +45,8 @@ if [ ! -f "$ENV_FILE" ]; then
   } > "$ENV_FILE"
   echo "generated: $ENV_FILE"
 elif ! grep -q '^HIVE_ORIGIN_KEY=' "$ENV_FILE"; then
+  # The origin key still gates the public 443 vhost while the relay rollout
+  # is mid-flight; the removal PR prunes it.
   printf 'HIVE_ORIGIN_KEY=%s\n' "$(openssl rand -hex 24)" >> "$ENV_FILE"
   echo "appended HIVE_ORIGIN_KEY to $ENV_FILE"
 else
