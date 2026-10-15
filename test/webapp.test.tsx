@@ -135,6 +135,8 @@ describe('stretchtext decisions', () => {
     expect(container.textContent).toContain('it fits the relational brief');
   });
 });
+
+describe('instant click feedback', () => {
   it('the moment Resume is clicked the card shows resuming… and all other action buttons disable', async () => {
     const startBtn = [...container.querySelectorAll('button')]
       .find((b) => b.textContent === 'Start task') as HTMLButtonElement;
