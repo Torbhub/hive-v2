@@ -31,6 +31,7 @@ vi.mock('../src/hub.js', async (importOriginal) => {
 import { buildStatus, readDialogFor, answerDialog, wake } from '../src/hub.js';
 import { paneExists, run } from '../src/tmux.js';
 import { hubPath, readDecisions, writeJson, hivePath } from '../src/state.js';
+import { captureDeathBundle } from '../src/death-bundle.js';
 import {
   extractCommand, neverApprove, tier1Approves, watchCycle,
 } from '../src/watch.js';
@@ -178,5 +179,95 @@ describe('watchCycle auto-approver', () => {
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ ls') as never);
     await watchCycle(root);
     expect(answerDialog).not.toHaveBeenCalled();
+  });
+});
+
+describe('death bundle capture', () => {
+  const agent = {
+    name: 'demo-orchestrator', orchestrator: true,
+    pane: '%1', pane_pid: 11, pane_started: 'a', session_id: 'session_abc',
+  };
+
+  function stubProbes(dmesgResult = { code: 0, stdout: 'killed process 11\noom line\n', stderr: '' }) {
+    vi.mocked(run).mockImplementation(async (cmd, args) => {
+      if (cmd === 'tmux') return { code: 0, stdout: '%1: hive:1.0\n%2: hive:2.0\n', stderr: '' };
+      if (cmd === 'ps') return { code: 1, stdout: '', stderr: '' };
+      if (cmd === 'dmesg') return dmesgResult;
+      if (cmd === 'free') return { code: 0, stdout: 'Mem: 16000 8000 8000\n', stderr: '' };
+      if (cmd === 'systemctl') {
+        return { code: 0, stdout: `ActiveEnterTimestamp=${new Date(Date.now() - 60_000).toUTCString()}\n`, stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+  }
+
+  async function fakeWireLog(home: string): Promise<void> {
+    const dir = path.join(home, '.kimi-code', 'sessions', 'wd_x', 'session_abc', 'agents', 'main');
+    await fs.mkdir(dir, { recursive: true });
+    const lines = [
+      { type: 'turn.prompt', time: 1760000000000, prompt: 'secret prompt text' },
+      { type: 'step.end', time: 1760000001000 },
+      { type: 'turn.ended', time: 1760000002000 },
+    ];
+    await fs.writeFile(path.join(dir, 'wire.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  }
+
+  it('writes a bundle with every section, and wire types+times only', async () => {
+    const root = tmp();
+    const home = tmp();
+    await fakeWireLog(home);
+    const distFile = path.join(tmp(), 'cli.js');
+    await fs.writeFile(distFile, 'x');
+    stubProbes();
+    const file = await captureDeathBundle(root, 'demo', agent, { home, distFile });
+    expect(path.dirname(file)).toBe(hubPath(root, 'deaths'));
+    expect(path.basename(file)).toMatch(/^demo-\d+\.log$/);
+    const text = await fs.readFile(file, 'utf8');
+    for (const section of [
+      '== watchdog record ==', '== tmux server (socket', '== dead process evidence ==',
+      '== kimi wire log tail ==', '== deploy correlation ==', '== exit evidence ==',
+    ]) {
+      expect(text).toContain(section);
+    }
+    expect(text).toContain('pane: %1');
+    expect(text).toContain('no process with pid 11 (confirmed gone)');
+    expect(text).toContain('oom line');
+    expect(text).toContain(`${new Date(1760000001000).toISOString()} step.end`);
+    expect(text).toContain(`${new Date(1760000002000).toISOString()} turn.ended`);
+    expect(text).not.toContain('secret prompt text');
+    expect(text).toContain('deploy within 10 minutes before death: yes');
+    expect(text).toContain('remain-on-exit pane output: unavailable (the pane is already gone)');
+  });
+
+  it('a failing dmesg probe is recorded and the bundle still ships', async () => {
+    const root = tmp();
+    const home = tmp();
+    await fakeWireLog(home);
+    const distFile = path.join(tmp(), 'cli.js');
+    await fs.writeFile(distFile, 'x');
+    stubProbes({ code: 1, stdout: '', stderr: 'dmesg: read kernel buffer failed: Operation not permitted' });
+    const file = await captureDeathBundle(root, 'demo', agent, { home, distFile });
+    const text = await fs.readFile(file, 'utf8');
+    expect(text).toContain('dmesg: unavailable (dmesg: read kernel buffer failed: Operation not permitted)');
+    expect(text).toContain('== kimi wire log tail ==');
+    expect(text).toContain('== exit evidence ==');
+  });
+
+  it('watchCycle captures the bundle, logs its path, and still wakes the orchestrator', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'a' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(false);
+    stubProbes();
+    await watchCycle(root, {}, new Set());
+    const deathsDir = hubPath(root, 'deaths');
+    const files = await fs.readdir(deathsDir);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^demo-\d+\.log$/);
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log).toContain(`death bundle: ${path.join(deathsDir, files[0])}`);
+    expect(wake).toHaveBeenCalledWith(root, 'demo');
+    const text = await fs.readFile(path.join(deathsDir, files[0]), 'utf8');
+    expect(text).toContain('wire-log: unavailable (no session_id in the team entry)');
   });
 });
