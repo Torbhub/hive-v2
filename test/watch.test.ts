@@ -10,6 +10,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   return {
     ...orig,
     run: vi.fn(orig.run),
+    tmux: vi.fn(async () => ({ code: 1, stdout: '', stderr: 'tmux not stubbed in test' })),
     paneExists: vi.fn(async () => true),
     sleep: vi.fn(async () => {}),
   };
@@ -29,7 +30,7 @@ vi.mock('../src/hub.js', async (importOriginal) => {
 });
 
 import { buildStatus, readDialogFor, answerDialog, wake } from '../src/hub.js';
-import { paneExists, run } from '../src/tmux.js';
+import { paneExists, run, tmux } from '../src/tmux.js';
 import { hubPath, readDecisions, writeJson, hivePath } from '../src/state.js';
 import { captureDeathBundle } from '../src/death-bundle.js';
 import {
@@ -44,6 +45,21 @@ function tmp(): string {
 beforeEach(() => {
   vi.clearAllMocks();
 });
+
+// Stubs every exec probe a death-bundle capture can fire; the suite never
+// runs real tmux/ps/dmesg/free/systemctl.
+function stubProbes(dmesgResult = { code: 0, stdout: 'killed process 11\noom line\n', stderr: '' }) {
+  vi.mocked(tmux).mockResolvedValue({ code: 0, stdout: '%1: hive:1.0\n%2: hive:2.0\n', stderr: '' });
+  vi.mocked(run).mockImplementation(async (cmd) => {
+    if (cmd === 'ps') return { code: 1, stdout: '', stderr: '' };
+    if (cmd === 'dmesg') return dmesgResult;
+    if (cmd === 'free') return { code: 0, stdout: 'Mem: 16000 8000 8000\n', stderr: '' };
+    if (cmd === 'systemctl') {
+      return { code: 0, stdout: `ActiveEnterTimestamp=${new Date(Date.now() - 60_000).toUTCString()}\n`, stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  });
+}
 
 describe('the approval classifier', () => {
   it('extracts the command from a Run-this-command dialog', () => {
@@ -93,6 +109,7 @@ describe('watchCycle watchdog', () => {
       ],
     });
     vi.mocked(paneExists).mockResolvedValue(false);
+    stubProbes();
     const deaths = new Set<string>();
     await watchCycle(root, {}, deaths);
     expect(wake).toHaveBeenCalledWith(root, 'demo');
@@ -188,19 +205,6 @@ describe('death bundle capture', () => {
     pane: '%1', pane_pid: 11, pane_started: 'a', session_id: 'session_abc',
   };
 
-  function stubProbes(dmesgResult = { code: 0, stdout: 'killed process 11\noom line\n', stderr: '' }) {
-    vi.mocked(run).mockImplementation(async (cmd, args) => {
-      if (cmd === 'tmux') return { code: 0, stdout: '%1: hive:1.0\n%2: hive:2.0\n', stderr: '' };
-      if (cmd === 'ps') return { code: 1, stdout: '', stderr: '' };
-      if (cmd === 'dmesg') return dmesgResult;
-      if (cmd === 'free') return { code: 0, stdout: 'Mem: 16000 8000 8000\n', stderr: '' };
-      if (cmd === 'systemctl') {
-        return { code: 0, stdout: `ActiveEnterTimestamp=${new Date(Date.now() - 60_000).toUTCString()}\n`, stderr: '' };
-      }
-      return { code: 0, stdout: '', stderr: '' };
-    });
-  }
-
   async function fakeWireLog(home: string): Promise<void> {
     const dir = path.join(home, '.kimi-code', 'sessions', 'wd_x', 'session_abc', 'agents', 'main');
     await fs.mkdir(dir, { recursive: true });
@@ -221,7 +225,7 @@ describe('death bundle capture', () => {
     stubProbes();
     const file = await captureDeathBundle(root, 'demo', agent, { home, distFile });
     expect(path.dirname(file)).toBe(hubPath(root, 'deaths'));
-    expect(path.basename(file)).toMatch(/^demo-\d+\.log$/);
+    expect(path.basename(file)).toMatch(/^demo-demo-orchestrator-\d+\.log$/);
     const text = await fs.readFile(file, 'utf8');
     for (const section of [
       '== watchdog record ==', '== tmux server (socket', '== dead process evidence ==',
@@ -263,7 +267,7 @@ describe('death bundle capture', () => {
     const deathsDir = hubPath(root, 'deaths');
     const files = await fs.readdir(deathsDir);
     expect(files).toHaveLength(1);
-    expect(files[0]).toMatch(/^demo-\d+\.log$/);
+    expect(files[0]).toMatch(/^demo-demo-orchestrator-\d+\.log$/);
     const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
     expect(log).toContain(`death bundle: ${path.join(deathsDir, files[0])}`);
     expect(wake).toHaveBeenCalledWith(root, 'demo');

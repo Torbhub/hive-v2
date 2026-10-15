@@ -2,11 +2,13 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { hubPath } from './state.js';
-import { run, tmuxSocket } from './tmux.js';
+import { run, tmux, tmuxSocket } from './tmux.js';
 import type { TeamEntry } from './types.js';
 import { lastLine } from './view.js';
 
+// Rebuild stamp left by infra/ deploy on the box; the box is committed state in infra/.
 const HIVE_V2_DIST = '/home/ubuntu/hive-v2/dist/src/cli.js';
+const PROBE_TIMEOUT_MS = 10_000;
 const DEPLOY_WINDOW_MS = 10 * 60_000;
 const WIRE_TAIL_BYTES = 64 * 1024;
 const WIRE_EVENT_COUNT = 5;
@@ -31,7 +33,7 @@ async function isolated(name: string, fn: () => Promise<string>): Promise<string
 
 async function probeRun(name: string, cmd: string, args: string[]): Promise<string> {
   return isolated(name, async () => {
-    const r = await run(cmd, args);
+    const r = await run(cmd, args, undefined, undefined, PROBE_TIMEOUT_MS);
     if (r.code !== 0) throw new Error(r.stderr.trim() || `exit code ${r.code}`);
     return r.stdout;
   });
@@ -135,17 +137,22 @@ export async function captureDeathBundle(
 ): Promise<string> {
   const home = paths.home ?? os.homedir();
   const distFile = paths.distFile ?? HIVE_V2_DIST;
-  const panes = await probeRun('tmux-list-panes', 'tmux', ['-L', tmuxSocket(), 'list-panes', '-a']);
+  const panes = await isolated('tmux-list-panes', async () => {
+    const r = await tmux(['list-panes', '-a'], PROBE_TIMEOUT_MS);
+    if (r.code !== 0) throw new Error(r.stderr.trim() || `exit code ${r.code}`);
+    return r.stdout;
+  });
   const ps = await isolated('ps', async () => {
-    const r = await run('ps', ['-o', 'pid,stat,etime,cmd', '-p', String(agent.pane_pid)]);
+    const r = await run('ps', ['-o', 'pid,stat,etime,cmd', '-p', String(agent.pane_pid)], undefined, undefined, PROBE_TIMEOUT_MS);
     return r.code === 0 && r.stdout.trim().split('\n').length > 1
       ? r.stdout
       : `no process with pid ${agent.pane_pid} (confirmed gone)`;
   });
   const dmesg = cap(await probeRun('dmesg', 'dmesg', []), 20);
   const free = await probeRun('free', 'free', ['-m']);
-  const wire = agent.session_id
-    ? await isolated('wire-log', () => wireTail(home, agent.session_id as string))
+  const sessionId = agent.session_id;
+  const wire = sessionId
+    ? await isolated('wire-log', () => wireTail(home, sessionId))
     : 'wire-log: unavailable (no session_id in the team entry)';
   const deploy = await isolated('deploy-correlation', () => deploySection(distFile, deathAt));
 
@@ -183,7 +190,7 @@ export async function captureDeathBundle(
     ``,
   ].join('\n');
 
-  const file = hubPath(root, 'deaths', `${project}-${Math.floor(deathAt.getTime() / 1000)}.log`);
+  const file = hubPath(root, 'deaths', `${project}-${agent.name}-${Math.floor(deathAt.getTime() / 1000)}.log`);
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, bundle);
   return file;
