@@ -5,9 +5,11 @@ box (a dedicated EC2 instance). One CloudFormation stack plus the box config.
 
 - `template.yaml` — stack `hive-v2-infra`: the IAM role the GitHub deploy
   workflow assumes over OIDC.
-- `box/` — the live box config: both systemd units, the `hive` wrapper, and
+- `box/` — the live box config: the systemd units, the `hive` wrapper, and
   the nginx site (with `__HIVE_WEB_SECRET__` and `__HIVE_ORIGIN_KEY__`
-  placeholders, rendered at provision time).
+  placeholders, rendered at provision time). `hive-v2-tmux.service` owns the
+  tmux server so deploy restarts of the web and watch units cannot kill the
+  panes. Deploys never restart it.
 
 ## The one way in
 

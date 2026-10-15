@@ -1,0 +1,3 @@
+# The watch daemon (User=ubuntu) re-creates the tmux server through this unit
+# so the server never lands in a cgroup a deploy restarts.
+ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl start hive-v2-tmux, /usr/bin/systemctl restart hive-v2-tmux
