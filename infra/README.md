@@ -23,7 +23,9 @@ origin (CloudFront cannot target a bare IP). It serves no public UI.
 
 - `provision-box.sh` — idempotent root provisioner. Installs units and
   wrapper only when content differs, keeps an existing
-  `/etc/hive-v2/web.env`, renders and reloads nginx.
+  `/etc/hive-v2/web.env`, renders and reloads nginx. Installs the pinned
+  nexus-push MCP client to `/opt/nexus-push/` (pins at the top of the
+  section, bump both to upgrade).
 - `deploy-box.sh` — what the workflow runs on the box over SSM: fetch, reset
   to the merged commit, `npm ci`, build, provision, health-check.
 - `.github/workflows/deploy.yml` — gate job (test, build, lint) then deploy.
