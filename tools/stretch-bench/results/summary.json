@@ -1,0 +1,193 @@
+{
+  "summary": {
+    "replies": 20,
+    "originalWords": 9939,
+    "skimWords": 1485,
+    "skimRatio": 0.14941140959855118,
+    "claims": 54,
+    "claimsCovered": 13,
+    "coverage": 0.24074074074074073
+  },
+  "perReply": [
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_2e53cf7d-0305-4f43-842b-f25d761832dd/agents/agent-3/wire.jsonl",
+      "turn": "5",
+      "originalWords": 1396,
+      "skimWords": 74,
+      "ratio": 0.05300859598853868,
+      "claims": 3,
+      "hits": 1
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_9ea5f89b-f9ca-4103-abb9-ab737495e2e3/agents/agent-41/wire.jsonl",
+      "turn": "0",
+      "originalWords": 769,
+      "skimWords": 60,
+      "ratio": 0.07802340702210664,
+      "claims": 3,
+      "hits": 0
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_db0c6952-8173-452c-adfb-c5bce9b8043c/agents/main/wire.jsonl",
+      "turn": "56",
+      "originalWords": 607,
+      "skimWords": 83,
+      "ratio": 0.13673805601317957,
+      "claims": 3,
+      "hits": 1
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_2e53cf7d-0305-4f43-842b-f25d761832dd/agents/main/wire.jsonl",
+      "turn": "4",
+      "originalWords": 422,
+      "skimWords": 84,
+      "ratio": 0.1990521327014218,
+      "claims": 3,
+      "hits": 1
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_9ea5f89b-f9ca-4103-abb9-ab737495e2e3/agents/agent-34/wire.jsonl",
+      "turn": "1",
+      "originalWords": 352,
+      "skimWords": 73,
+      "ratio": 0.20738636363636365,
+      "claims": 3,
+      "hits": 0
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_db0c6952-8173-452c-adfb-c5bce9b8043c/agents/main/wire.jsonl",
+      "turn": "21",
+      "originalWords": 200,
+      "skimWords": 54,
+      "ratio": 0.27,
+      "claims": 3,
+      "hits": 0
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_9ea5f89b-f9ca-4103-abb9-ab737495e2e3/agents/main/wire.jsonl",
+      "turn": "17",
+      "originalWords": 655,
+      "skimWords": 123,
+      "ratio": 0.18778625954198475,
+      "claims": 3,
+      "hits": 0
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_db0c6952-8173-452c-adfb-c5bce9b8043c/agents/main/wire.jsonl",
+      "turn": "4",
+      "originalWords": 364,
+      "skimWords": 78,
+      "ratio": 0.21428571428571427,
+      "claims": 3,
+      "hits": 0
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_db0c6952-8173-452c-adfb-c5bce9b8043c/agents/main/wire.jsonl",
+      "turn": "55",
+      "originalWords": 158,
+      "skimWords": 67,
+      "ratio": 0.4240506329113924,
+      "claims": 3,
+      "hits": 1
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_db0c6952-8173-452c-adfb-c5bce9b8043c/agents/main/wire.jsonl",
+      "turn": "22",
+      "originalWords": 358,
+      "skimWords": 95,
+      "ratio": 0.26536312849162014,
+      "claims": 3,
+      "hits": 1
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_9ea5f89b-f9ca-4103-abb9-ab737495e2e3/agents/main/wire.jsonl",
+      "turn": "27",
+      "originalWords": 255,
+      "skimWords": 83,
+      "ratio": 0.3254901960784314,
+      "claims": 1,
+      "hits": 0
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_2e53cf7d-0305-4f43-842b-f25d761832dd/agents/main/wire.jsonl",
+      "turn": "1",
+      "originalWords": 611,
+      "skimWords": 60,
+      "ratio": 0.09819967266775777,
+      "claims": 1,
+      "hits": 0
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_d5d8af59-8500-45ae-aa1c-d5aec05e1885/agents/main/wire.jsonl",
+      "turn": "10",
+      "originalWords": 567,
+      "skimWords": 95,
+      "ratio": 0.1675485008818342,
+      "claims": 3,
+      "hits": 0
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_db0c6952-8173-452c-adfb-c5bce9b8043c/agents/main/wire.jsonl",
+      "turn": "52",
+      "originalWords": 378,
+      "skimWords": 78,
+      "ratio": 0.20634920634920634,
+      "claims": 1,
+      "hits": 0
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_d5d8af59-8500-45ae-aa1c-d5aec05e1885/agents/main/wire.jsonl",
+      "turn": "0",
+      "originalWords": 1148,
+      "skimWords": 80,
+      "ratio": 0.06968641114982578,
+      "claims": 3,
+      "hits": 2
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_db0c6952-8173-452c-adfb-c5bce9b8043c/agents/main/wire.jsonl",
+      "turn": "24",
+      "originalWords": 218,
+      "skimWords": 55,
+      "ratio": 0.25229357798165136,
+      "claims": 3,
+      "hits": 1
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_9ea5f89b-f9ca-4103-abb9-ab737495e2e3/agents/agent-42/wire.jsonl",
+      "turn": "1",
+      "originalWords": 414,
+      "skimWords": 45,
+      "ratio": 0.10869565217391304,
+      "claims": 3,
+      "hits": 3
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_db0c6952-8173-452c-adfb-c5bce9b8043c/agents/agent-7/wire.jsonl",
+      "turn": "11",
+      "originalWords": 472,
+      "skimWords": 58,
+      "ratio": 0.1228813559322034,
+      "claims": 3,
+      "hits": 1
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_d5d8af59-8500-45ae-aa1c-d5aec05e1885/agents/main/wire.jsonl",
+      "turn": "15",
+      "originalWords": 201,
+      "skimWords": 64,
+      "ratio": 0.31840796019900497,
+      "claims": 3,
+      "hits": 1
+    },
+    {
+      "wire": "wd_citadel_f4ef02a48725/session_d5d8af59-8500-45ae-aa1c-d5aec05e1885/agents/main/wire.jsonl",
+      "turn": "6",
+      "originalWords": 394,
+      "skimWords": 76,
+      "ratio": 0.19289340101522842,
+      "claims": 3,
+      "hits": 0
+    }
+  ]
+}
