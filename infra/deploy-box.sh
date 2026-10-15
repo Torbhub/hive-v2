@@ -19,6 +19,7 @@ runuser -u ubuntu -- env PATH=/opt/node22/bin:$PATH npm run build
 # No password on stdin: an existing htpasswd file is preserved.
 bash infra/provision-box.sh </dev/null
 
+# hive-v2-tmux is never touched here: restarting it kills every agent pane.
 systemctl restart hive-v2-web hive-v2-watch
 
 SECRET=$(sed -n 's/^HIVE_WEB_SECRET=//p' /etc/hive-v2/web.env)

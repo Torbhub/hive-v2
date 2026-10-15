@@ -10,6 +10,7 @@ process.env.HIVE_TMUX_SOCKET = SOCK;
 import {
   assertPane, capturePane, ensureHiveSession, killWindow, newWindow,
   paneExists, paneIdentity, sendEnter, sendEscape, sendLiteral,
+  serverReachable, tmuxSocketPath,
 } from '../src/tmux.js';
 
 function raw(socket: string, args: string[]): string {
@@ -45,6 +46,18 @@ describe('private socket', () => {
     expect(seen === null || !seen.includes('DECOY-CONTENT')).toBe(true);
     const stillThere = raw(DECOY_SOCK, ['display-message', '-p', '-t', decoyPane, '#{pane_id}']).trim();
     expect(stillThere).toBe(decoyPane);
+  });
+});
+
+describe('serverReachable', () => {
+  it('sees a live server and refuses absent or stale sockets', async () => {
+    expect(await serverReachable(tmuxSocketPath())).toBe(true);
+    expect(await serverReachable(`/tmp/tmux-1000/no-such-${process.pid}`)).toBe(false);
+    // A stale socket file (dead server) is not reachable.
+    const stale = `/tmp/tmux-1000/hive-stale-${process.pid}`;
+    execFileSync('touch', [stale]);
+    expect(await serverReachable(stale)).toBe(false);
+    execFileSync('rm', ['-f', stale]);
   });
 });
 
