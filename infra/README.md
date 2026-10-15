@@ -16,13 +16,16 @@ box (a dedicated EC2 instance). One CloudFormation stack plus the box config.
 The hub lives inside nexus: `nexus.dexima.ai/hive`. CloudFront sends
 `/hive/*` to the nexus Lambda, which relays the request over an SSM
 port-forward tunnel to the box's loopback. nginx on the box listens on
-`127.0.0.1:8081` only, injects the app secret, and proxies to hive-web on
-7684. The nexus session gate is the auth.
+`127.0.0.1:8081`, injects the app secret, and proxies to hive-web on 7684.
+The nexus session gate is the auth. The relay finds the box by its
+`Role=nexus-kimi-session` tag, so no hostname, IP, certificate, or DNS
+record references it.
 
-Nothing public listens for hive. No hostname, IP, certificate, or DNS
-record references the box — the relay finds it by its
-`Role=nexus-kimi-session` tag. The hive server strips the `/hive` prefix
-before routing, so `/hive/api/view` and `/api/view` are the same endpoint.
+Transition: the origin-keyed 443 vhost (`hive.44.192.48.70.sslip.io`) stays
+until the citadel relay deploys, then a follow-up PR removes it and the
+`HIVE_ORIGIN_KEY` machinery. The hive server strips the `/hive` prefix
+before routing, so `/hive/api/view` and `/api/view` are the same endpoint
+on both paths.
 
 - `provision-box.sh` — idempotent root provisioner. Installs units and
   wrapper only when content differs, keeps an existing
