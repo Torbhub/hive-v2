@@ -10,13 +10,16 @@ on:
       - 'package*.json'
       - 'tsconfig*.json'
       - '.github/workflows/deploy.yml'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
   # Newest-wins, same as citadel's deploy-nexus: a newer push cancels the
   # stale run, and the staleness step below keeps a survivor from reverting
   # the box to an older SHA. A cancelled run reads as normal, not an incident.
-  group: deploy-hive-v2
+  # PR runs gate per-branch in their own group so they never cancel a deploy.
+  group: ${{ github.event_name == 'pull_request' && format('gate-{0}', github.ref) || 'deploy-hive-v2' }}
   cancel-in-progress: true
 
 jobs:
@@ -40,6 +43,7 @@ jobs:
 
   deploy:
     needs: gate
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       id-token: write

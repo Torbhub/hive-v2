@@ -1,5 +1,13 @@
 # hive-v2 — working rules for agents
 
+## Lane discipline (HARD)
+
+- Never commit or push directly to `main`. Every change gets its own lane:
+  `jj workspace add ../hive-v2-<lane>` from the box clone (jj-colocated),
+  work there, push the bookmark, open a PR. main merges happen on GitHub
+  after the deslop review and a green `gate` check.
+- Two lanes never share a working copy.
+
 ## Build and test
 
 - Build: `npm run build` (needs Node 22. On the deploy box use `/opt/node22/bin/npm`).
