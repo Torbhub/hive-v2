@@ -145,8 +145,7 @@ export async function watchCycle(
 }
 
 // The watch loop is a foreground process; systemd owns restart-on-death.
-// A cycle that outlives cycleTimeoutMs is abandoned, logged, and the loop
-// moves on — one wedged await must never stop the daemon (issue #10).
+// A wedged cycle await is abandoned after cycleTimeoutMs; the loop moves on.
 export async function watch(
   root: string,
   { intervalMs = 5000, cycleTimeoutMs = CYCLE_TIMEOUT_MS }: { intervalMs?: number; cycleTimeoutMs?: number } = {},
