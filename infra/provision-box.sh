@@ -39,32 +39,29 @@ install_if_different "$BOX_DIR/hive" /usr/local/bin/hive 755
 mkdir -p /etc/hive-v2
 if [ ! -f "$ENV_FILE" ]; then
   umask 077
-  {
-    printf 'HIVE_WEB_SECRET=%s\n' "$(openssl rand -hex 24)"
-    printf 'HIVE_ORIGIN_KEY=%s\n' "$(openssl rand -hex 24)"
-  } > "$ENV_FILE"
+  printf 'HIVE_WEB_SECRET=%s\n' "$(openssl rand -hex 24)" > "$ENV_FILE"
   echo "generated: $ENV_FILE"
-elif ! grep -q '^HIVE_ORIGIN_KEY=' "$ENV_FILE"; then
-  printf 'HIVE_ORIGIN_KEY=%s\n' "$(openssl rand -hex 24)" >> "$ENV_FILE"
-  echo "appended HIVE_ORIGIN_KEY to $ENV_FILE"
 else
   echo "kept:    $ENV_FILE"
 fi
+# The origin key died with the public origin (relay architecture); drop it.
+if grep -q '^HIVE_ORIGIN_KEY=' "$ENV_FILE"; then
+  sed -i '/^HIVE_ORIGIN_KEY=/d' "$ENV_FILE"
+  echo "pruned:  HIVE_ORIGIN_KEY from $ENV_FILE"
+fi
 
 HIVE_WEB_SECRET=$(sed -n 's/^HIVE_WEB_SECRET=//p' "$ENV_FILE")
-HIVE_ORIGIN_KEY=$(sed -n 's/^HIVE_ORIGIN_KEY=//p' "$ENV_FILE")
-if [ -z "$HIVE_WEB_SECRET" ] || [ -z "$HIVE_ORIGIN_KEY" ]; then
-  echo "FAIL: HIVE_WEB_SECRET or HIVE_ORIGIN_KEY missing in $ENV_FILE" >&2
+if [ -z "$HIVE_WEB_SECRET" ]; then
+  echo "FAIL: HIVE_WEB_SECRET missing in $ENV_FILE" >&2
   exit 1
 fi
 
 # Escape & and / so a non-hex value cannot corrupt the sed render.
 WEB_SECRET_ESC=${HIVE_WEB_SECRET//[&\/]/\\&}
-ORIGIN_KEY_ESC=${HIVE_ORIGIN_KEY//[&\/]/\\&}
 
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
-sed -e "s/__HIVE_WEB_SECRET__/$WEB_SECRET_ESC/" -e "s/__HIVE_ORIGIN_KEY__/$ORIGIN_KEY_ESC/" \
+sed -e "s/__HIVE_WEB_SECRET__/$WEB_SECRET_ESC/" \
   "$BOX_DIR/nginx-hive.conf" > "$tmp"
 install_if_different "$tmp" "$NGINX_AVAIL" 644
 rm -f "$tmp"

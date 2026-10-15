@@ -13,15 +13,16 @@ box (a dedicated EC2 instance). One CloudFormation stack plus the box config.
 
 ## The one way in
 
-The hub lives inside nexus: `nexus.dexima.ai/hive`. CloudFront proxies
-`/hive/*` to the box's nginx vhost with a custom origin header
-`x-hive-origin: <HIVE_ORIGIN_KEY>`. The nexus session gate is the auth.
-nginx checks the origin key on `location /hive/` and serves nothing else on
-the hostname. The hive server strips the `/hive` prefix before routing, so
-`/hive/api/view` and `/api/view` are the same endpoint.
+The hub lives inside nexus: `nexus.dexima.ai/hive`. CloudFront sends
+`/hive/*` to the nexus Lambda, which relays the request over an SSM
+port-forward tunnel to the box's loopback. nginx on the box listens on
+`127.0.0.1:8081` only, injects the app secret, and proxies to hive-web on
+7684. The nexus session gate is the auth.
 
-The hostname `hive.44.192.48.70.sslip.io` exists only as the CloudFront
-origin (CloudFront cannot target a bare IP). It serves no public UI.
+Nothing public listens for hive. No hostname, IP, certificate, or DNS
+record references the box — the relay finds it by its
+`Role=nexus-kimi-session` tag. The hive server strips the `/hive` prefix
+before routing, so `/hive/api/view` and `/api/view` are the same endpoint.
 
 - `provision-box.sh` — idempotent root provisioner. Installs units and
   wrapper only when content differs, keeps an existing
@@ -52,31 +53,9 @@ origin (CloudFront cannot target a bare IP). It serves no public UI.
 2. In the GitHub repo settings, set:
    - secret `HIVE_DEPLOY_ROLE_ARN` = the stack's `DeployRoleArn` output
    - variable `KIMI_BOX_ID` = `i-004e23820520cbf3c`
-   - on the citadel repo, secret `HIVE_ORIGIN_KEY` = the `HIVE_ORIGIN_KEY`
-     line from `/etc/hive-v2/web.env` on the box. The citadel deploy-nexus
-     workflow consumes it to set the CloudFront origin header; this repo
-     never reads it from GitHub.
 
 3. Done. Every push to main that touches `src/`, `web/`, `infra/`, or the
    package files runs the gate and then deploys over SSM.
-
-## Swapping the origin hostname (e.g. to hive.dexima.ai)
-
-The CloudFront origin hostname is a deploy-time context on the citadel side,
-so the swap is four steps, no code archaeology:
-
-1. Point the new hostname's DNS at the box (`44.192.48.70`).
-2. Cert on the box: `sudo certbot --nginx -d hive.dexima.ai` (http-01 works
-   once DNS resolves; the le-http01 nginx site already answers challenges).
-3. Edit `infra/box/nginx-hive.conf`: `server_name` and both
-   `ssl_certificate*` paths to the new hostname, push. The deploy workflow
-   reprovisions the box. `nginx -t` gates the reload, so a missing cert
-   fails safe.
-4. On the citadel repo set the variable `HIVE_ORIGIN_HOST` to the new
-   hostname. The next deploy-nexus run points CloudFront at it.
-
-The old sslip hostname then serves nothing and its cert can lapse.
-
 
 ## Drift adoption
 
