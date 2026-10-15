@@ -61,7 +61,80 @@ function resumeButton(): HTMLButtonElement {
   return btn;
 }
 
-describe('instant click feedback', () => {
+describe('stretchtext decisions', () => {
+  const stretchView: HubView = {
+    ...VIEW,
+    decisions: [{
+      at: new Date().toISOString(),
+      project: 'demo',
+      task: 'demo-1',
+      by: 'watch',
+      summary: 'chose postgres {{why|it fits the relational brief}} for demo',
+    }],
+  };
+
+  function mountWithDecisions(): void {
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      const url = String(input);
+      if (url.endsWith('api/view')) {
+        return Promise.resolve(new Response(JSON.stringify(stretchView), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    });
+  }
+
+  function stretchSpan(text: string): HTMLElement {
+    const el = [...container.querySelectorAll('[role="button"]')]
+      .find((b) => b.textContent === text) as HTMLElement | undefined;
+    if (!el) throw new Error(`no stretch span rendered for "${text}"`);
+    return el;
+  }
+
+  it('the short form shows, a click expands the long form and records the open', async () => {
+    mountWithDecisions();
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
+    });
+    expect(stretchSpan('why').getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain('it fits the relational brief');
+
+    act(() => {
+      stretchSpan('why').click();
+    });
+    expect(container.textContent).toContain('it fits the relational brief');
+    expect(container.textContent).not.toContain('{{why|');
+    const recorded = vi.mocked(fetch).mock.calls
+      .map(([input, init]) => ({ url: String(input), init }))
+      .find((c) => c.url.endsWith('api/stretch-opened'));
+    expect(recorded).toBeDefined();
+    expect(JSON.parse(String(recorded!.init?.body))).toEqual({ short: 'why', pane: 'demo-1' });
+
+    act(() => {
+      stretchSpan('it fits the relational brief').click();
+    });
+    expect(container.textContent).not.toContain('it fits the relational brief');
+    // A collapse records nothing.
+    expect(vi.mocked(fetch).mock.calls.filter(([i]) => String(i).endsWith('api/stretch-opened'))).toHaveLength(1);
+  });
+
+  it('a failed record call leaves the expansion working', async () => {
+    mountWithDecisions();
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      const url = String(input);
+      if (url.endsWith('api/view')) {
+        return Promise.resolve(new Response(JSON.stringify(stretchView), { status: 200 }));
+      }
+      return Promise.reject(new Error('network down'));
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
+    });
+    act(() => {
+      stretchSpan('why').click();
+    });
+    expect(container.textContent).toContain('it fits the relational brief');
+  });
+});
   it('the moment Resume is clicked the card shows resuming… and all other action buttons disable', async () => {
     const startBtn = [...container.querySelectorAll('button')]
       .find((b) => b.textContent === 'Start task') as HTMLButtonElement;

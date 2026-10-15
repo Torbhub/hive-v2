@@ -405,3 +405,9 @@ Toasts (on completion):
 - The `dialogs` map is populated per refresh by running `hh-hub dialog <project>` for each orchestrator with `question` or `starting.question`, and `hh-hub dialog <project> <agentRef>` for each agent with `question`; failures are silently omitted.
 
 Skipped: the engine-specific atoms/pane plumbing and the edit/git guard in `hub.tsx` (not visible UI). Risk: `Button` styling is defined by the `claude-code` engine, not this repo — you'll need to invent the Ink visual treatment for `primary`/`plain`/default yourself; labels and behavior above are exact.
+
+## 9. Stretchtext (web UI only)
+
+Decision summaries can carry stretchtext markup: `{{short|long}}`. The web UI parses it (`src/stretch.ts`) and renders each closed stretch as its `short` form — dotted underline, brighter than the surrounding summary text, `role="button"` with `aria-expanded`. A click swaps the span to its `long` form inline (long forms can hold further stretches); a second click collapses back to `short`. While any stretch in a row is open, the row wraps instead of truncating. Text without a `|`, unclosed stretches, and braces inside code spans or fences render as plain text.
+
+Every expand (never a collapse) fires a fire-and-forget POST to `/api/stretch-opened` with `{short, pane}` (`pane` = the decision's task id, else its project). The endpoint appends `{"ts": <ms epoch>, "short": "...", "pane": "..."}` as one JSON line to `~/.kimi-code/stretch-opened.jsonl` (override with `HIVE_STRETCH_LOG`), which the stretchtext skill reads to know what the owner already opened. UI failures are swallowed; the server logs its own failures. `short` and `pane` are capped at 200 characters. The Ink screen does not parse the markup; raw braces show there.

@@ -9,6 +9,7 @@ import {
   ROTATE_AT_PERCENT, tasksLine, type Need,
 } from '../src/ui/look';
 import { cn } from './lib/utils';
+import { StretchText } from './Stretch';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
 import { Card, CardContent, CardHeader } from './components/ui/card';
@@ -583,7 +584,7 @@ export function App() {
                   <div className="flex min-w-0 items-baseline gap-2">
                     <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-600" />
                     <span className="shrink-0 font-medium text-zinc-100">{d.task ?? d.project}</span>
-                    <span className="truncate text-zinc-400">{d.summary}</span>
+                    <StretchText text={d.summary} pane={d.task ?? d.project} className="text-zinc-400" />
                   </div>
                   <span className="shrink-0 text-xs text-zinc-500 tabular">{ago(d.at, now)}</span>
                 </div>
