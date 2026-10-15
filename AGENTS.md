@@ -8,6 +8,14 @@
   after the deslop review and a green `gate` check.
 - Two lanes never share a working copy.
 
+## Box compute (HARD)
+
+- No heavy local compute in lanes: no npm ci, no test suites, no builds on
+  this box. Write the code, push the branch, let the PR gate run them in CI.
+  Cheap syntax checks (`bash -n`, yaml parse) are fine.
+- The box runs the live hub and the orchestrators. A lane that chugs it
+  kills the product it's working on.
+
 ## Build and test
 
 - Build: `npm run build` (needs Node 22. On the deploy box use `/opt/node22/bin/npm`).
