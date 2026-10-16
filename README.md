@@ -105,8 +105,10 @@ tmux -L hive-v2 attach
 
 ## Deployment
 
-The hub lives inside nexus at `nexus.dexima.ai/hive` (CloudFront proxies
-`/hive/*` to the box; the nexus session gate is the auth). Infrastructure
+The hub lives inside nexus at `nexus.dexima.ai/hive` and is reachable only
+through that relay (CloudFront `/hive/*` → nexus Lambda → SSM tunnel to the
+box loopback; the nexus session gate is the auth). No public hostname, cert,
+or DNS record exists for the hub. Infrastructure
 lives in `infra/` (one CloudFormation stack plus the committed box config)
 and every push to main deploys through `.github/workflows/deploy.yml` over
 SSM. Bootstrap steps and the drift-adoption story: `infra/README.md`.

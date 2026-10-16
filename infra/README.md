@@ -6,8 +6,8 @@ box (a dedicated EC2 instance). One CloudFormation stack plus the box config.
 - `template.yaml` — stack `hive-v2-infra`: the IAM role the GitHub deploy
   workflow assumes over OIDC.
 - `box/` — the live box config: the systemd units, the `hive` wrapper, and
-  the nginx site (with `__HIVE_WEB_SECRET__` and `__HIVE_ORIGIN_KEY__`
-  placeholders, rendered at provision time). `hive-v2-tmux.service` owns the
+  the nginx site (with the `__HIVE_WEB_SECRET__` placeholder, rendered at
+  provision time). `hive-v2-tmux.service` owns the
   tmux server so deploy restarts of the web and watch units cannot kill the
   panes. Deploys never restart it.
 
@@ -19,13 +19,9 @@ port-forward tunnel to the box's loopback. nginx on the box listens on
 `127.0.0.1:8081`, injects the app secret, and proxies to hive-web on 7684.
 The nexus session gate is the auth. The relay finds the box by its
 `Role=nexus-kimi-session` tag, so no hostname, IP, certificate, or DNS
-record references it.
-
-Transition: the origin-keyed 443 vhost (`hive.44.192.48.70.sslip.io`) stays
-until the citadel relay deploys, then a follow-up PR removes it and the
-`HIVE_ORIGIN_KEY` machinery. The hive server strips the `/hive` prefix
-before routing, so `/hive/api/view` and `/api/view` are the same endpoint
-on both paths.
+record references it. There is no public hive hostname or TLS cert; the
+relay is the only way in. The hive server strips the `/hive` prefix
+before routing, so `/hive/api/view` and `/api/view` are the same endpoint.
 
 - `provision-box.sh` — idempotent root provisioner. Installs units and
   wrapper only when content differs, keeps an existing
