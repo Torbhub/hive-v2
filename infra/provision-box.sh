@@ -74,6 +74,29 @@ if [ -f "$HTPASSWD_STALE" ]; then
   echo "removed: $HTPASSWD_STALE (basic-auth fallback retired)"
 fi
 
+# nexus-push MCP client (citadel #1747), pinned fetch from the private
+# citadel repo via the ubuntu user's gh auth. Bump BOTH pins to upgrade.
+NEXUS_PUSH_SHA=6542be37f15e682c5c18268892fd769911d0bf5b
+NEXUS_PUSH_SHA256=bdf23a9ddca9377a357400110564aedf85b546a5ce8ff762a17cbe3341024cbf
+NEXUS_PUSH_DST=/opt/nexus-push/nexus_push_mcp.py
+
+if [ -f "$NEXUS_PUSH_DST" ] && echo "$NEXUS_PUSH_SHA256  $NEXUS_PUSH_DST" | sha256sum -c --status -; then
+  echo "kept:    $NEXUS_PUSH_DST"
+else
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp"' EXIT
+  runuser -u ubuntu -- gh api \
+    "repos/Torbhub/citadel/contents/scripts/nexus_push_mcp.py?ref=$NEXUS_PUSH_SHA" \
+    -H "Accept: application/vnd.github.raw" > "$tmp"
+  if ! echo "$NEXUS_PUSH_SHA256  $tmp" | sha256sum -c --status -; then
+    echo "FAIL: nexus-push sha256 mismatch at pinned SHA $NEXUS_PUSH_SHA" >&2
+    exit 1
+  fi
+  install_if_different "$tmp" "$NEXUS_PUSH_DST" 644
+  rm -f "$tmp"
+  trap - EXIT
+fi
+
 systemctl daemon-reload
 systemctl enable --now hive-v2-web hive-v2-watch >/dev/null
 systemctl enable hive-v2-tmux >/dev/null
