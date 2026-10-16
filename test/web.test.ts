@@ -338,6 +338,39 @@ describe('POST /api/start', () => {
   });
 });
 
+describe('POST /api/stretch-opened', () => {
+  it('appends one JSON line per open to the stretch log', async () => {
+    const log = path.join(root, 'stretch-opened.jsonl');
+    process.env.HIVE_STRETCH_LOG = log;
+    try {
+      const r = await post('/api/stretch-opened', { short: 'why', pane: 'demo-1' });
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({ ok: true });
+      await post('/api/stretch-opened', { short: 'evidence' });
+      const lines = (await fs.readFile(log, 'utf8')).trim().split('\n');
+      expect(lines).toHaveLength(2);
+      const first = JSON.parse(lines[0]);
+      expect(first.short).toBe('why');
+      expect(first.pane).toBe('demo-1');
+      expect(typeof first.ts).toBe('number');
+      expect(JSON.parse(lines[1]).pane).toBe('');
+    } finally {
+      delete process.env.HIVE_STRETCH_LOG;
+    }
+  });
+
+  it('an empty or missing short is a 400, an oversized one a 413', async () => {
+    process.env.HIVE_STRETCH_LOG = path.join(root, 'stretch-opened.jsonl');
+    try {
+      expect((await post('/api/stretch-opened', { short: '  ' })).status).toBe(400);
+      expect((await post('/api/stretch-opened', {})).status).toBe(400);
+      expect((await post('/api/stretch-opened', { short: 'x'.repeat(201) })).status).toBe(413);
+    } finally {
+      delete process.env.HIVE_STRETCH_LOG;
+    }
+  });
+});
+
 describe('POST /api/mode', () => {
   it('persists a valid mode and returns it', async () => {
     const r = await post('/api/mode', { project: 'demo', mode: 'yolo' });

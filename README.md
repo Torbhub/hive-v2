@@ -59,6 +59,10 @@ only a reply starting with APPROVE counts). It only ever picks option 1,
 in `.hive-hub/decisions.jsonl` with `by:"watch"`, as do owner answers
 (`by:"owner"`) and `hive hub log <id> decided <reason>` (`by:"orchestrator"`);
 the web screen shows the latest eight under DECISIONS.
+`test/watch-e2e.test.ts` proves the smart tier end to end: a decoy tmux pane
+plays a fake approval dialog, and the real watch cycle detects it, calls the
+classifier (a stub `kimi` on PATH), and answers the pane or correctly holds
+back.
 
 ## How a task flows
 
