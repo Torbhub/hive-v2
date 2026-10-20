@@ -180,6 +180,9 @@ async function spawnCommand(args: string[]): Promise<void> {
     console.log(`hive: ${project}/${agent} closed`);
     return;
   }
+  if (sub === 'respawn' && f.model !== undefined) {
+    throw new UsageError('respawn reuses the model recorded in team.json; change it with close + spawn or by editing team.json');
+  }
   const pane = sub === 'respawn'
     ? await respawnAgent(root, project, agent)
     : await spawnAgent(root, project, {

@@ -105,10 +105,16 @@ export async function typeLine(pane: string, text: string, identity: PaneIdentit
 // -S combines with -y/--auto/-m per kimi --help, so mode and model apply to resumes too.
 const MODEL_RE = /^[A-Za-z0-9._/[\]-]{1,64}$/;
 
-export function launchCommand(sessionId: string | undefined, mode: ProjectMode = 'ask', model?: string): string {
-  if (model && !MODEL_RE.test(model)) {
+// Called before any side effect (worktree add, pane kill): a bad alias is a
+// recoverable config error and must never orphan a worktree or kill a live agent.
+function checkModel(model: string | undefined): void {
+  if (model !== undefined && !MODEL_RE.test(model)) {
     throw new Error(`a model alias is letters, digits, '.', '_', '-', '/', '[', ']': ${model}`);
   }
+}
+
+export function launchCommand(sessionId: string | undefined, mode: ProjectMode = 'ask', model?: string): string {
+  checkModel(model);
   const args = [
     sessionId ? `--session ${sessionId}` : '',
     mode === 'yolo' ? '-y' : mode === 'auto' ? '--auto' : '',
@@ -187,6 +193,7 @@ export type SpawnOptions = { agent: string; role?: string; worktree?: string; ta
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
   const { agent, role = 'implementer' } = opts;
   if (!AGENT_NAME_RE.test(agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${agent}`);
+  checkModel(opts.model);
   await preflight();
   const p = await projectEntry(root, project);
   const home = p.home;
@@ -312,6 +319,7 @@ export async function respawnAgent(root: string, project: string, agent: string)
   const team = await readTeam(home);
   const old = team.agents.find((a) => a.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
+  checkModel(old.model);
   await preflight();
   await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
   try {
@@ -333,6 +341,7 @@ export async function wakeAgent(root: string, project: string, agent: string): P
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   if (old.closed_at) throw new Error(`${agent} was closed on purpose at ${old.closed_at}; not waking it`);
   if (!old.session_id) throw new Error(`${agent} has no recorded session to resume; respawn it instead`);
+  checkModel(old.model);
   await preflight();
   if (old.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
     throw new Error(`${agent} is already running`);
