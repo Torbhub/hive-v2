@@ -256,7 +256,7 @@ async function relaunchAgent(
   });
   await upsertTeamEntry(home, {
     name: old.name, pane, pane_pid: identity.pid, pane_started: identity.started,
-    session_id: sessionId, closed_at: undefined,
+    session_id: sessionId, closed_at: undefined, wedged_at: undefined,
   });
   const idle = await waitIdle(pane);
   if (idle !== 'idle') {

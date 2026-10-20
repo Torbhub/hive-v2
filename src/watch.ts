@@ -1,9 +1,12 @@
+import os from 'node:os';
+import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { captureDeathBundle } from './death-bundle.js';
+import { captureDeathBundle, wireLogMtime } from './death-bundle.js';
 import { answerDialog, buildStatus, readDialogFor, Refusal, wake } from './hub.js';
 import { wakeAgent } from './spawn.js';
-import { appendDecision, hubPath, readProjects, readTeam } from './state.js';
-import { paneExists, run, sleep } from './tmux.js';
+import { classify, lines } from './screen.js';
+import { appendDecision, hivePath, hubPath, readProjects, readTeam, upsertTeamEntry, writeJson } from './state.js';
+import { capturePane, killWindow, paneExists, run, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
 import type { Approvals, TeamEntry } from './types.js';
 
@@ -93,6 +96,8 @@ async function maybeAutoApprove(
 }
 
 export const WAKE_MAX_ATTEMPTS = 60;
+export const WEDGE_STILL_MS = 10 * 60_000;
+const WEDGE_DUMP_TIMEOUT_MS = 15_000;
 
 // Desired vs actual, re-judged every tick: a death is logged and bundled once,
 // but the wake is retried until the pane is back or the attempts run out.
@@ -145,19 +150,113 @@ async function handleDeath(
   }
 }
 
+async function stackProbe(sections: string[], title: string, cmd: string, args: string[]): Promise<void> {
+  try {
+    const r = await run(cmd, args, undefined, undefined, WEDGE_DUMP_TIMEOUT_MS);
+    if (r.code !== 0) throw new Error(r.stderr.trim() || `exit code ${r.code}`);
+    sections.push(title, r.stdout.trimEnd() || 'no output');
+  } catch (e) {
+    sections.push(title, `unavailable (${lastLine(e)})`);
+  }
+}
+
+// Operator standing rule: stack dumps land on disk BEFORE any wedged restart.
+async function captureWedgeDump(home: string, a: TeamEntry): Promise<string> {
+  const sections: string[] = [`agent: ${a.name}`, `pane: ${a.pane ?? '?'}`, `pid: ${a.pane_pid ?? '?'}`];
+  await stackProbe(sections, `== pstack ${a.pane_pid} ==`, 'sudo', ['-n', 'pstack', String(a.pane_pid)]);
+  const pySpy = await run('which', ['py-spy'], undefined, undefined, WEDGE_DUMP_TIMEOUT_MS);
+  if (pySpy.code === 0) await stackProbe(sections, '== py-spy dump ==', 'py-spy', ['dump', '--pid', String(a.pane_pid)]);
+  const file = hivePath(home, 'wedges', `${a.name}-${Math.floor(Date.now() / 1000)}.log`);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, sections.join('\n') + '\n');
+  return file;
+}
+
+export type Stillness = Map<string, { content: string; since: number }>;
+
+async function clearWedged(root: string, home: string, project: string, a: TeamEntry): Promise<void> {
+  await upsertTeamEntry(home, { name: a.name, wedged_at: undefined });
+  await appendWatchLog(root, `${new Date().toISOString()} ${project} ${a.name} is moving again; cleared the wedged mark`);
+}
+
+// A live pane can still be dead weight: kimi's spinner ticks while it works,
+// so a pane frozen on a spinner with a stale wire log is wedged, not busy.
+async function judgeWedge(
+  root: string,
+  project: string,
+  home: string,
+  a: TeamEntry,
+  stills: Stillness,
+  stillMs: number,
+): Promise<void> {
+  const pane = a.pane;
+  if (!pane) return;
+  const key = `${pane}:${a.pane_pid}`;
+  const raw = await capturePane(pane);
+  if (raw === null || classify(lines(raw)) !== 'working') {
+    stills.delete(key);
+    if (a.wedged_at) await clearWedged(root, home, project, a);
+    return;
+  }
+  const seen = stills.get(key);
+  if (!seen || seen.content !== raw) {
+    stills.set(key, { content: raw, since: Date.now() });
+    if (seen && a.wedged_at) await clearWedged(root, home, project, a);
+    return;
+  }
+  if (Date.now() - seen.since < stillMs) return;
+  if (a.session_id) {
+    const wireAt = await wireLogMtime(os.homedir(), a.session_id);
+    if (wireAt !== null && Date.now() - wireAt < stillMs) return;
+  }
+  if (a.wedged_at) return;
+  await upsertTeamEntry(home, { name: a.name, wedged_at: new Date().toISOString() });
+  await appendWatchLog(
+    root,
+    `${new Date().toISOString()} ${project} ${a.name} looks wedged: pane ${pane} frozen on a spinner for ${Math.round(stillMs / 60_000)}m`,
+  );
+  const dump = await captureWedgeDump(home, a).catch(() => null);
+  await appendWatchLog(root, `${new Date().toISOString()} ${project} ${a.name} stack dump: ${dump ?? 'capture failed'}`);
+  if (!a.orchestrator && !a.session_id) {
+    await appendDecision(root, {
+      project, by: 'watch',
+      summary: `marked ${a.name} wedged: frozen pane, no session to resume, stack dump saved, left for the owner`,
+    });
+    return;
+  }
+  await appendDecision(root, {
+    project, by: 'watch',
+    summary: `marked ${a.name} wedged: frozen pane, stale wire log, stack dump saved, restarting it`,
+  });
+  if (!a.pane_pid || !a.pane_started) {
+    await appendWatchLog(root, `${new Date().toISOString()} ${project} ${a.name} has no recorded pane identity; refusing to kill ${pane}`);
+    return;
+  }
+  await killWindow(pane, { pid: a.pane_pid, started: a.pane_started }).catch(async (e: unknown) => {
+    await appendWatchLog(root, `${new Date().toISOString()} ${project} killing the wedged pane failed: ${lastLine(e)}`);
+  });
+  // The death path re-wakes it on the next tick.
+}
+
 export async function watchCycle(
   root: string,
   env: NodeJS.ProcessEnv = {},
   deaths: Set<string> = new Set(),
   wakes: Map<string, number> = new Map(),
+  stills: Stillness = new Map(),
+  { wedgeStillMs = WEDGE_STILL_MS }: { wedgeStillMs?: number } = {},
 ): Promise<void> {
   const pf = await readProjects(root);
   const status = await buildStatus(root);
   for (const p of pf.projects) {
     const team = await readTeam(p.home);
     for (const a of team.agents) {
-      if (!a.pane || a.closed_at || (await paneExists(a.pane))) continue;
-      await handleDeath(root, p.name, a, deaths, wakes);
+      if (!a.pane || a.closed_at) continue;
+      if (!(await paneExists(a.pane))) {
+        await handleDeath(root, p.name, a, deaths, wakes);
+        continue;
+      }
+      await judgeWedge(root, p.name, p.home, a, stills, wedgeStillMs);
     }
 
     const approvals = p.approvals ?? 'manual';
@@ -189,10 +288,15 @@ export async function watch(
   const env = await kimiEnv().catch(() => ({} as NodeJS.ProcessEnv));
   const deaths = new Set<string>();
   const wakes = new Map<string, number>();
+  const stills: Stillness = new Map();
+  let cycles = 0;
   for (;;) {
-    await withTimeout(watchCycle(root, env, deaths, wakes), cycleTimeoutMs, 'watch cycle').catch(async (e: unknown) => {
+    await withTimeout(watchCycle(root, env, deaths, wakes, stills), cycleTimeoutMs, 'watch cycle').catch(async (e: unknown) => {
       await appendWatchLog(root, `${new Date().toISOString()} cycle error: ${lastLine(e)}`);
     });
+    cycles += 1;
+    // The heartbeat: a stale status file means the watch itself is wedged.
+    await writeJson(hubPath(root, 'watch-status.json'), { ts: new Date().toISOString(), cycles }).catch(() => {});
     await sleep(intervalMs);
   }
 }

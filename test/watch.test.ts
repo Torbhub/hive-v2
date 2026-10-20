@@ -12,6 +12,8 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     run: vi.fn(orig.run),
     tmux: vi.fn(async () => ({ code: 1, stdout: '', stderr: 'tmux not stubbed in test' })),
     paneExists: vi.fn(async () => true),
+    capturePane: vi.fn(async () => null),
+    killWindow: vi.fn(async () => {}),
     sleep: vi.fn(async () => {}),
   };
 });
@@ -37,11 +39,19 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/death-bundle.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/death-bundle.js')>();
+  return {
+    ...orig,
+    wireLogMtime: vi.fn(async () => Date.now()),
+  };
+});
+
 import { buildStatus, readDialogFor, answerDialog, wake } from '../src/hub.js';
 import { wakeAgent } from '../src/spawn.js';
-import { paneExists, run, sleep, tmux } from '../src/tmux.js';
-import { hubPath, readDecisions, writeJson, hivePath } from '../src/state.js';
-import { captureDeathBundle } from '../src/death-bundle.js';
+import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
+import { capturePane, killWindow, paneExists, run, sleep, tmux } from '../src/tmux.js';
+import { hubPath, readDecisions, readTeam, writeJson, hivePath } from '../src/state.js';
 import {
   extractCommand, neverApprove, tier1Approves, watch, watchCycle, WAKE_MAX_ATTEMPTS,
 } from '../src/watch.js';
@@ -212,6 +222,95 @@ describe('watch loop cycle timeout', () => {
     const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
     const stalls = log.split('\n').filter((l) => l.includes('cycle error: watch cycle timed out'));
     expect(stalls).toHaveLength(3);
+    const pulse = JSON.parse(await fs.readFile(hubPath(root, 'watch-status.json'), 'utf8')) as { cycles: number };
+    expect(pulse.cycles).toBe(3);
+  });
+});
+
+describe('watchCycle wedge detection', () => {
+  const WORKING = 'line of work\n⠋ Working…\n';
+
+  it('marks a frozen pane wedged, dumps its stack, then kills it for the death path', async () => {
+    const { root, home } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(WORKING);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 60 * 60_000);
+    vi.mocked(run).mockResolvedValue({ code: 0, stdout: 'stack\n', stderr: '' });
+    const stills = new Map();
+    // The first sight only records stillness; the verdict lands on the next tick.
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    const team = await readTeam(home);
+    expect(team.agents[0].wedged_at).toBeTruthy();
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log).toContain('builder looks wedged');
+    expect(log).toMatch(/stack dump: .*wedges/);
+    const dumps = await fs.readdir(hivePath(home, 'wedges'));
+    expect(dumps).toHaveLength(1);
+    const dump = await fs.readFile(path.join(hivePath(home, 'wedges'), dumps[0]), 'utf8');
+    expect(dump).toContain('== pstack 22 ==');
+    expect(killWindow).toHaveBeenCalledWith('%2', { pid: 22, started: 'b' });
+    const pstackCall = vi.mocked(run).mock.calls.findIndex((c) => c[0] === 'sudo' && c[1]?.includes('pstack'));
+    expect(pstackCall).toBeGreaterThanOrEqual(0);
+    expect(vi.mocked(run).mock.invocationCallOrder[pstackCall])
+      .toBeLessThan(vi.mocked(killWindow).mock.invocationCallOrder[0]);
+    const decisions = await readDecisions(root);
+    expect(decisions[0].summary).toContain('marked builder wedged');
+
+    // A further cycle with the mark set does not restamp, redump, or rekill.
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    expect(killWindow).toHaveBeenCalledTimes(1);
+    expect(await fs.readdir(hivePath(home, 'wedges'))).toHaveLength(1);
+  });
+
+  it('a fresh wire log reads as working, not wedged', async () => {
+    const { root, home } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(WORKING);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now() + 60_000);
+    const stills = new Map();
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    const team = await readTeam(home);
+    expect(team.agents[0].wedged_at).toBeUndefined();
+    expect(killWindow).not.toHaveBeenCalled();
+  });
+
+  it('marks a wedged agent with no session but leaves the pane for the owner', async () => {
+    const { root, home } = await setupProject({
+      agents: [{ name: 'helper', pane: '%3', pane_pid: 33, pane_started: 'c' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(WORKING);
+    vi.mocked(run).mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+    const stills = new Map();
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    const team = await readTeam(home);
+    expect(team.agents[0].wedged_at).toBeTruthy();
+    expect(killWindow).not.toHaveBeenCalled();
+    const decisions = await readDecisions(root);
+    expect(decisions[0].summary).toContain('left for the owner');
+  });
+
+  it('clears the mark when the pane moves again', async () => {
+    const { root, home } = await setupProject({
+      agents: [{
+        name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b',
+        session_id: 'session_b', wedged_at: new Date().toISOString(),
+      }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue('all done\n│ > \n');
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { wedgeStillMs: 0 });
+    const team = await readTeam(home);
+    expect(team.agents[0].wedged_at).toBeUndefined();
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log).toContain('cleared the wedged mark');
   });
 });
 

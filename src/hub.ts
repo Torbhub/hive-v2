@@ -198,7 +198,10 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
     const snap = await snapshot(a);
     const agent: HubAgent = {
       name: a.name,
-      state: !a.pane ? 'unrecorded' : snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped',
+      state: !a.pane ? 'unrecorded'
+        : snap.alive !== 'gone' && a.wedged_at ? 'wedged'
+        : snap.alive === 'running' ? 'running'
+        : snap.alive === 'unknown' ? 'unknown' : 'stopped',
       question: snap.alive !== 'gone' && snap.dialog !== null,
       worktree: a.worktree,
       ref: agentRef(a.name, nameCounts, a.worktree),
@@ -449,7 +452,7 @@ async function launchOrchestrator(
   await typeLine(pane, line, identity);
   await upsertTeamEntry(p.home, {
     name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
-    worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`), closed_at: undefined,
+    worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`), closed_at: undefined, wedged_at: undefined,
   });
   await writePendingPane(root, project, { ...pending, typed: true });
   const sid = kind === 'wake' ? sessionId : await findLatestSession(cwd, name);
@@ -492,7 +495,7 @@ export async function continueProject(root: string, project: string): Promise<st
       name: orchestratorName(project), orchestrator: true,
       pane: pending.pane, pane_pid: id.pid, pane_started: id.started,
       worktree: p.home, handoff: hivePath(p.home, 'handoffs', `${orchestratorName(project)}.md`),
-      closed_at: undefined,
+      closed_at: undefined, wedged_at: undefined,
     });
     const sid = await findLatestSession(p.home, orchestratorName(project));
     if (sid) await upsertTeamEntry(p.home, { name: orchestratorName(project), session_id: sid });

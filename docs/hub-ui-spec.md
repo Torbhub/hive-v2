@@ -105,7 +105,7 @@ Card = column, `marginTop: 1`.
 
 **`agents` row**:
 - no agents: gray `none`.
-- else one row: for each agent, one of these glyphs **followed by a trailing space** (so two hollow dots don't read as one wide sign): `●` **green** (running), `○` **yellow` (stopped), `?` **red** (unknown/unrecorded). Then white ` {up} of {total}` (leading space; `up` = running count).
+- else one row: for each agent, one of these glyphs **followed by a trailing space** (so two hollow dots don't read as one wide sign): `●` **green** (running), `○` **yellow` (stopped), `✖` **red** (wedged), `?` **red** (unknown/unrecorded). Then white ` {up} of {total}` (leading space; `up` = running count).
 - If any agents are not running, a second line, **yellow**: `{ref} {state}` joined with `, ` (e.g. `fixer stopped, reviewer@/wt/repo unknown`).
 
 **`tasks` row** — white, one string:
@@ -151,6 +151,7 @@ Card = column, `marginTop: 1`.
 | (fallback) | `?` | `cannot tell` | red |
 
 Agent colors: running → green, stopped → yellow, anything else → red.
+`wedged` marks a pane the watchdog found frozen on a spinner with a stale wire log.
 `agentRef(a) = a.ref ?? a.name` (status emits `<name>@<team root>` when a name appears in two team roots).
 
 ## 4. Dialog block (verbatim rendering rules)
@@ -176,7 +177,9 @@ type HubOrchestratorState = 'running' | 'stopped' | 'unknown' | 'none' | 'unregi
 // unregistered: live session outside hivehouse (found via Claude Code session records);
 // resumable: nothing recorded, but a transcript exists (wake resumes by session id)
 
-type HubAgentState = 'running' | 'stopped' | 'unknown' | 'unrecorded'
+type HubAgentState = 'running' | 'stopped' | 'unknown' | 'unrecorded' | 'wedged'
+// wedged: pane alive but frozen on a spinner with a stale wire log;
+// the watchdog restarts it when a session exists to resume
 
 type HubAgent = {
   name: string
