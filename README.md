@@ -24,6 +24,7 @@ hive hub add demo ~/src/demo      # a project = a name + a folder with a git rep
 hive hub task demo "add a /health endpoint"
 hive ui                           # the hub screen: what waits on you
 hive hub start demo demo-1        # bring the orchestrator up on a task
+hive doctor                       # preflight: is this box ready for a task
 hive gate --log g.log -- build "npm run build" test "npm test"
 ```
 

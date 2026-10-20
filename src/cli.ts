@@ -32,6 +32,7 @@ const USAGE = `usage:
   hive gate-verify log <path> [--expect a,b] [--commit sha] | gate-verify commits <base>..<tip> --max-files <n> --style conventional|free --attribution allow|deny [--no-body]
   hive push <remote> <sha> <branch>
   hive cleanup <project> [--dry-run]
+  hive doctor
   hive ui
   hive web [--port N]
   hive watch`;
@@ -262,6 +263,10 @@ async function main(): Promise<void> {
       if (actions.length === 0) console.log(`hive: nothing to clean for ${project}`);
       for (const a of actions) console.log(`${dryRun ? 'would ' : ''}${a.action}`);
       return;
+    }
+    case 'doctor': {
+      const { doctor } = await import('./doctor.js');
+      process.exit(await doctor(process.cwd()));
     }
     case 'ui': {
       const { render } = await import('ink');
