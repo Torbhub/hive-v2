@@ -30,11 +30,13 @@ install_if_different() {
 }
 
 visudo -cf "$BOX_DIR/hive-v2-tmux.sudoers" >/dev/null
+visudo -cf "$BOX_DIR/hive-v2-dmesg.sudoers" >/dev/null
 install_if_different "$BOX_DIR/hive-v2-web.service" /etc/systemd/system/hive-v2-web.service 644
 install_if_different "$BOX_DIR/hive-v2-watch.service" /etc/systemd/system/hive-v2-watch.service 644
 install_if_different "$BOX_DIR/hive-v2-tmux.service" /etc/systemd/system/hive-v2-tmux.service 644
 install_if_different "$BOX_DIR/hive-v2-webterm.service" /etc/systemd/system/hive-v2-webterm.service 644
 install_if_different "$BOX_DIR/hive-v2-tmux.sudoers" /etc/sudoers.d/hive-v2-tmux 440
+install_if_different "$BOX_DIR/hive-v2-dmesg.sudoers" /etc/sudoers.d/hive-v2-dmesg 440
 install_if_different "$BOX_DIR/hive" /usr/local/bin/hive 755
 install_if_different "$BOX_DIR/hub-attach.sh" /opt/hive-v2/hub-attach.sh 755
 
