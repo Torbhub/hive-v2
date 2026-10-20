@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 export const USED = 'USED';
@@ -32,7 +32,7 @@ export const INVARIANTS: Invariant[] = [
     evidence: 'test/hub.test.ts::readDialogFor same-named agents' },
   { id: 'decisions-logged', desc: 'every owner, watch, or orchestrator decision lands in decisions.jsonl',
     evidence: 'test/hub.test.ts::decisions from hub actions' },
-  { id: 'gate-never-vacuous-green', desc: 'a gate log with no passing steps is RED; GREEN needs the right commit on a clean tree',
+  { id: 'gate-never-vacuous-green', desc: 'a gate log with no passing steps is RED, and GREEN needs the right commit on a clean tree',
     evidence: 'test/gate.test.ts::verifyLog' },
   { id: 'cleanup-trash-never-delete', desc: 'cleanup trashes only manifest-registered paths under the project home',
     evidence: 'test/cleanup.test.ts::cleanupProject worktree records' },
@@ -113,10 +113,16 @@ export function coherenceErrors(root: string): string[] {
       errs.push(`${j.id}: tracer missing on disk -> ${j.tracer}`);
     }
   }
+  const seenInv = new Set<string>();
   for (const inv of INVARIANTS) {
-    const file = inv.evidence.split('::')[0];
-    if (!existsSync(path.join(root, file))) {
+    if (seenInv.has(inv.id)) errs.push(`duplicate invariant id: ${inv.id}`);
+    seenInv.add(inv.id);
+    const [file, node] = inv.evidence.split('::');
+    const full = path.join(root, file);
+    if (!existsSync(full)) {
       errs.push(`invariant ${inv.id}: evidence missing on disk -> ${file}`);
+    } else if (node && !readFileSync(full, 'utf8').includes(`describe('${node}'`)) {
+      errs.push(`invariant ${inv.id}: evidence test not found in ${file} -> ${node}`);
     }
   }
   return errs;
