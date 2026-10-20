@@ -65,7 +65,7 @@ src/
   view.ts         — one HubView assembly (status + tasks + dialogs) for both screens
 roles/         — orchestrator.md, implementer.md, reviewer.md, council-*.md (read by spawned sessions)
 rules/RULES.md — the team's working rules (git, gate, reporting, handoff format)
-skills/        — start, gate, cleanup, council (Kimi Code skills; load with --skills-dir)
+skills/        — start, gate, cleanup, council, retro (Kimi Code skills; load with --skills-dir)
 web/           — server.ts (node:http, loopback) + the React/vite SPA (built to web/dist)
 docs/          — this file, hub-ui-spec.md, mechanics.md (what was kept/cut and why)
 test/          — vitest: screen parsing, gate-verify, task ledger, arg parsing
