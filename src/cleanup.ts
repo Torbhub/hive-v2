@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { killWindow, paneExists, paneIs, processStartTime, run, type PaneIdentity } from './tmux.js';
-import { hivePath, manifestRead, manifestWrite, readProjects, type ManifestRecord } from './state.js';
+import { hivePath, manifestRead, manifestWrite, readProjects, readTeam, upsertTeamEntry, type ManifestRecord } from './state.js';
 
 export type CleanupAction = { record: ManifestRecord; action: string; acted: boolean };
 
@@ -39,7 +39,14 @@ export async function cleanupProject(
         continue;
       }
       actions.push({ record: rec, action: `kill tmux window ${rec.window ?? pane} (${pane})`, acted: !dryRun });
-      if (!dryRun) await killWindow(pane, identity);
+      if (!dryRun) {
+        // Stamp the intent before the kill so watch never reads it as a crash.
+        const team = await readTeam(p.home);
+        for (const a of team.agents.filter((x) => x.pane === pane)) {
+          await upsertTeamEntry(p.home, { name: a.name, closed_at: new Date().toISOString() });
+        }
+        await killWindow(pane, identity);
+      }
       continue;
     }
     if (rec.kind === 'process') {

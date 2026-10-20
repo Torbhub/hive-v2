@@ -3,13 +3,29 @@ import { promises as fs } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { cleanupProject } from '../src/cleanup.js';
-import { hivePath, manifestAdd, writeJson, hubPath } from '../src/state.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// No tmux records in these tests, but keep the socket pointed away from the
-// user's server anyway.
+// No real tmux server in these tests: pane liveness, identity, and kills are
+// stubbed; git (run) stays real for the worktree cases.
 process.env.HIVE_TMUX_SOCKET = `hive-test-${process.pid}`;
+
+vi.mock('../src/tmux.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/tmux.js')>();
+  return {
+    ...orig,
+    paneExists: vi.fn(async () => true),
+    paneIs: vi.fn(async () => true),
+    killWindow: vi.fn(async () => {}),
+  };
+});
+
+import { cleanupProject } from '../src/cleanup.js';
+import { hivePath, manifestAdd, readTeam, writeJson, hubPath } from '../src/state.js';
+import { killWindow } from '../src/tmux.js';
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 function git(args: string[], cwd: string): void {
   execFileSync('git', args, { cwd, stdio: 'ignore' });
@@ -67,5 +83,39 @@ describe('cleanupProject worktree records', () => {
     const trashed = path.join(hivePath(home, 'trash'), new Date().toISOString().slice(0, 10), 'wt-agent');
     expect(await fs.stat(trashed)).toBeTruthy();
     expect((await fs.readFile(hivePath(home, 'manifest.jsonl'), 'utf8')).trim()).toBe('');
+  });
+});
+
+describe('cleanupProject tmux records', () => {
+  const tmuxRecord = {
+    kind: 'tmux' as const, at: new Date().toISOString(), pane: '%1', window: 'proj:builder',
+    pane_pid: 11, pane_started: 'a',
+  };
+
+  async function setupTmux() {
+    const { root, home } = await setup();
+    await manifestAdd(home, tmuxRecord);
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 11, pane_started: 'a' }],
+    });
+    return { root, home };
+  }
+
+  it('stamps the team entry closed before killing the window', async () => {
+    const { root, home } = await setupTmux();
+    const actions = await cleanupProject(root, 'proj');
+    expect(actions[0]).toMatchObject({ acted: true });
+    expect(killWindow).toHaveBeenCalledWith('%1', { pid: 11, started: 'a' });
+    const team = await readTeam(home);
+    expect(team.agents[0].closed_at).toBeTruthy();
+  });
+
+  it('a dry run stamps nothing and kills nothing', async () => {
+    const { root, home } = await setupTmux();
+    const actions = await cleanupProject(root, 'proj', { dryRun: true });
+    expect(actions[0].acted).toBe(false);
+    expect(killWindow).not.toHaveBeenCalled();
+    const team = await readTeam(home);
+    expect(team.agents[0].closed_at).toBeUndefined();
   });
 });

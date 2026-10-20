@@ -152,7 +152,7 @@ export async function watchCycle(
   for (const p of pf.projects) {
     const team = await readTeam(p.home);
     for (const a of team.agents) {
-      if (!a.pane || (await paneExists(a.pane))) continue;
+      if (!a.pane || a.closed_at || (await paneExists(a.pane))) continue;
       await handleDeath(root, p.name, a, deaths, wakes);
     }
 

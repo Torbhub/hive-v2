@@ -149,6 +149,21 @@ describe('watchCycle watchdog', () => {
     const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
     expect(log.match(/gave up waking demo-orchestrator/g)).toHaveLength(1);
   });
+
+  it('never logs or wakes a pane that was closed on purpose', async () => {
+    const { root } = await setupProject({
+      agents: [{
+        name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'a',
+        session_id: 'session_x', closed_at: new Date().toISOString(),
+      }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(false);
+    stubProbes();
+    await watchCycle(root, {}, new Set(), new Map());
+    expect(wake).not.toHaveBeenCalled();
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8').catch(() => '');
+    expect(log).not.toContain('died');
+  });
 });
 
 describe('watch loop cycle timeout', () => {

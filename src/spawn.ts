@@ -235,6 +235,7 @@ export async function closeAgent(root: string, project: string, agent: string): 
   const team = await readTeam(home);
   const entry = team.agents.find((a) => a.name === agent);
   if (!entry) throw new Error(`${project} has no agent named ${agent}`);
+  await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
   if (entry.pane) await killWindow(entry.pane, recordedIdentity(entry));
   await removeTeamEntry(home, agent);
   if (entry.orchestrator) await clearPendingPane(root, project);
@@ -247,6 +248,7 @@ export async function respawnAgent(root: string, project: string, agent: string)
   const old = team.agents.find((a) => a.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   await preflight();
+  await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
   if (old.pane) await killWindow(old.pane, recordedIdentity(old));
   const worktree = old.worktree ?? home;
   const { pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask');
@@ -255,7 +257,8 @@ export async function respawnAgent(root: string, project: string, agent: string)
     pane_pid: identity.pid, pane_started: identity.started,
   });
   await upsertTeamEntry(home, {
-    name: agent, pane, pane_pid: identity.pid, pane_started: identity.started, session_id: undefined,
+    name: agent, pane, pane_pid: identity.pid, pane_started: identity.started,
+    session_id: undefined, closed_at: undefined,
   });
   const idle = await waitIdle(pane);
   if (idle !== 'idle') {
