@@ -1,16 +1,19 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseSteps, pushByHash, verifyCommits, verifyLog } from '../src/gate.js';
 
 const SHA = 'a'.repeat(40);
+const VITEST_OK = ' Test Files  1 passed (1)\n      Tests  3 passed (3)\n';
 
-function log(lines: string[]): string {
+function log(lines: string[], steps: Record<string, string> = {}): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'hive-gate-'));
   const file = path.join(dir, 'gate.log');
   writeFileSync(file, lines.join('\n') + '\n');
+  mkdirSync(`${file}.d`, { recursive: true });
+  for (const [name, out] of Object.entries(steps)) writeFileSync(path.join(`${file}.d`, `${name}.log`), out);
   return file;
 }
 
@@ -30,11 +33,39 @@ describe('parseSteps', () => {
 
 describe('verifyLog', () => {
   it('GREEN on a full clean log', async () => {
-    const file = log([`# hive-gate steps: build,test head=${SHA} dirty=0`, 'build exit 0', 'test exit 0']);
+    const file = log(
+      [`# hive-gate steps: build,test head=${SHA} dirty=0`, 'build exit 0', 'test exit 0'],
+      { test: VITEST_OK },
+    );
     const r = await verifyLog(file);
     expect(r.green).toBe(true);
     expect(r.out).toBe('GREEN (2 steps)');
     expect(r.note).toMatch(/not checked against a commit/);
+  });
+
+  it('RED when a green test step ran zero tests — exit 0 is not evidence', async () => {
+    const empty = log(
+      [`# hive-gate steps: test head=${SHA} dirty=0`, 'test exit 0'],
+      { test: 'No test files found, exiting with code 0\n' },
+    );
+    const r = await verifyLog(empty);
+    expect(r.green).toBe(false);
+    expect(r.out).toContain('test: zero passing tests');
+    const skipped = log(
+      [`# hive-gate steps: test head=${SHA} dirty=0`, 'test exit 0'],
+      { test: ' Test Files  1 passed (1)\n      Tests  3 skipped (3)\n' },
+    );
+    expect((await verifyLog(skipped)).out).toContain('test: zero passing tests');
+  });
+
+  it('RED when a green test step shows errors or no output log', async () => {
+    const errors = log(
+      [`# hive-gate steps: test head=${SHA} dirty=0`, 'test exit 0'],
+      { test: ' Test Files  1 passed (1)\n      Tests  3 passed (3)\n     Errors  1 error\n' },
+    );
+    expect((await verifyLog(errors)).out).toContain('test: 1 error(s)');
+    const noOut = log([`# hive-gate steps: test head=${SHA} dirty=0`, 'test exit 0']);
+    expect((await verifyLog(noOut)).out).toContain('test: no step output');
   });
 
   it('RED when a step failed, and later steps still count', async () => {

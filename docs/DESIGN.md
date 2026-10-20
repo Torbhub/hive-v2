@@ -152,7 +152,9 @@ hive ui                                  — the hub screen
 after a failure, per-step output to `L.d/<name>.log`, appends `<name> exit
 <n>`. `gate-verify log L [--commit sha]`: GREEN only with ≥1 step line, all
 `exit 0`, no duplicates, every header step present, and (with --commit) head
-match + clean tree. `gate-verify commits a..b`: per commit non-empty
+match + clean tree. A green step whose name starts with `test` also needs its
+`L.d/<name>.log` to show a vitest summary with passed > 0 and zero errors —
+exit 0 alone is not evidence. `gate-verify commits a..b`: per commit non-empty
 subject, ≤ N files vs first parent, empty range is RED. A gate with no step
 lines is RED, never vacuously green.
 
