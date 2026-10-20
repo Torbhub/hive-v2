@@ -29,7 +29,16 @@ vi.mock('../src/hub.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/spawn.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/spawn.js')>();
+  return {
+    ...orig,
+    wakeAgent: vi.fn(async () => '%8'),
+  };
+});
+
 import { buildStatus, readDialogFor, answerDialog, wake } from '../src/hub.js';
+import { wakeAgent } from '../src/spawn.js';
 import { paneExists, run, sleep, tmux } from '../src/tmux.js';
 import { hubPath, readDecisions, writeJson, hivePath } from '../src/state.js';
 import { captureDeathBundle } from '../src/death-bundle.js';
@@ -163,6 +172,27 @@ describe('watchCycle watchdog', () => {
     expect(wake).not.toHaveBeenCalled();
     const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8').catch(() => '');
     expect(log).not.toContain('died');
+  });
+
+  it('re-wakes a dead agent by its session id; one without a session is only logged', async () => {
+    const { root } = await setupProject({
+      agents: [
+        { name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' },
+        { name: 'logger', pane: '%3', pane_pid: 33, pane_started: 'c' },
+      ],
+    });
+    vi.mocked(paneExists).mockResolvedValue(false);
+    stubProbes();
+    await watchCycle(root, {}, new Set(), new Map());
+    expect(wakeAgent).toHaveBeenCalledWith(root, 'demo', 'builder');
+    expect(wakeAgent).toHaveBeenCalledTimes(1);
+    expect(wake).not.toHaveBeenCalled();
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log).toContain('resurrected builder in pane %8 (wake attempt 1)');
+    expect(log).toMatch(/demo logger pane %3 died/);
+    expect(log).not.toContain('resurrected logger');
+    const decisions = await readDecisions(root);
+    expect(decisions[0].summary).toBe('woke builder after pane %2 died');
   });
 });
 

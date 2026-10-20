@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { captureDeathBundle } from './death-bundle.js';
 import { answerDialog, buildStatus, readDialogFor, Refusal, wake } from './hub.js';
+import { wakeAgent } from './spawn.js';
 import { appendDecision, hubPath, readProjects, readTeam } from './state.js';
 import { paneExists, run, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
@@ -115,17 +116,20 @@ async function handleDeath(
       `${new Date().toISOString()} ${project} ${a.name} death bundle: ${bundle ?? 'capture failed'}`,
     );
   }
-  if (!a.orchestrator) return;
+  if (!a.orchestrator && !a.session_id) return;
   const attempt = (wakes.get(key) ?? 0) + 1;
   if (attempt > WAKE_MAX_ATTEMPTS) return;
   wakes.set(key, attempt);
   if (attempt === 1) {
     await appendDecision(root, {
-      project, by: 'watch', summary: `woke the orchestrator after pane ${a.pane} died`,
+      project, by: 'watch',
+      summary: a.orchestrator
+        ? `woke the orchestrator after pane ${a.pane} died`
+        : `woke ${a.name} after pane ${a.pane} died`,
     });
   }
   try {
-    const pane = await wake(root, project);
+    const pane = a.orchestrator ? await wake(root, project) : await wakeAgent(root, project, a.name);
     await appendWatchLog(
       root,
       `${new Date().toISOString()} ${project} resurrected ${a.name} in pane ${pane} (wake attempt ${attempt})`,
