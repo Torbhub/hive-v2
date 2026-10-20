@@ -4,8 +4,7 @@
 // baseline fails the gate. --update moves the baseline DOWN only. A missing
 // baseline, a missing entry, or a missing file fails loud — a silent skip is
 // a false green.
-// Modes: --check (default, gate) | --update (regenerate, ratchet down only) |
-// --report (print current vs baseline, always exit 0).
+// Modes: --check (default, gate) | --update (regenerate, ratchet down only).
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,9 +13,14 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINE = 'scripts/discipline-baseline.json';
 const FILES = ['web/App.tsx', 'src/hub.ts', 'src/ui/HubApp.tsx', 'src/cli.ts', 'web/server.ts'];
 
+const usage = 'usage: node scripts/discipline-gate.mjs [--check|--update]';
+if (process.argv.length > 3) {
+  console.error(usage);
+  process.exit(2);
+}
 const mode = process.argv[2] ?? '--check';
-if (!['--check', '--update', '--report'].includes(mode)) {
-  console.error('usage: node scripts/discipline-gate.mjs [--check|--update|--report]');
+if (!['--check', '--update'].includes(mode)) {
+  console.error(usage);
   process.exit(2);
 }
 
@@ -68,7 +72,6 @@ for (const f of FILES) {
   console.log(`  ${f.padEnd(24)} baseline=${String(base[f]).padEnd(5)} current=${String(counts[f]).padEnd(5)} ${marker}`);
 }
 
-if (mode === '--report') process.exit(0);
 if (over.length) {
   fail(`FAIL: ${over.length} file(s) over baseline — shrink them; the baseline ratchets down only`);
 }
