@@ -47,7 +47,8 @@ install_hook() {
 install_hook pre-push
 
 # --- jj gate: install the wrapper next to the hooks, then route `jj push`
-# through it via a repo-local alias. Nothing is written outside .git/ here.
+# through it via a repo-local alias. Writes stay inside .git/ plus the
+# repo-local jj config (.jj/repo/config.toml).
 if [ -d "$ROOT/.jj" ] && command -v jj >/dev/null 2>&1; then
   cp "$ROOT/scripts/jj-push-gate.sh" "$DEST/jj-push-gate"
   chmod +x "$DEST/jj-push-gate"
