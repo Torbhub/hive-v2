@@ -28,3 +28,11 @@
 - Rotation is normal. A fresh copy of you reads that block and continues.
 - Decisions live in `.hive-hub/decisions.jsonl` (append via
   `hive hub log <id> decided "<reason>"`); read them at pickup — they are permanent.
+
+## Retro edits
+
+- Before a retro-driven edit of roles/, rules/, or skills/ lands, tag the
+  current state: `tools/checkpoint.sh "<note>"`.
+- Rollback deletes added files first:
+  `rm -rf roles rules skills && git checkout <tag> -- roles rules skills`.
+  A plain checkout keeps files the edit added, and those keep steering agents.

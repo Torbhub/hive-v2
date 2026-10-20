@@ -32,5 +32,7 @@ Look for:
 Propose, never edit in place. The edits land as their own change through the
 same path as any work: gate, then the owner's word. Before a retro-driven
 edit lands, tag the current state with `tools/checkpoint.sh` (see
-`rules/RULES.md`). Report verdict first: what to change, why, and what you
+`rules/RULES.md`). Those paths live in the hive-v2 repo, not in your project
+worktree — run the checkpoint and make the edits from a hive-v2 checkout.
+Report verdict first: what to change, why, and what you
 deliberately left alone.
