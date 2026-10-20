@@ -78,7 +78,12 @@ back.
 ## How a task flows
 
 1. You record a task: `hive hub task demo "..."`. It lands in the ledger
-   (`.hive-hub/tasks.jsonl`) in state `asked`.
+   (`.hive-hub/tasks.jsonl`) in state `asked`. A task can also be a
+   structured brief: frontmatter between `---` lines plus a
+   `## Files to touch` section that claims the paths the work will change.
+   Paste one with `hive hub task demo "$(cat brief.md)"`. hive validates the
+   brief before recording it and keeps the frontmatter at the top of
+   `tasks/<id>.md`.
 2. You start the team: `hive hub start demo demo-1`. hive opens a tmux window
    (`demo:demo-orchestrator` in the `hive` tmux session), waits for kimi to go
    idle, and types the pickup line: who it is, where its handoff is, where the
@@ -92,8 +97,13 @@ yourself:
 ```bash
 tmux -L hive-v2 attach
 ```
-3. The orchestrator plans, asks, and spawns agents (`hive spawn`). Every state
-   change is a ledger event: `plan`, `question`, `blocked`, `done`.
+3. The orchestrator plans, asks, and spawns agents (`hive spawn`). With
+   `--task <id>` the spawn binds the agent to a task whose brief claims a
+   file scope. hive refuses the spawn when the scope overlaps another live
+   agent's task scope, and when either brief's scope does not parse. Two
+   agents on the same task never collide. A task with no scope claim spawns
+   unchecked. Every state change is a ledger event: `plan`, `question`,
+   `blocked`, `done`.
 4. The hub screen (`hive ui`) is where you see all of it: tasks that need you,
    dialogs waiting on any agent's screen (answerable from the screen, with a
    fingerprint check so a changed dialog is never blindly answered), context

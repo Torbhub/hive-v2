@@ -12,6 +12,7 @@ import {
   removeTeamEntry, upsertTeamEntry, clearPendingPane, type ProjectsFile,
 } from './state.js';
 import type { ProjectMode, TeamEntry } from './types.js';
+import { checkTaskScope } from './scope.js';
 
 export function orchestratorName(project: string): string {
   return `${project}-orchestrator`;
@@ -174,7 +175,7 @@ async function projectEntry(root: string, project: string): Promise<ProjectsFile
   return p;
 }
 
-export type SpawnOptions = { agent: string; role?: string; worktree?: string };
+export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string };
 
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
   const { agent, role = 'implementer' } = opts;
@@ -186,6 +187,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   if (team.agents.some((a) => a.name === agent)) {
     throw new Error(`${project} already has an agent named ${agent} (close or respawn it)`);
   }
+  if (opts.task) await checkTaskScope(root, project, home, opts.task);
 
   let worktree = home;
   if (opts.worktree) {
@@ -205,7 +207,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   });
   const entry: TeamEntry = {
     name: agent, pane, pane_pid: identity.pid, pane_started: identity.started,
-    worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`),
+    worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task: opts.task,
   };
   await upsertTeamEntry(home, entry);
 

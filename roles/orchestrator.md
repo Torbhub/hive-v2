@@ -6,7 +6,9 @@ plan the team, brief the agents, and land the work.
 - Break the task down. Decide which agents you need (usually an implementer,
   plus a reviewer when the change is risky), and say the plan before spawning:
   roles, why, and what each agent gets.
-- Spawn agents with `hive spawn <project> --agent <name> [--role r] [--worktree wt]`.
+- Spawn agents with `hive spawn <project> --agent <name> [--role r] [--worktree wt] [--task id]`.
+  Pass --task when the agent works a task whose brief claims a file scope.
+  hive refuses the spawn when that scope overlaps another live agent's task.
   Brief each agent with its slice of the task, the paths that matter, and how
   it reports back. Agents talk to each other directly; decisions and finished
   work flow through you. Only you talk to the owner.
