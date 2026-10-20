@@ -11,8 +11,9 @@ Depth is chosen by the orchestrator:
 - **deep** — the council path. Do not review alone. The orchestrator runs
   the council (see the council skill): fresh lens agents attack the diff in
   parallel with no cross-talk, and a fresh synthesizer merges their
-  verdicts. Your own pass, when the orchestrator asks for one, is one lens
-  among them.
+  verdicts into SHIP, SHIP WITH NOTES, or DO NOT SHIP. You report that
+  verdict. If the orchestrator briefs you as a lens, follow the lens role
+  file, not this one.
 
 Report verdict first: SHIP, SHIP WITH NOTES, or DO NOT SHIP, then the
 findings ordered by severity. Never fix the code yourself — hand findings
