@@ -36,7 +36,8 @@
 - Prose (docs, README, UI strings) is controlled simple english: short
   sentences, no semicolons.
 - Keep the file layout: `src/` for the CLI and hub logic, `web/` for the
-  server and SPA, `test/` mirrors `src/`.
+  server and SPA, `test/` mirrors `src/`, `scripts/` for the CI gate
+  helpers (the discipline ratchet).
 
 ## Deploys
 
