@@ -10,6 +10,7 @@ workflow on main. Policy: any failure is immediately fixed, never ignored.
 | `gate` job red on main, failed SHA == main tip | Auto-revert the tip. Branch `auto-revert/<sha>`. PR with auto-merge. Alarm issue opened or updated. Comment on the offending PR. |
 | `deploy` leg red, `gate` green | Alarm-only. The content passed the gate. This is infra. Investigate the run, fix, re-dispatch if needed. |
 | Red SHA no longer main tip | No-op. The tip's own checks govern. |
+| A revert PR for the same SHA already exists (open, or closed unmerged) | No-op. Dedupe. |
 | Tip is itself a revert | Alarm-only (loop guard). A human resolves. |
 | Revert conflicts | No PR. The alarm says `conflict`. A human reverts by hand. |
 

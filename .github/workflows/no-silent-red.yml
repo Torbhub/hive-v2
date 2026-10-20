@@ -1,18 +1,18 @@
 name: no-silent-red
-# Watches the deploy workflow on main. A red gate on the tip spawns an
-# auto-revert PR with auto-merge. A red deploy leg with a green gate alarms
-# only — infra failures are not content to revert. One rolling issue carries
-# the alarm. Setup and operator steps: docs/no-silent-red.md.
+# Watches the deploy workflow on main. A red gate on the tip spawns a revert
+# PR, gates it on its branch, squash-merges it, and dispatches the deploy on
+# main. A red deploy leg with a green gate alarms only — infra failures are
+# not content to revert. One rolling issue carries the alarm. Operator steps:
+# docs/no-silent-red.md.
 #
-# Why the App token: PRs opened by the default GITHUB_TOKEN do not trigger the
-# PR gate, which would strand the revert under the required `gate` check. This
-# workflow never triggers on push or pull_request, so the credential cannot run
-# against unmerged code.
+# GITHUB_TOKEN acts (branch push, PR create, merge) fire no other workflows.
+# So the tripwire runs the gate by dispatching deploy on the revert branch
+# (its deploy leg is main-only) and dispatches the deploy on main itself
+# after merging.
 on:
   workflow_run:
     workflows: [deploy]
     types: [completed]
-  workflow_dispatch:
 
 # One tripwire per offending SHA — a rerun of the same failed run must not double-act.
 concurrency:
@@ -20,43 +20,34 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  issues: write
+  contents: write       # push the revert branch, merge the PR
+  pull-requests: write  # open and comment the revert PR
+  issues: write         # the rolling alarm issue
+  checks: read          # poll the gate check on the revert head
+  actions: write        # dispatch deploy on the revert branch and on main
 
 jobs:
   red-check:
     if: >-
       ${{
-        github.event_name == 'workflow_dispatch' ||
-        (github.event.workflow_run.conclusion == 'failure'
-         && github.event.workflow_run.head_branch == 'main')
+        github.event.workflow_run.conclusion == 'failure'
+        && github.event.workflow_run.head_branch == 'main'
+        && github.event.workflow_run.head_repository.full_name == github.repository
       }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/create-github-app-token@v1
-        id: app
-        with:
-          app-id: ${{ vars.HIVE_CI_APP_ID }}
-          private-key: ${{ secrets.HIVE_CI_APP_PRIVATE_KEY }}
       - uses: actions/checkout@v4
         with:
-          token: ${{ steps.app.outputs.token }}
           fetch-depth: 0
       - name: Evaluate and auto-revert the red tip
         id: act
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            gh api "repos/$GITHUB_REPOSITORY" --jq .full_name
-            echo "probe OK — App token mints and reads the repo" >> "$GITHUB_STEP_SUMMARY"
-            echo "outcome=probe-ok" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           TIP="$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
           if [ "$RUN_SHA" != "$TIP" ]; then
             echo "failed SHA ${RUN_SHA:0:7} is no longer main tip (${TIP:0:7}) — the tip's own checks govern. No-op."
@@ -78,17 +69,18 @@ jobs:
             echo "outcome=loop-guarded" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Dedupe: an open revert PR for this SHA already exists.
-          EXISTING="$(gh pr list --state open --json number,title --jq ".[] | select(.title | test(\"no-silent-red ${TIP:0:7}\")) | .number" | head -1)"
+          # Dedupe: an unmerged revert PR for this SHA already exists (open, or
+          # closed without merge — a rerun must not spawn it again).
+          EXISTING="$(gh pr list --state all --limit 100 --json number,title,state --jq ".[] | select(.state != \"MERGED\") | select(.title | test(\"no-silent-red ${TIP:0:7}\")) | .number" | head -1)"
           if [ -n "$EXISTING" ]; then
-            echo "revert PR #$EXISTING already open for ${TIP:0:7} — no-op"
+            echo "revert PR #$EXISTING already exists for ${TIP:0:7} — no-op"
             echo "outcome=deduped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git config user.name "hive-ci-app[bot]"
-          git config user.email "hive-ci-app[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           BRANCH="auto-revert/${TIP:0:7}"
-          git checkout -b "$BRANCH"
+          git checkout -b "$BRANCH" "$TIP"
           if ! git revert -m 1 --no-edit "$TIP"; then
             git revert --abort || true
             if ! git revert --no-edit "$TIP"; then
@@ -101,15 +93,40 @@ jobs:
           git push origin "$BRANCH"
           PR_URL="$(gh pr create --base main --head "$BRANCH" \
             --title "Revert \"$SUBJ\" — no-silent-red ${TIP:0:7}" \
-            --body "The gate went red on main at $TIP ([run]($RUN_URL)). This revert restores the last green tree. Auto-merge is on. If the revert itself goes red, a human resolves — the no-silent-red alarm stays open.")"
+            --body "The gate went red on main at $TIP ([run]($RUN_URL)). This revert restores the last green tree. The tripwire gates this PR on its branch, squash-merges it when green, and dispatches the deploy on main. If the gate stays red, a human resolves — the no-silent-red alarm stays open.")"
           echo "revert PR: $PR_URL"
-          if ! gh pr merge --auto --merge "$PR_URL"; then
-            echo "::warning::could not enable auto-merge (repo allow_auto_merge off?) — merge $PR_URL by hand"
-          fi
-          echo "outcome=revert-pr-open" >> "$GITHUB_OUTPUT"
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          # GITHUB_TOKEN fired no checks for this PR, so run the gate by hand:
+          # dispatch deploy on the branch (deploy leg is main-only) and poll
+          # the check it writes on the revert head.
+          REVERT_SHA="$(git rev-parse HEAD)"
+          gh workflow run deploy.yml --ref "$BRANCH"
+          C="pending"
+          for i in $(seq 1 60); do
+            sleep 10
+            C="$(gh api "repos/$GITHUB_REPOSITORY/commits/$REVERT_SHA/check-runs?check_name=gate" --jq '.check_runs[0].conclusion // "pending"')"
+            case "$C" in
+              success) break ;;
+              failure|cancelled|timed_out|action_required) break ;;
+            esac
+          done
+          if [ "$C" != "success" ]; then
+            echo "::error::gate on the revert branch did not go green within 10 minutes (conclusion: $C) — human resolves $PR_URL"
+            echo "outcome=revert-gate-red" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Squash, so the merged tip keeps the Revert "..." subject the loop
+          # guard above matches (and main stays all-squash).
+          gh pr merge --squash "$PR_URL"
+          # The GITHUB_TOKEN merge fires no push run — dispatch the deploy on main by hand.
+          gh workflow run deploy.yml --ref main
+          echo "outcome=revert-merged" >> "$GITHUB_OUTPUT"
       - name: Alarm (always — even when the revert path failed)
-        if: always() && github.event_name != 'workflow_dispatch'
+        if: >-
+          ${{
+            always()
+            && !contains(fromJSON('["superseded","deduped"]'), steps.act.outputs.outcome)
+          }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}

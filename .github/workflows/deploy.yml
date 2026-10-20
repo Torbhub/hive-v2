@@ -43,7 +43,11 @@ jobs:
 
   deploy:
     needs: gate
-    if: github.event_name != 'pull_request'
+    # Deploys run from main only. A branch dispatch runs the gate alone — the
+    # no-silent-red tripwire uses that to gate its revert before merging.
+    if: >-
+      ${{ github.event_name == 'push'
+         || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
