@@ -34,7 +34,7 @@ import { paneExists, run, sleep, tmux } from '../src/tmux.js';
 import { hubPath, readDecisions, writeJson, hivePath } from '../src/state.js';
 import { captureDeathBundle } from '../src/death-bundle.js';
 import {
-  extractCommand, neverApprove, tier1Approves, watch, watchCycle,
+  extractCommand, neverApprove, tier1Approves, watch, watchCycle, WAKE_MAX_ATTEMPTS,
 } from '../src/watch.js';
 
 function tmp(): string {
@@ -101,7 +101,7 @@ async function setupProject(opts: { approvals?: string; agents?: Record<string, 
 }
 
 describe('watchCycle watchdog', () => {
-  it('logs a dead orchestrator pane once and wakes it; a dead agent is only logged', async () => {
+  it('logs a death once, retries a failed wake, and logs the resurrection', async () => {
     const { root } = await setupProject({
       agents: [
         { name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'a', session_id: 'session_x' },
@@ -111,21 +111,43 @@ describe('watchCycle watchdog', () => {
     vi.mocked(paneExists).mockResolvedValue(false);
     stubProbes();
     const deaths = new Set<string>();
-    await watchCycle(root, {}, deaths);
+    const wakes = new Map<string, number>();
+    vi.mocked(wake).mockRejectedValueOnce(new Error('the teamkimi proxy is down'));
+    await watchCycle(root, {}, deaths, wakes);
     expect(wake).toHaveBeenCalledWith(root, 'demo');
     expect(wake).toHaveBeenCalledTimes(1);
-    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    let log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
     expect(log).toMatch(/demo demo-orchestrator pane %1 died \(pid 11, started a\)/);
     expect(log).toMatch(/demo builder pane %2 died \(pid 22, started b\)/);
+    expect(log).toContain('wake attempt 1 failed: the teamkimi proxy is down');
     const decisions = await readDecisions(root);
     expect(decisions[0]).toMatchObject({ by: 'watch', project: 'demo' });
     expect(decisions[0].summary).toMatch(/woke the orchestrator/);
-    // A second cycle with the same dead panes does not relog or rewake.
-    vi.mocked(wake).mockClear();
-    await watchCycle(root, {}, deaths);
-    expect(wake).not.toHaveBeenCalled();
-    const log2 = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
-    expect(log2).toBe(log);
+
+    // The failed wake is retried on the next tick; the death is not relogged,
+    // a dead agent is still only logged, and a successful retry is a resurrection.
+    await watchCycle(root, {}, deaths, wakes);
+    expect(wake).toHaveBeenCalledTimes(2);
+    log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log.match(/pane %1 died/g)).toHaveLength(1);
+    expect(log).toContain('resurrected demo-orchestrator in pane %9 (wake attempt 2)');
+    const after = await readDecisions(root);
+    expect(after.filter((d) => d.summary.includes('woke the orchestrator'))).toHaveLength(1);
+  });
+
+  it('gives up waking after the attempts run out and says so once', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'a' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(false);
+    stubProbes();
+    vi.mocked(wake).mockRejectedValue(new Error('the teamkimi proxy is down'));
+    const deaths = new Set<string>();
+    const wakes = new Map<string, number>();
+    for (let i = 0; i < WAKE_MAX_ATTEMPTS + 2; i++) await watchCycle(root, {}, deaths, wakes);
+    expect(wake).toHaveBeenCalledTimes(WAKE_MAX_ATTEMPTS);
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log.match(/gave up waking demo-orchestrator/g)).toHaveLength(1);
   });
 });
 

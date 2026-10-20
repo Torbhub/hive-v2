@@ -4,7 +4,7 @@ import { answerDialog, buildStatus, readDialogFor, Refusal, wake } from './hub.j
 import { appendDecision, hubPath, readProjects, readTeam } from './state.js';
 import { paneExists, run, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
-import type { Approvals } from './types.js';
+import type { Approvals, TeamEntry } from './types.js';
 
 // Read-only leaders: a chain segment must start with one of these to be
 // auto-approvable. Multi-word leaders match the subcommand, not just `git`.
@@ -91,10 +91,61 @@ async function maybeAutoApprove(
   });
 }
 
+export const WAKE_MAX_ATTEMPTS = 60;
+
+// Desired vs actual, re-judged every tick: a death is logged and bundled once,
+// but the wake is retried until the pane is back or the attempts run out.
+async function handleDeath(
+  root: string,
+  project: string,
+  a: TeamEntry,
+  deaths: Set<string>,
+  wakes: Map<string, number>,
+): Promise<void> {
+  const key = `${a.pane}:${a.pane_pid}`;
+  if (!deaths.has(key)) {
+    deaths.add(key);
+    await appendWatchLog(
+      root,
+      `${new Date().toISOString()} ${project} ${a.name} pane ${a.pane} died (pid ${a.pane_pid}, started ${a.pane_started})`,
+    );
+    const bundle = await captureDeathBundle(root, project, a).catch(() => null);
+    await appendWatchLog(
+      root,
+      `${new Date().toISOString()} ${project} ${a.name} death bundle: ${bundle ?? 'capture failed'}`,
+    );
+  }
+  if (!a.orchestrator) return;
+  const attempt = (wakes.get(key) ?? 0) + 1;
+  if (attempt > WAKE_MAX_ATTEMPTS) return;
+  wakes.set(key, attempt);
+  if (attempt === 1) {
+    await appendDecision(root, {
+      project, by: 'watch', summary: `woke the orchestrator after pane ${a.pane} died`,
+    });
+  }
+  try {
+    const pane = await wake(root, project);
+    await appendWatchLog(
+      root,
+      `${new Date().toISOString()} ${project} resurrected ${a.name} in pane ${pane} (wake attempt ${attempt})`,
+    );
+  } catch (e) {
+    await appendWatchLog(root, `${new Date().toISOString()} ${project} wake attempt ${attempt} failed: ${lastLine(e)}`);
+    if (attempt === WAKE_MAX_ATTEMPTS) {
+      await appendWatchLog(
+        root,
+        `${new Date().toISOString()} ${project} gave up waking ${a.name} after ${WAKE_MAX_ATTEMPTS} attempts; wake it by hand`,
+      );
+    }
+  }
+}
+
 export async function watchCycle(
   root: string,
   env: NodeJS.ProcessEnv = {},
   deaths: Set<string> = new Set(),
+  wakes: Map<string, number> = new Map(),
 ): Promise<void> {
   const pf = await readProjects(root);
   const status = await buildStatus(root);
@@ -102,26 +153,7 @@ export async function watchCycle(
     const team = await readTeam(p.home);
     for (const a of team.agents) {
       if (!a.pane || (await paneExists(a.pane))) continue;
-      const key = `${a.pane}:${a.pane_pid}`;
-      if (deaths.has(key)) continue;
-      deaths.add(key);
-      await appendWatchLog(
-        root,
-        `${new Date().toISOString()} ${p.name} ${a.name} pane ${a.pane} died (pid ${a.pane_pid}, started ${a.pane_started})`,
-      );
-      const bundle = await captureDeathBundle(root, p.name, a).catch(() => null);
-      await appendWatchLog(
-        root,
-        `${new Date().toISOString()} ${p.name} ${a.name} death bundle: ${bundle ?? 'capture failed'}`,
-      );
-      if (a.orchestrator) {
-        await appendDecision(root, {
-          project: p.name, by: 'watch', summary: `woke the orchestrator after pane ${a.pane} died`,
-        });
-        await wake(root, p.name).catch(async (e: unknown) => {
-          await appendWatchLog(root, `${new Date().toISOString()} ${p.name} wake failed: ${lastLine(e)}`);
-        });
-      }
+      await handleDeath(root, p.name, a, deaths, wakes);
     }
 
     const approvals = p.approvals ?? 'manual';
@@ -152,8 +184,9 @@ export async function watch(
 ): Promise<void> {
   const env = await kimiEnv().catch(() => ({} as NodeJS.ProcessEnv));
   const deaths = new Set<string>();
+  const wakes = new Map<string, number>();
   for (;;) {
-    await withTimeout(watchCycle(root, env, deaths), cycleTimeoutMs, 'watch cycle').catch(async (e: unknown) => {
+    await withTimeout(watchCycle(root, env, deaths, wakes), cycleTimeoutMs, 'watch cycle').catch(async (e: unknown) => {
       await appendWatchLog(root, `${new Date().toISOString()} cycle error: ${lastLine(e)}`);
     });
     await sleep(intervalMs);
