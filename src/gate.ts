@@ -110,16 +110,18 @@ export async function runGate(logPath: string, steps: GateStep[], cwd: string): 
 
 export type VerifyLogResult = { green: boolean; out: string; note?: string };
 
-// Exit 0 is not evidence: a test step must show N>0 passed and zero errors in
-// the vitest summary of its own output log, else the step evidenced nothing.
+// Exit 0 is not evidence: a test step must show passed > 0, zero failed, and
+// zero errors in the vitest summary of its own output log.
 async function vacuity(file: string, name: string): Promise<string | null> {
   const stepLog = path.join(`${file}.d`, `${name}.log`);
   const out = await fs.readFile(stepLog, 'utf8').catch(() => '');
   if (!out) return `no step output at ${stepLog}`;
   const tests = out.match(VITEST_TESTS_RE)?.[1] ?? '';
   const passed = Number(tests.match(/(\d+) passed/)?.[1] ?? 0);
+  const failed = Number(tests.match(/(\d+) failed/)?.[1] ?? 0);
   const errors = Number(out.match(VITEST_ERRORS_RE)?.[1] ?? 0);
   if (passed === 0) return 'zero passing tests — the step evidences nothing';
+  if (failed > 0) return `${failed} failed test(s) in the summary — the exit code was masked`;
   if (errors > 0) return `${errors} error(s) — tests did not run to a verdict`;
   return null;
 }

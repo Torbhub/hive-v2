@@ -68,6 +68,16 @@ describe('verifyLog', () => {
     expect((await verifyLog(noOut)).out).toContain('test: no step output');
   });
 
+  it('RED when a green test step recorded failures — the exit code was masked', async () => {
+    const masked = log(
+      [`# hive-gate steps: test head=${SHA} dirty=0`, 'test exit 0'],
+      { test: ' Test Files  1 failed (1)\n      Tests  1 failed | 9 passed (10)\n' },
+    );
+    const r = await verifyLog(masked);
+    expect(r.green).toBe(false);
+    expect(r.out).toContain('test: 1 failed test(s)');
+  });
+
   it('RED when a step failed, and later steps still count', async () => {
     const file = log([`# hive-gate steps: build,test head=${SHA} dirty=0`, 'build exit 1', 'test exit 0']);
     const r = await verifyLog(file);
