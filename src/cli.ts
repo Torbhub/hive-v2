@@ -174,6 +174,7 @@ async function spawnCommand(args: string[]): Promise<void> {
   if (!project || typeof agent !== 'string') {
     throw new UsageError('usage: hive spawn [respawn|close] <project> --agent <name> [--role r] [--worktree wt] [--task id]');
   }
+  if (sub !== 'spawn' && f.task !== undefined) throw new UsageError('--task only applies to spawn');
   if (sub === 'close') {
     await closeAgent(root, project, agent);
     console.log(`hive: ${project}/${agent} closed`);

@@ -60,6 +60,20 @@ describe('taskScope', () => {
     expect(taskScope(brief('no bullets at all')).kind).toBe('invalid');
   });
 
+  it('invalid when a bullet carries more than one path token', () => {
+    expect(taskScope(brief('- src/a.ts, src/b.ts')).kind).toBe('invalid');
+    expect(taskScope(brief('- src/a.ts src/b.ts')).kind).toBe('invalid');
+  });
+
+  it('invalid on a NEW bullet with no path', () => {
+    expect(taskScope(brief('- NEW')).kind).toBe('invalid');
+  });
+
+  it('accepts annotations opened with a dash or a paren', () => {
+    const s = taskScope(brief('- src/a.ts — one line\n- src/b.ts (~10 lines)\n- src/c.ts'));
+    expect(s).toEqual({ kind: 'claim', paths: new Set(['src/a.ts', 'src/b.ts', 'src/c.ts']) });
+  });
+
   it('invalid when frontmatter opens and never closes', () => {
     expect(taskScope('---\ntitle: "x"\n\n## Files to touch\n- src/a.ts\n').kind).toBe('invalid');
   });
@@ -162,4 +176,31 @@ describe('spawnAgent --task', () => {
     await expect(spawnAgent(root, 'demo', { agent: 'impl-2', task: 'demo-99' }))
       .rejects.toThrow(/no task file/);
   });
+
+  it('records the claim before the window opens', async () => {
+    const { root, home } = await setup();
+    await writeTask(root, 'demo-1', brief('- src/a.ts — x'));
+    const { newWindow } = await import('../src/tmux.js');
+    let seenAtLaunch: { agents: { name: string; task?: string }[] } | null = null;
+    vi.mocked(newWindow).mockImplementationOnce(async () => {
+      seenAtLaunch = JSON.parse(await fs.readFile(hivePath(home, 'team.json'), 'utf8'));
+      return '%9';
+    });
+    await spawnAgent(root, 'demo', { agent: 'impl-1', task: 'demo-1' });
+    expect(seenAtLaunch!.agents).toContainEqual({ name: 'impl-1', task: 'demo-1' });
+  }, 20_000);
+
+  it('lets exactly one of two concurrent overlapping spawns start', async () => {
+    const { root, home } = await setup();
+    await writeTask(root, 'demo-1', brief('- src/a.ts — x'));
+    await writeTask(root, 'demo-2', brief('- src/a.ts — y'));
+    const results = await Promise.allSettled([
+      spawnAgent(root, 'demo', { agent: 'impl-1', task: 'demo-1' }),
+      spawnAgent(root, 'demo', { agent: 'impl-2', task: 'demo-2' }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.find((r) => r.status === 'rejected');
+    expect((rejected as PromiseRejectedResult).reason.message).toMatch(/overlaps/);
+    expect((await readTeam(home)).agents).toHaveLength(1);
+  }, 20_000);
 });

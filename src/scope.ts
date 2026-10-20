@@ -9,7 +9,11 @@ import { hubPath, readTeam } from './state.js';
 const FRONTMATTER = /^---\n([\s\S]*?)\n---(?:\n|$)/;
 const FILES_SECTION = /^## Files to touch\s*\n([\s\S]*?)(?=^## |(?![\s\S]))/m;
 const BULLET = /^\s*-\s/;
-const BULLET_PATH = /^\s*-\s+(?:NEW\s+)?`?([^\s`()]+)`?/;
+// A bullet is `- [NEW] path`, optionally followed by an annotation opened
+// with `—` or `(`. Anything else after the path (a second token, a comma
+// list) fails closed: capturing just the first token would silently drop
+// the rest of the claim.
+const BULLET_PATH = /^\s*-\s+(?:NEW\s+)?`?([^\s`()]+)`?(\s+[—(].*)?\s*$/;
 
 export type Scope =
   | { kind: 'none' }
@@ -26,7 +30,7 @@ export function taskScope(text: string): Scope {
   for (const line of m[1].split('\n')) {
     if (!BULLET.test(line)) continue;
     const b = line.match(BULLET_PATH);
-    if (!b || b[1].startsWith('—')) {
+    if (!b || b[1].startsWith('—') || b[1] === 'NEW') {
       return { kind: 'invalid', why: `a Files to touch bullet has no path: ${line.trim()}` };
     }
     paths.add(b[1]);
