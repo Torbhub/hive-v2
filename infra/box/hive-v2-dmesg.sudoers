@@ -1,0 +1,3 @@
+# Death bundles (src/death-bundle.ts) read the kernel ring buffer; the box
+# sets kernel.dmesg_restrict=1, so dmesg needs root.
+ubuntu ALL=(root) NOPASSWD: /usr/bin/dmesg
