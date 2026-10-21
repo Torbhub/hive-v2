@@ -1,7 +1,7 @@
 # Crawl sources
 
 The standing sources the news-scout crawls on every daily-scan task. The
-scout proposes additions and removals in its findings note; the edits land
+scout proposes additions and removals in its findings note. The edits land
 through the normal PR path.
 
 - Kimi Code CLI releases — https://github.com/MoonshotAI/kimi-cli/releases

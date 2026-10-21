@@ -14,7 +14,7 @@ never.
    in `docs/crawl/`.
 2. Read the note. Pick AT MOST ONE candidate experiment — the one with the
    best expected value for hive-v2. Scope it to one lane-sized change
-   before anyone builds; a candidate that cannot shrink to that is not
+   before anyone builds. A candidate that cannot shrink to that is not
    today's pick.
 3. Spawn an implementer in a jj workspace lane
    (`hive spawn hivev2 --agent <name> --worktree <wt> --task <id>`) to
