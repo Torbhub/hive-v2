@@ -390,6 +390,7 @@ Success (exit 0) prints one line: the pane dialog parse plus identifiers:
 | dialog option button | `hh-hub answer <project> [<agent>] --choice <n> --seen <fingerprint>` | 30 s | — |
 | `Esc` button | same with `--choice esc` | 30 s | — |
 | `a approve plan` / `b send back` hotkey buttons (TUI), `Approve plan` / `Send back` + feedback line (web) | `hh-hub plan-answer <project> <task> <approve|sendback> [feedback]` | 30 s (TUI), 150 s (web) | cyan `answering…` on the need |
+| `Add project` row (web only, §10) | POST `/api/project` with `{name, path}` | 30 s | — |
 | `Seen` button | local state only (records the away-period start as seen); no subprocess | — | — |
 
 Toasts (on completion):
@@ -414,3 +415,11 @@ Skipped: the engine-specific atoms/pane plumbing and the edit/git guard in `hub.
 Decision summaries can carry stretchtext markup: `{{short|long}}`. The web UI parses it (`src/stretch.ts`) and renders each closed stretch as its `short` form — dotted underline, brighter than the surrounding summary text, `role="button"` with `aria-expanded`. A click swaps the span to its `long` form inline (long forms can hold further stretches); a second click collapses back to `short`. While any stretch in a row is open, the row wraps instead of truncating. Text without a `|`, unclosed stretches, and braces inside code spans or fences render as plain text.
 
 Every expand (never a collapse) fires a fire-and-forget POST to `/api/stretch-opened` with `{short, pane}` (`pane` = the decision's task id, else its project). The endpoint appends `{"ts": <ms epoch>, "short": "...", "pane": "..."}` as one JSON line to `~/.kimi-code/stretch-opened.jsonl` (override with `HIVE_STRETCH_LOG`), which the stretchtext skill reads to know what the owner already opened. UI failures are swallowed; the server logs its own failures. `short` and `pane` are capped at 200 characters. The Ink screen does not parse the markup; raw braces show there.
+
+## 10. Add project row (web UI only)
+
+The web screen ends its project list with an add-project row, rendered after the last project card and before the footer (so it is also the answer to the §1.6 empty state). One row: a `name` input (placeholder `name`, aria-label `new project name`, fixed narrow width), a `path` input (placeholder `/absolute/path`, aria-label `new project path`, grows), and a primary **Add project** button. Both inputs are mono, small. Enter in either input submits; the button stays disabled until both fields hold text.
+
+A submit POSTs `/api/project` with `{name, path}` (trimmed). The server checks, in order: the name matches the CLI rule (`/^[a-z][a-z0-9-]{0,31}$/`), `path` is absolute, it is a directory, and it holds a git repo (a `.git` directory or, for a worktree, a `.git` file). A duplicate name is refused. Optional `mode` (`ask|yolo|auto`) and `approvals` (`manual|safe|smart`) fields are validated the same way when present; the form does not send them — the project card's toggles set them after the add. Success writes `projects.json` exactly like `hive hub add` and answers `{ok: true, name}`; any refusal is a 400 `{ok: false, detail}` and shows as a toast. On success the row clears, a `{name}: project added` toast shows, and the view refreshes so the new card appears.
+
+The Ink screen has no add-project row (it has no task-creation row either): registration stays a web flow, the TUI stays a monitor.
