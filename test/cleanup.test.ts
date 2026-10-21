@@ -13,6 +13,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/tmux.js')>();
   return {
     ...orig,
+    run: vi.fn(orig.run),
     paneExists: vi.fn(async () => true),
     paneIs: vi.fn(async () => true),
     killWindow: vi.fn(async () => {}),
@@ -21,7 +22,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 
 import { cleanupProject } from '../src/cleanup.js';
 import { hivePath, manifestAdd, readTeam, writeJson, hubPath } from '../src/state.js';
-import { killWindow } from '../src/tmux.js';
+import { killWindow, run } from '../src/tmux.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -83,6 +84,43 @@ describe('cleanupProject worktree records', () => {
     const trashed = path.join(hivePath(home, 'trash'), new Date().toISOString().slice(0, 10), 'wt-agent');
     expect(await fs.stat(trashed)).toBeTruthy();
     expect((await fs.readFile(hivePath(home, 'manifest.jsonl'), 'utf8')).trim()).toBe('');
+  });
+});
+
+describe('cleanupProject jj-workspace records', () => {
+  it('trashes a workspace jj lists and forgets it', async () => {
+    const { root, home } = await setup();
+    const wt = path.join(home, 'lane-agent');
+    await fs.mkdir(wt);
+    await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: wt });
+    vi.mocked(run)
+      .mockImplementationOnce(async () => ({ code: 0, stdout: `${wt}\n`, stderr: '' }))
+      .mockImplementationOnce(async () => ({ code: 0, stdout: '', stderr: '' }));
+
+    const actions = await cleanupProject(root, 'proj');
+    expect(actions).toHaveLength(1);
+    expect(actions[0].acted).toBe(true);
+    expect(actions[0].action).toMatch(/trash jj workspace/);
+    expect(await fs.stat(wt).catch(() => null)).toBeNull();
+    const trashed = path.join(hivePath(home, 'trash'), new Date().toISOString().slice(0, 10), 'lane-agent');
+    expect(await fs.stat(trashed)).toBeTruthy();
+    expect(vi.mocked(run).mock.calls.map((c) => c[1])).toContainEqual(
+      ['-R', home, 'workspace', 'forget', 'lane-agent'],
+    );
+  });
+
+  it('leaves a path alone that jj does not list as a workspace', async () => {
+    const { root, home } = await setup();
+    const plain = path.join(home, 'just-a-dir');
+    await fs.mkdir(plain);
+    await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: plain });
+    vi.mocked(run).mockImplementationOnce(async () => ({ code: 0, stdout: '', stderr: '' }));
+
+    const actions = await cleanupProject(root, 'proj');
+    expect(actions[0].acted).toBe(false);
+    expect(actions[0].action).toMatch(/left jj workspace/);
+    expect(await fs.stat(plain)).toBeTruthy();
+    expect(vi.mocked(run).mock.calls.some((c) => c[1].includes('forget'))).toBe(false);
   });
 });
 

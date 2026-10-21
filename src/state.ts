@@ -180,7 +180,7 @@ export async function removeTeamEntry(projectHome: string, name: string): Promis
   });
 }
 
-export type ManifestRecord = { kind: 'worktree' | 'tmux' | 'process'; at: string; [k: string]: unknown };
+export type ManifestRecord = { kind: 'worktree' | 'jj-workspace' | 'tmux' | 'process'; at: string; [k: string]: unknown };
 
 export async function manifestAdd(projectHome: string, rec: ManifestRecord): Promise<void> {
   await fs.mkdir(hivePath(projectHome), { recursive: true });

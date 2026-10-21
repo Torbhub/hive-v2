@@ -99,6 +99,32 @@ export async function cleanupProject(
       }
       continue;
     }
+    if (rec.kind === 'jj-workspace') {
+      const wt = String(rec.path ?? '');
+      const abs = wt ? path.resolve(wt) : '';
+      const st = abs ? await fs.stat(abs).catch(() => null) : null;
+      if (!abs || !st) continue;
+      // Same trust rule as worktrees, with jj as the witness.
+      const underHome = abs.startsWith(path.resolve(p.home) + path.sep);
+      const listed = underHome
+        ? (await run('jj', ['-R', p.home, 'workspace', 'list', '-T', 'root ++ "\\n"'], p.home)).stdout
+            .split('\n')
+            .some((l) => l.trim() === abs)
+        : false;
+      if (!underHome || !listed) {
+        actions.push({ record: rec, action: `left jj workspace ${abs} alone: not a registered workspace under ${p.home}`, acted: false });
+        keep.push(rec);
+        continue;
+      }
+      const dest = path.join(trashDir, path.basename(abs));
+      actions.push({ record: rec, action: `trash jj workspace ${abs} -> ${dest}`, acted: !dryRun });
+      if (!dryRun) {
+        await fs.mkdir(trashDir, { recursive: true });
+        await fs.rename(abs, dest);
+        await run('jj', ['-R', p.home, 'workspace', 'forget', path.basename(abs)], p.home);
+      }
+      continue;
+    }
     keep.push(rec);
   }
 
