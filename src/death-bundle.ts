@@ -148,7 +148,7 @@ export async function captureDeathBundle(
       ? r.stdout
       : `no process with pid ${agent.pane_pid} (confirmed gone)`;
   });
-  const dmesg = cap(await probeRun('dmesg', 'dmesg', []), 20);
+  const dmesg = cap(await probeRun('dmesg', 'sudo', ['-n', 'dmesg']), 20);
   const free = await probeRun('free', 'free', ['-m']);
   const sessionId = agent.session_id;
   const wire = sessionId

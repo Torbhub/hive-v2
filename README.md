@@ -113,6 +113,26 @@ lives in `infra/` (one CloudFormation stack plus the committed box config)
 and every push to main deploys through `.github/workflows/deploy.yml` over
 SSM. Bootstrap steps and the drift-adoption story: `infra/README.md`.
 
+## The bench
+
+`bench/` holds small canary tasks about hive's own code. Each task in
+`bench/tasks/<id>/` pins a rev, breaks one thing (`setup.sh`), and checks
+the fix (`check.sh`). `bench/run.sh <task> [action...]` clones hive at the
+pinned rev, breaks it, runs the optional action (an agent working from
+`prompt.md`), and prints one JSON verdict line: pass or fail. The verdict
+comes from the gate itself. The runner commits the candidate and reads the
+check through `hive gate` plus `hive gate-verify --commit HEAD`, exactly
+like work that lands.
+
+A change to `roles/`, `rules/`, or `skills/` steers agent behavior, and the
+PR gate cannot see behavior. Such a change must post a bench verdict in its
+PR body. Run every task in `bench/tasks/` with an agent that carries the
+candidate role or rules, and paste the JSON lines. A task the agent solved
+before the change must stay green after it.
+
+The runner does heavy work: a full clone, `npm ci`, a build, vitest. Do not
+run it on the hub box. Run it on any other machine with Node 22.
+
 ## Development
 
 ```bash

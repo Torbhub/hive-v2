@@ -30,11 +30,15 @@ install_if_different() {
 }
 
 visudo -cf "$BOX_DIR/hive-v2-tmux.sudoers" >/dev/null
+visudo -cf "$BOX_DIR/hive-v2-dmesg.sudoers" >/dev/null
 install_if_different "$BOX_DIR/hive-v2-web.service" /etc/systemd/system/hive-v2-web.service 644
 install_if_different "$BOX_DIR/hive-v2-watch.service" /etc/systemd/system/hive-v2-watch.service 644
 install_if_different "$BOX_DIR/hive-v2-tmux.service" /etc/systemd/system/hive-v2-tmux.service 644
+install_if_different "$BOX_DIR/hive-v2-webterm.service" /etc/systemd/system/hive-v2-webterm.service 644
 install_if_different "$BOX_DIR/hive-v2-tmux.sudoers" /etc/sudoers.d/hive-v2-tmux 440
+install_if_different "$BOX_DIR/hive-v2-dmesg.sudoers" /etc/sudoers.d/hive-v2-dmesg 440
 install_if_different "$BOX_DIR/hive" /usr/local/bin/hive 755
+install_if_different "$BOX_DIR/hub-attach.sh" /opt/hive-v2/hub-attach.sh 755
 
 mkdir -p /etc/hive-v2
 if [ ! -f "$ENV_FILE" ]; then
@@ -75,7 +79,7 @@ if [ -f "$HTPASSWD_STALE" ]; then
 fi
 
 systemctl daemon-reload
-systemctl enable --now hive-v2-web hive-v2-watch >/dev/null
+systemctl enable --now hive-v2-web hive-v2-watch hive-v2-webterm >/dev/null
 systemctl enable hive-v2-tmux >/dev/null
 # hive-v2-tmux is never restarted here: its cgroup holds every agent pane.
 # Start it only when no server answers the socket. A live server started
@@ -89,8 +93,8 @@ else
   systemctl restart hive-v2-tmux
   echo "tmux:    hive-v2-tmux (re)started"
 fi
-systemctl restart hive-v2-web hive-v2-watch
-echo "services: hive-v2-web hive-v2-watch enabled and restarted"
+systemctl restart hive-v2-web hive-v2-watch hive-v2-webterm
+echo "services: hive-v2-web hive-v2-watch hive-v2-webterm enabled and restarted"
 
 if nginx -t 2>/dev/null; then
   systemctl reload nginx
