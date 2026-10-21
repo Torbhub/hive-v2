@@ -481,4 +481,17 @@ describe('POST /api/project', () => {
     const view = await (await fetch(`${base}/api/view`)).json();
     expect(view.projects.some((x: { name: string }) => x.name === 'enumproj')).toBe(false);
   });
+
+  it('a bogus .git file is not a worktree pointer and is refused', async () => {
+    const bogus = path.join(root, 'bogusproj');
+    await fs.mkdir(bogus, { recursive: true });
+    await fs.writeFile(path.join(bogus, '.git'), 'not a pointer\n');
+    const r = await post('/api/project', { name: 'bogusproj', path: bogus });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/not a git repo/);
+    const empty = path.join(root, 'emptyproj');
+    await fs.mkdir(empty, { recursive: true });
+    await fs.writeFile(path.join(empty, '.git'), '');
+    expect((await post('/api/project', { name: 'emptyproj', path: empty })).status).toBe(400);
+  });
 });

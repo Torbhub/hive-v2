@@ -9,6 +9,7 @@ import {
   capturePane, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep,
 } from './tmux.js';
 import { lines, parseDialog, scrapeContext } from './screen.js';
+import { PROJECT_NAME_RE } from './names.js';
 import {
   appendDecision, appendTaskEvent, clearPendingPane, foldTasks, hivePath, hubPath, manifestAdd, nextTaskId,
   readPendingPane, readProjects, readTaskEvents, readTeam, withHubLock, writePendingPane,
@@ -19,9 +20,8 @@ import {
 } from './spawn.js';
 import { taskScope } from './scope.js';
 
-// A deliberate refusal with an operator-safe message (unknown project, stale
-// fingerprint, already running…). The web layer shows these to the client;
-// every other error is infrastructure and stays server-side.
+// A deliberate refusal with an operator-safe message. The web layer shows
+// these to the client; every other error is infrastructure and stays server-side.
 export class Refusal extends Error {}
 
 export async function hubInit(root: string, name = 'hub'): Promise<void> {
@@ -35,7 +35,7 @@ export async function hubInit(root: string, name = 'hub'): Promise<void> {
 }
 
 export async function hubAdd(root: string, name: string, folder: string): Promise<void> {
-  if (!/^[a-z][a-z0-9-]{0,31}$/.test(name)) {
+  if (!PROJECT_NAME_RE.test(name)) {
     throw new Error(`a project name is lowercase letters, digits, '-': ${name}`);
   }
   const home = path.resolve(root, folder);

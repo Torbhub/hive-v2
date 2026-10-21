@@ -100,7 +100,7 @@ function agentRefOf(body: Record<string, unknown>): string | undefined {
   return ref;
 }
 
-// Same-project actions run one at a time; different projects run freely.
+// projects.json writers share one key so their read-modify-write cannot race. Other actions serialize per project.
 const actionChains = new Map<string, Promise<void>>();
 
 function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -141,7 +141,7 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
   if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
   if (pathname === '/api/project') return serialized('projects', () => addProjectFromBody(root, body));
   const project = projectName(body);
-  return serialized(project, async () => {
+  return serialized(['/api/mode', '/api/approvals'].includes(pathname) ? 'projects' : project, async () => {
     if (pathname === '/api/mode') {
       return { ok: true, mode: await setProjectMode(root, project, String(body.mode ?? '')) };
     }
