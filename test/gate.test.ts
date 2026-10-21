@@ -2,8 +2,14 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { parseSteps, pushByHash, verifyCommits, verifyLog } from '../src/gate.js';
+import { describe, expect, it, vi, afterEach } from 'vitest';
+import { landPr, parseSteps, pushByHash, verifyCommits, verifyLog } from '../src/gate.js';
+import { run } from '../src/tmux.js';
+
+vi.mock('../src/tmux.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/tmux.js')>();
+  return { ...orig, run: vi.fn(orig.run) };
+});
 
 const SHA = 'a'.repeat(40);
 const VITEST_OK = ' Test Files  1 passed (1)\n      Tests  3 passed (3)\n';
@@ -169,5 +175,97 @@ describe('verifyCommits', () => {
 describe('pushByHash', () => {
   it('refuses a remote that looks like a flag', async () => {
     await expect(pushByHash('--upload-pack=x', SHA, 'main', '/tmp')).rejects.toThrow(/remote/);
+  });
+});
+
+describe('landPr', () => {
+  const realRun = vi.mocked(run).getMockImplementation()!;
+  const PR_URL = 'https://github.com/Torbhub/hive-v2/pull/1';
+
+  afterEach(() => {
+    vi.mocked(run).mockReset();
+    vi.mocked(run).mockImplementation(realRun);
+  });
+
+  function stub(table: Record<string, { code: number; stdout?: string; stderr?: string }>) {
+    vi.mocked(run).mockImplementation(async (cmd, args = []) => {
+      const key = [cmd, ...args].join(' ');
+      const hit = table[key];
+      if (!hit) return { code: 1, stdout: '', stderr: `unstubbed: ${key}` };
+      return { code: hit.code, stdout: hit.stdout ?? '', stderr: hit.stderr ?? '' };
+    });
+  }
+  const ghOk = { 'gh --version': { code: 0, stdout: 'gh version 2.0.0' } };
+  const jjOk = {
+    'jj root': { code: 0, stdout: '/repo' },
+    'jj git root': { code: 0, stdout: '/repo/.git' },
+  };
+  const gitOk = {
+    'jj root': { code: 1 },
+    [`git rev-parse --verify --quiet --end-of-options ${SHA}^{commit}`]: { code: 0, stdout: SHA },
+    'git rev-parse --verify --quiet --end-of-options refs/remotes/origin/lane': { code: 1 },
+    [`git push origin ${SHA}:refs/heads/lane`]: { code: 0 },
+  };
+
+  it('refuses when gh is not on PATH, before any push', async () => {
+    stub({ 'gh --version': { code: 1, stderr: 'command not found' } });
+    await expect(landPr({ remote: 'origin', sha: SHA, branch: 'lane' }, '/tmp')).rejects.toThrow(/gh is not on PATH/);
+    expect(vi.mocked(run).mock.calls.some((c) => c[1]?.includes('push'))).toBe(false);
+  });
+
+  it('validates like pushByHash: dash-leading branch, bad sha', async () => {
+    stub({ ...ghOk, 'jj root': { code: 1 } });
+    await expect(landPr({ remote: 'origin', sha: SHA, branch: '-pwned' }, '/tmp')).rejects.toThrow(/branch may not start/);
+    await expect(landPr({ remote: 'origin', sha: 'abc', branch: 'lane' }, '/tmp')).rejects.toThrow(/40-char/);
+  });
+
+  it('uses jj push --bookmark on a jj-colocated repo', async () => {
+    stub({
+      ...ghOk, ...jjOk,
+      'jj push --bookmark land-pr': { code: 0 },
+      'gh pr create --head land-pr --fill': { code: 0, stdout: `${PR_URL}\n` },
+    });
+    const url = await landPr({ bookmark: 'land-pr' }, '/repo');
+    expect(url).toBe(PR_URL);
+    expect(vi.mocked(run).mock.calls.map((c) => [c[0], ...(c[1] ?? [])].join(' '))).toContain('jj push --bookmark land-pr');
+  });
+
+  it('refuses a jj-native repo with no git remote', async () => {
+    stub({ ...ghOk, 'jj root': { code: 0, stdout: '/repo' }, 'jj git root': { code: 1 } });
+    await expect(landPr({ bookmark: 'lane' }, '/repo')).rejects.toThrow(/jj-native/);
+  });
+
+  it('rejects bad bookmark names on a jj repo', async () => {
+    stub({ ...ghOk, ...jjOk });
+    await expect(landPr({ bookmark: '-evil' }, '/repo')).rejects.toThrow(/bookmark may not start/);
+    await expect(landPr({ bookmark: 'two words' }, '/repo')).rejects.toThrow(/letters, digits/);
+    await expect(landPr({ bookmark: 'a..b' }, '/repo')).rejects.toThrow(/letters, digits/);
+    await expect(landPr({}, '/repo')).rejects.toThrow(/jj-colocated/);
+  });
+
+  it('rejects --body without --title', async () => {
+    stub({ ...ghOk, 'jj root': { code: 1 } });
+    await expect(landPr({ remote: 'origin', sha: SHA, branch: 'lane', body: 'why' }, '/repo'))
+      .rejects.toThrow(/--body needs --title/);
+  });
+
+  it('reuses pushByHash on a plain-git repo', async () => {
+    stub({
+      ...ghOk, ...gitOk,
+      'gh pr create --head lane --title the thing --body why': { code: 0, stdout: `${PR_URL}\n` },
+    });
+    const url = await landPr({ remote: 'origin', sha: SHA, branch: 'lane', title: 'the thing', body: 'why' }, '/repo');
+    expect(url).toBe(PR_URL);
+    expect(vi.mocked(run).mock.calls.map((c) => [c[0], ...(c[1] ?? [])].join(' ')))
+      .toContain(`git push origin ${SHA}:refs/heads/lane`);
+  });
+
+  it('says the branch IS pushed when gh pr create fails after a push', async () => {
+    stub({
+      ...ghOk, ...gitOk,
+      'gh pr create --head lane --fill': { code: 1, stderr: 'authentication required' },
+    });
+    await expect(landPr({ remote: 'origin', sha: SHA, branch: 'lane' }, '/repo'))
+      .rejects.toThrow(/lane is pushed, but gh pr create failed: authentication required/);
   });
 });

@@ -280,3 +280,45 @@ export async function pushByHash(remote: string, sha: string, branch: string, cw
   const pushed = await run('git', ['push', remote, `${sha}:refs/heads/${branch}`], cwd);
   if (pushed.code !== 0) throw new Error(pushed.stderr.trim() || 'git push failed');
 }
+
+const BOOKMARK_RE = /^(?!.*\.\.)[A-Za-z0-9_.-]+$/;
+
+export type LandArgs = {
+  remote?: string; sha?: string; branch?: string; bookmark?: string; title?: string; body?: string;
+};
+
+// jj push is the repo-local gated alias — jj git push fires no hooks.
+export async function landPr(args: LandArgs, cwd: string): Promise<string> {
+  const gh = await run('gh', ['--version'], cwd);
+  if (gh.code !== 0) throw new Error('gh is not on PATH. Install the GitHub CLI, then run hive land again');
+
+  if (args.body && !args.title) throw new Error('--body needs --title');
+
+  let head: string;
+  if ((await run('jj', ['root'], cwd)).code === 0) {
+    if ((await run('jj', ['git', 'root'], cwd)).code !== 0) {
+      throw new Error('this repo is jj-native, not colocated. hive land pushes a bookmark only when a git remote exists');
+    }
+    const bookmark = args.bookmark ?? '';
+    if (!bookmark) throw new Error('this repo is jj-colocated. Land with --bookmark <name>');
+    if (bookmark.startsWith('-')) throw new Error(`a bookmark may not start with '-': ${bookmark}`);
+    if (!BOOKMARK_RE.test(bookmark)) throw new Error(`a bookmark is letters, digits, '-', '_' and '.': ${bookmark}`);
+    const pushed = await run('jj', ['push', '--bookmark', bookmark], cwd);
+    if (pushed.code !== 0) throw new Error(pushed.stderr.trim() || 'jj push failed');
+    head = bookmark;
+  } else {
+    const { remote, sha, branch } = args;
+    if (!remote || !sha || !branch) throw new Error('this repo is plain git. Land with <remote> <sha> <branch>');
+    await pushByHash(remote, sha, branch, cwd);
+    head = branch;
+  }
+
+  const prArgs = ['pr', 'create', '--head', head];
+  if (args.title) prArgs.push('--title', args.title, '--body', args.body ?? '');
+  else prArgs.push('--fill');
+  const pr = await run('gh', prArgs, cwd);
+  if (pr.code !== 0) {
+    throw new Error(`${head} is pushed, but gh pr create failed: ${pr.stderr.trim() || 'no output from gh'}`);
+  }
+  return pr.stdout.trim();
+}
