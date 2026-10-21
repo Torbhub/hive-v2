@@ -25,9 +25,10 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   };
 });
 
-import { closeAgent, launchCommand, respawnAgent } from '../src/spawn.js';
+import { closeAgent, launchCommand, respawnAgent, wakeAgent } from '../src/spawn.js';
 import { hubAdd, hubInit } from '../src/hub.js';
-import { hivePath, manifestRead, writeJson } from '../src/state.js';
+import { hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';
+import { newWindow, paneIs, killWindow } from '../src/tmux.js';
 
 async function setup(teamEntry: Record<string, unknown>) {
   const root = mkdtempSync(path.join(tmpdir(), 'hive-spawn-'));
@@ -52,12 +53,66 @@ describe('respawnAgent', () => {
     expect(tmuxRecs[0].pane_pid).toBe(4242);
     expect(tmuxRecs[0].pane_started).toBe('later');
   }, 20_000);
+
+  it('clears the close stamp when the kill fails', async () => {
+    const { root, home } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    vi.mocked(killWindow).mockRejectedValueOnce(new Error('tmux down'));
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow('tmux down');
+    const team = await readTeam(home);
+    expect(team.agents[0].closed_at).toBeUndefined();
+  });
 });
 
 describe('closeAgent', () => {
   it('refuses to kill a pane whose identity was never recorded', async () => {
     const { root } = await setup({ name: 'builder', pane: '%1' });
     await expect(closeAgent(root, 'demo', 'builder')).rejects.toThrow(/no recorded pane identity/);
+  });
+
+  it('clears the close stamp when the kill fails', async () => {
+    const { root, home } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    vi.mocked(killWindow).mockRejectedValueOnce(new Error('tmux down'));
+    await expect(closeAgent(root, 'demo', 'builder')).rejects.toThrow('tmux down');
+    const team = await readTeam(home);
+    expect(team.agents[0].closed_at).toBeUndefined();
+  });
+});
+
+describe('wakeAgent', () => {
+  it('resumes the recorded session in a new window', async () => {
+    const { root, home } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b',
+    });
+    vi.mocked(paneIs).mockResolvedValueOnce(false);
+    const pane = await wakeAgent(root, 'demo', 'builder');
+    expect(pane).toBe('%9');
+    expect(newWindow).toHaveBeenCalledWith(
+      'demo:builder', home,
+      'KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_b',
+    );
+    const team = await readTeam(home);
+    expect(team.agents[0]).toMatchObject({ pane: '%9', session_id: 'session_b' });
+    expect(team.agents[0].closed_at).toBeUndefined();
+  }, 20_000);
+
+  it('never wakes a pane that was closed on purpose', async () => {
+    const { root } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier',
+      session_id: 'session_b', closed_at: new Date().toISOString(),
+    });
+    await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/closed on purpose/);
+  });
+
+  it('refuses an agent with no recorded session', async () => {
+    const { root } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/no recorded session/);
+  });
+
+  it('refuses an agent whose pane is still the recorded process', async () => {
+    const { root } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b',
+    });
+    await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/already running/);
   });
 });
 

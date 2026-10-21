@@ -55,6 +55,7 @@ export function agentRef(a: HubAgent): string {
 export function agentGlyph(a: HubAgent): { glyph: string; color: string } {
   if (a.state === 'running') return { glyph: '●', color: 'green' };
   if (a.state === 'stopped') return { glyph: '○', color: 'yellow' };
+  if (a.state === 'wedged') return { glyph: '✖', color: 'red' };
   return { glyph: '?', color: 'red' };
 }
 

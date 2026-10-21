@@ -76,6 +76,15 @@ async function findWireLog(sessionDir: string): Promise<string> {
   throw new Error(`no wire.jsonl under ${agentsDir}`);
 }
 
+// The wedge judge's liveness signal: when the session last wrote a wire event.
+export async function wireLogMtime(home: string, sessionId: string): Promise<number | null> {
+  try {
+    return (await fs.stat(await findWireLog(await findSessionDir(home, sessionId)))).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 // Only type and timestamp leave this function; payloads never enter the bundle.
 async function wireTail(home: string, sessionId: string): Promise<string> {
   const file = await findWireLog(await findSessionDir(home, sessionId));

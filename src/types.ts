@@ -6,7 +6,7 @@ export type HubOrchestratorState =
   | 'unregistered'
   | 'resumable';
 
-export type HubAgentState = 'running' | 'stopped' | 'unknown' | 'unrecorded';
+export type HubAgentState = 'running' | 'stopped' | 'unknown' | 'unrecorded' | 'wedged';
 
 export type HubAgent = {
   name: string;
@@ -122,6 +122,12 @@ export type TeamEntry = {
   worktree?: string;
   session_id?: string;
   handoff?: string;
+  // Stamped by a deliberate close (cleanup/close/respawn). A crash never
+  // stamps, so watch treats a stamped pane as intentionally down.
+  closed_at?: string;
+  // Stamped by the watchdog when the pane is frozen on a spinner with a stale
+  // wire log. Cleared when the pane moves again or is relaunched.
+  wedged_at?: string;
 };
 
 export const TASK_EVENTS = [

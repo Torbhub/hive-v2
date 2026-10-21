@@ -235,9 +235,45 @@ export async function closeAgent(root: string, project: string, agent: string): 
   const team = await readTeam(home);
   const entry = team.agents.find((a) => a.name === agent);
   if (!entry) throw new Error(`${project} has no agent named ${agent}`);
-  if (entry.pane) await killWindow(entry.pane, recordedIdentity(entry));
+  await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
+  try {
+    if (entry.pane) await killWindow(entry.pane, recordedIdentity(entry));
+  } catch (e) {
+    // The pane survived; a surviving stamp would hide it from the watch.
+    await upsertTeamEntry(home, { name: agent, closed_at: undefined });
+    throw e;
+  }
   await removeTeamEntry(home, agent);
   if (entry.orchestrator) await clearPendingPane(root, project);
+}
+
+// Shared tail of respawnAgent and wakeAgent: new window, team record, pickup line.
+async function relaunchAgent(
+  p: ProjectsFile['projects'][number],
+  old: TeamEntry,
+  sessionId: string | undefined,
+): Promise<string> {
+  const home = p.home;
+  const worktree = old.worktree ?? home;
+  const { pane, identity } = await launchWindow(p.name, old.name, worktree, sessionId, p.mode ?? 'ask');
+  await manifestAdd(home, {
+    kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(p.name, old.name),
+    pane_pid: identity.pid, pane_started: identity.started,
+  });
+  await upsertTeamEntry(home, {
+    name: old.name, pane, pane_pid: identity.pid, pane_started: identity.started,
+    session_id: sessionId, closed_at: undefined, wedged_at: undefined,
+  });
+  const idle = await waitIdle(pane);
+  if (idle !== 'idle') {
+    throw new Error(idle === 'dialog'
+      ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
+      : `${pane} never went idle; nothing was typed`);
+  }
+  await typeLine(pane, pickupLine(p.name, old.name), identity);
+  const sid = await findLatestSession(worktree, old.name);
+  if (sid) await upsertTeamEntry(home, { name: old.name, session_id: sid });
+  return pane;
 }
 
 export async function respawnAgent(root: string, project: string, agent: string): Promise<string> {
@@ -247,24 +283,29 @@ export async function respawnAgent(root: string, project: string, agent: string)
   const old = team.agents.find((a) => a.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   await preflight();
-  if (old.pane) await killWindow(old.pane, recordedIdentity(old));
-  const worktree = old.worktree ?? home;
-  const { pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask');
-  await manifestAdd(home, {
-    kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
-    pane_pid: identity.pid, pane_started: identity.started,
-  });
-  await upsertTeamEntry(home, {
-    name: agent, pane, pane_pid: identity.pid, pane_started: identity.started, session_id: undefined,
-  });
-  const idle = await waitIdle(pane);
-  if (idle !== 'idle') {
-    throw new Error(idle === 'dialog'
-      ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
-      : `${pane} never went idle; nothing was typed`);
+  await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
+  try {
+    if (old.pane) await killWindow(old.pane, recordedIdentity(old));
+    return await relaunchAgent(p, old, undefined);
+  } catch (e) {
+    // A failed respawn must not leave the agent invisible to the watch.
+    await upsertTeamEntry(home, { name: agent, closed_at: undefined });
+    throw e;
   }
-  await typeLine(pane, pickupLine(project, agent), identity);
-  const sid = await findLatestSession(worktree, agent);
-  if (sid) await upsertTeamEntry(home, { name: agent, session_id: sid });
-  return pane;
+}
+
+// The watchdog's agent ensure: a dead agent with a recorded session comes back
+// with that session resumed. A stamped close is never woken.
+export async function wakeAgent(root: string, project: string, agent: string): Promise<string> {
+  const p = await projectEntry(root, project);
+  const team = await readTeam(p.home);
+  const old = team.agents.find((a) => a.name === agent);
+  if (!old) throw new Error(`${project} has no agent named ${agent}`);
+  if (old.closed_at) throw new Error(`${agent} was closed on purpose at ${old.closed_at}; not waking it`);
+  if (!old.session_id) throw new Error(`${agent} has no recorded session to resume; respawn it instead`);
+  await preflight();
+  if (old.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
+    throw new Error(`${agent} is already running`);
+  }
+  return relaunchAgent(p, old, old.session_id);
 }
