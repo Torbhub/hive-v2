@@ -128,6 +128,7 @@ export type TeamEntry = {
   // Stamped by the watchdog when the pane is frozen on a spinner with a stale
   // wire log. Cleared when the pane moves again or is relaunched.
   wedged_at?: string;
+  task?: string;
 };
 
 export const TASK_EVENTS = [

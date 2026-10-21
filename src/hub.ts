@@ -17,6 +17,7 @@ import {
 import {
   ensureAgentFiles, findLatestSession, launchWindow, orchestratorName, pickupLine, preflight, typeLine, waitIdle,
 } from './spawn.js';
+import { taskScope } from './scope.js';
 
 // A deliberate refusal with an operator-safe message (unknown project, stale
 // fingerprint, already running…). The web layer shows these to the client;
@@ -73,11 +74,15 @@ export async function setProjectApprovals(root: string, project: string, approva
 export async function hubTask(root: string, project: string, text: string): Promise<string> {
   const pf = await readProjects(root);
   if (!pf.projects.some((p) => p.name === project)) throw new Refusal(`unknown project: ${project}`);
+  const scope = taskScope(text);
+  if (scope.kind === 'invalid') throw new Refusal(`the brief does not parse: ${scope.why}`);
   // The lock makes id allocation + task file + ledger append one step.
   return withHubLock(root, async () => {
     const id = await nextTaskId(root, project);
     await fs.mkdir(hubPath(root, 'tasks'), { recursive: true });
-    await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), `# ${id}\n\n${text}\n`);
+    // A brief keeps its frontmatter at the top of the file.
+    const body = text.startsWith('---') ? `${text.trimEnd()}\n` : `# ${id}\n\n${text}\n`;
+    await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), body);
     await appendTaskEvent(root, { id, project, event: 'asked', at: new Date().toISOString() });
     return id;
   });

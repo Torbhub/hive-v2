@@ -9,9 +9,10 @@ import {
 import { classify, lines } from './screen.js';
 import {
   hivePath, manifestAdd, readProjects, readTeam,
-  removeTeamEntry, upsertTeamEntry, clearPendingPane, type ProjectsFile,
+  removeTeamEntry, upsertTeamEntry, clearPendingPane, withTeamLock, writeJson, type ProjectsFile,
 } from './state.js';
 import type { ProjectMode, TeamEntry } from './types.js';
+import { checkTaskScope } from './scope.js';
 
 export function orchestratorName(project: string): string {
   return `${project}-orchestrator`;
@@ -174,7 +175,7 @@ async function projectEntry(root: string, project: string): Promise<ProjectsFile
   return p;
 }
 
-export type SpawnOptions = { agent: string; role?: string; worktree?: string };
+export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string };
 
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
   const { agent, role = 'implementer' } = opts;
@@ -186,28 +187,50 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   if (team.agents.some((a) => a.name === agent)) {
     throw new Error(`${project} already has an agent named ${agent} (close or respawn it)`);
   }
-
-  let worktree = home;
-  if (opts.worktree) {
-    const wt = path.resolve(home, opts.worktree);
-    const branch = `${project}/${agent}`;
-    const made = await run('git', ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD'], home);
-    if (made.code !== 0) throw new Error(`git worktree add failed: ${made.stderr.trim()}`);
-    await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: wt, branch });
-    worktree = wt;
+  // Claim the scope and the name in one lock: two concurrent spawns on
+  // overlapping tasks must not both pass the check.
+  const task = opts.task;
+  if (task) {
+    // The lock lives in .hive/, which a first spawn has not created yet.
+    await fs.mkdir(hivePath(home), { recursive: true });
+    await withTeamLock(home, async () => {
+      const fresh = await readTeam(home);
+      if (fresh.agents.some((a) => a.name === agent)) {
+        throw new Error(`${project} already has an agent named ${agent} (close or respawn it)`);
+      }
+      await checkTaskScope(root, project, home, task);
+      await writeJson(hivePath(home, 'team.json'), { agents: [...fresh.agents, { name: agent, task }] });
+    });
   }
 
-  await ensureAgentFiles(worktree, agent, role);
-  const { pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask');
-  await manifestAdd(home, {
-    kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
-    pane_pid: identity.pid, pane_started: identity.started,
-  });
-  const entry: TeamEntry = {
-    name: agent, pane, pane_pid: identity.pid, pane_started: identity.started,
-    worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`),
-  };
-  await upsertTeamEntry(home, entry);
+  let pane: string;
+  let identity: PaneIdentity;
+  let worktree = home;
+  try {
+    if (opts.worktree) {
+      const wt = path.resolve(home, opts.worktree);
+      const branch = `${project}/${agent}`;
+      const made = await run('git', ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD'], home);
+      if (made.code !== 0) throw new Error(`git worktree add failed: ${made.stderr.trim()}`);
+      await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: wt, branch });
+      worktree = wt;
+    }
+
+    await ensureAgentFiles(worktree, agent, role);
+    ({ pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask'));
+    await manifestAdd(home, {
+      kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
+      pane_pid: identity.pid, pane_started: identity.started,
+    });
+    const entry: TeamEntry = {
+      name: agent, pane, pane_pid: identity.pid, pane_started: identity.started,
+      worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task,
+    };
+    await upsertTeamEntry(home, entry);
+  } catch (e) {
+    if (task) await removeTeamEntry(home, agent);
+    throw e;
+  }
 
   const idle = await waitIdle(pane);
   if (idle !== 'idle') {

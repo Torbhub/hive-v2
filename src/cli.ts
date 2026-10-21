@@ -27,7 +27,7 @@ const USAGE = `usage:
   hive hub init|add <name> <path>|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note]
   hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
   hive hub wake <project> | start <project> <task-id> | continue <project>
-  hive spawn <project> --agent <name> [--role r] [--worktree wt] | respawn | close
+  hive spawn <project> --agent <name> [--role r] [--worktree wt] [--task id] | respawn | close
   hive gate --log <path> -- <name> <cmd>...
   hive gate-verify log <path> [--expect a,b] [--commit sha] | gate-verify commits <base>..<tip> --max-files <n> --style conventional|free --attribution allow|deny [--no-body]
   hive push <remote> <sha> <branch>
@@ -168,12 +168,13 @@ async function spawnCommand(args: string[]): Promise<void> {
     sub = args[0];
     rest = args.slice(1);
   }
-  const { flags: f, pos } = parseFlags(rest, ['agent', 'role', 'worktree']);
+  const { flags: f, pos } = parseFlags(rest, ['agent', 'role', 'worktree', 'task']);
   const project = pos[0] && validName('project', pos[0]);
   const agent = typeof f.agent === 'string' ? validName('agent', f.agent) : f.agent;
   if (!project || typeof agent !== 'string') {
-    throw new UsageError('usage: hive spawn [respawn|close] <project> --agent <name> [--role r] [--worktree wt]');
+    throw new UsageError('usage: hive spawn [respawn|close] <project> --agent <name> [--role r] [--worktree wt] [--task id]');
   }
+  if (sub !== 'spawn' && f.task !== undefined) throw new UsageError('--task only applies to spawn');
   if (sub === 'close') {
     await closeAgent(root, project, agent);
     console.log(`hive: ${project}/${agent} closed`);
@@ -185,6 +186,7 @@ async function spawnCommand(args: string[]): Promise<void> {
         agent,
         role: typeof f.role === 'string' ? f.role : undefined,
         worktree: typeof f.worktree === 'string' ? f.worktree : undefined,
+        task: typeof f.task === 'string' ? f.task : undefined,
       });
   console.log(pane);
 }
