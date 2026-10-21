@@ -27,7 +27,7 @@ const USAGE = `usage:
   hive hub init|add <name> <path>|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note]
   hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
   hive hub wake <project> | start <project> <task-id> | continue <project>
-  hive spawn <project> --agent <name> [--role r] [--worktree wt] [--task id] [--model m] | respawn | close
+  hive spawn <project> --agent <name> [--role r] [--worktree wt (a jj workspace when the repo is jj)] [--task id] [--model m] | respawn | close
   hive gate --log <path> -- <name> <cmd>...
   hive gate-verify log <path> [--expect a,b] [--commit sha] | gate-verify commits <base>..<tip> --max-files <n> --style conventional|free --attribution allow|deny [--no-body]
   hive push <remote> <sha> <branch>
@@ -173,7 +173,7 @@ async function spawnCommand(args: string[]): Promise<void> {
   const project = pos[0] && validName('project', pos[0]);
   const agent = typeof f.agent === 'string' ? validName('agent', f.agent) : f.agent;
   if (!project || typeof agent !== 'string') {
-    throw new UsageError('usage: hive spawn [respawn|close] <project> --agent <name> [--role r] [--worktree wt] [--task id] [--model m]');
+    throw new UsageError('usage: hive spawn [respawn|close] <project> --agent <name> [--role r] [--worktree wt (a jj workspace when the repo is jj)] [--task id] [--model m]');
   }
   if (sub !== 'spawn' && f.task !== undefined) throw new UsageError('--task only applies to spawn');
   if (sub === 'close') {

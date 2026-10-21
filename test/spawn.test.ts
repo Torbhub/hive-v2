@@ -25,7 +25,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   };
 });
 
-import { closeAgent, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
+import { closeAgent, laneKind, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
 import { hubAdd, hubInit } from '../src/hub.js';
 import { hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';
 import { killWindow, newWindow, paneIs, run } from '../src/tmux.js';
@@ -94,6 +94,52 @@ describe('spawnAgent', () => {
     await expect(spawnAgent(root, 'demo', { agent: 'builder2', model: 'bad model' })).rejects.toThrow(/model alias/);
     expect(vi.mocked(run).mock.calls).toHaveLength(runs);
   }, 20_000);
+
+  it('lanes into a jj workspace when jj root answers in the project home', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    await spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' });
+    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1].includes('add'));
+    expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', path.join(home, 'lane'), '-r', 'main@origin']);
+    const recs = (await manifestRead(home)).filter((r) => r.kind === 'jj-workspace');
+    expect(recs).toHaveLength(1);
+    expect(recs[0].path).toBe(path.join(home, 'lane'));
+    expect(recs[0].branch).toBeUndefined();
+    expect(vi.mocked(run).mock.calls.some((c) => c[0] === 'git' && c[1][0] === 'worktree')).toBe(false);
+  }, 20_000);
+
+  it('falls back to a git worktree when the jj probe fails', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    vi.mocked(run).mockImplementation(async (cmd) => cmd === 'jj'
+      ? { code: 1, stdout: '', stderr: 'no jj here' }
+      : { code: 0, stdout: '', stderr: '' });
+    try {
+      await spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' });
+    } finally {
+      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
+    }
+    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'git' && c[1][0] === 'worktree');
+    expect(add?.[1]).toEqual(['worktree', 'add', '-q', '-b', 'demo/builder2', path.join(home, 'lane'), 'HEAD']);
+    const recs = (await manifestRead(home)).filter((r) => r.kind === 'worktree');
+    expect(recs).toHaveLength(1);
+    expect(recs[0].branch).toBe('demo/builder2');
+  }, 20_000);
+
+  it('forgets the jj workspace when the launch fails after it was made', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    vi.mocked(newWindow).mockRejectedValueOnce(new Error('tmux down'));
+    await expect(spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' })).rejects.toThrow('tmux down');
+    const forget = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1].includes('forget'));
+    expect(forget?.[1]).toEqual(['-R', home, 'workspace', 'forget', 'lane']);
+    expect(await fs.stat(path.join(home, 'lane')).catch(() => null)).toBeNull();
+  }, 20_000);
+});
+
+describe('laneKind', () => {
+  it('picks jj only when the probe succeeds', () => {
+    expect(laneKind({ code: 0 })).toBe('jj-workspace');
+    expect(laneKind({ code: 1 })).toBe('git-worktree');
+    expect(laneKind({ code: 127 })).toBe('git-worktree');
+  });
 });
 
 describe('closeAgent', () => {

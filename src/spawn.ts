@@ -190,6 +190,13 @@ async function projectEntry(root: string, project: string): Promise<ProjectsFile
 
 export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string; model?: string };
 
+export type LaneKind = 'git-worktree' | 'jj-workspace';
+
+// jj root answers only inside a jj repo; any probe failure keeps the git lane.
+export function laneKind(probe: { code: number }): LaneKind {
+  return probe.code === 0 ? 'jj-workspace' : 'git-worktree';
+}
+
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
   const { agent, role = 'implementer' } = opts;
   if (!AGENT_NAME_RE.test(agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${agent}`);
@@ -220,13 +227,25 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   let pane: string;
   let identity: PaneIdentity;
   let worktree = home;
+  let jjLane: { name: string; path: string } | null = null;
   try {
     if (opts.worktree) {
       const wt = path.resolve(home, opts.worktree);
-      const branch = `${project}/${agent}`;
-      const made = await run('git', ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD'], home);
-      if (made.code !== 0) throw new Error(`git worktree add failed: ${made.stderr.trim()}`);
-      await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: wt, branch });
+      if (laneKind(await run('jj', ['root'], home)) === 'jj-workspace') {
+        const made = await run('jj', ['-R', home, 'workspace', 'add', wt, '-r', 'main@origin'], home);
+        if (made.code !== 0) throw new Error(`jj workspace add failed: ${made.stderr.trim()}`);
+        jjLane = { name: path.basename(wt), path: wt };
+        if (existsSync(path.join(wt, 'scripts', 'install-git-hooks.sh'))) {
+          const hooks = await run('bash', ['scripts/install-git-hooks.sh'], wt);
+          if (hooks.code !== 0) throw new Error(`install-git-hooks failed in ${wt}: ${hooks.stderr.trim()}`);
+        }
+        await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: wt });
+      } else {
+        const branch = `${project}/${agent}`;
+        const made = await run('git', ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD'], home);
+        if (made.code !== 0) throw new Error(`git worktree add failed: ${made.stderr.trim()}`);
+        await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: wt, branch });
+      }
       worktree = wt;
     }
 
@@ -242,6 +261,13 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
     };
     await upsertTeamEntry(home, entry);
   } catch (e) {
+    if (jjLane) {
+      // A failed spawn must not strand a registered lane.
+      await run('jj', ['-R', home, 'workspace', 'forget', jjLane.name], home);
+      const dest = path.join(hivePath(home, 'trash', new Date().toISOString().slice(0, 10)), jjLane.name);
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.rename(jjLane.path, dest).catch(() => {});
+    }
     if (task) await removeTeamEntry(home, agent);
     throw e;
   }
