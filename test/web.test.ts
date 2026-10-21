@@ -19,9 +19,27 @@ vi.mock('../src/hub.js', async (importOriginal) => {
   return { ...orig, wake: vi.fn(orig.wake), hubTask: vi.fn(orig.hubTask), startProject: vi.fn(orig.startProject) };
 });
 
+vi.mock('../src/message.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/message.js')>();
+  return { ...orig, sendOwnerMessage: vi.fn(orig.sendOwnerMessage) };
+});
+
+vi.mock('../src/spawn.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/spawn.js')>();
+  return { ...orig, typeLine: vi.fn(orig.typeLine) };
+});
+
+vi.mock('../src/tmux.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/tmux.js')>();
+  return { ...orig, paneIs: vi.fn(orig.paneIs), capturePane: vi.fn(orig.capturePane) };
+});
+
 import { hubTask, startProject, wake } from '../src/hub.js';
+import { sendOwnerMessage } from '../src/message.js';
+import { typeLine } from '../src/spawn.js';
+import { capturePane, paneIs } from '../src/tmux.js';
 import { createServer } from '../web/server.js';
-import { appendTaskEvent, hubPath, writeJson } from '../src/state.js';
+import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
 
 let server: Server;
 let base: string;
@@ -493,5 +511,88 @@ describe('POST /api/project', () => {
     await fs.mkdir(empty, { recursive: true });
     await fs.writeFile(path.join(empty, '.git'), '');
     expect((await post('/api/project', { name: 'emptyproj', path: empty })).status).toBe(400);
+  });
+});
+
+describe('POST /api/message', () => {
+  beforeAll(async () => {
+    // The recorded pane is not on the throwaway socket, so it reads as dead.
+    await writeJson(hivePath(path.join(root, 'demo'), 'team.json'), {
+      agents: [{
+        name: 'demo-orchestrator', orchestrator: true,
+        pane: '%999', pane_pid: 424242, pane_started: 'Mon Jan  1 00:00:00 2024',
+      }],
+    });
+  });
+
+  it('empty or blank text is a 400', async () => {
+    expect((await post('/api/message', { project: 'demo', text: '' })).status).toBe(400);
+    expect((await post('/api/message', { project: 'demo', text: '   ' })).status).toBe(400);
+    const j = await (await post('/api/message', { project: 'demo' })).json();
+    expect(j.detail).toMatch(/message text is empty/);
+  });
+
+  it('text past the cap is a 400', async () => {
+    const r = await post('/api/message', { project: 'demo', text: 'x'.repeat(4001) });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/capped at 4000/);
+  });
+
+  it('unknown project is a 400', async () => {
+    const r = await post('/api/message', { project: 'nope', text: 'hi' });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/unknown project/);
+  });
+
+  it('an unknown agent is a 400', async () => {
+    const r = await post('/api/message', { project: 'demo', agent: 'ghost', text: 'hi' });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/no agent named ghost/);
+  });
+
+  it('a dead pane is a clean refusal, not a crash', async () => {
+    const r = await post('/api/message', { project: 'demo', text: 'are you there' });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/pane is gone/);
+  });
+
+  it('a control character in the text is a 400 refusal', async () => {
+    const r = await post('/api/message', { project: 'demo', text: 'bad\u001btext' });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/control characters/);
+  });
+
+  it('a good send returns the typed line', async () => {
+    vi.mocked(sendOwnerMessage).mockImplementation(async () => ({ typed: 'Owner: hello there' }));
+    try {
+      const r = await post('/api/message', { project: 'demo', text: 'hello there' });
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({ ok: true, typed: 'Owner: hello there' });
+      expect(vi.mocked(sendOwnerMessage)).toHaveBeenCalledWith(root, 'demo', undefined, 'hello there');
+    } finally {
+      vi.mocked(sendOwnerMessage).mockRestore();
+    }
+  });
+
+  it('the real send folds newlines into one typed line and logs the decision', async () => {
+    vi.mocked(paneIs).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue('demo-orchestrator is idle at its prompt');
+    vi.mocked(typeLine).mockResolvedValue(undefined);
+    try {
+      const r = await post('/api/message', { project: 'demo', text: 'line1\nline2' });
+      expect(r.status).toBe(200);
+      expect((await r.json()).typed).toBe('Owner: line1 line2');
+      expect(vi.mocked(typeLine)).toHaveBeenCalledWith(
+        '%999', 'Owner: line1 line2', { pid: 424242, started: 'Mon Jan  1 00:00:00 2024' },
+      );
+      const log = (await fs.readFile(hubPath(root, 'decisions.jsonl'), 'utf8')).trim().split('\n');
+      const last = JSON.parse(log[log.length - 1]);
+      expect(last.by).toBe('owner');
+      expect(last.summary).toContain('line1 line2');
+    } finally {
+      vi.mocked(paneIs).mockRestore();
+      vi.mocked(capturePane).mockRestore();
+      vi.mocked(typeLine).mockRestore();
+    }
   });
 });

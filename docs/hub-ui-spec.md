@@ -391,6 +391,7 @@ Success (exit 0) prints one line: the pane dialog parse plus identifiers:
 | `Esc` button | same with `--choice esc` | 30 s | — |
 | `a approve plan` / `b send back` hotkey buttons (TUI), `Approve plan` / `Send back` + feedback line (web) | `hh-hub plan-answer <project> <task> <approve|sendback> [feedback]` | 30 s (TUI), 150 s (web) | cyan `answering…` on the need |
 | `Add project` row (web only, §10) | POST `/api/project` with `{name, path}` | 30 s | — |
+| `Send` message row (web only, §11) | POST `/api/message` with `{project, text}` | 150 s | cyan `sending…` on the card |
 | `Seen` button | local state only (records the away-period start as seen); no subprocess | — | — |
 
 Toasts (on completion):
@@ -398,6 +399,7 @@ Toasts (on completion):
 - wake/continue failure: `{project}: {last stderr line, "hivehouse: " stripped}`.
 - answer success: `{who}: answered "{option}"` + ` (the dialog is still on its screen)` when `dialog_gone` false; `who` = `{project} · {agent}` or `{project}`. Failure: `{who}: {stderr last line}`.
 - plan-answer success: `{taskId}: plan approved` / `{taskId}: plan sent back`. Failure: `{taskId}: {reason}` (for example the plan prompt came back on the orchestrator's screen).
+- message success: `{project}: the message was typed to its orchestrator`. Failure: `{project}: {reason}` (for example the pane is gone or a dialog waits on its screen).
 - After every action: refresh.
 
 ## 8. Notes for the Ink port
@@ -423,3 +425,11 @@ The web screen ends its project list with an add-project row, rendered after the
 A submit POSTs `/api/project` with `{name, path}` (trimmed). The server checks, in order: the name matches the CLI rule (`/^[a-z][a-z0-9-]{0,31}$/`), `path` is absolute, it is a directory, and it holds a git repo (a `.git` directory, or a `.git` file that starts with `gitdir:` — a worktree pointer). A duplicate name is refused. Optional `mode` (`ask|yolo|auto`) and `approvals` (`manual|safe|smart`) fields are validated the same way when present. The form does not send them: the project card's toggles set them after the add. Success writes `projects.json` exactly like `hive hub add` and answers `{ok: true, name}`. Any refusal is a 400 `{ok: false, detail}` and shows as a toast. On success the row clears, a `{name}: project added` toast shows, and the view refreshes so the new card appears. All `projects.json` writes (`/api/project`, `/api/mode`, `/api/approvals`) serialize on one key, so their read-modify-write cannot race.
 
 The Ink screen has no add-project row (it has no task-creation row either): registration stays a web flow, the TUI stays a monitor.
+
+## 11. Owner message row (web UI only)
+
+Each project card holds a message row above its new-task row. One row: a text input (placeholder `message the orchestrator…`, aria-label `message for {project}`, mono, small) and a **Send** button. Enter in the input submits. The button stays disabled while the input is blank, and the shared one-action-at-a-time gate disables it while any action runs. While this project's send is in flight, the row shows cyan `sending…`. On success the input clears. The row shows on every card, even with no team. The server answers a refusal and the refusal shows as a toast.
+
+A submit POSTs `/api/message` with `{project, text}`. The default target is the project's orchestrator. An optional `agent` field names a team agent (`name`, or `name@<worktree>` when the name is ambiguous). The server checks, in order: `text` trimmed and whitespace-folded is non-empty, it is capped at 4000 characters, it holds no control characters (the fold already turns tab and newline into spaces, so what remains is hostile or broken input), the project exists, the target is in `team.json`, and the target has a recorded pane whose identity (pid plus start time) still matches the live pane. A dialog on the target's screen refuses with `answer it first`. The typed line is `Owner: {text}` and the send reuses the spawn typing path, so the pane identity is verified again before the keys land. Success answers `{ok: true, typed}` and appends the message to `decisions.jsonl` with `by: 'owner'`. A send that cannot be logged answers an error, not a success. Every refusal is a 400 `{ok: false, detail}` and shows as a toast.
+
+The Ink screen has no message row: messaging a live agent stays a web flow, the TUI stays a monitor.
