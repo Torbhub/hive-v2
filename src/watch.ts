@@ -15,6 +15,8 @@ import type { Approvals, TeamEntry } from './types.js';
 const SAFE_LEADERS = [
   'ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd', 'echo', 'wc', 'tsc',
   'git status', 'git log', 'git diff', 'git show', 'git branch',
+  'jj st', 'jj status', 'jj log', 'jj diff', 'jj show',
+  'jj bookmark list', 'jj git root', 'jj root',
   'hive hub status', 'hive hub tasks', 'hive hub dialog',
   'npm test', 'npm run build',
 ];
@@ -22,6 +24,7 @@ const SAFE_LEADERS = [
 // Destructive shapes are never auto-approved, by either tier.
 const NEVER_RES = [
   /\brm\s/, /git\s+push/, /git\s+reset/, /\bsudo\b/, /\bdd\s/, /\bmkfs\b/,
+  /\bjj\s+push\b/, /\bjj\s+abandon\b/, /jj\s+workspace\s+forget/,
   /chmod\s+-R/, /(?:curl|wget)[^|]*\|\s*(?:ba|z)?sh\b/, />\s*\/(etc|usr|bin|sbin|var|boot|lib)(\/|\s|$)/,
 ];
 
