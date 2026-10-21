@@ -148,7 +148,7 @@ describe('spawnAgent', () => {
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
-    const forget = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1].includes('forget'));
+    const forget = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1][1] === home && c[1].includes('forget'));
     expect(forget?.[1]).toEqual(['-R', home, 'workspace', 'forget', 'lane']);
     expect(await fs.stat(wt).catch(() => null)).toBeNull();
     expect((await manifestRead(home)).filter((r) => r.kind === 'jj-workspace')).toHaveLength(0);
