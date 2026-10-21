@@ -1,21 +1,31 @@
 name: auto-merge
 # Tiered auto-merge, ported from citadel with hive-v2 scopes.
 #
-# A PR auto-merges when ALL hold:
-#   1. the PR carries the opt-in label `auto-merge`;
-#   2. no `gate:*` label (the human-hold mechanism);
-#   3. every changed file is in the allowlist (docs/, roles/, rules/,
-#      skills/, README.md, AGENTS.md) — prose and team config only. infra/
-#      and src/ are hard-denied even if the allowlist is ever widened;
-#   4. the latest deploy run on main is green — a red deploy line halts
+# A PR auto-merges when every shared gate holds and ONE tier admits it.
+# Shared gates:
+#   1. no `gate:*` label (the human-hold mechanism);
+#   2. the latest deploy run on main is green — a red deploy line halts
 #      auto-merge fail-closed;
-#   5. the required `gate` check is green — enforced by GitHub's auto-merge
+#   3. the required `gate` check is green — enforced by GitHub's auto-merge
 #      itself.
+# Tiers:
+#   A. prose — label `auto-merge`, and every changed file is in the
+#      allowlist (docs/, roles/, rules/, skills/, README.md, AGENTS.md).
+#      infra/ and src/ are hard-denied even if the allowlist is ever
+#      widened.
+#   B. deslop-clean — label `deslop-clean`, applied by the on-box
+#      adversarial reviewer only after a full deslop review comes back
+#      CLEAN (and pulled on SLOPPY). Any path is allowed EXCEPT infra/**
+#      and .github/**: those stay human-territory even with the label,
+#      because machinery that can merge its own edits is a supply-chain
+#      hole.
 #
 # The merge runs under GITHUB_TOKEN, which does not trigger push workflows.
-# That is safe here: the allowlist touches no deploy path (see
-# deploy.yml on.push.paths), so no deploy is ever stranded. This workflow
-# checks out and runs NO repository code — pure API classification.
+# Tier A touches no deploy path (see deploy.yml on.push.paths), so it never
+# strands a deploy. Tier B can merge src/ or web/ changes: those deploy on
+# the next push to main that fires deploy.yml, not on the merge itself.
+# This workflow checks out and runs NO repository code — pure API
+# classification.
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
@@ -52,37 +62,56 @@ jobs:
           [ "$STATE" = "OPEN/false" ] || { echo "PR #$PR is $STATE — skip"; exit 0; }
 
           LABELS="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '[.labels[].name] | join(" ")')"
-          case " $LABELS " in
-            *" auto-merge "*) ;;
-            *) gh pr merge --disable-auto "$PR" || true; echo "PR #$PR: no auto-merge label — skip (opt-in)"; exit 0;;
-          esac
+          HAS_PROSE=0; HAS_DESLOP=0
+          case " $LABELS " in *" auto-merge "*) HAS_PROSE=1;; esac
+          case " $LABELS " in *" deslop-clean "*) HAS_DESLOP=1;; esac
+          if [ "$HAS_PROSE" = 0 ] && [ "$HAS_DESLOP" = 0 ]; then
+            gh pr merge --disable-auto "$PR" || true
+            echo "PR #$PR: no auto-merge or deslop-clean label — skip (opt-in)"
+            exit 0
+          fi
           GATE_LABEL="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '[.labels[].name | select(startswith("gate:"))] | .[0] // empty')"
           DEPLOY_GREEN="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/deploy.yml/runs?branch=main&per_page=1" --jq 'if .workflow_runs[0].conclusion == "success" then "yes" else "no" end')"
 
-          SCOPE_OK=1; HARD_DENY=0
+          PROSE_OK=1; PROSE_DENY=0; DESLOP_DENY=0
           while IFS= read -r f; do
             case "$f" in
               docs/*|roles/*|rules/*|skills/*|README.md|AGENTS.md) ;;
-              *) SCOPE_OK=0;;
+              *) PROSE_OK=0;;
             esac
             case "$f" in
-              infra/*|src/*) HARD_DENY=1;;
+              infra/*|src/*) PROSE_DENY=1;;
+            esac
+            case "$f" in
+              infra/*|.github/*) DESLOP_DENY=1;;
             esac
           done < <(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)')
 
-          if [ "$SCOPE_OK" = 1 ] && [ "$HARD_DENY" = 0 ] && [ -z "$GATE_LABEL" ] && [ "$DEPLOY_GREEN" = yes ]; then
+          TIER=
+          if [ "$HAS_PROSE" = 1 ] && [ "$PROSE_OK" = 1 ] && [ "$PROSE_DENY" = 0 ]; then
+            TIER="auto-merge (prose scope)"
+          elif [ "$HAS_DESLOP" = 1 ] && [ "$DESLOP_DENY" = 0 ]; then
+            TIER="deslop-clean (adversarial review)"
+          fi
+
+          if [ -n "$TIER" ] && [ -z "$GATE_LABEL" ] && [ "$DEPLOY_GREEN" = yes ]; then
             if gh pr merge --auto --merge "$PR"; then
-              echo "PR #$PR: auto-merge ENABLED (opted in, in scope, no gate label, deploy line green)"
+              echo "PR #$PR: auto-merge ENABLED via $TIER (no gate label, deploy line green)"
             else
-              echo "::warning::PR #$PR eligible but auto-merge enable failed (repo allow_auto_merge off?)"
+              echo "::warning::PR #$PR eligible ($TIER) but auto-merge enable failed (repo allow_auto_merge off?)"
             fi
             exit 0
           fi
 
-          WHY="outside the auto-merge scope"
-          [ "$HARD_DENY" = 1 ] && WHY="touches infra/ or src/ (hard deny)"
-          [ -n "$GATE_LABEL" ] && WHY="held by label $GATE_LABEL"
-          [ "$DEPLOY_GREEN" != yes ] && WHY="deploy line not green (fail-closed halt)"
+          if [ -n "$GATE_LABEL" ]; then
+            WHY="held by label $GATE_LABEL"
+          elif [ "$DEPLOY_GREEN" != yes ]; then
+            WHY="deploy line not green (fail-closed halt)"
+          else
+            [ "$HAS_PROSE" = 1 ] && [ "$PROSE_OK" = 0 ] && WHY="outside the prose allowlist"
+            [ "$HAS_PROSE" = 1 ] && [ "$PROSE_DENY" = 1 ] && WHY="touches infra/ or src/ (prose hard deny)"
+            [ "$HAS_DESLOP" = 1 ] && [ "$DESLOP_DENY" = 1 ] && WHY="touches infra/ or .github/ (human territory even with deslop-clean)"
+          fi
           # A held PR must not keep a previously-enabled auto-merge.
           gh pr merge --disable-auto "$PR" || true
           echo "PR #$PR held: $WHY"

@@ -4,7 +4,7 @@ import {
   listTasks, planAnswer, readDialogFor, startProject, wake,
 } from './hub.js';
 import { closeAgent, respawnAgent, spawnAgent } from './spawn.js';
-import { parseSteps, pushByHash, runGate, verifyCommits, verifyLog } from './gate.js';
+import { landPr, parseSteps, pushByHash, runGate, verifyCommits, verifyLog } from './gate.js';
 import { cleanupProject } from './cleanup.js';
 import { checkName } from './names.js';
 
@@ -31,6 +31,7 @@ const USAGE = `usage:
   hive gate --log <path> -- <name> <cmd>...
   hive gate-verify log <path> [--expect a,b] [--commit sha] | gate-verify commits <base>..<tip> --max-files <n> --style conventional|free --attribution allow|deny [--no-body]
   hive push <remote> <sha> <branch>
+  hive land <remote> <sha> <branch> [--title t] [--body b] | --bookmark <name> [--title t] [--body b]
   hive cleanup <project> [--dry-run]
   hive doctor
   hive ui
@@ -66,6 +67,10 @@ function parseFlags(args: string[], names: string[]): { flags: Record<string, st
 
 function fail(msg: string): never {
   throw new UsageError(msg);
+}
+
+function str(v: string | true | undefined): string | undefined {
+  return typeof v === 'string' ? v : undefined;
 }
 
 async function hubCommand(args: string[]): Promise<void> {
@@ -125,18 +130,14 @@ async function hubCommand(args: string[]): Promise<void> {
     case 'answer': {
       const { flags: f, pos } = parseFlags(args.slice(1), ['choice', 'seen']);
       const [project, agent] = pos;
-      if (!project || typeof f.choice !== 'string' || typeof f.seen !== 'string') {
-        throw new UsageError('usage: hive hub answer <project> [agent] --choice <n|esc> --seen <sha1>');
-      }
+      if (!project || typeof f.choice !== 'string' || typeof f.seen !== 'string') throw new UsageError('usage: hive hub answer <project> [agent] --choice <n|esc> --seen <sha1>');
       const result = await answerDialog(root, validName('project', project), agent && validAgentRef(agent), f.choice, f.seen);
       console.log(JSON.stringify(result, null, 2));
       return;
     }
     case 'plan-answer': {
       const [, project, task, verdict, ...fb] = args;
-      if (!project || !task || !verdict) {
-        throw new UsageError('usage: hive hub plan-answer <project> <task> <approve|sendback> [feedback]');
-      }
+      if (!project || !task || !verdict) throw new UsageError('usage: hive hub plan-answer <project> <task> <approve|sendback> [feedback]');
       const r = await planAnswer(root, validName('project', project), task, verdict, fb.length ? fb.join(' ') : undefined);
       console.log(`hive: typed into ${project}'s orchestrator: ${r.typed}`);
       return;
@@ -186,13 +187,7 @@ async function spawnCommand(args: string[]): Promise<void> {
   }
   const pane = sub === 'respawn'
     ? await respawnAgent(root, project, agent)
-    : await spawnAgent(root, project, {
-        agent,
-        role: typeof f.role === 'string' ? f.role : undefined,
-        worktree: typeof f.worktree === 'string' ? f.worktree : undefined,
-        task: typeof f.task === 'string' ? f.task : undefined,
-        model: typeof f.model === 'string' ? f.model : undefined,
-      });
+    : await spawnAgent(root, project, { agent, role: str(f.role), worktree: str(f.worktree), task: str(f.task), model: str(f.model) });
   console.log(pane);
 }
 
@@ -219,10 +214,7 @@ async function main(): Promise<void> {
         const { flags: f, pos } = parseFlags(args.slice(2), ['expect', 'commit']);
         const file = pos[0];
         if (!file) throw new UsageError('usage: hive gate-verify log <path> [--expect a,b] [--commit sha]');
-        const result = await verifyLog(file, {
-          expect: typeof f.expect === 'string' ? f.expect.split(',') : [],
-          commit: typeof f.commit === 'string' ? f.commit : '',
-        });
+        const result = await verifyLog(file, { expect: str(f.expect)?.split(',') ?? [], commit: str(f.commit) ?? '' });
         console.log(result.out);
         if (result.note) process.stderr.write(result.note + '\n');
         process.exit(result.green ? 0 : 1);
@@ -237,12 +229,7 @@ async function main(): Promise<void> {
         if (f.attribution !== 'allow' && f.attribution !== 'deny') throw new UsageError('--attribution is allow|deny');
         const maxFiles = Number(f['max-files']);
         if (!Number.isInteger(maxFiles) || maxFiles < 0) throw new UsageError('--max-files is a non-negative integer');
-        const result = await verifyCommits(range, {
-          maxFiles,
-          style: f.style,
-          attribution: f.attribution,
-          noBody: f['no-body'] === true,
-        });
+        const result = await verifyCommits(range, { maxFiles, style: f.style, attribution: f.attribution, noBody: f['no-body'] === true });
         console.log(result.out);
         process.exit(result.green ? 0 : 1);
       }
@@ -253,6 +240,15 @@ async function main(): Promise<void> {
       if (!remote || !sha || !branch) throw new UsageError('usage: hive push <remote> <sha> <branch>');
       await pushByHash(remote, sha, branch, process.cwd());
       console.log(`hive: pushed ${sha} to ${remote}/${branch}`);
+      return;
+    }
+    case 'land': {
+      const { flags: f, pos } = parseFlags(args.slice(1), ['title', 'body', 'bookmark']);
+      const [remote, sha, branch] = pos;
+      if (f.bookmark !== undefined ? pos.length > 0 : !remote || !sha || !branch) {
+        throw new UsageError('usage: hive land <remote> <sha> <branch> [--title t] [--body b] | --bookmark <name> [--title t] [--body b]');
+      }
+      console.log(await landPr({ remote, sha, branch, bookmark: str(f.bookmark), title: str(f.title), body: str(f.body) }, process.cwd()));
       return;
     }
     case 'cleanup': {
