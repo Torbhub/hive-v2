@@ -76,6 +76,21 @@ plays a fake approval dialog, and the real watch cycle detects it, calls the
 classifier (a stub `kimi` on PATH), and answers the pane or correctly holds
 back.
 
+## The daily loop
+
+Once a day the box posts a `daily-scan` task to the hivev2 project by
+itself (a systemd timer, `hive-v2-daily-scan.timer`, provisioned from
+`infra/box/` — never made by hand). The orchestrator that picks it up
+follows the experiment skill (`skills/experiment/SKILL.md`): a news-scout
+crawls the standing sources in `docs/crawl-sources.md` plus one web-search
+pass and writes a dated findings note in `docs/crawl/` with at most three
+candidate experiments. The orchestrator tries at most one, in its own lane,
+through the gate and a PR. The deslop-reviewer reviews that PR; only a
+CLEAN verdict earns the `deslop-clean` label that lets auto-merge land it.
+An experiment that touches `infra/` or `.github/` never auto-merges — it
+waits for you. A day where the scout finds nothing worth trying closes as
+done with a note, and that is the loop working.
+
 ## How a task flows
 
 1. You record a task: `hive hub task demo "..."`. It lands in the ledger
