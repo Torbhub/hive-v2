@@ -1,4 +1,4 @@
-import { promises as fs, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, promises as fs, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -122,6 +122,27 @@ describe('spawnAgent', () => {
     const recs = (await manifestRead(home)).filter((r) => r.kind === 'worktree');
     expect(recs).toHaveLength(1);
     expect(recs[0].branch).toBe('demo/builder2');
+  }, 20_000);
+
+  it('creates missing parent dirs for a nested --worktree path', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    // jj workspace add fails when the target's parent does not exist.
+    vi.mocked(run).mockImplementation(async (cmd, args) => {
+      if (cmd === 'jj' && args[2] === 'workspace' && args[3] === 'add' && !existsSync(path.dirname(args[4]))) {
+        return { code: 1, stdout: '', stderr: 'Cannot create workspace: No such file or directory (os error 2)' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    try {
+      await spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lanes/chunk-1' });
+    } finally {
+      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
+    }
+    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1][4] === path.join(home, 'lanes', 'chunk-1'));
+    expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', path.join(home, 'lanes', 'chunk-1'), '-r', 'main@origin']);
+    const recs = (await manifestRead(home)).filter((r) => r.kind === 'jj-workspace');
+    expect(recs).toHaveLength(1);
+    expect(recs[0].path).toBe(path.join(home, 'lanes', 'chunk-1'));
   }, 20_000);
 
   it('forgets the jj workspace when the launch fails after it was made', async () => {
