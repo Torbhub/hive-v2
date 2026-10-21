@@ -129,6 +129,7 @@ export type TeamEntry = {
   // wire log. Cleared when the pane moves again or is relaunched.
   wedged_at?: string;
   task?: string;
+  model?: string;
 };
 
 export const TASK_EVENTS = [

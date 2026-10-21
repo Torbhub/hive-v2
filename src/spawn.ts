@@ -102,11 +102,23 @@ export async function typeLine(pane: string, text: string, identity: PaneIdentit
   throw new Error(`the line stayed in the prompt of ${pane}; not typed`);
 }
 
-// -S combines with -y/--auto per kimi --help, so the mode applies to resumes too.
-export function launchCommand(sessionId: string | undefined, mode: ProjectMode = 'ask'): string {
+// -S combines with -y/--auto/-m per kimi --help, so mode and model apply to resumes too.
+const MODEL_RE = /^[A-Za-z0-9._/[\]-]{1,64}$/;
+
+// Called before any side effect (worktree add, pane kill): a bad alias is a
+// recoverable config error and must never orphan a worktree or kill a live agent.
+function checkModel(model: string | undefined): void {
+  if (model !== undefined && !MODEL_RE.test(model)) {
+    throw new Error(`a model alias is letters, digits, '.', '_', '-', '/', '[', ']': ${model}`);
+  }
+}
+
+export function launchCommand(sessionId: string | undefined, mode: ProjectMode = 'ask', model?: string): string {
+  checkModel(model);
   const args = [
     sessionId ? `--session ${sessionId}` : '',
     mode === 'yolo' ? '-y' : mode === 'auto' ? '--auto' : '',
+    model ? `-m '${model}'` : '',
   ].filter(Boolean);
   return `KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run${args.length ? ` -- ${args.join(' ')}` : ''}`;
 }
@@ -117,11 +129,12 @@ export async function launchWindow(
   cwd: string,
   sessionId?: string,
   mode: ProjectMode = 'ask',
+  model?: string,
 ): Promise<{ pane: string; identity: PaneIdentity }> {
   const pane = await newWindow(
     windowName(project, agent),
     cwd,
-    launchCommand(sessionId, mode),
+    launchCommand(sessionId, mode, model),
   );
   const deadline = Date.now() + 15_000;
   let identity: PaneIdentity | null = null;
@@ -175,11 +188,12 @@ async function projectEntry(root: string, project: string): Promise<ProjectsFile
   return p;
 }
 
-export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string };
+export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string; model?: string };
 
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
   const { agent, role = 'implementer' } = opts;
   if (!AGENT_NAME_RE.test(agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${agent}`);
+  checkModel(opts.model);
   await preflight();
   const p = await projectEntry(root, project);
   const home = p.home;
@@ -217,14 +231,14 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
     }
 
     await ensureAgentFiles(worktree, agent, role);
-    ({ pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask'));
+    ({ pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask', opts.model));
     await manifestAdd(home, {
       kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
       pane_pid: identity.pid, pane_started: identity.started,
     });
     const entry: TeamEntry = {
       name: agent, pane, pane_pid: identity.pid, pane_started: identity.started,
-      worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task,
+      worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task, model: opts.model,
     };
     await upsertTeamEntry(home, entry);
   } catch (e) {
@@ -278,7 +292,7 @@ async function relaunchAgent(
 ): Promise<string> {
   const home = p.home;
   const worktree = old.worktree ?? home;
-  const { pane, identity } = await launchWindow(p.name, old.name, worktree, sessionId, p.mode ?? 'ask');
+  const { pane, identity } = await launchWindow(p.name, old.name, worktree, sessionId, p.mode ?? 'ask', old.model);
   await manifestAdd(home, {
     kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(p.name, old.name),
     pane_pid: identity.pid, pane_started: identity.started,
@@ -305,6 +319,7 @@ export async function respawnAgent(root: string, project: string, agent: string)
   const team = await readTeam(home);
   const old = team.agents.find((a) => a.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
+  checkModel(old.model);
   await preflight();
   await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
   try {
@@ -326,6 +341,7 @@ export async function wakeAgent(root: string, project: string, agent: string): P
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   if (old.closed_at) throw new Error(`${agent} was closed on purpose at ${old.closed_at}; not waking it`);
   if (!old.session_id) throw new Error(`${agent} has no recorded session to resume; respawn it instead`);
+  checkModel(old.model);
   await preflight();
   if (old.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
     throw new Error(`${agent} is already running`);

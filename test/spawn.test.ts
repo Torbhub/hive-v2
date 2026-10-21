@@ -25,10 +25,10 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   };
 });
 
-import { closeAgent, launchCommand, respawnAgent, wakeAgent } from '../src/spawn.js';
+import { closeAgent, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
 import { hubAdd, hubInit } from '../src/hub.js';
 import { hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';
-import { newWindow, paneIs, killWindow } from '../src/tmux.js';
+import { killWindow, newWindow, paneIs, run } from '../src/tmux.js';
 
 async function setup(teamEntry: Record<string, unknown>) {
   const root = mkdtempSync(path.join(tmpdir(), 'hive-spawn-'));
@@ -61,6 +61,39 @@ describe('respawnAgent', () => {
     const team = await readTeam(home);
     expect(team.agents[0].closed_at).toBeUndefined();
   });
+
+  it('relaunches on the model recorded in team.json', async () => {
+    const { root } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', worktree: '', model: 'kimi-k2',
+    });
+    await respawnAgent(root, 'demo', 'builder');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toContain("-m 'kimi-k2'");
+  }, 20_000);
+
+  it('rejects a bad recorded model before killing the live pane', async () => {
+    const { root } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', worktree: '', model: 'bad model',
+    });
+    const kills = vi.mocked(killWindow).mock.calls.length;
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow(/model alias/);
+    expect(vi.mocked(killWindow).mock.calls).toHaveLength(kills);
+  }, 20_000);
+
+  it('rejects an empty recorded model instead of dropping it', async () => {
+    const { root } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', worktree: '', model: '',
+    });
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow(/model alias/);
+  }, 20_000);
+});
+
+describe('spawnAgent', () => {
+  it('rejects a bad --model before any side effect', async () => {
+    const { root } = await setup({ name: 'builder' });
+    const runs = vi.mocked(run).mock.calls.length;
+    await expect(spawnAgent(root, 'demo', { agent: 'builder2', model: 'bad model' })).rejects.toThrow(/model alias/);
+    expect(vi.mocked(run).mock.calls).toHaveLength(runs);
+  }, 20_000);
 });
 
 describe('closeAgent', () => {
@@ -124,5 +157,17 @@ describe('launchCommand', () => {
     expect(launchCommand('session_abc', 'ask')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc');
     expect(launchCommand('session_abc', 'yolo')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc -y');
     expect(launchCommand('session_abc', 'auto')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc --auto');
+  });
+
+  it('adds -m for a per-agent model, combined with session and mode', () => {
+    expect(launchCommand(undefined, 'ask', 'kimi-k2')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- -m 'kimi-k2'");
+    expect(launchCommand('session_abc', 'yolo', 'kimi-code/k3')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc -y -m 'kimi-code/k3'");
+    expect(launchCommand(undefined, 'ask', 'k3[1m]')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- -m 'k3[1m]'");
+  });
+
+  it('rejects a model alias outside the safe charset', () => {
+    expect(() => launchCommand(undefined, 'ask', "k3'; rm -rf ~;'")).toThrow(/model alias/);
+    expect(() => launchCommand(undefined, 'ask', 'k3 $(whoami)')).toThrow(/model alias/);
+    expect(() => launchCommand(undefined, 'ask', '')).toThrow(/model alias/);
   });
 });

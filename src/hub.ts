@@ -435,7 +435,7 @@ async function launchOrchestrator(
     }
 
     await ensureAgentFiles(cwd, name, 'orchestrator');
-    const { pane, identity } = await launchWindow(project, name, cwd, sessionId, p.mode ?? 'ask');
+    const { pane, identity } = await launchWindow(project, name, cwd, sessionId, p.mode ?? 'ask', old?.model);
     await manifestAdd(p.home, {
       kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}`,
       pane_pid: identity.pid, pane_started: identity.started,

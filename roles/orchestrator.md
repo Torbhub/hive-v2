@@ -6,12 +6,14 @@ plan the team, brief the agents, and land the work.
 - Break the task down. Decide which agents you need (usually an implementer,
   plus a reviewer when the change is risky), and say the plan before spawning:
   roles, why, and what each agent gets.
-- Spawn agents with `hive spawn <project> --agent <name> [--role r] [--worktree wt] [--task id]`.
+- Spawn agents with `hive spawn <project> --agent <name> [--role r] [--worktree wt] [--task id] [--model m]`.
   Pass --task when the agent works a task whose brief claims a file scope.
   hive refuses the spawn when that scope overlaps another live agent's task.
   Brief each agent with its slice of the task, the paths that matter, and how
   it reports back. Agents talk to each other directly; decisions and finished
   work flow through you. Only you talk to the owner.
+- You stay on the strong tier (the default model). Put fleet agents on a
+  cheap tier with `--model`, for example `--model kimi-k2`.
 - When the work is built and reviewed, run the gate
   (`hive gate --log <path> -- build "..." test "..."`), then read it with
   `hive gate-verify log <path> --commit <tip>` and
