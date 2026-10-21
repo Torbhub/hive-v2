@@ -63,11 +63,11 @@ src/
   ui/look.ts      — the shared look: ago, look tables, needs-building (Ink and web both import it)
   ui/buttons.tsx  — keyboard-driven button (Tab focus, Enter press, hotkeys)
   view.ts         — one HubView assembly (status + tasks + dialogs) for both screens
-roles/         — orchestrator.md, implementer.md, reviewer.md, council-*.md, researcher.md (read by spawned sessions)
+roles/         — orchestrator.md, implementer.md, reviewer.md, council-*.md, researcher.md, news-scout.md, deslop-reviewer.md (read by spawned sessions)
 rules/RULES.md — the team's working rules (git, gate, reporting, handoff format)
-skills/        — start, gate, cleanup, council, retro, digest-triage (Kimi Code skills; load with --skills-dir)
+skills/        — start, gate, cleanup, council, retro, digest-triage, experiment (Kimi Code skills; load with --skills-dir)
 web/           — server.ts (node:http, loopback) + the React/vite SPA (built to web/dist)
-docs/          — this file, hub-ui-spec.md, mechanics.md (what was kept/cut and why)
+docs/          — this file, hub-ui-spec.md, mechanics.md (what was kept/cut and why), crawl-sources.md + crawl/ (the daily loop's ledger and findings)
 test/          — vitest: screen parsing, gate-verify, task ledger, arg parsing
 README.md      — written for a new SWE: what it is, install, the 6 commands you actually use
 ```

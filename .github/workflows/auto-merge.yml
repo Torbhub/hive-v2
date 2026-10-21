@@ -15,10 +15,11 @@ name: auto-merge
 #      widened.
 #   B. deslop-clean — label `deslop-clean`, applied by the on-box
 #      adversarial reviewer only after a full deslop review comes back
-#      CLEAN (and pulled on SLOPPY). Any path is allowed EXCEPT infra/**
-#      and .github/**: those stay human-territory even with the label,
-#      because machinery that can merge its own edits is a supply-chain
-#      hole.
+#      CLEAN (and pulled on SLOPPY). Prose and product code are allowed;
+#      the loop's own control plane is not: infra/**, .github/**,
+#      scripts/**, roles/**, skills/**, rules/**, and AGENTS.md stay
+#      human-territory even with the label. Machinery that can merge its
+#      own steering edits is a supply-chain hole.
 #
 # The merge runs under GITHUB_TOKEN, which does not trigger push workflows.
 # Tier A touches no deploy path (see deploy.yml on.push.paths), so it never
@@ -83,7 +84,7 @@ jobs:
               infra/*|src/*) PROSE_DENY=1;;
             esac
             case "$f" in
-              infra/*|.github/*) DESLOP_DENY=1;;
+              infra/*|.github/*|scripts/*|roles/*|skills/*|rules/*|AGENTS.md) DESLOP_DENY=1;;
             esac
           done < <(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)')
 
@@ -110,7 +111,7 @@ jobs:
           else
             [ "$HAS_PROSE" = 1 ] && [ "$PROSE_OK" = 0 ] && WHY="outside the prose allowlist"
             [ "$HAS_PROSE" = 1 ] && [ "$PROSE_DENY" = 1 ] && WHY="touches infra/ or src/ (prose hard deny)"
-            [ "$HAS_DESLOP" = 1 ] && [ "$DESLOP_DENY" = 1 ] && WHY="touches infra/ or .github/ (human territory even with deslop-clean)"
+            [ "$HAS_DESLOP" = 1 ] && [ "$DESLOP_DENY" = 1 ] && WHY="touches the control plane: infra/, .github/, scripts/, roles/, skills/, rules/, AGENTS.md (human territory even with deslop-clean)"
           fi
           # A held PR must not keep a previously-enabled auto-merge.
           gh pr merge --disable-auto "$PR" || true

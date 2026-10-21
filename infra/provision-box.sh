@@ -36,11 +36,14 @@ install_if_different "$BOX_DIR/hive-v2-web.service" /etc/systemd/system/hive-v2-
 install_if_different "$BOX_DIR/hive-v2-watch.service" /etc/systemd/system/hive-v2-watch.service 644
 install_if_different "$BOX_DIR/hive-v2-tmux.service" /etc/systemd/system/hive-v2-tmux.service 644
 install_if_different "$BOX_DIR/hive-v2-webterm.service" /etc/systemd/system/hive-v2-webterm.service 644
+install_if_different "$BOX_DIR/hive-v2-daily-scan.service" /etc/systemd/system/hive-v2-daily-scan.service 644
+install_if_different "$BOX_DIR/hive-v2-daily-scan.timer" /etc/systemd/system/hive-v2-daily-scan.timer 644
 install_if_different "$BOX_DIR/hive-v2-tmux.sudoers" /etc/sudoers.d/hive-v2-tmux 440
 install_if_different "$BOX_DIR/hive-v2-dmesg.sudoers" /etc/sudoers.d/hive-v2-dmesg 440
 install_if_different "$BOX_DIR/hive-v2-pstack.sudoers" /etc/sudoers.d/hive-v2-pstack 440
 install_if_different "$BOX_DIR/hive" /usr/local/bin/hive 755
 install_if_different "$BOX_DIR/hub-attach.sh" /opt/hive-v2/hub-attach.sh 755
+install_if_different "$BOX_DIR/daily-scan.sh" /opt/hive-v2/daily-scan.sh 755
 
 mkdir -p /etc/hive-v2
 if [ ! -f "$ENV_FILE" ]; then
@@ -97,6 +100,11 @@ else
 fi
 systemctl restart hive-v2-web hive-v2-watch hive-v2-webterm
 echo "services: hive-v2-web hive-v2-watch hive-v2-webterm enabled and restarted"
+# A timer, not a service: enable and (re)start the timer itself, never the
+# oneshot it fires.
+systemctl enable --now hive-v2-daily-scan.timer >/dev/null
+systemctl restart hive-v2-daily-scan.timer
+echo "timer:    hive-v2-daily-scan.timer enabled"
 
 if nginx -t 2>/dev/null; then
   systemctl reload nginx
