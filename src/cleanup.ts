@@ -104,8 +104,7 @@ export async function cleanupProject(
       const abs = wt ? path.resolve(wt) : '';
       const st = abs ? await fs.stat(abs).catch(() => null) : null;
       if (!abs || !st) continue;
-      // Same trust rule as worktrees: trash only a path under the project
-      // home that jj itself lists as a workspace of it.
+      // Same trust rule as worktrees, with jj as the witness.
       const underHome = abs.startsWith(path.resolve(p.home) + path.sep);
       const listed = underHome
         ? (await run('jj', ['-R', p.home, 'workspace', 'list', '-T', 'root ++ "\\n"'], p.home)).stdout

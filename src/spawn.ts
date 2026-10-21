@@ -190,11 +190,21 @@ async function projectEntry(root: string, project: string): Promise<ProjectsFile
 
 export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string; model?: string };
 
-export type LaneKind = 'git-worktree' | 'jj-workspace';
+// Prefer the remote tip; the fallbacks keep offline and master-based repos lane-able.
+async function jjBaseRev(home: string): Promise<string> {
+  for (const rev of ['main@origin', 'main', '@']) {
+    const probe = await run('jj', ['-R', home, 'log', '-r', rev, '-T', "''", '--no-graph', '--limit', '1'], home);
+    if (probe.code === 0) return rev;
+  }
+  throw new Error(`jj: no base revision in ${home} (tried main@origin, main, @)`);
+}
 
-// jj root answers only inside a jj repo; any probe failure keeps the git lane.
-export function laneKind(probe: { code: number }): LaneKind {
-  return probe.code === 0 ? 'jj-workspace' : 'git-worktree';
+// Trash first, then forget: forget is jj's flow for a directory already gone.
+async function undoJjWorkspace(home: string, name: string, wt: string): Promise<void> {
+  const dest = path.join(hivePath(home, 'trash', new Date().toISOString().slice(0, 10)), name);
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  await fs.rename(wt, dest).catch(() => {});
+  await run('jj', ['-R', home, 'workspace', 'forget', name], home);
 }
 
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
@@ -231,9 +241,16 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   try {
     if (opts.worktree) {
       const wt = path.resolve(home, opts.worktree);
-      if (laneKind(await run('jj', ['root'], home)) === 'jj-workspace') {
-        const made = await run('jj', ['-R', home, 'workspace', 'add', wt, '-r', 'main@origin'], home);
-        if (made.code !== 0) throw new Error(`jj workspace add failed: ${made.stderr.trim()}`);
+      // jj root answers only inside a jj repo; any probe failure keeps the git lane.
+      if ((await run('jj', ['root'], home)).code === 0) {
+        const base = await jjBaseRev(home);
+        const existed = existsSync(wt);
+        const made = await run('jj', ['-R', home, 'workspace', 'add', wt, '-r', base], home);
+        if (made.code !== 0) {
+          // jj can register the workspace and create the dir yet still fail.
+          if (!existed && existsSync(wt)) await undoJjWorkspace(home, path.basename(wt), wt);
+          throw new Error(`jj workspace add failed: ${made.stderr.trim()}`);
+        }
         jjLane = { name: path.basename(wt), path: wt };
         if (existsSync(path.join(wt, 'scripts', 'install-git-hooks.sh'))) {
           const hooks = await run('bash', ['scripts/install-git-hooks.sh'], wt);
@@ -263,10 +280,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   } catch (e) {
     if (jjLane) {
       // A failed spawn must not strand a registered lane.
-      await run('jj', ['-R', home, 'workspace', 'forget', jjLane.name], home);
-      const dest = path.join(hivePath(home, 'trash', new Date().toISOString().slice(0, 10)), jjLane.name);
-      await fs.mkdir(path.dirname(dest), { recursive: true });
-      await fs.rename(jjLane.path, dest).catch(() => {});
+      await undoJjWorkspace(home, jjLane.name, jjLane.path);
     }
     if (task) await removeTeamEntry(home, agent);
     throw e;

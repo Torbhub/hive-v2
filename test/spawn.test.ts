@@ -25,7 +25,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   };
 });
 
-import { closeAgent, laneKind, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
+import { closeAgent, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
 import { hubAdd, hubInit } from '../src/hub.js';
 import { hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';
 import { killWindow, newWindow, paneIs, run } from '../src/tmux.js';
@@ -132,14 +132,27 @@ describe('spawnAgent', () => {
     expect(forget?.[1]).toEqual(['-R', home, 'workspace', 'forget', 'lane']);
     expect(await fs.stat(path.join(home, 'lane')).catch(() => null)).toBeNull();
   }, 20_000);
-});
 
-describe('laneKind', () => {
-  it('picks jj only when the probe succeeds', () => {
-    expect(laneKind({ code: 0 })).toBe('jj-workspace');
-    expect(laneKind({ code: 1 })).toBe('git-worktree');
-    expect(laneKind({ code: 127 })).toBe('git-worktree');
-  });
+  it('rolls back a workspace that jj registered despite a failed add', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const wt = path.join(home, 'lane');
+    vi.mocked(run).mockImplementation(async (cmd, args) => {
+      if (cmd === 'jj' && args[2] === 'workspace' && args[3] === 'add') {
+        await fs.mkdir(args[4], { recursive: true });
+        return { code: 1, stdout: '', stderr: 'add blew up' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    try {
+      await expect(spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' })).rejects.toThrow(/jj workspace add failed/);
+    } finally {
+      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
+    }
+    const forget = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1].includes('forget'));
+    expect(forget?.[1]).toEqual(['-R', home, 'workspace', 'forget', 'lane']);
+    expect(await fs.stat(wt).catch(() => null)).toBeNull();
+    expect((await manifestRead(home)).filter((r) => r.kind === 'jj-workspace')).toHaveLength(0);
+  }, 20_000);
 });
 
 describe('closeAgent', () => {
