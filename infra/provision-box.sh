@@ -43,7 +43,7 @@ install_if_different "$BOX_DIR/hive-v2-dmesg.sudoers" /etc/sudoers.d/hive-v2-dme
 install_if_different "$BOX_DIR/hive-v2-pstack.sudoers" /etc/sudoers.d/hive-v2-pstack 440
 install_if_different "$BOX_DIR/hive" /usr/local/bin/hive 755
 install_if_different "$BOX_DIR/hub-attach.sh" /opt/hive-v2/hub-attach.sh 755
-install_if_different "$REPO/scripts/daily-scan.sh" /opt/hive-v2/daily-scan.sh 755
+install_if_different "$BOX_DIR/daily-scan.sh" /opt/hive-v2/daily-scan.sh 755
 
 mkdir -p /etc/hive-v2
 if [ ! -f "$ENV_FILE" ]; then

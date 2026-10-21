@@ -85,11 +85,12 @@ follows the experiment skill (`skills/experiment/SKILL.md`): a news-scout
 crawls the standing sources in `docs/crawl-sources.md` plus one web-search
 pass and writes a dated findings note in `docs/crawl/` with at most three
 candidate experiments. The orchestrator tries at most one, in its own lane,
-through the gate and a PR. The deslop-reviewer reviews that PR; only a
+through the gate and a PR. The deslop-reviewer reviews that PR. Only a
 CLEAN verdict earns the `deslop-clean` label that lets auto-merge land it.
-An experiment that touches `infra/` or `.github/` never auto-merges — it
-waits for you. A day where the scout finds nothing worth trying closes as
-done with a note, and that is the loop working.
+An experiment that touches the loop's control plane never auto-merges:
+`infra/`, `.github/`, `scripts/`, `roles/`, `skills/`, `rules/`, or
+`AGENTS.md`. It waits for you. A day where the scout finds nothing worth
+trying closes as done with a note, and that is the loop working.
 
 ## How a task flows
 

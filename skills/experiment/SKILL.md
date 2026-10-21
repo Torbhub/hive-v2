@@ -21,8 +21,8 @@ never.
    build the pick. It lands as a PR from that lane, gate green in CI.
 4. Spawn the deslop-reviewer (role `deslop-reviewer`) on the PR. Only its
    CLEAN verdict earns the `deslop-clean` label, and only the label lets
-   auto-merge land it. A SLOPPY verdict goes back to the implementer once;
-   a second SLOPPY closes the experiment.
+   auto-merge land it. A SLOPPY verdict goes back to the implementer once.
+   A second SLOPPY closes the experiment.
 5. Report DONE with what was tried and how it ended.
 
 Stop conditions — all normal endings, not failures:
@@ -35,6 +35,7 @@ Stop conditions — all normal endings, not failures:
 - The gate or the deslop review stays red after one retry: abandon and
   note why.
 
-Standing rule: an experiment that touches `infra/` or `.github/` is never
-auto-merged, `deslop-clean` label or not. Leave that PR open for the owner
-and say so in the task log.
+Standing rule: an experiment that touches the loop's control plane —
+`infra/`, `.github/`, `scripts/`, `roles/`, `skills/`, `rules/`, or
+`AGENTS.md` — is never auto-merged, `deslop-clean` label or not. Leave
+that PR open for the owner and say so in the task log.
