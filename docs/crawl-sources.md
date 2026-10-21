@@ -4,7 +4,7 @@ The standing sources the news-scout crawls on every daily-scan task. The
 scout proposes additions and removals in its findings note. The edits land
 through the normal PR path.
 
-- Kimi Code CLI releases — https://github.com/MoonshotAI/kimi-cli/releases
+- Kimi Code CLI releases — https://github.com/MoonshotAI/kimi-code/releases
 - tmux CHANGES — https://github.com/tmux/tmux/blob/master/CHANGES
 - jj releases — https://github.com/jj-vcs/jj/releases
 
