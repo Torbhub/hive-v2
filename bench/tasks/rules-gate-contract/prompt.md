@@ -1,0 +1,1 @@
+rules/RULES.md lost its gate contract. Restore the rule that nothing lands without a green gate on the exact commit being pushed, and the line that says to read the log with `hive gate-verify log <path> --commit <tip>`. Change nothing else.
