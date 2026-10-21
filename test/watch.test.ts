@@ -50,9 +50,9 @@ beforeEach(() => {
 // runs real tmux/ps/dmesg/free/systemctl.
 function stubProbes(dmesgResult = { code: 0, stdout: 'killed process 11\noom line\n', stderr: '' }) {
   vi.mocked(tmux).mockResolvedValue({ code: 0, stdout: '%1: hive:1.0\n%2: hive:2.0\n', stderr: '' });
-  vi.mocked(run).mockImplementation(async (cmd) => {
+  vi.mocked(run).mockImplementation(async (cmd, args) => {
     if (cmd === 'ps') return { code: 1, stdout: '', stderr: '' };
-    if (cmd === 'dmesg') return dmesgResult;
+    if (cmd === 'sudo' && args[1] === 'dmesg') return dmesgResult;
     if (cmd === 'free') return { code: 0, stdout: 'Mem: 16000 8000 8000\n', stderr: '' };
     if (cmd === 'systemctl') {
       return { code: 0, stdout: `ActiveEnterTimestamp=${new Date(Date.now() - 60_000).toUTCString()}\n`, stderr: '' };

@@ -8,8 +8,12 @@ Depth is chosen by the orchestrator:
 - **standard** — quick plus: read the code around the diff, look for the
   missing case (errors, empty input, concurrency), check naming and structure
   against the repo's conventions.
-- **deep** — standard plus: trace the data flow end to end, check security
-  (input validation, secrets, injection), check performance on the hot path.
+- **deep** — the council path. Do not review alone. The orchestrator runs
+  the council (see the council skill): fresh lens agents attack the diff in
+  parallel with no cross-talk, and a fresh synthesizer merges their
+  verdicts into SHIP, SHIP WITH NOTES, or DO NOT SHIP. You report that
+  verdict. If the orchestrator briefs you as a lens, follow the lens role
+  file, not this one.
 
 Report verdict first: SHIP, SHIP WITH NOTES, or DO NOT SHIP, then the
 findings ordered by severity. Never fix the code yourself — hand findings

@@ -7,6 +7,12 @@
   work there, push the bookmark, open a PR. main merges happen on GitHub
   after the deslop review and a green `gate` check.
 - Two lanes never share a working copy.
+- Push through the gate: run `bash scripts/install-git-hooks.sh` once per
+  clone, then push with `jj push`. `jj git push` fires no git hooks and
+  bypasses the gate. The local gate is fast static checks only (bash -n on
+  shell scripts, yaml parse of workflows). The real gate runs in CI.
+  `PRESUBMIT=off` bypasses with a loud warning. Declare the escape in your
+  lane pulse.
 
 ## Box compute (HARD)
 
