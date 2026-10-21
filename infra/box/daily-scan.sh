@@ -21,17 +21,33 @@ post() {
     -d "$2"
 }
 
+nudge_running() {
+  local id=$1 resp code body
+  resp=$(post /api/message "$(jq -n --arg project "$PROJECT" \
+    --arg text "$MARKER is in the ledger. Read .hive-hub/tasks/$id.md and take it from there." \
+    '{project:$project, text:$text}')")
+  code=${resp##*$'\n'}
+  body=${resp%$'\n'*}
+  if [ "$code" != 200 ]; then
+    echo "FAIL: POST /api/message $id -> $code: $body" >&2
+    return 1
+  fi
+  echo "nudged the live orchestrator about: $id"
+}
+
 start_task() {
   local id=$1 resp code body
   resp=$(post /api/start "$(jq -n --arg project "$PROJECT" --arg task "$id" '{project:$project, task:$task}')")
   code=${resp##*$'\n'}
   body=${resp%$'\n'*}
   if [ "$code" != 200 ]; then
-    # A live orchestrator picks the task up from the ledger on its own.
-    # Refusing to start a second one is not a failure of the daily loop.
+    # A live orchestrator never notices a new ledger task on its own, so
+    # nudge it with /api/message. A refusal (dead pane, dialog open) fails
+    # the unit: a missed day must show in systemctl status.
     if grep -q 'already running' <<<"$body"; then
-      echo "note: orchestrator already running. $id waits in the ledger"
-      return 0
+      echo "note: orchestrator already running. Nudging it about $id"
+      nudge_running "$id"
+      return
     fi
     echo "FAIL: POST /api/start $id -> $code: $body" >&2
     return 1
