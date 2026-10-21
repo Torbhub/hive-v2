@@ -1,0 +1,2 @@
+# The watch wedge dump runs `sudo -n pstack <pid>` before restarting a wedged pane.
+ubuntu ALL=(root) NOPASSWD: /usr/bin/pstack
