@@ -118,4 +118,12 @@ describe('cleanupProject tmux records', () => {
     const team = await readTeam(home);
     expect(team.agents[0].closed_at).toBeUndefined();
   });
+
+  it('unstamps the team entry when the kill fails', async () => {
+    const { root, home } = await setupTmux();
+    vi.mocked(killWindow).mockRejectedValueOnce(new Error('tmux down'));
+    await expect(cleanupProject(root, 'proj')).rejects.toThrow('tmux down');
+    const team = await readTeam(home);
+    expect(team.agents[0].closed_at).toBeUndefined();
+  });
 });

@@ -20,11 +20,19 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 
 vi.mock('../src/hub.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/hub.js')>();
+  const state = await import('../src/state.js');
   return {
     ...orig,
     buildStatus: vi.fn(async () => ({ hub: { root: '' }, projects: [] })),
     readDialogFor: vi.fn(async () => null),
-    wake: vi.fn(async () => '%9'),
+    // A successful wake registers the new pane on the team entry, as the real
+    // launchOrchestrator does; the watchdog checks before it logs resurrection.
+    wake: vi.fn(async (root: string, project: string) => {
+      const pf = await state.readProjects(root);
+      const home = pf.projects.find((p) => p.name === project)?.home ?? '';
+      await state.upsertTeamEntry(home, { name: `${project}-orchestrator`, pane: '%9' });
+      return '%9';
+    }),
     answerDialog: vi.fn(async () => ({
       answered: true as const, session: 'demo-orchestrator', choice: '1', option: 'Approve once', dialog_gone: true,
     })),
@@ -33,9 +41,15 @@ vi.mock('../src/hub.js', async (importOriginal) => {
 
 vi.mock('../src/spawn.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/spawn.js')>();
+  const state = await import('../src/state.js');
   return {
     ...orig,
-    wakeAgent: vi.fn(async () => '%8'),
+    wakeAgent: vi.fn(async (root: string, project: string, agent: string) => {
+      const pf = await state.readProjects(root);
+      const home = pf.projects.find((p) => p.name === project)?.home ?? '';
+      await state.upsertTeamEntry(home, { name: agent, pane: '%8' });
+      return '%8';
+    }),
   };
 });
 
@@ -120,7 +134,7 @@ async function setupProject(opts: { approvals?: string; agents?: Record<string, 
 }
 
 describe('watchCycle watchdog', () => {
-  it('logs a death once, retries a failed wake, and logs the resurrection', async () => {
+  it('logs a death once, backs off a failed wake, and logs a real resurrection', async () => {
     const { root } = await setupProject({
       agents: [
         { name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'a', session_id: 'session_x' },
@@ -130,7 +144,7 @@ describe('watchCycle watchdog', () => {
     vi.mocked(paneExists).mockResolvedValue(false);
     stubProbes();
     const deaths = new Set<string>();
-    const wakes = new Map<string, number>();
+    const wakes = new Map<string, { attempts: number; nextAt: number }>();
     vi.mocked(wake).mockRejectedValueOnce(new Error('the teamkimi proxy is down'));
     await watchCycle(root, {}, deaths, wakes);
     expect(wake).toHaveBeenCalledWith(root, 'demo');
@@ -139,12 +153,16 @@ describe('watchCycle watchdog', () => {
     expect(log).toMatch(/demo demo-orchestrator pane %1 died \(pid 11, started a\)/);
     expect(log).toMatch(/demo builder pane %2 died \(pid 22, started b\)/);
     expect(log).toContain('wake attempt 1 failed: the teamkimi proxy is down');
-    const decisions = await readDecisions(root);
-    expect(decisions[0]).toMatchObject({ by: 'watch', project: 'demo' });
-    expect(decisions[0].summary).toMatch(/woke the orchestrator/);
+    // Nothing is recorded in DECISIONS before a wake actually succeeds.
+    expect(await readDecisions(root)).toHaveLength(0);
 
-    // The failed wake is retried on the next tick; the death is not relogged,
-    // a dead agent is still only logged, and a successful retry is a resurrection.
+    // The very next tick is inside the backoff window and does not retry.
+    await watchCycle(root, {}, deaths, wakes);
+    expect(wake).toHaveBeenCalledTimes(1);
+
+    // After the backoff the retry runs, the death is not relogged, and the
+    // resurrection is logged only because the team entry moved to the new pane.
+    for (const w of wakes.values()) w.nextAt = 0;
     await watchCycle(root, {}, deaths, wakes);
     expect(wake).toHaveBeenCalledTimes(2);
     log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
@@ -152,6 +170,23 @@ describe('watchCycle watchdog', () => {
     expect(log).toContain('resurrected demo-orchestrator in pane %9 (wake attempt 2)');
     const after = await readDecisions(root);
     expect(after.filter((d) => d.summary.includes('woke the orchestrator'))).toHaveLength(1);
+  });
+
+  it('counts a wake that never registered its pane as a failed attempt', async () => {
+    const { root, home } = await setupProject({
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'a', session_id: 'session_x' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(false);
+    stubProbes();
+    // wake returns a pane but the team entry never moves (waitIdle timed out).
+    vi.mocked(wake).mockResolvedValue('%9');
+    const wakes = new Map<string, { attempts: number; nextAt: number }>();
+    await watchCycle(root, {}, new Set(), wakes);
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log).toContain('wake attempt 1 failed: wake returned %9 but the team entry still points at %1');
+    expect(log).not.toContain('resurrected');
+    expect(await readDecisions(root)).toHaveLength(0);
+    expect((await readTeam(home)).agents[0].pane).toBe('%1');
   });
 
   it('gives up waking after the attempts run out and says so once', async () => {
@@ -162,8 +197,11 @@ describe('watchCycle watchdog', () => {
     stubProbes();
     vi.mocked(wake).mockRejectedValue(new Error('the teamkimi proxy is down'));
     const deaths = new Set<string>();
-    const wakes = new Map<string, number>();
-    for (let i = 0; i < WAKE_MAX_ATTEMPTS + 2; i++) await watchCycle(root, {}, deaths, wakes);
+    const wakes = new Map<string, { attempts: number; nextAt: number }>();
+    for (let i = 0; i < WAKE_MAX_ATTEMPTS + 2; i++) {
+      await watchCycle(root, {}, deaths, wakes);
+      for (const w of wakes.values()) w.nextAt = 0;
+    }
     expect(wake).toHaveBeenCalledTimes(WAKE_MAX_ATTEMPTS);
     const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
     expect(log.match(/gave up waking demo-orchestrator/g)).toHaveLength(1);
@@ -263,6 +301,29 @@ describe('watchCycle wedge detection', () => {
     await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
     expect(killWindow).toHaveBeenCalledTimes(1);
     expect(await fs.readdir(hivePath(home, 'wedges'))).toHaveLength(1);
+  });
+
+  it('a frozen screen with an advancing CPU tree is working, not wedged', async () => {
+    const { root, home } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(WORKING);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 60 * 60_000);
+    let times = 100;
+    vi.mocked(run).mockImplementation(async (cmd, args) => {
+      if (cmd === 'ps' && args?.includes('pid=,ppid=,times=')) {
+        times += 5;
+        return { code: 0, stdout: `  22     1 ${times}\n`, stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    const stills = new Map();
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    const team = await readTeam(home);
+    expect(team.agents[0].wedged_at).toBeUndefined();
+    expect(killWindow).not.toHaveBeenCalled();
   });
 
   it('a fresh wire log reads as working, not wedged', async () => {

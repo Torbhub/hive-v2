@@ -236,7 +236,13 @@ export async function closeAgent(root: string, project: string, agent: string): 
   const entry = team.agents.find((a) => a.name === agent);
   if (!entry) throw new Error(`${project} has no agent named ${agent}`);
   await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
-  if (entry.pane) await killWindow(entry.pane, recordedIdentity(entry));
+  try {
+    if (entry.pane) await killWindow(entry.pane, recordedIdentity(entry));
+  } catch (e) {
+    // The pane survived; a surviving stamp would hide it from the watch.
+    await upsertTeamEntry(home, { name: agent, closed_at: undefined });
+    throw e;
+  }
   await removeTeamEntry(home, agent);
   if (entry.orchestrator) await clearPendingPane(root, project);
 }
@@ -278,8 +284,14 @@ export async function respawnAgent(root: string, project: string, agent: string)
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   await preflight();
   await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
-  if (old.pane) await killWindow(old.pane, recordedIdentity(old));
-  return relaunchAgent(p, old, undefined);
+  try {
+    if (old.pane) await killWindow(old.pane, recordedIdentity(old));
+    return await relaunchAgent(p, old, undefined);
+  } catch (e) {
+    // A failed respawn must not leave the agent invisible to the watch.
+    await upsertTeamEntry(home, { name: agent, closed_at: undefined });
+    throw e;
+  }
 }
 
 // The watchdog's agent ensure: a dead agent with a recorded session comes back

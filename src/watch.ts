@@ -99,14 +99,18 @@ export const WAKE_MAX_ATTEMPTS = 60;
 export const WEDGE_STILL_MS = 10 * 60_000;
 const WEDGE_DUMP_TIMEOUT_MS = 15_000;
 
+export type WakeState = Map<string, { attempts: number; nextAt: number }>;
+
 // Desired vs actual, re-judged every tick: a death is logged and bundled once,
-// but the wake is retried until the pane is back or the attempts run out.
+// but the wake is retried with backoff until the pane is back or the budget
+// runs out (60 attempts at a capped 10-minute backoff span hours of outage).
 async function handleDeath(
   root: string,
   project: string,
+  home: string,
   a: TeamEntry,
   deaths: Set<string>,
-  wakes: Map<string, number>,
+  wakes: WakeState,
 ): Promise<void> {
   const key = `${a.pane}:${a.pane_pid}`;
   if (!deaths.has(key)) {
@@ -122,19 +126,25 @@ async function handleDeath(
     );
   }
   if (!a.orchestrator && !a.session_id) return;
-  const attempt = (wakes.get(key) ?? 0) + 1;
-  if (attempt > WAKE_MAX_ATTEMPTS) return;
-  wakes.set(key, attempt);
-  if (attempt === 1) {
+  const w = wakes.get(key) ?? { attempts: 0, nextAt: 0 };
+  if (w.attempts >= WAKE_MAX_ATTEMPTS || Date.now() < w.nextAt) return;
+  const attempt = w.attempts + 1;
+  wakes.set(key, { attempts: attempt, nextAt: Date.now() + Math.min(5000 * 2 ** (attempt - 1), 600_000) });
+  try {
+    const pane = a.orchestrator ? await wake(root, project) : await wakeAgent(root, project, a.name);
+    // wake() can return a pane it never registered (waitIdle timed out before
+    // the pickup line landed). Only a team entry pointing at the new pane
+    // counts as a resurrection; anything else is a failed attempt.
+    const entry = (await readTeam(home)).agents.find((x) => x.name === a.name);
+    if (entry?.pane !== pane) {
+      throw new Error(`wake returned ${pane} but the team entry still points at ${entry?.pane ?? 'nothing'}`);
+    }
     await appendDecision(root, {
       project, by: 'watch',
       summary: a.orchestrator
         ? `woke the orchestrator after pane ${a.pane} died`
         : `woke ${a.name} after pane ${a.pane} died`,
     });
-  }
-  try {
-    const pane = a.orchestrator ? await wake(root, project) : await wakeAgent(root, project, a.name);
     await appendWatchLog(
       root,
       `${new Date().toISOString()} ${project} resurrected ${a.name} in pane ${pane} (wake attempt ${attempt})`,
@@ -172,7 +182,31 @@ async function captureWedgeDump(home: string, a: TeamEntry): Promise<string> {
   return file;
 }
 
-export type Stillness = Map<string, { content: string; since: number }>;
+export type Stillness = Map<string, { content: string; since: number; cpu: number | null }>;
+
+// CPU seconds of the pane's whole process tree; null when the pid is gone.
+async function treeCpuTime(pid: number): Promise<number | null> {
+  const r = await run('ps', ['-eo', 'pid=,ppid=,times='], undefined, undefined, WEDGE_DUMP_TIMEOUT_MS);
+  if (r.code !== 0) return null;
+  const kids = new Map<number, number[]>();
+  const times = new Map<number, number>();
+  for (const line of r.stdout.split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)/);
+    if (!m) continue;
+    const [p, pp, t] = [Number(m[1]), Number(m[2]), Number(m[3])];
+    times.set(p, t);
+    kids.set(pp, [...(kids.get(pp) ?? []), p]);
+  }
+  if (!times.has(pid)) return null;
+  let total = 0;
+  const stack = [pid];
+  while (stack.length) {
+    const p = stack.pop()!;
+    total += times.get(p) ?? 0;
+    stack.push(...(kids.get(p) ?? []));
+  }
+  return total;
+}
 
 async function clearWedged(root: string, home: string, project: string, a: TeamEntry): Promise<void> {
   await upsertTeamEntry(home, { name: a.name, wedged_at: undefined });
@@ -180,7 +214,8 @@ async function clearWedged(root: string, home: string, project: string, a: TeamE
 }
 
 // A live pane can still be dead weight: kimi's spinner ticks while it works,
-// so a pane frozen on a spinner with a stale wire log is wedged, not busy.
+// so a pane frozen on a spinner is suspicious. It is only wedged when nothing
+// corroborates life: no CPU advance in the process tree and a stale wire log.
 async function judgeWedge(
   root: string,
   project: string,
@@ -200,11 +235,18 @@ async function judgeWedge(
   }
   const seen = stills.get(key);
   if (!seen || seen.content !== raw) {
-    stills.set(key, { content: raw, since: Date.now() });
+    const cpu = a.pane_pid ? await treeCpuTime(a.pane_pid) : null;
+    stills.set(key, { content: raw, since: Date.now(), cpu });
     if (seen && a.wedged_at) await clearWedged(root, home, project, a);
     return;
   }
   if (Date.now() - seen.since < stillMs) return;
+  const cpu = a.pane_pid ? await treeCpuTime(a.pane_pid) : null;
+  if (cpu !== null && seen.cpu !== null && cpu > seen.cpu) {
+    // The tree burned CPU while the screen sat still: working, not wedged.
+    stills.set(key, { content: raw, since: Date.now(), cpu });
+    return;
+  }
   if (a.session_id) {
     const wireAt = await wireLogMtime(os.homedir(), a.session_id);
     if (wireAt !== null && Date.now() - wireAt < stillMs) return;
@@ -242,7 +284,7 @@ export async function watchCycle(
   root: string,
   env: NodeJS.ProcessEnv = {},
   deaths: Set<string> = new Set(),
-  wakes: Map<string, number> = new Map(),
+  wakes: WakeState = new Map(),
   stills: Stillness = new Map(),
   { wedgeStillMs = WEDGE_STILL_MS }: { wedgeStillMs?: number } = {},
 ): Promise<void> {
@@ -253,7 +295,7 @@ export async function watchCycle(
     for (const a of team.agents) {
       if (!a.pane || a.closed_at) continue;
       if (!(await paneExists(a.pane))) {
-        await handleDeath(root, p.name, a, deaths, wakes);
+        await handleDeath(root, p.name, p.home, a, deaths, wakes);
         continue;
       }
       await judgeWedge(root, p.name, p.home, a, stills, wedgeStillMs);
@@ -287,7 +329,7 @@ export async function watch(
 ): Promise<void> {
   const env = await kimiEnv().catch(() => ({} as NodeJS.ProcessEnv));
   const deaths = new Set<string>();
-  const wakes = new Map<string, number>();
+  const wakes: WakeState = new Map();
   const stills: Stillness = new Map();
   let cycles = 0;
   for (;;) {

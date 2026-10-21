@@ -48,16 +48,17 @@ tasks, starts teams, and sets a project's permission mode (`ask`/`yolo`/`auto`
 `hive watch` is a foreground daemon (one systemd unit:
 `ExecStart=/path/to/hive watch`, run from the hub root): every 5s it logs
 dead panes to `.hive-hub/watch.log` with timestamps and re-wakes the dead by
-session id. A failed wake is retried every cycle (60 attempts, then it gives
-up and says so). A pane closed on purpose (`hive cleanup`, `hive spawn
-close`, a respawn) is stamped `closed_at` in `team.json` first, and the
-watch never re-wakes a stamped pane. A dead agent with a recorded session is
-re-woken the same way as the orchestrator. A live pane frozen on a spinner
-with a wire log stale for 10 minutes is marked `wedged` on the hub. Before
-any restart of a wedged pane the watch saves a stack dump (`sudo pstack`,
-plus `py-spy dump` when installed) to `.hive/wedges/`, then kills the pane
-so the death path re-wakes it. The watch also pulses
-`.hive-hub/watch-status.json` every cycle; a stale file means the watch
+session id. A failed wake is retried with backoff (60 attempts over hours,
+then it gives up and says so). A pane closed on purpose (`hive cleanup`,
+`hive spawn close`, a respawn) is stamped `closed_at` in `team.json` first,
+and the watch never re-wakes a stamped pane. A dead agent with a recorded
+session is re-woken the same way as the orchestrator. A live pane frozen on
+a spinner for 10 minutes is marked `wedged` on the hub, but only when
+nothing corroborates life: no CPU advance in its process tree and a stale
+wire log. Before any restart of a wedged pane the watch saves a stack dump
+(`sudo pstack`, plus `py-spy dump` when installed) to `.hive/wedges/`, then
+kills the pane so the death path re-wakes it. The watch also pulses
+`.hive-hub/watch-status.json` every cycle. A stale file means the watch
 itself is wedged. It auto-answers permission dialogs per the
 project's `approvals` setting (`manual`/`safe`/`smart`). `safe` approves only
 deterministic read-only commands (a whitelist over every segment of a

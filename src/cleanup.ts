@@ -42,10 +42,19 @@ export async function cleanupProject(
       if (!dryRun) {
         // Stamp the intent before the kill so watch never reads it as a crash.
         const team = await readTeam(p.home);
-        for (const a of team.agents.filter((x) => x.pane === pane)) {
-          await upsertTeamEntry(p.home, { name: a.name, closed_at: new Date().toISOString() });
+        const stamped = team.agents.filter((x) => x.pane === pane).map((x) => x.name);
+        for (const name of stamped) {
+          await upsertTeamEntry(p.home, { name, closed_at: new Date().toISOString() });
         }
-        await killWindow(pane, identity);
+        try {
+          await killWindow(pane, identity);
+        } catch (e) {
+          // The pane survived; a surviving stamp would hide it from the watch.
+          for (const name of stamped) {
+            await upsertTeamEntry(p.home, { name, closed_at: undefined });
+          }
+          throw e;
+        }
       }
       continue;
     }

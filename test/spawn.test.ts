@@ -28,7 +28,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 import { closeAgent, launchCommand, respawnAgent, wakeAgent } from '../src/spawn.js';
 import { hubAdd, hubInit } from '../src/hub.js';
 import { hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';
-import { newWindow, paneIs } from '../src/tmux.js';
+import { newWindow, paneIs, killWindow } from '../src/tmux.js';
 
 async function setup(teamEntry: Record<string, unknown>) {
   const root = mkdtempSync(path.join(tmpdir(), 'hive-spawn-'));
@@ -53,12 +53,28 @@ describe('respawnAgent', () => {
     expect(tmuxRecs[0].pane_pid).toBe(4242);
     expect(tmuxRecs[0].pane_started).toBe('later');
   }, 20_000);
+
+  it('clears the close stamp when the kill fails', async () => {
+    const { root, home } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    vi.mocked(killWindow).mockRejectedValueOnce(new Error('tmux down'));
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow('tmux down');
+    const team = await readTeam(home);
+    expect(team.agents[0].closed_at).toBeUndefined();
+  });
 });
 
 describe('closeAgent', () => {
   it('refuses to kill a pane whose identity was never recorded', async () => {
     const { root } = await setup({ name: 'builder', pane: '%1' });
     await expect(closeAgent(root, 'demo', 'builder')).rejects.toThrow(/no recorded pane identity/);
+  });
+
+  it('clears the close stamp when the kill fails', async () => {
+    const { root, home } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    vi.mocked(killWindow).mockRejectedValueOnce(new Error('tmux down'));
+    await expect(closeAgent(root, 'demo', 'builder')).rejects.toThrow('tmux down');
+    const team = await readTeam(home);
+    expect(team.agents[0].closed_at).toBeUndefined();
   });
 });
 
