@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Refusal, answerDialog, continueProject, hubTask, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
 import { checkName } from '../src/names.js';
+import { addProjectFromBody } from '../src/project.js';
 import {
   ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
 } from '../src/view.js';
@@ -99,16 +100,14 @@ function agentRefOf(body: Record<string, unknown>): string | undefined {
   return ref;
 }
 
-// Same-project actions run one at a time; different projects run freely.
+// projects.json writers share one key so their read-modify-write cannot race. Other actions serialize per project.
 const actionChains = new Map<string, Promise<void>>();
 
 function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = actionChains.get(key) ?? Promise.resolve();
   const run = prev.then(fn, fn);
-  const tail = run.then(
-    () => { if (actionChains.get(key) === tail) actionChains.delete(key); },
-    () => { if (actionChains.get(key) === tail) actionChains.delete(key); },
-  );
+  const sweep = () => { if (actionChains.get(key) === tail) actionChains.delete(key); };
+  const tail = run.then(sweep, sweep);
   actionChains.set(key, tail);
   return run;
 }
@@ -136,12 +135,13 @@ async function recordStretchOpened(body: Record<string, unknown>): Promise<unkno
 }
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/stretch-opened'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/stretch-opened', '/api/project'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
+  if (pathname === '/api/project') return serialized('projects', () => addProjectFromBody(root, body));
   const project = projectName(body);
-  return serialized(project, async () => {
+  return serialized(['/api/mode', '/api/approvals'].includes(pathname) ? 'projects' : project, async () => {
     if (pathname === '/api/mode') {
       return { ok: true, mode: await setProjectMode(root, project, String(body.mode ?? '')) };
     }

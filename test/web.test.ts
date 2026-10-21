@@ -413,3 +413,85 @@ describe('POST /api/approvals + decisions in the view', () => {
     expect(view.decisions[0].by).toBe('watch');
   });
 });
+
+describe('POST /api/project', () => {
+  it('registers a repo folder with mode and approvals, and the view shows it', async () => {
+    const home = path.join(root, 'newproj');
+    await fs.mkdir(path.join(home, '.git'), { recursive: true });
+    const r = await post('/api/project', { name: 'newproj', path: home, mode: 'yolo', approvals: 'safe' });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, name: 'newproj' });
+    const view = await (await fetch(`${base}/api/view`)).json();
+    const p = view.projects.find((x: { name: string }) => x.name === 'newproj');
+    expect(p.home).toBe(home);
+    expect(p.mode).toBe('yolo');
+    expect(p.approvals).toBe('safe');
+  });
+
+  it('a worktree (a .git file, not a directory) registers too, with default mode and approvals', async () => {
+    const home = path.join(root, 'wtproj');
+    await fs.mkdir(home, { recursive: true });
+    await fs.writeFile(path.join(home, '.git'), 'gitdir: /elsewhere\n');
+    const r = await post('/api/project', { name: 'wtproj', path: home });
+    expect(r.status).toBe(200);
+    const view = await (await fetch(`${base}/api/view`)).json();
+    const p = view.projects.find((x: { name: string }) => x.name === 'wtproj');
+    expect(p.mode).toBe('ask');
+    expect(p.approvals).toBe('manual');
+  });
+
+  it('a duplicate name is a 400', async () => {
+    const r = await post('/api/project', { name: 'newproj', path: path.join(root, 'newproj') });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/a project named newproj exists/);
+  });
+
+  it('a bad name is a 400, and so is a traversal-style one', async () => {
+    for (const name of ['Bad Name', '../x', '1proj', '']) {
+      const r = await post('/api/project', { name, path: root });
+      expect(r.status).toBe(400);
+      expect((await r.json()).detail).toMatch(/project name is/);
+    }
+  });
+
+  it('a relative path, a missing folder, and a folder without git are all 400s', async () => {
+    const relative = await post('/api/project', { name: 'relproj', path: 'some/where' });
+    expect(relative.status).toBe(400);
+    expect((await relative.json()).detail).toMatch(/must be absolute/);
+
+    const missing = await post('/api/project', { name: 'goneproj', path: path.join(root, 'not-there') });
+    expect(missing.status).toBe(400);
+    expect((await missing.json()).detail).toMatch(/not a folder/);
+
+    const plain = path.join(root, 'plainproj');
+    await fs.mkdir(plain, { recursive: true });
+    const noGit = await post('/api/project', { name: 'plainproj', path: plain });
+    expect(noGit.status).toBe(400);
+    expect((await noGit.json()).detail).toMatch(/not a git repo/);
+  });
+
+  it('a bad mode or approvals value is a 400 and writes nothing', async () => {
+    const home = path.join(root, 'newproj');
+    const badMode = await post('/api/project', { name: 'enumproj', path: home, mode: 'chaos' });
+    expect(badMode.status).toBe(400);
+    expect((await badMode.json()).detail).toMatch(/mode is ask\|yolo\|auto/);
+    const badApprovals = await post('/api/project', { name: 'enumproj', path: home, approvals: 'chaos' });
+    expect(badApprovals.status).toBe(400);
+    expect((await badApprovals.json()).detail).toMatch(/manual\|safe\|smart/);
+    const view = await (await fetch(`${base}/api/view`)).json();
+    expect(view.projects.some((x: { name: string }) => x.name === 'enumproj')).toBe(false);
+  });
+
+  it('a bogus .git file is not a worktree pointer and is refused', async () => {
+    const bogus = path.join(root, 'bogusproj');
+    await fs.mkdir(bogus, { recursive: true });
+    await fs.writeFile(path.join(bogus, '.git'), 'not a pointer\n');
+    const r = await post('/api/project', { name: 'bogusproj', path: bogus });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/not a git repo/);
+    const empty = path.join(root, 'emptyproj');
+    await fs.mkdir(empty, { recursive: true });
+    await fs.writeFile(path.join(empty, '.git'), '');
+    expect((await post('/api/project', { name: 'emptyproj', path: empty })).status).toBe(400);
+  });
+});

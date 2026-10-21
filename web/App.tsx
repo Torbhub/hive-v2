@@ -1,5 +1,5 @@
 import React, {
-  createContext, useCallback, useContext, useEffect, useRef, useState,
+  useCallback, useContext, useEffect, useRef, useState,
 } from 'react';
 import { Toaster, toast } from 'sonner';
 import type { Approvals, HubDialog, HubProject, HubView, ProjectMode } from '../src/types';
@@ -10,6 +10,8 @@ import {
 } from '../src/ui/look';
 import { cn } from './lib/utils';
 import { StretchText } from './Stretch';
+import { ActionContext, Btn } from './action';
+import { AddProjectRow, NewTaskRow } from './rows';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
 import { Card, CardContent, CardHeader } from './components/ui/card';
@@ -32,37 +34,6 @@ async function post(pathname: string, body: unknown): Promise<Record<string, unk
   const j = (await r.json()) as { ok?: boolean; detail?: string } & Record<string, unknown>;
   if (!r.ok || j.ok === false) throw new Error(j.detail ?? `HTTP ${r.status}`);
   return j;
-}
-
-// Every action button reads this: while an action runs all of them disable,
-// and the one that was pressed holds the inverted look until it ends.
-const ActionContext = createContext<{ acting: boolean; pressed: string | null }>({
-  acting: false,
-  pressed: null,
-});
-
-function Btn({
-  id, variant = 'outline', size = 'sm', disabled, onPress, children,
-}: {
-  id: string;
-  variant?: 'default' | 'primary' | 'outline' | 'ghost';
-  size?: 'default' | 'sm';
-  disabled?: boolean;
-  onPress: () => void;
-  children: React.ReactNode;
-}) {
-  const { acting, pressed } = useContext(ActionContext);
-  return (
-    <Button
-      variant={variant}
-      size={size}
-      pressed={pressed === id}
-      disabled={disabled || acting}
-      onClick={onPress}
-    >
-      {children}
-    </Button>
-  );
 }
 
 function StatusDot({ color, className }: { color: string; className?: string }) {
@@ -249,46 +220,6 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-function NewTaskRow({
-  project, busy, onStartTask,
-}: {
-  project: string;
-  busy: { project: string; what: string } | null;
-  onStartTask: (project: string, text: string) => Promise<boolean>;
-}) {
-  const [text, setText] = useState('');
-  if (busy?.project === project && busy.what === 'starting') {
-    return (
-      <div className="mt-2 border-t border-zinc-800 pt-2.5 text-xs text-sky-400">starting…</div>
-    );
-  }
-  const submit = async () => {
-    const t = text.trim();
-    if (!t) return;
-    if (await onStartTask(project, t)) setText('');
-  };
-  return (
-    <div className="mt-2 flex gap-2 border-t border-zinc-800 pt-2.5">
-      <Input
-        className="font-mono text-xs"
-        value={text}
-        placeholder="describe the task…"
-        aria-label={`new task for ${project}`}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            void submit();
-          }
-        }}
-      />
-      <Btn id={`start-${project}`} variant="primary" disabled={!text.trim()} onPress={() => void submit()}>
-        Start task
-      </Btn>
-    </div>
-  );
-}
-
 function ProjectCard({
   project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals,
 }: {
@@ -413,7 +344,7 @@ function ProjectCard({
 export function App() {
   const [view, setView] = useState<HubView>(EMPTY_VIEW);
   const [acting, setActing] = useState(false);
-  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering'; who?: string } | null>(null);
+  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
   const actingRef = useRef(false);
 
@@ -450,7 +381,7 @@ export function App() {
   const act = useCallback(async (
     id: string,
     project: string,
-    what: 'resuming' | 'continuing' | 'answering' | 'starting',
+    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding',
     who: string,
     runAction: () => Promise<string>,
     busyWho?: string,
@@ -524,6 +455,13 @@ export function App() {
       await post('api/plan-answer', { project, task: taskId, verdict, feedback });
       return verdict === 'approve' ? `${taskId}: plan approved` : `${taskId}: plan sent back`;
     }, taskId);
+  }, [act]);
+
+  const onAddProject = useCallback(async (name: string, folder: string): Promise<boolean> => {
+    return act('add-project', name, 'adding', name, async () => {
+      await post('api/project', { name, path: folder });
+      return `${name}: project added`;
+    });
   }, [act]);
 
   const now = Date.now();
@@ -605,6 +543,8 @@ export function App() {
               onSetApprovals={onSetApprovals}
             />
           ))}
+
+          <AddProjectRow onAddProject={onAddProject} />
 
           <footer className="flex items-center justify-between pt-1">
             <span className="flex items-center gap-3 text-xs text-zinc-500">
