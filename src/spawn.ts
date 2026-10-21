@@ -241,6 +241,8 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   try {
     if (opts.worktree) {
       const wt = path.resolve(home, opts.worktree);
+      // Neither jj workspace add nor git worktree add creates missing parent dirs.
+      await fs.mkdir(path.dirname(wt), { recursive: true });
       // jj root answers only inside a jj repo; any probe failure keeps the git lane.
       if ((await run('jj', ['root'], home)).code === 0) {
         const base = await jjBaseRev(home);
