@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Refusal, answerDialog, continueProject, hubTask, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
+import { sendOwnerMessage } from '../src/message.js';
 import { checkName } from '../src/names.js';
 import { addProjectFromBody } from '../src/project.js';
 import {
@@ -13,28 +14,19 @@ import {
 const BODY_CAP = 64 * 1024;
 
 const CONTENT_TYPES: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.map': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
 };
 
 const STATIC_HEADERS: Record<string, string> = {
-  'x-content-type-options': 'nosniff',
-  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
   'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
 };
 
 class HttpError extends Error {
-  constructor(
-    public code: number,
-    message: string,
-  ) {
+  constructor(public code: number, message: string) {
     super(message);
   }
 }
@@ -135,7 +127,7 @@ async function recordStretchOpened(body: Record<string, unknown>): Promise<unkno
 }
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/stretch-opened', '/api/project'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/stretch-opened', '/api/project'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
@@ -171,6 +163,12 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
         startProject(root, project, String(body.task ?? '')), ACTION_TIMEOUT_MS, 'start',
       );
       return { ok: true, pane };
+    }
+    if (pathname === '/api/message') {
+      const r = await withTimeout(
+        sendOwnerMessage(root, project, agentRefOf(body), String(body.text ?? '')), ACTION_TIMEOUT_MS, 'message',
+      );
+      return { ok: true, typed: r.typed };
     }
     if (pathname === '/api/plan-answer') {
       const r = await withTimeout(

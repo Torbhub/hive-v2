@@ -42,6 +42,46 @@ export function NewTaskRow({
   );
 }
 
+export function MessageRow({
+  project, busy, onMessage,
+}: {
+  project: string;
+  busy: { project: string; what: string } | null;
+  onMessage: (project: string, text: string) => Promise<boolean>;
+}) {
+  const [text, setText] = useState('');
+  if (busy?.project === project && busy.what === 'messaging') {
+    return (
+      <div className="mt-2 border-t border-zinc-800 pt-2.5 text-xs text-sky-400">sending…</div>
+    );
+  }
+  const submit = async () => {
+    const t = text.trim();
+    if (!t) return;
+    if (await onMessage(project, t)) setText('');
+  };
+  return (
+    <div className="mt-2 flex gap-2 border-t border-zinc-800 pt-2.5">
+      <Input
+        className="font-mono text-xs"
+        value={text}
+        placeholder="message the orchestrator…"
+        aria-label={`message for ${project}`}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            void submit();
+          }
+        }}
+      />
+      <Btn id={`message-${project}`} disabled={!text.trim()} onPress={() => void submit()}>
+        Send
+      </Btn>
+    </div>
+  );
+}
+
 export function AddProjectRow({
   onAddProject,
 }: {

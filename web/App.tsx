@@ -11,7 +11,7 @@ import {
 import { cn } from './lib/utils';
 import { StretchText } from './Stretch';
 import { ActionContext, Btn } from './action';
-import { AddProjectRow, NewTaskRow } from './rows';
+import { AddProjectRow, MessageRow, NewTaskRow } from './rows';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
 import { Card, CardContent, CardHeader } from './components/ui/card';
@@ -21,9 +21,7 @@ import { ToggleGroup, ToggleGroupItem } from './components/ui/toggle-group';
 
 const EVERY_MS = 20_000;
 
-const EMPTY_VIEW: HubView = {
-  root: '', hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], updatedAt: 0, error: '',
-};
+const EMPTY_VIEW: HubView = { root: '', hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], updatedAt: 0, error: '' };
 
 async function post(pathname: string, body: unknown): Promise<Record<string, unknown>> {
   const r = await fetch(pathname, {
@@ -37,16 +35,11 @@ async function post(pathname: string, body: unknown): Promise<Record<string, unk
 }
 
 function StatusDot({ color, className }: { color: string; className?: string }) {
-  const cls = {
-    green: 'bg-emerald-500', yellow: 'bg-amber-400', red: 'bg-red-500',
-    gray: 'bg-zinc-600', cyan: 'bg-sky-400', magenta: 'bg-fuchsia-400',
-  }[color] ?? 'bg-zinc-600';
+  const cls = { green: 'bg-emerald-500', yellow: 'bg-amber-400', red: 'bg-red-500', gray: 'bg-zinc-600', cyan: 'bg-sky-400', magenta: 'bg-fuchsia-400' }[color] ?? 'bg-zinc-600';
   return <span className={cn('inline-block h-2 w-2 rounded-full shrink-0', cls, className)} />;
 }
 
-const NEED_ACCENT: Record<string, string> = {
-  magenta: 'border-l-fuchsia-400', yellow: 'border-l-amber-400', red: 'border-l-red-500',
-};
+const NEED_ACCENT: Record<string, string> = { magenta: 'border-l-fuchsia-400', yellow: 'border-l-amber-400', red: 'border-l-red-500' };
 
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
@@ -64,10 +57,7 @@ function DialogBlock({
   idPrefix: string;
   onAnswer: (choice: string) => void;
 }) {
-  const textLines = dialog.text
-    .split('\n')
-    .filter((l) => !/^[\s─╌]*$/.test(l))
-    .slice(-14);
+  const textLines = dialog.text.split('\n').filter((l) => !/^[\s─╌]*$/.test(l)).slice(-14);
   const offered = dialog.options.filter((o) => o.offered);
   const notOffered = dialog.options.filter((o) => !o.offered);
   return (
@@ -221,7 +211,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 function ProjectCard({
-  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals,
+  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage,
 }: {
   project: HubProject;
   view: HubView;
@@ -231,6 +221,7 @@ function ProjectCard({
   onStartTask: (project: string, text: string) => Promise<boolean>;
   onSetMode: (project: string, mode: ProjectMode) => void;
   onSetApprovals: (project: string, approvals: Approvals) => void;
+  onMessage: (project: string, text: string) => Promise<boolean>;
 }) {
   const { acting } = useContext(ActionContext);
   const look = orchestratorLook(p.orchestrator);
@@ -335,6 +326,7 @@ function ProjectCard({
               )}
           </div>
         )}
+        <MessageRow project={p.name} busy={busy} onMessage={onMessage} />
         <NewTaskRow project={p.name} busy={busy} onStartTask={onStartTask} />
       </CardContent>
     </Card>
@@ -344,7 +336,7 @@ function ProjectCard({
 export function App() {
   const [view, setView] = useState<HubView>(EMPTY_VIEW);
   const [acting, setActing] = useState(false);
-  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding'; who?: string } | null>(null);
+  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
   const actingRef = useRef(false);
 
@@ -381,7 +373,7 @@ export function App() {
   const act = useCallback(async (
     id: string,
     project: string,
-    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding',
+    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding' | 'messaging',
     who: string,
     runAction: () => Promise<string>,
     busyWho?: string,
@@ -464,11 +456,16 @@ export function App() {
     });
   }, [act]);
 
+  const onMessage = useCallback(async (project: string, text: string): Promise<boolean> => {
+    return act(`message-${project}`, project, 'messaging', project, async () => {
+      await post('api/message', { project, text });
+      return `${project}: the message was typed to its orchestrator`;
+    });
+  }, [act]);
+
   const now = Date.now();
   const where = homeTilde(view.root, '');
-  const clock = view.updatedAt
-    ? new Date(view.updatedAt).toTimeString().slice(0, 5)
-    : 'reading…';
+  const clock = view.updatedAt ? new Date(view.updatedAt).toTimeString().slice(0, 5) : 'reading…';
   const needs = buildNeeds(view, now);
 
   return (
@@ -541,6 +538,7 @@ export function App() {
               onStartTask={onStartTask}
               onSetMode={onSetMode}
               onSetApprovals={onSetApprovals}
+              onMessage={onMessage}
             />
           ))}
 
