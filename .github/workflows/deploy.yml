@@ -34,6 +34,8 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      - name: Discipline ratchet — god-file line counts
+        run: node scripts/discipline-gate.mjs
       - name: Syntax-check the infra scripts
         run: bash -n infra/provision-box.sh && bash -n infra/deploy-box.sh && bash -n infra/deploy-mutex.sh
       - name: Lint the CloudFormation template
