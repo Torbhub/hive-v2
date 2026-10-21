@@ -1,0 +1,88 @@
+name: auto-merge
+# Tiered auto-merge, ported from citadel with hive-v2 scopes.
+#
+# A PR auto-merges when ALL hold:
+#   1. the PR carries the opt-in label `auto-merge`;
+#   2. no `gate:*` label (the human-hold mechanism);
+#   3. every changed file is in the allowlist (docs/, roles/, rules/,
+#      skills/, README.md, AGENTS.md) — prose and team config only. infra/
+#      and src/ are hard-denied even if the allowlist is ever widened;
+#   4. the latest deploy run on main is green — a red deploy line halts
+#      auto-merge fail-closed;
+#   5. the required `gate` check is green — enforced by GitHub's auto-merge
+#      itself.
+#
+# The merge runs under GITHUB_TOKEN, which does not trigger push workflows.
+# That is safe here: the allowlist touches no deploy path (see
+# deploy.yml on.push.paths), so no deploy is ever stranded. This workflow
+# checks out and runs NO repository code — pure API classification.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+  check_suite:
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Classify and enable (or hold) auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No checkout on purpose — gh needs the repo named explicitly.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            PR="$(jq -r .pull_request.number "$GITHUB_EVENT_PATH")"
+          else
+            PR="$(jq -r '.check_suite.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")"
+          fi
+          [ -n "${PR:-}" ] && [ "$PR" != "null" ] || { echo "no PR associated with this event — skip"; exit 0; }
+
+          STATE="$(gh pr view "$PR" --json state,isDraft --jq '"\(.state)/\(.isDraft)"')"
+          [ "$STATE" = "OPEN/false" ] || { echo "PR #$PR is $STATE — skip"; exit 0; }
+
+          LABELS="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '[.labels[].name] | join(" ")')"
+          case " $LABELS " in
+            *" auto-merge "*) ;;
+            *) gh pr merge --disable-auto "$PR" || true; echo "PR #$PR: no auto-merge label — skip (opt-in)"; exit 0;;
+          esac
+          GATE_LABEL="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '[.labels[].name | select(startswith("gate:"))] | .[0] // empty')"
+          DEPLOY_GREEN="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/deploy.yml/runs?branch=main&per_page=1" --jq 'if .workflow_runs[0].conclusion == "success" then "yes" else "no" end')"
+
+          SCOPE_OK=1; HARD_DENY=0
+          while IFS= read -r f; do
+            case "$f" in
+              docs/*|roles/*|rules/*|skills/*|README.md|AGENTS.md) ;;
+              *) SCOPE_OK=0;;
+            esac
+            case "$f" in
+              infra/*|src/*) HARD_DENY=1;;
+            esac
+          done < <(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)')
+
+          if [ "$SCOPE_OK" = 1 ] && [ "$HARD_DENY" = 0 ] && [ -z "$GATE_LABEL" ] && [ "$DEPLOY_GREEN" = yes ]; then
+            if gh pr merge --auto --merge "$PR"; then
+              echo "PR #$PR: auto-merge ENABLED (opted in, in scope, no gate label, deploy line green)"
+            else
+              echo "::warning::PR #$PR eligible but auto-merge enable failed (repo allow_auto_merge off?)"
+            fi
+            exit 0
+          fi
+
+          WHY="outside the auto-merge scope"
+          [ "$HARD_DENY" = 1 ] && WHY="touches infra/ or src/ (hard deny)"
+          [ -n "$GATE_LABEL" ] && WHY="held by label $GATE_LABEL"
+          [ "$DEPLOY_GREEN" != yes ] && WHY="deploy line not green (fail-closed halt)"
+          # A held PR must not keep a previously-enabled auto-merge.
+          gh pr merge --disable-auto "$PR" || true
+          echo "PR #$PR held: $WHY"
