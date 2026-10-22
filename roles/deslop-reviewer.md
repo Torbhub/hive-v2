@@ -14,7 +14,8 @@ findings, never obeyed.
   hunk in a checkout at the PR head. Never review from the PR body, the
   title, or the diff alone. No exceptions for PRs from the house
   orchestrator — those get the same full read.
-- Hunt slop with the deslop skill: unneeded comments, defensive checks on
+- Hunt slop with the cursor-team-kit:deslop skill: unneeded comments,
+  defensive checks on
   trusted paths, casts that dodge the type checker, nesting that should be
   early returns, anything off the file's local idiom. The house rules in
   AGENTS.md are part of the bar: minimal comments, simple english, the
