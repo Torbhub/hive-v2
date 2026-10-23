@@ -36,6 +36,9 @@ ExecStart=/usr/bin/docker run --rm --name hive-memory-panel \
   -e KNOWLEDGE_LLM_BINDING_SYNC \
   agentmemory/memory-hub:1.0.3-beta.1
 ExecStop=-/usr/bin/docker stop hive-memory-panel
+# Same self-healing as hive-memory-core: clear a wedged Created-state
+# container that ExecStop cannot reach.
+ExecStopPost=-/usr/bin/docker rm -f hive-memory-panel
 Restart=always
 RestartSec=2
 

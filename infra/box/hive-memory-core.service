@@ -24,6 +24,9 @@ ExecStart=/usr/bin/docker run --rm --name hive-memory-core \
   -e STORE_MODE=sqlite \
   agentmemory/memory-core:1.0.3-beta.1
 ExecStop=-/usr/bin/docker stop hive-memory-core
+# A container wedged in Created state (the --rm race on first provision)
+# survives ExecStop; this makes the unit self-healing on the next start.
+ExecStopPost=-/usr/bin/docker rm -f hive-memory-core
 Restart=always
 RestartSec=2
 
