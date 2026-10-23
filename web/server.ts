@@ -69,7 +69,8 @@ function checkBrowserHeaders(req: http.IncomingMessage): void {
     } catch {
       throw new HttpError(403, 'bad origin header');
     }
-    if (host !== req.headers.host) throw new HttpError(403, 'cross-site request');
+    if (host !== req.headers.host)
+      throw new HttpError(403, `cross-site request (origin host ${host} != host ${req.headers.host})`);
   }
 }
 
