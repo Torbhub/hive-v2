@@ -18,6 +18,8 @@ ExecStart=/usr/bin/docker run --rm --name hive-memory-core \
   -v tdai-memory-core-data:/data/tdai-memory \
   -v /etc/hive-v2/tdai-gateway.yaml:/data/config/tdai-gateway.yaml:ro \
   -e TDAI_GATEWAY_API_KEY \
+  -e TDAI_MEMORY_SYSTEM_USER_ID \
+  -e TDAI_MEMORY_SYSTEM_USER_KEY \
   -e TDAI_GATEWAY_PORT=8420 \
   -e TDAI_GATEWAY_HOST=0.0.0.0 \
   -e TDAI_DATA_DIR=/data/tdai-memory \

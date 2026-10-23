@@ -41,7 +41,7 @@ describe('searchMemory', () => {
     ] }));
     expect(await searchMemory('demo', 'q')).toBe('- first lesson\n- second lesson');
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('http://127.0.0.1:8420/v3/atomic/search');
+    expect(url).toBe('http://127.0.0.1:8421/v3/atomic/search');
     const body = JSON.parse(String(init.body));
     expect(body).toMatchObject({ team_id: 'hive-demo', agent_id: 'team', user_id: 'hive', query: 'q', limit: 5 });
     const headers = init.headers as Record<string, string>;
@@ -98,17 +98,19 @@ describe('searchMemory', () => {
 
 describe('proposeMemory', () => {
   it('writes a private candidate with provenance', async () => {
-    fetchMock.mockResolvedValue(ok({ id: 'x', updated_at: 'now' }));
+    fetchMock.mockResolvedValue(ok({ accepted_ids: ['m-1'] }));
     const id = await proposeMemory('demo', 'builder', 'the gate needs a green run', { session: 'session_1' });
-    expect(id).toMatch(/^cand-/);
+    expect(id).toBe('m-1');
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('http://127.0.0.1:8420/v3/atomic/update');
+    expect(url).toBe('http://127.0.0.1:8421/v3/conversation/add');
     const body = JSON.parse(String(init.body));
     expect(body).toMatchObject({
-      team_id: 'hive-demo', agent_id: 'candidates', user_id: 'hive',
-      id, content: 'the gate needs a green run',
+      team_id: 'hive-demo', agent_id: 'candidates', user_id: 'hive', session_id: 'candidates',
     });
-    expect(body.background).toBe('project: demo, agent: builder, session: session_1');
+    expect(body.messages[0].role).toBe('user');
+    expect(body.messages[0].content).toBe(
+      'the gate needs a green run\n— project: demo, agent: builder, session: session_1',
+    );
   });
 
   it('returns null when memory is down', async () => {
@@ -119,43 +121,55 @@ describe('proposeMemory', () => {
 
 describe('listCandidates', () => {
   it('queries the candidates bucket', async () => {
-    fetchMock.mockResolvedValue(ok({ items: [{ id: 'cand-1', content: 'note' }], total: 1 }));
+    fetchMock.mockResolvedValue(ok({ messages: [{ id: 'm-1', content: 'note' }], total: 1 }));
     const items = await listCandidates('demo');
-    expect(items).toEqual([{ id: 'cand-1', content: 'note' }]);
+    expect(items).toEqual([{ id: 'm-1', content: 'note' }]);
     const body = JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body));
-    expect(body).toMatchObject({ team_id: 'hive-demo', agent_id: 'candidates' });
+    expect(body).toMatchObject({ team_id: 'hive-demo', agent_id: 'candidates', session_id: 'candidates' });
+  });
+
+  it('pages until a short page', async () => {
+    const full = Array.from({ length: 100 }, (_, i) => ({ id: `m-${i}`, content: 'x' }));
+    fetchMock
+      .mockResolvedValueOnce(ok({ messages: full, total: 101 }))
+      .mockResolvedValueOnce(ok({ messages: [{ id: 'm-100', content: 'y' }], total: 101 }));
+    const items = await listCandidates('demo', 200);
+    expect(items).toHaveLength(101);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
 describe('promoteCandidate', () => {
-  const cand = { id: 'cand-1', content: 'lesson', background: 'project: demo, agent: builder' };
+  const cand = { id: 'm-1', content: 'lesson\n— project: demo, agent: builder' };
 
   it('copies to the team bucket, then deletes the candidate', async () => {
     fetchMock.mockImplementation(async (url: string) => {
-      if (url.endsWith('/v3/atomic/query')) return ok({ items: [cand], total: 1 });
+      if (url.endsWith('/v3/conversation/query')) return ok({ messages: [cand], total: 1 });
+      if (url.endsWith('/v3/conversation/add')) return ok({ accepted_ids: ['m-9'] });
       return ok({});
     });
-    const r = await promoteCandidate('demo', 'cand-1');
-    expect(r).toEqual({ kind: 'promoted', id: 'mem-1' });
+    const r = await promoteCandidate('demo', 'm-1');
+    expect(r).toEqual({ kind: 'promoted', id: 'm-9' });
     const paths = fetchMock.mock.calls.map((c) => String(c[0]));
     expect(paths).toEqual([
-      expect.stringContaining('/v3/atomic/query'),
-      expect.stringContaining('/v3/atomic/update'),
-      expect.stringContaining('/v3/atomic/delete'),
+      expect.stringContaining('/v3/conversation/query'),
+      expect.stringContaining('/v3/conversation/add'),
+      expect.stringContaining('/v3/conversation/delete'),
     ]);
     const write = JSON.parse(String((fetchMock.mock.calls[1] as [string, RequestInit])[1].body));
-    expect(write).toMatchObject({ agent_id: 'team', id: 'mem-1', content: 'lesson', background: cand.background });
+    expect(write).toMatchObject({ agent_id: 'team', session_id: 'team' });
+    expect(write.messages[0].content).toBe(cand.content);
     const del = JSON.parse(String((fetchMock.mock.calls[2] as [string, RequestInit])[1].body));
-    expect(del).toMatchObject({ agent_id: 'candidates', ids: ['cand-1'] });
+    expect(del).toMatchObject({ agent_id: 'candidates', message_ids: ['m-1'] });
   });
 
   it('reports a missing candidate', async () => {
-    fetchMock.mockResolvedValue(ok({ items: [], total: 0 }));
-    expect(await promoteCandidate('demo', 'cand-nope')).toEqual({ kind: 'missing' });
+    fetchMock.mockResolvedValue(ok({ messages: [], total: 0 }));
+    expect(await promoteCandidate('demo', 'm-nope')).toEqual({ kind: 'missing' });
   });
 
   it('reports memory down', async () => {
     fetchMock.mockRejectedValue(new Error('down'));
-    expect(await promoteCandidate('demo', 'cand-1')).toEqual({ kind: 'unavailable' });
+    expect(await promoteCandidate('demo', 'm-1')).toEqual({ kind: 'unavailable' });
   });
 });
