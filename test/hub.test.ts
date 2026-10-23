@@ -13,6 +13,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/tmux.js')>();
   return {
     ...orig,
+    newWindow: vi.fn(async () => '%9'),
     paneExists: vi.fn(async () => true),
     paneIdentity: vi.fn(async () => ({ pid: 1, started: 'x' })),
     paneIs: vi.fn(async () => true),
@@ -36,10 +37,10 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
   };
 });
 
-import { capturePane, paneExists, sendArrow, sendEnter } from '../src/tmux.js';
+import { capturePane, newWindow, paneExists, sendArrow, sendEnter } from '../src/tmux.js';
 import {
   answerDialog, hubAccept, hubAdd, hubInit, hubLog, hubProgress, hubTask, listTasks, menuKeys, planAnswer,
-  readDialogFor, startProject, wake,
+  readDialogFor, setProjectApprovals, setProjectMode, startProject, wake,
 } from '../src/hub.js';
 import { lines, parseDialog } from '../src/screen.js';
 import { appendTaskEvent, hubPath, hivePath, readDecisions, readPendingPane, readTeam, writeJson, writePendingPane } from '../src/state.js';
@@ -462,5 +463,34 @@ describe('wake pending pane', () => {
     const team = await readTeam(home);
     expect(team.agents[0]).toMatchObject({ name: 'demo-orchestrator', orchestrator: true, pane: '%7' });
     expect((await readPendingPane(root, 'demo'))?.typed).toBe(true);
+  });
+});
+
+describe('orchestrator launch mode', () => {
+  async function setupOrchestrator() {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc' }],
+    });
+    return { root, home };
+  }
+
+  it('wakes with --auto when mode is ask and approvals is smart', async () => {
+    const { root } = await setupOrchestrator();
+    await setProjectMode(root, 'demo', 'ask');
+    await setProjectApprovals(root, 'demo', 'smart');
+    const pane = await wake(root, 'demo');
+    expect(pane).toBe('%9');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2])
+      .toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc --auto');
+  });
+
+  it('wakes in ask when approvals is manual, so the human answers', async () => {
+    const { root } = await setupOrchestrator();
+    await setProjectMode(root, 'demo', 'ask');
+    await setProjectApprovals(root, 'demo', 'manual');
+    await wake(root, 'demo');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2])
+      .toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc');
   });
 });
