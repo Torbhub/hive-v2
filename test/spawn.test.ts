@@ -8,6 +8,34 @@ const IDLE = readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'idle-empty-prompt.txt'),
   'utf8',
 );
+const TRUST_MENU = readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'dialog-trust-menu.txt'),
+  'utf8',
+);
+const PERMISSION = readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'dialog-permission.txt'),
+  'utf8',
+);
+
+// The trust menu with "Trust this folder" as the second option, cursor on the first.
+const TRUST_MENU_2 = [
+  'teamkimi run',
+  ' ────────────────────────────',
+  '  Trust this folder?',
+  '  ↑↓ navigate · Enter select · Esc exit',
+  '',
+  '  /tmp',
+  '',
+  '  Project-level MCP servers are disabled until you explicitly choose Trust.',
+  '',
+  '   ❯ Ask again later',
+  '     nothing is remembered',
+  '',
+  '     Trust this folder',
+  '     Enable project MCP servers. Remembered for this folder.',
+  ' ────────────────────────────',
+  '',
+].join('\n');
 
 vi.mock('../src/tmux.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/tmux.js')>();
@@ -20,15 +48,16 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     capturePane: vi.fn(async () => IDLE),
     sendLiteral: vi.fn(async () => {}),
     sendEnter: vi.fn(async () => {}),
+    sendArrow: vi.fn(async () => {}),
     killWindow: vi.fn(async () => {}),
     sleep: vi.fn(async () => {}),
   };
 });
 
 import { closeAgent, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
-import { hubAdd, hubInit } from '../src/hub.js';
-import { hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';
-import { killWindow, newWindow, paneIs, run } from '../src/tmux.js';
+import { hubAdd, hubInit, hubTask } from '../src/hub.js';
+import { appendTaskEvent, hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';
+import { capturePane, killWindow, newWindow, paneIs, run, sendArrow, sendEnter } from '../src/tmux.js';
 
 async function setup(teamEntry: Record<string, unknown>) {
   const root = mkdtempSync(path.join(tmpdir(), 'hive-spawn-'));
@@ -250,4 +279,83 @@ describe('launchCommand', () => {
     expect(() => launchCommand(undefined, 'ask', 'k3 $(whoami)')).toThrow(/model alias/);
     expect(() => launchCommand(undefined, 'ask', '')).toThrow(/model alias/);
   });
+});
+
+async function approvePlan(root: string, id: string): Promise<void> {
+  await appendTaskEvent(root, {
+    id, project: 'demo', event: 'plan', at: new Date().toISOString(), note: 'the plan',
+    checkpoints: [{ id: 'c1', desc: 'the step', etaMin: 5 }],
+  });
+  await appendTaskEvent(root, {
+    id, project: 'demo', event: 'answered', at: new Date().toISOString(), note: 'plan approved by owner',
+  });
+}
+
+describe('spawn gate', () => {
+  it('refuses a worker spawn on a task with no approved plan, before any side effect', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const id = await hubTask(root, 'demo', 'do it');
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    await expect(spawnAgent(root, 'demo', { agent: 'worker1', task: id })).rejects.toThrow(/no approved plan/);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+    expect((await readTeam(home)).agents.some((a) => a.name === 'worker1')).toBe(false);
+  });
+
+  it('lets a worker spawn once the owner approved the plan', async () => {
+    const { root } = await setup({ name: 'builder' });
+    const id = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, id);
+    const pane = await spawnAgent(root, 'demo', { agent: 'worker1', task: id });
+    expect(pane).toBe('%9');
+  }, 20_000);
+
+  it('respawn and wake of a task worker obey the same gate', async () => {
+    const { root } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b', task: 'demo-1',
+    });
+    await hubTask(root, 'demo', 'do it');
+    const kills = vi.mocked(killWindow).mock.calls.length;
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow(/no approved plan/);
+    expect(vi.mocked(killWindow).mock.calls).toHaveLength(kills);
+    await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/no approved plan/);
+  });
+});
+
+describe('trust dialog at spawn', () => {
+  it('answers the folder-trust menu once, then finishes the spawn', async () => {
+    const { root } = await setup({ name: 'builder' });
+    let calls = 0;
+    vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? TRUST_MENU : IDLE));
+    try {
+      const pane = await spawnAgent(root, 'demo', { agent: 'builder2' });
+      expect(pane).toBe('%9');
+      expect(vi.mocked(sendArrow).mock.calls).toEqual([]);
+      expect(vi.mocked(sendEnter).mock.calls.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('walks the menu when Trust is not under the cursor', async () => {
+    const { root } = await setup({ name: 'builder' });
+    let calls = 0;
+    vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? TRUST_MENU_2 : IDLE));
+    vi.mocked(sendArrow).mockClear();
+    try {
+      await spawnAgent(root, 'demo', { agent: 'builder2' });
+      expect(vi.mocked(sendArrow).mock.calls).toEqual([['%9', 'Down']]);
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('any other dialog still throws', async () => {
+    const { root } = await setup({ name: 'builder' });
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+    try {
+      await expect(spawnAgent(root, 'demo', { agent: 'builder2' })).rejects.toThrow(/answer it in the pane, then respawn/);
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
 });
