@@ -8,6 +8,7 @@ import { classify, lines } from './screen.js';
 import { appendDecision, hivePath, hubPath, readProjects, readTeam, upsertTeamEntry, writeJson } from './state.js';
 import { capturePane, killWindow, paneExists, run, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
+import { loadProcessedKeys, recordProcessedKey } from './watch-persist.js';
 import type { Approvals, TeamEntry } from './types.js';
 
 // Read-only leaders: a chain segment must start with one of these to be
@@ -18,7 +19,7 @@ const SAFE_LEADERS = [
   'jj st', 'jj status', 'jj log', 'jj diff', 'jj show',
   'jj bookmark list', 'jj git root', 'jj root',
   'hive hub status', 'hive hub tasks', 'hive hub dialog',
-  'npm test', 'npm run build',
+  'npm run build',
 ];
 
 // Destructive shapes are never auto-approved, by either tier.
@@ -26,6 +27,9 @@ const NEVER_RES = [
   /\brm\s/, /git\s+push/, /git\s+reset/, /\bsudo\b/, /\bdd\s/, /\bmkfs\b/,
   /\bjj\s+push\b/, /\bjj\s+abandon\b/, /jj\s+workspace\s+forget/,
   /chmod\s+-R/, /(?:curl|wget)[^|]*\|\s*(?:ba|z)?sh\b/, />\s*\/(etc|usr|bin|sbin|var|boot|lib)(\/|\s|$)/,
+  // Heavy compute waits for a human: box policy bans local builds and suites.
+  /\bnpm\s+ci\b/, /\bnpm\s+(?:i|install)\b/, /\bnpx\s+vitest\b/, /\bnpm\s+test\b/,
+  /\bnpx\s+jest\b/, /\bcargo\s+build\b/, /\bmake\s/, /\bdocker\s+build\b/, /\bpip\s+install\b/,
 ];
 
 export function extractCommand(dialogText: string): string | null {
@@ -63,13 +67,18 @@ export async function classifyWithKimi(
   env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
   const prompt = `In project ${project}, an agent asks to run this command:\n$ ${command}\nAnswer APPROVE only if this is clearly a safe, read-only or build/test action with no external side effects. Otherwise answer ASK.`;
-  const r = await run(
-    'kimi', ['-p', prompt], undefined,
-    { ...process.env, ...env, KIMI_CODE_NO_AUTO_UPDATE: '1' },
-    CLASSIFY_TIMEOUT_MS,
-  );
+  const model = env.HIVE_CLASSIFIER_MODEL ?? process.env.HIVE_CLASSIFIER_MODEL;
+  const spawnEnv = { ...process.env, ...env, KIMI_CODE_NO_AUTO_UPDATE: '1' };
+  const args = model ? ['-m', model, '-p', prompt] : ['-p', prompt];
+  const r = await run('kimi', args, undefined, spawnEnv, CLASSIFY_TIMEOUT_MS);
   return r.code === 0 && r.stdout.trimStart().startsWith('APPROVE');
 }
+
+// APPROVE verdicts cached by command: one grep must never spawn two classifiers.
+// ASK and timeouts are never cached, so a re-ask always reaches the classifier.
+const approveCache = new Map<string, true>();
+// Fingerprints with a classifier running right now; abandoned cycles skip them.
+const inFlight = new Set<string>();
 
 async function appendWatchLog(root: string, line: string): Promise<void> {
   await fs.mkdir(hubPath(root), { recursive: true });
@@ -83,11 +92,27 @@ async function maybeAutoApprove(
   dialog: NonNullable<Awaited<ReturnType<typeof readDialogFor>>>,
   approvals: Approvals,
   env: NodeJS.ProcessEnv,
+  verdicts: Map<string, true>,
 ): Promise<void> {
   const command = extractCommand(dialog.text);
+  // neverApprove runs before every tier and before the cache, always.
   if (!command || neverApprove(dialog.text)) return;
+  // Whitespace-collapsed key: `git  status` and `git status` share a verdict.
+  const cacheKey = command.replace(/\s+/g, ' ');
   let ok = tier1Approves(command);
-  if (!ok && approvals === 'smart') ok = await classifyWithKimi(project, command, env);
+  if (!ok && approvals === 'smart') {
+    if (verdicts.has(cacheKey)) {
+      ok = true;
+    } else if (!inFlight.has(dialog.fingerprint)) {
+      inFlight.add(dialog.fingerprint);
+      try {
+        ok = await classifyWithKimi(project, command, env);
+      } finally {
+        inFlight.delete(dialog.fingerprint);
+      }
+      if (ok) verdicts.set(cacheKey, true);
+    }
+  }
   if (!ok) return;
   // Only ever option 1 ("Approve once"); a saves-rule option is the owner's call.
   const opt = dialog.options.find((o) => o.n === 1);
@@ -100,6 +125,7 @@ async function maybeAutoApprove(
 
 export const WAKE_MAX_ATTEMPTS = 60;
 export const WEDGE_STILL_MS = 10 * 60_000;
+export const STALE_WIRE_MS = 15 * 60_000;
 const WEDGE_DUMP_TIMEOUT_MS = 15_000;
 
 export type WakeState = Map<string, { attempts: number; nextAt: number }>;
@@ -107,6 +133,8 @@ export type WakeState = Map<string, { attempts: number; nextAt: number }>;
 // Desired vs actual, re-judged every tick: a death is logged and bundled once,
 // but the wake is retried with backoff until the pane is back or the budget
 // runs out (60 attempts at a capped 10-minute backoff span hours of outage).
+// The deaths set is seeded from disk at watch start, so a restart skips the
+// re-report but still owns the wake.
 async function handleDeath(
   root: string,
   project: string,
@@ -118,6 +146,7 @@ async function handleDeath(
   const key = `${a.pane}:${a.pane_pid}`;
   if (!deaths.has(key)) {
     deaths.add(key);
+    await recordProcessedKey(root, key);
     await appendWatchLog(
       root,
       `${new Date().toISOString()} ${project} ${a.name} pane ${a.pane} died (pid ${a.pane_pid}, started ${a.pane_started})`,
@@ -161,6 +190,30 @@ async function handleDeath(
       );
     }
   }
+}
+
+// A live pane with a silent wire log for 15 minutes is a stalled lane.
+// One decisions line per pane per hour; the persisted set carries it across
+// restarts so systemd never turns one stall into an hourly-repeat flood.
+async function flagStale(
+  root: string,
+  project: string,
+  a: TeamEntry,
+  seen: Set<string>,
+): Promise<void> {
+  if (!a.session_id || !a.pane) return;
+  const wireAt = await wireLogMtime(os.homedir(), a.session_id);
+  if (wireAt === null) return;
+  const ageMs = Date.now() - wireAt;
+  if (ageMs < STALE_WIRE_MS) return;
+  const key = `stale:${a.pane}:${Math.floor(Date.now() / 3_600_000)}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  await recordProcessedKey(root, key);
+  await appendDecision(root, {
+    project, by: 'watch',
+    summary: `stale: ${project}/${a.name} no output for ${Math.floor(ageMs / 60_000)}m`,
+  });
 }
 
 async function stackProbe(sections: string[], title: string, cmd: string, args: string[]): Promise<void> {
@@ -289,7 +342,9 @@ export async function watchCycle(
   deaths: Set<string> = new Set(),
   wakes: WakeState = new Map(),
   stills: Stillness = new Map(),
-  { wedgeStillMs = WEDGE_STILL_MS }: { wedgeStillMs?: number } = {},
+  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache }: {
+    wedgeStillMs?: number; verdicts?: Map<string, true>;
+  } = {},
 ): Promise<void> {
   const pf = await readProjects(root);
   const status = await buildStatus(root);
@@ -301,6 +356,7 @@ export async function watchCycle(
         await handleDeath(root, p.name, p.home, a, deaths, wakes);
         continue;
       }
+      await flagStale(root, p.name, a, deaths);
       await judgeWedge(root, p.name, p.home, a, stills, wedgeStillMs);
     }
 
@@ -319,7 +375,7 @@ export async function watchCycle(
         return null;
       });
       if (!dialog) continue;
-      await maybeAutoApprove(root, p.name, ref, dialog, approvals, env);
+      await maybeAutoApprove(root, p.name, ref, dialog, approvals, env, verdicts);
     }
   }
 }
@@ -331,7 +387,7 @@ export async function watch(
   { intervalMs = 5000, cycleTimeoutMs = CYCLE_TIMEOUT_MS }: { intervalMs?: number; cycleTimeoutMs?: number } = {},
 ): Promise<void> {
   const env = await kimiEnv().catch(() => ({} as NodeJS.ProcessEnv));
-  const deaths = new Set<string>();
+  const deaths = await loadProcessedKeys(root);
   const wakes: WakeState = new Map();
   const stills: Stillness = new Map();
   let cycles = 0;
