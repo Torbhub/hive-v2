@@ -34,6 +34,7 @@ const USAGE = `usage:
   hive push <remote> <sha> <branch>
   hive land <remote> <sha> <branch> [--title t] [--body b] | --bookmark <name> [--title t] [--body b]
   hive cleanup <project> [--dry-run]
+  hive interrupt <project> [agent]
   hive doctor | ui | watch
   hive web [--port N]
   hive memory propose <project> <text...> | ls <project> | promote <project> <id>`;
@@ -142,19 +143,12 @@ async function hubCommand(args: string[]): Promise<void> {
       console.log(`hive: typed into ${project}'s orchestrator: ${r.typed}`);
       return;
     }
-    case 'wake': {
-      if (!args[1]) throw new UsageError('usage: hive hub wake <project>');
-      console.log(await wake(root, validName('project', args[1])));
-      return;
-    }
-    case 'start': {
-      if (!args[1] || !args[2]) throw new UsageError('usage: hive hub start <project> <task-id>');
-      console.log(await startProject(root, validName('project', args[1]), args[2]));
-      return;
-    }
+    case 'wake':
+    case 'start':
     case 'continue': {
-      if (!args[1]) throw new UsageError('usage: hive hub continue <project>');
-      console.log(await continueProject(root, validName('project', args[1])));
+      if (!args[1] || (sub === 'start' && !args[2])) throw new UsageError(`usage: hive hub ${sub} <project>${sub === 'start' ? ' <task-id>' : ''}`);
+      const p = validName('project', args[1]);
+      console.log(await (sub === 'wake' ? wake(root, p) : sub === 'start' ? startProject(root, p, String(args[2])) : continueProject(root, p)));
       return;
     }
     default:
@@ -268,11 +262,16 @@ async function main(): Promise<void> {
       render(createElement(HubApp, { root: process.cwd() }));
       return;
     }
+    case 'interrupt': {
+      if (!args[1]) throw new UsageError('usage: hive interrupt <project> [agent]');
+      const { interruptLine } = await import('./interrupt.js');
+      console.log(await interruptLine(process.cwd(), validName('project', args[1]), args[2] && validAgentRef(args[2])));
+      return;
+    }
     case 'watch': {
       const { watch } = await import('./watch.js');
       console.log(`hive: watching ${process.cwd()} (deaths + approvals per projects.json)`);
-      await watch(process.cwd());
-      return;
+      return watch(process.cwd());
     }
     case 'web': {
       const { flags: f } = parseFlags(args.slice(1), ['port']);

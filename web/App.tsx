@@ -49,7 +49,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 function ProjectCard({
-  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage, onNudge,
+  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage, onNudge, onInterrupt,
 }: {
   project: HubProject;
   view: HubView;
@@ -61,6 +61,7 @@ function ProjectCard({
   onSetApprovals: (project: string, approvals: Approvals) => void;
   onMessage: (project: string, text: string) => Promise<boolean>;
   onNudge: (project: string, taskId: string) => void;
+  onInterrupt: (project: string, ref?: string) => void;
 }) {
   const { acting } = useContext(ActionContext);
   const look = orchestratorLook(p.orchestrator);
@@ -97,6 +98,11 @@ function ProjectCard({
               </span>
             )}
             {o.context_unknown && <span className="text-zinc-500">  context unknown</span>}
+            {o.state === 'running' && (
+              <span className="ml-2 inline-block">
+                <Btn id={`interrupt-${p.name}`} onPress={() => onInterrupt(p.name)}>Interrupt</Btn>
+              </span>
+            )}
           </span>
         </Row>
         <Row label="agents">
@@ -116,6 +122,19 @@ function ProjectCard({
               <span className="text-zinc-500 text-xs">
                 {p.agents.map((a) => windowLabel(p.name, a.name)).join(', ')}
               </span>
+              {up > 0 && (
+                <span className="mt-1 flex flex-wrap gap-1.5">
+                  {p.agents.filter((a) => a.state === 'running').map((a) => (
+                    <Btn
+                      key={a.ref ?? a.name}
+                      id={`interrupt-${p.name}-${agentRef(a)}`}
+                      onPress={() => onInterrupt(p.name, agentRef(a))}
+                    >
+                      {`Interrupt ${agentRef(a)}`}
+                    </Btn>
+                  ))}
+                </span>
+              )}
             </span>
           )}
         </Row>
@@ -194,7 +213,7 @@ function ProjectCard({
 export function App() {
   const [view, setView] = useState<HubView>(EMPTY_VIEW);
   const [acting, setActing] = useState(false);
-  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging'; who?: string } | null>(null);
+  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
   const actingRef = useRef(false);
 
@@ -231,7 +250,7 @@ export function App() {
   const act = useCallback(async (
     id: string,
     project: string,
-    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding' | 'messaging' | 'resolving' | 'nudging',
+    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting',
     who: string,
     runAction: () => Promise<string>,
     busyWho?: string,
@@ -319,6 +338,14 @@ export function App() {
       await post('api/message', { project, text: `${taskId}: owner asks for status` });
       return `${taskId}: the orchestrator was asked for status`;
     }, taskId);
+  }, [act]);
+
+  const onInterrupt = useCallback((project: string, ref?: string) => {
+    const who = ref ? `${project} · ${ref}` : project;
+    void act(`interrupt-${who}`, project, 'interrupting', who, async () => {
+      const j = await post('api/interrupt', { project, agent: ref });
+      return `interrupted ${String(j.target)}`;
+    }, ref);
   }, [act]);
 
   const onAddProject = useCallback(async (name: string, folder: string): Promise<boolean> => {
@@ -414,6 +441,7 @@ export function App() {
               onSetApprovals={onSetApprovals}
               onMessage={onMessage}
               onNudge={onNudge}
+              onInterrupt={onInterrupt}
             />
           ))}
 

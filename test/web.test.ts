@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promises as fs } from 'node:fs';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'node:http';
 
 const WEB_DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web', 'dist');
@@ -24,6 +24,11 @@ vi.mock('../src/message.js', async (importOriginal) => {
   return { ...orig, sendOwnerMessage: vi.fn(orig.sendOwnerMessage) };
 });
 
+vi.mock('../src/interrupt.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/interrupt.js')>();
+  return { ...orig, interruptAgent: vi.fn(orig.interruptAgent) };
+});
+
 vi.mock('../src/spawn.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/spawn.js')>();
   return { ...orig, typeLine: vi.fn(orig.typeLine) };
@@ -35,6 +40,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 });
 
 import { hubLog, hubTask, startProject, wake } from '../src/hub.js';
+import { interruptAgent } from '../src/interrupt.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { typeLine } from '../src/spawn.js';
 import { capturePane, paneIs } from '../src/tmux.js';
@@ -731,5 +737,57 @@ describe('POST /api/progress', () => {
     expect(missing.status).toBe(400);
     expect((await missing.json()).detail).toMatch(/unknown task/);
     expect((await post('/api/progress', { project: 'demo', status: 'ok' })).status).toBe(400);
+  });
+});
+
+describe('POST /api/interrupt', () => {
+  // The spy wraps the real function, so refusal tests below reach it too;
+  // each test starts from a clean call history.
+  beforeEach(() => {
+    vi.mocked(interruptAgent).mockClear();
+  });
+
+  it('an unknown project, a bad agent name, and a dead pane are 400s', async () => {
+    const noProject = await post('/api/interrupt', { project: 'nope' });
+    expect(noProject.status).toBe(400);
+    expect((await noProject.json()).detail).toMatch(/unknown project/);
+    expect((await post('/api/interrupt', { project: 'demo', agent: 'bad name' })).status).toBe(400);
+    // The recorded pane %999 is not on the throwaway socket, so it reads as dead.
+    const dead = await post('/api/interrupt', { project: 'demo' });
+    expect(dead.status).toBe(400);
+    expect((await dead.json()).detail).toMatch(/no live pane/);
+  });
+
+  it('a cross-site request is a 403', async () => {
+    const r = await post('/api/interrupt', { project: 'demo' }, { 'sec-fetch-site': 'cross-site' });
+    expect(r.status).toBe(403);
+  });
+
+  it('success answers the target, and interrupts serialize per project', async () => {
+    let active = 0;
+    let maxActive = 0;
+    vi.mocked(interruptAgent).mockImplementation(async (_root, project) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 120));
+      active -= 1;
+      return { target: `${project}-orchestrator`, pane: '%1' };
+    });
+    try {
+      const [r1, r2] = await Promise.all([
+        post('/api/interrupt', { project: 'demo' }),
+        post('/api/interrupt', { project: 'demo', agent: 'builder' }),
+      ]);
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(200);
+      expect(await r1.json()).toEqual({ ok: true, target: 'demo-orchestrator', pane: '%1' });
+      expect(vi.mocked(interruptAgent).mock.calls).toEqual([
+        [root, 'demo', undefined],
+        [root, 'demo', 'builder'],
+      ]);
+      expect(maxActive).toBe(1);
+    } finally {
+      vi.mocked(interruptAgent).mockRestore();
+    }
   });
 });

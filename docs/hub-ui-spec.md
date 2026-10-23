@@ -109,12 +109,14 @@ Card = column, `marginTop: 1`.
 - when state `unregistered` and `pane` set: gray `  pane {pane}` (two leading spaces).
 - when `context` is a number: `  {context}%` — color: **gray** if `context_assumed`, else **yellow** if `context >= rotateAt` (plugin option `rotate_at_percent`, default **50**), else **green**.
 - when `context_unknown`: gray `  context unknown`.
+- when state is `running` (web only): an **Interrupt** button (§13), spaced off the text.
 
 **`agents` row**:
 - no agents: gray `none`.
 - else one row: for each agent, one of these glyphs **followed by a trailing space** (so two hollow dots don't read as one wide sign): `●` **green** (running), `○` **yellow` (stopped), `✖` **red** (wedged), `?` **red** (unknown/unrecorded). Then white ` {up} of {total}` (leading space; `up` = running count).
 - If any agents are not running, a second line, **yellow**: `{ref} {state}` joined with `, ` (e.g. `fixer stopped, reviewer@/wt/repo unknown`).
 - Web only, a third line, gray, small: the tmux window name of every agent, `{project}:{agent name}` joined with `, `.
+- Web only, when any agent is running: a wrap line of **Interrupt {ref}** buttons, one per running agent (§13).
 
 **`tasks` row** — white, one string:
 `{open_tasks} open` then optional suffixes, in order:
@@ -425,6 +427,7 @@ Success (exit 0) prints one line: the pane dialog parse plus identifiers:
 | `Send` message row (web only, §11) | POST `/api/message` with `{project, text}` | 150 s | cyan `sending…` on the card |
 | `Rebrief` / `Cancel` on a blocked or question need (web only) | POST `/api/task-resolve` with `{project, task, action, note?}` | 30 s | cyan `resolving…` on the need |
 | `Nudge` on a stale need or progress row (web only) | POST `/api/message` with `{project, text: "<taskId>: owner asks for status"}` | 150 s | cyan `nudging…` on the need or row |
+| `Interrupt` / `Interrupt {ref}` buttons (web only, §13) | POST `/api/interrupt` with `{project, agent?}` | 150 s | — |
 | (workers, completeness) | POST `/api/progress` with `{project, task, checkpoint, status, note?}` | 30 s | — |
 | `Seen` button | local state only (records the away-period start as seen); no subprocess | — | — |
 
@@ -440,6 +443,7 @@ Toasts (on completion):
 - task-resolve success: `{taskId}: cancelled` / `{taskId}: back to asked with the new brief`. Failure: `{taskId}: {reason}` (for example the task is already done).
 - nudge success: `{taskId}: the orchestrator was asked for status`. Failure: `{taskId}: {reason}` (for example the pane is gone).
 - message success: `{project}: the message was typed to its orchestrator`. Failure: `{project}: {reason}` (for example the pane is gone or a dialog waits on its screen).
+- interrupt success: `interrupted {target}` where `target` is the agent ref or `{project}-orchestrator`. Failure: `{who}: {reason}` with `who` = `{project} · {agent}` or `{project}` (for example the pane is gone).
 - After every action: refresh.
 
 ## 8. Notes for the Ink port
@@ -484,3 +488,9 @@ The feed is signal only. The server scans the newest 64 entries of `decisions.js
 - `by: 'owner'` rows whose summary starts with `answered "Approve once"`
 
 Everything else stays: plan approvals, send-backs, rebriefs, cancels, owner messages, non-trivial watch decisions, wedged marks, deaths. The web UI renders what the view carries and never filters itself. The TUI has no decisions feed.
+
+## 13. Interrupt (web UI and CLI)
+
+`hive interrupt <project> [agent]` and the web **Interrupt** buttons send Escape to a live pane. A running turn stops mid-turn and the session survives, so the owner can steer the agent after with a message or a dialog answer. Killing the pane loses the session and its context. On an open dialog Escape is the dismiss key, and the dialog block's own Esc button covers that case, so a need card has no Interrupt button.
+
+The target is the project's orchestrator by default. A starting orchestrator not yet registered is reached through its pending pane. An optional `agent` names a team agent (`name`, or `name@<worktree>` when the name is ambiguous). The checks run in order: the project exists, the target resolves in `team.json`, the pane is live, and its identity (pid plus start time) still matches the record. The send goes through the tmux layer, which re-verifies the pane identity before the key lands. Success answers `{ok: true, target, pane}` and appends `interrupted {target}` to `decisions.jsonl` with `by: 'owner'`. Every refusal is a 400 `{ok: false, detail}` and shows as a toast. The endpoint serializes per project like the other actions. The Ink screen has no interrupt buttons: interrupting stays a web and CLI flow.

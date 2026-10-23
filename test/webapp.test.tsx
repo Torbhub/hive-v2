@@ -408,3 +408,78 @@ describe('needs-ui', () => {
     expect(container.textContent).toContain('attach: tmux -L hive-v2 attach');
   });
 });
+
+describe('interrupt buttons', () => {
+  const runningView: HubView = {
+    ...VIEW,
+    projects: [{
+      ...VIEW.projects[0],
+      orchestrator: { state: 'running', question: false, name: 'demo-orchestrator' },
+      agents: [
+        { name: 'builder', state: 'running', ref: 'builder' },
+        { name: 'fixer', state: 'stopped', ref: 'fixer' },
+      ],
+    }],
+  };
+
+  function mountRunning(): void {
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      if (String(input).endsWith('api/view')) {
+        return Promise.resolve(new Response(JSON.stringify(runningView), { status: 200 }));
+      }
+      return new Promise<Response>((resolve) => {
+        resolveAction = resolve;
+      });
+    });
+  }
+
+  async function repoll(): Promise<void> {
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
+    });
+  }
+
+  function interruptButton(text: string): HTMLButtonElement {
+    const btn = [...container.querySelectorAll('button')].find((b) => b.textContent === text);
+    if (!btn) throw new Error(`no "${text}" button rendered`);
+    return btn as HTMLButtonElement;
+  }
+
+  it('running rows render Interrupt buttons, stopped rows do not', async () => {
+    mountRunning();
+    await repoll();
+    interruptButton('Interrupt');
+    interruptButton('Interrupt builder');
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Interrupt fixer')).toBe(false);
+  });
+
+  it('the orchestrator Interrupt posts without an agent and gates while busy', async () => {
+    mountRunning();
+    await repoll();
+    act(() => {
+      interruptButton('Interrupt').click();
+    });
+    expect(resolveAction).not.toBeNull();
+    const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/interrupt'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({ project: 'demo' });
+    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1); // only refresh stays live
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true, target: 'demo-orchestrator', pane: '%1' }), { status: 200 }));
+    });
+    expect(container.textContent).toContain('interrupted demo-orchestrator');
+  });
+
+  it('an agent Interrupt posts its ref', async () => {
+    mountRunning();
+    await repoll();
+    act(() => {
+      interruptButton('Interrupt builder').click();
+    });
+    const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/interrupt'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({ project: 'demo', agent: 'builder' });
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true, target: 'builder', pane: '%2' }), { status: 200 }));
+    });
+    expect(container.textContent).toContain('interrupted builder');
+  });
+});
