@@ -41,17 +41,42 @@ Provision renders `/etc/hive-v2/tdai-gateway.yaml` from `memory.env` on
 every deploy. The core container mounts it read-only. Do not hand-edit the
 rendered file. Edit `memory.env` and rerun provision through a deploy.
 
+Hive itself reads three env vars, set in the shell that runs `hive`:
+
+- `HIVE_MEMORY_KEY` — the user key (`sk-mem-...`). Without it memory is
+  off and every call is a no-op.
+- `HIVE_MEMORY_URL` — the gateway base URL. Default
+  `http://127.0.0.1:8420`, the loopback on this box.
+- `HIVE_MEMORY_SERVICE_ID` — the service id header. Default `default`.
+
 ## The write gate
 
-Lanes never write memory directly. Write candidates land in a private
-scope. A human reviews them in the panel and promotes the good ones to the
-team scope. This keeps agent noise out of shared memory.
+Lanes never write shared memory directly. `hive memory propose <project>
+<text>` writes a candidate into a private bucket (`agent_id` `candidates`
+under `team_id` `hive-<project>`) with the provenance in the background
+field: project, agent (env `HIVE_AGENT`), session (env `HIVE_SESSION`).
+
+`hive memory ls <project>` lists the candidates. The owner reviews them
+and runs `hive memory promote <project> <id>`. Promote copies the
+candidate into the team bucket (`agent_id` `team`) and deletes the
+candidate.
+
+Known gap: the v3 data plane has no per-memory visibility field, so
+promote is copy across buckets, not one upstream visibility flip. A
+promote that dies between the copy and the delete leaves the text in both
+buckets. That is safe, and the next promote of the same id cleans it up.
 
 ## Recall flow
 
-Planned, not yet built: the hub searches memory before it writes a spawn
-brief, and found memories go into the brief, so a new lane starts with
-what earlier lanes learned. This section lands with the recall lane.
+When hive spawns an agent on a task, it searches the team bucket with the
+task brief as the query. Found memories land in a `## Memory` block at the
+end of the agent's handoff (`.hive/handoffs/<agent>.md`), capped at 2000
+chars. This covers worker spawns and orchestrator starts. The block is
+rewritten on each spawn, so it stays current.
+
+Recall never blocks a spawn. Every memory call has a 3s timeout and fails
+open: memory down, slow, or unconfigured means no block, and the spawn
+goes ahead without it.
 
 ## Upgrade
 

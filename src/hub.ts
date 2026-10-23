@@ -21,6 +21,7 @@ import {
 } from './spawn.js';
 import { planVerdict, settlePendingPane } from './taskgate.js';
 import { taskScope } from './scope.js';
+import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 
 export { Refusal } from './state.js';
 export { hubAccept, hubLog, hubProgress, ledgerCommand } from './taskgate.js';
@@ -414,6 +415,10 @@ async function launchOrchestrator(
     }
 
     await ensureAgentFiles(cwd, name, 'orchestrator');
+    if (task) {
+      const block = await memoryBlockFor(root, project, task);
+      if (block) await applyMemoryBlock(hivePath(cwd, 'handoffs', `${name}.md`), block);
+    }
     const mode = effectiveOrchestratorMode(p.mode ?? 'ask', p.approvals);
     const { pane, identity } = await launchWindow(project, name, cwd, sessionId, mode, old?.model);
     await manifestAdd(p.home, {

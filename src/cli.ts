@@ -6,6 +6,7 @@ import {
 import { closeAgent, respawnAgent, spawnAgent } from './spawn.js';
 import { landPr, parseSteps, pushByHash, runGate, verifyCommits, verifyLog } from './gate.js';
 import { cleanupProject } from './cleanup.js';
+import { memoryCommand } from './memory-cli.js';
 import { checkName } from './names.js';
 
 function validName(kind: string, value: string): string {
@@ -33,10 +34,9 @@ const USAGE = `usage:
   hive push <remote> <sha> <branch>
   hive land <remote> <sha> <branch> [--title t] [--body b] | --bookmark <name> [--title t] [--body b]
   hive cleanup <project> [--dry-run]
-  hive doctor
-  hive ui
+  hive doctor | ui | watch
   hive web [--port N]
-  hive watch`;
+  hive memory propose <project> <text...> | ls <project> | promote <project> <id>`;
 
 class UsageError extends Error {}
 
@@ -195,12 +195,9 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const cmd = args[0] ?? fail('no command');
   switch (cmd) {
-    case 'hub':
-      await hubCommand(args.slice(1));
-      return;
-    case 'spawn':
-      await spawnCommand(args.slice(1));
-      return;
+    case 'hub': await hubCommand(args.slice(1)); return;
+    case 'spawn': await spawnCommand(args.slice(1)); return;
+    case 'memory': await memoryCommand(args.slice(1)); return;
     case 'gate': {
       const sep = args.indexOf('--');
       const { flags: f } = parseFlags(args.slice(1, sep === -1 ? undefined : sep), ['log']);
