@@ -3,10 +3,10 @@ import React, {
 } from 'react';
 import { Toaster, toast } from 'sonner';
 import type { Approvals, HubDialog, HubProject, HubView, ProjectMode } from '../src/types';
-import { APPROVALS_MODES, PROJECT_MODES } from '../src/types';
+import { APPROVALS_MODES, CLOSED_STATES, PROJECT_MODES } from '../src/types';
 import {
   agentGlyph, agentRef, ago, buildNeeds, homeTilde, orchestratorLook,
-  ROTATE_AT_PERCENT, tasksLine, type Need,
+  ROTATE_AT_PERCENT, staleTask, taskProgress, tasksLine, windowLabel, type Need,
 } from '../src/ui/look';
 import { cn } from './lib/utils';
 import { StretchText } from './Stretch';
@@ -116,7 +116,7 @@ function NeedDialog({
 }
 
 function NeedCard({
-  need, view, busy, onAnswer, onContinue, onPlanAnswer,
+  need, view, busy, onAnswer, onContinue, onPlanAnswer, onResolve, onNudge,
 }: {
   need: Need;
   view: HubView;
@@ -124,24 +124,40 @@ function NeedCard({
   onAnswer: (project: string, agentRefArg: string | undefined, seen: string, choice: string, id: string) => void;
   onContinue: (project: string) => void;
   onPlanAnswer: (project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => void;
+  onResolve: (project: string, taskId: string, action: 'cancel' | 'rebrief', note?: string) => void;
+  onNudge: (project: string, taskId: string) => void;
 }) {
   const accent = NEED_ACCENT[need.color] ?? 'border-l-zinc-600';
   const continuing = need.action === 'continue' && need.project
     && busy?.project === need.project && busy.what === 'continuing';
+  const nudging = need.taskId !== undefined
+    && busy?.what === 'nudging' && busy.who === need.taskId;
   return (
     <div className={cn('rounded-md border border-zinc-800 border-l-2 bg-zinc-900/60 px-3 py-2', accent)}>
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0 text-sm">
           <span className="font-medium text-white">{need.who}</span>
           <span className="text-zinc-300">{`  ${need.words}`}</span>
+          {need.stale && <span className="text-amber-300">{`  stale`}</span>}
         </div>
         {need.when !== '' && <span className="shrink-0 text-xs text-zinc-500 tabular">{need.when}</span>}
       </div>
+      {need.detail && <div className="mt-1 text-xs text-zinc-500">{need.detail}</div>}
+      {need.checkpoints && need.checkpoints.length > 0 && (
+        <div className="mt-1 flex flex-col text-xs text-zinc-400">
+          {need.checkpoints.map((c) => (
+            <span key={c.id} className="truncate">{`${c.id}: ${c.desc} (~${c.etaMin}m)`}</span>
+          ))}
+        </div>
+      )}
       {need.dialogKey && (
         <NeedDialog dialogKey={need.dialogKey} dialogs={view.dialogs} busy={busy} onAnswer={onAnswer} />
       )}
       {need.action === 'plan' && need.project && need.taskId && !need.dialogKey && (
         <PlanActions need={need} busy={busy} onPlanAnswer={onPlanAnswer} />
+      )}
+      {need.action === 'resolve' && need.project && need.taskId && (
+        <ResolveActions need={need} busy={busy} onResolve={onResolve} />
       )}
       {need.action === 'continue' && need.project && (
         <div className="mt-2">
@@ -150,6 +166,66 @@ function NeedCard({
             : <Btn id={`continue-${need.project}`} onPress={() => onContinue(need.project!)}>Continue</Btn>}
         </div>
       )}
+      {need.stale && need.project && need.taskId && (
+        <div className="mt-2">
+          {nudging
+            ? <span className="text-xs text-sky-400">nudging…</span>
+            : (
+              <Btn id={`nudge-${need.taskId}`} onPress={() => onNudge(need.project!, need.taskId!)}>
+                Nudge
+              </Btn>
+            )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResolveActions({
+  need, busy, onResolve,
+}: {
+  need: Need;
+  busy: { project: string; what: string; who?: string } | null;
+  onResolve: (project: string, taskId: string, action: 'cancel' | 'rebrief', note?: string) => void;
+}) {
+  const [rebriefing, setRebriefing] = useState(false);
+  const [brief, setBrief] = useState('');
+  const project = need.project!;
+  const taskId = need.taskId!;
+  if (busy?.what === 'resolving' && busy.who === taskId) {
+    return <div className="mt-2 text-xs text-sky-400">resolving…</div>;
+  }
+  if (rebriefing) {
+    return (
+      <form
+        className="mt-2 flex gap-1.5"
+        // Block the native reload; the Send button's onPress is the one
+        // submit path (Enter in the input clicks the submit button).
+        onSubmit={(e) => e.preventDefault()}
+      >
+        <Input
+          autoFocus
+          value={brief}
+          onChange={(e) => setBrief(e.target.value)}
+          placeholder="the new brief"
+          aria-label={`new brief for ${taskId}`}
+          className="h-8 text-xs"
+        />
+        <Btn
+          id={`rebrief-go-${taskId}`}
+          disabled={!brief.trim()}
+          onPress={() => onResolve(project, taskId, 'rebrief', brief.trim())}
+        >
+          Send
+        </Btn>
+        <Btn id={`rebrief-back-${taskId}`} onPress={() => setRebriefing(false)}>Back</Btn>
+      </form>
+    );
+  }
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      <Btn id={`rebrief-${taskId}`} onPress={() => setRebriefing(true)}>Rebrief</Btn>
+      <Btn id={`cancel-${taskId}`} onPress={() => onResolve(project, taskId, 'cancel')}>Cancel</Btn>
     </div>
   );
 }
@@ -211,17 +287,18 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 function ProjectCard({
-  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage,
+  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage, onNudge,
 }: {
   project: HubProject;
   view: HubView;
   now: number;
-  busy: { project: string; what: string } | null;
+  busy: { project: string; what: string; who?: string } | null;
   onWake: (project: string) => void;
   onStartTask: (project: string, text: string) => Promise<boolean>;
   onSetMode: (project: string, mode: ProjectMode) => void;
   onSetApprovals: (project: string, approvals: Approvals) => void;
   onMessage: (project: string, text: string) => Promise<boolean>;
+  onNudge: (project: string, taskId: string) => void;
 }) {
   const { acting } = useContext(ActionContext);
   const look = orchestratorLook(p.orchestrator);
@@ -233,6 +310,9 @@ function ProjectCard({
     (o.state === 'stopped' || o.state === 'resumable') && Boolean(o.session_id) && !o.starting;
   const back = 1 + p.agents.filter((a) => a.state === 'stopped').length;
   const resuming = busy?.project === p.name && busy.what === 'resuming';
+  const trail = view.tasks.filter(
+    (t) => t.project === p.name && !CLOSED_STATES.has(t.state) && taskProgress(t) !== null,
+  );
 
   return (
     <Card>
@@ -247,6 +327,7 @@ function ProjectCard({
         <Row label="orchestrator">
           <span>
             <span className="text-zinc-100">{orchName}</span>
+            {o.name && <span className="text-zinc-500">{`  ${windowLabel(p.name, o.name)}`}</span>}
             {o.state === 'unregistered' && o.pane && <span className="text-zinc-500">{`  pane ${o.pane}`}</span>}
             {typeof o.context === 'number' && (
               <span className={o.context_assumed ? 'text-zinc-500' : o.context >= ROTATE_AT_PERCENT ? 'text-amber-300' : 'text-emerald-400'}>
@@ -270,12 +351,45 @@ function ProjectCard({
               {notRunning.length > 0 && (
                 <span className="text-amber-300 text-xs">{notRunning.map((a) => `${agentRef(a)} ${a.state}`).join(', ')}</span>
               )}
+              <span className="text-zinc-500 text-xs">
+                {p.agents.map((a) => windowLabel(p.name, a.name)).join(', ')}
+              </span>
             </span>
           )}
         </Row>
         <Row label="tasks">
           <span className="text-zinc-100">{tasksLine(view.tasks, p.name, p.open_tasks, now)}</span>
         </Row>
+        {trail.length > 0 && (
+          <Row label="progress">
+            <span className="flex flex-col gap-1">
+              {trail.map((t) => {
+                const prog = taskProgress(t)!;
+                const stale = staleTask(t, now);
+                const nudging = busy?.what === 'nudging' && busy.who === t.id;
+                return (
+                  <span key={t.id} className="flex flex-wrap items-baseline gap-x-1.5 text-xs">
+                    <span className="font-medium text-zinc-100">{t.id}</span>
+                    <span className="text-zinc-300">{`${prog.done}/${prog.total} checkpoints`}</span>
+                    {prog.current && <span className="text-zinc-300">{`on ${prog.current}`}</span>}
+                    <span className="text-zinc-500">
+                      {prog.lastAt ? `last progress ${ago(prog.lastAt, now)} ago` : 'no progress yet'}
+                    </span>
+                    {prog.failed.length > 0 && (
+                      <span className="text-red-400">{`failed: ${prog.failed.join(', ')}`}</span>
+                    )}
+                    {stale && <span className="text-amber-300">stale</span>}
+                    {stale && (
+                      nudging
+                        ? <span className="text-sky-400">nudging…</span>
+                        : <Btn id={`nudge-${t.id}`} onPress={() => onNudge(p.name, t.id)}>Nudge</Btn>
+                    )}
+                  </span>
+                );
+              })}
+            </span>
+          </Row>
+        )}
         <Row label="folders">
           <span className="flex flex-col">
             {p.repos.map((r) => (
@@ -328,6 +442,9 @@ function ProjectCard({
         )}
         <MessageRow project={p.name} busy={busy} onMessage={onMessage} />
         <NewTaskRow project={p.name} busy={busy} onStartTask={onStartTask} />
+        <div className="mt-2 border-t border-zinc-800 pt-2.5 font-mono text-xs text-zinc-500">
+          attach: tmux -L hive-v2 attach
+        </div>
       </CardContent>
     </Card>
   );
@@ -336,7 +453,7 @@ function ProjectCard({
 export function App() {
   const [view, setView] = useState<HubView>(EMPTY_VIEW);
   const [acting, setActing] = useState(false);
-  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging'; who?: string } | null>(null);
+  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
   const actingRef = useRef(false);
 
@@ -373,7 +490,7 @@ export function App() {
   const act = useCallback(async (
     id: string,
     project: string,
-    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding' | 'messaging',
+    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding' | 'messaging' | 'resolving' | 'nudging',
     who: string,
     runAction: () => Promise<string>,
     busyWho?: string,
@@ -449,6 +566,20 @@ export function App() {
     }, taskId);
   }, [act]);
 
+  const onResolve = useCallback((project: string, taskId: string, action: 'cancel' | 'rebrief', note?: string) => {
+    void act(`resolve-${taskId}-${action}`, project, 'resolving', taskId, async () => {
+      await post('api/task-resolve', { project, task: taskId, action, note });
+      return action === 'cancel' ? `${taskId}: cancelled` : `${taskId}: back to asked with the new brief`;
+    }, taskId);
+  }, [act]);
+
+  const onNudge = useCallback((project: string, taskId: string) => {
+    void act(`nudge-${taskId}`, project, 'nudging', taskId, async () => {
+      await post('api/message', { project, text: `${taskId}: owner asks for status` });
+      return `${taskId}: the orchestrator was asked for status`;
+    }, taskId);
+  }, [act]);
+
   const onAddProject = useCallback(async (name: string, folder: string): Promise<boolean> => {
     return act('add-project', name, 'adding', name, async () => {
       await post('api/project', { name, path: folder });
@@ -502,6 +633,8 @@ export function App() {
                   onAnswer={onAnswer}
                   onContinue={onContinue}
                   onPlanAnswer={onPlanAnswer}
+                  onResolve={onResolve}
+                  onNudge={onNudge}
                 />
               ))}
             </section>
@@ -539,6 +672,7 @@ export function App() {
               onSetMode={onSetMode}
               onSetApprovals={onSetApprovals}
               onMessage={onMessage}
+              onNudge={onNudge}
             />
           ))}
 

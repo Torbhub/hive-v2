@@ -3,10 +3,12 @@ import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Refusal, answerDialog, continueProject, hubTask, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
+import { Refusal, answerDialog, continueProject, hubLog, hubProgress, hubTask, listTasks, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { checkName } from '../src/names.js';
 import { addProjectFromBody } from '../src/project.js';
+import { appendDecision } from '../src/state.js';
+import { CLOSED_STATES } from '../src/types.js';
 import {
   ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
 } from '../src/view.js';
@@ -107,6 +109,43 @@ function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
 const TASK_TEXT_CAP = 4000;
 const STRETCH_FIELD_CAP = 200;
 
+// Owner verdicts on a waiting task: cancel it, or send it back to asked with a
+// new brief. Ledger appends only, so a dead pane never blocks the call.
+async function taskResolve(
+  root: string,
+  project: string,
+  taskId: string,
+  action: string,
+  note?: string,
+): Promise<{ ok: true }> {
+  if (action !== 'cancel' && action !== 'rebrief') {
+    throw new Refusal(`a resolve action is cancel|rebrief: ${action}`);
+  }
+  const brief = note?.replace(/\s+/g, ' ').trim() ?? '';
+  if (action === 'rebrief' && !brief) throw new Refusal('a rebrief needs a note: the new brief');
+  if (brief.length > TASK_TEXT_CAP) {
+    throw new Refusal(`the note is capped at ${TASK_TEXT_CAP} characters`);
+  }
+  // Same parity as an owner message: the fold took \t \n \r, so a control
+  // byte left over is hostile or broken input.
+  if (/[\x00-\x1f\x7f]/.test(brief)) {
+    throw new Refusal('the note holds control characters; they are not typeable');
+  }
+  const task = (await listTasks(root)).find((t) => t.id === taskId);
+  if (!task || task.project !== project) throw new Refusal(`unknown task: ${taskId}`);
+  if (CLOSED_STATES.has(task.state)) throw new Refusal(`${taskId} is already ${task.state}`);
+  if (action === 'cancel') {
+    await hubLog(root, taskId, 'cancelled', brief || 'cancelled by the owner');
+    await appendDecision(root, { project, task: taskId, by: 'owner', summary: `cancelled ${taskId}` });
+  } else {
+    await hubLog(root, taskId, 'asked', brief);
+    await appendDecision(root, {
+      project, task: taskId, by: 'owner', summary: `rebriefed ${taskId}: ${brief.slice(0, 120)}`,
+    });
+  }
+  return { ok: true };
+}
+
 // The stretchtext skill reads this log to know which spans the owner opened.
 function stretchLogPath(): string {
   return process.env.HIVE_STRETCH_LOG
@@ -127,7 +166,7 @@ async function recordStretchOpened(body: Record<string, unknown>): Promise<unkno
 }
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/stretch-opened', '/api/project'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/stretch-opened', '/api/project', '/api/task-resolve', '/api/progress'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
@@ -179,6 +218,24 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
         ACTION_TIMEOUT_MS, 'plan-answer',
       );
       return { ok: true, typed: r.typed };
+    }
+    if (pathname === '/api/task-resolve') {
+      return taskResolve(
+        root, project, String(body.task ?? ''), String(body.action ?? ''),
+        body.note === undefined ? undefined : String(body.note),
+      );
+    }
+    if (pathname === '/api/progress') {
+      const taskId = String(body.task ?? '').trim();
+      const checkpoint = String(body.checkpoint ?? '').trim();
+      if (!taskId || !checkpoint) throw new HttpError(400, 'task and checkpoint are required');
+      const task = (await listTasks(root)).find((t) => t.id === taskId);
+      if (!task || task.project !== project) throw new Refusal(`unknown task: ${taskId}`);
+      await hubProgress(
+        root, taskId, checkpoint, String(body.status ?? ''),
+        body.note === undefined ? undefined : String(body.note),
+      );
+      return { ok: true };
     }
     const r = await withTimeout(
       answerDialog(root, project, agentRefOf(body), String(body.choice ?? ''), String(body.fingerprint ?? '')),

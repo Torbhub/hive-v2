@@ -225,3 +225,186 @@ describe('instant click feedback', () => {
     expect(container.textContent).toContain('answered "Approve once"');
   });
 });
+
+describe('needs-ui', () => {
+  const iso = (minAgo: number) => new Date(Date.now() - minAgo * 60_000).toISOString();
+
+  function mountWith(view: HubView): void {
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      const url = String(input);
+      if (url.endsWith('api/view')) {
+        return Promise.resolve(new Response(JSON.stringify(view), { status: 200 }));
+      }
+      return new Promise<Response>((resolve) => {
+        resolveAction = resolve;
+      });
+    });
+  }
+
+  async function repoll(): Promise<void> {
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
+    });
+  }
+
+  function button(text: string): HTMLButtonElement {
+    const btn = [...container.querySelectorAll('button')].find((b) => b.textContent === text);
+    if (!btn) throw new Error(`no "${text}" button rendered`);
+    return btn as HTMLButtonElement;
+  }
+
+  function typeInto(input: HTMLInputElement, text: string): void {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+    act(() => {
+      setter.call(input, text);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  const blockedTask = {
+    id: 'demo-1', project: 'demo', asked: iso(400), state: 'blocked',
+    updated: iso(300), last_note: 'no API key in the vault', needs_owner: true,
+    last_progress_at: iso(300),
+  };
+
+  it('a blocked need renders its reason and the Rebrief/Cancel actions', async () => {
+    mountWith({ ...VIEW, tasks: [blockedTask] });
+    await repoll();
+    expect(container.textContent).toContain('demo-1');
+    expect(container.textContent).toContain('blocked');
+    expect(container.textContent).toContain('no API key in the vault');
+    button('Rebrief');
+    button('Cancel');
+  });
+
+  it('Cancel posts task-resolve and toasts; the card gates while busy', async () => {
+    mountWith({ ...VIEW, tasks: [blockedTask] });
+    await repoll();
+    act(() => {
+      button('Cancel').click();
+    });
+    expect(resolveAction).not.toBeNull();
+    expect(container.textContent).toContain('resolving…');
+    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1); // only refresh
+    const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/task-resolve'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({
+      project: 'demo', task: 'demo-1', action: 'cancel',
+    });
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    });
+    expect(container.textContent).toContain('demo-1: cancelled');
+  });
+
+  it('Rebrief swaps the buttons for the brief line, and Back abandons it', async () => {
+    mountWith({ ...VIEW, tasks: [blockedTask] });
+    await repoll();
+    act(() => {
+      button('Rebrief').click();
+    });
+    expect(container.querySelector('input[aria-label="new brief for demo-1"]')).not.toBeNull();
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Cancel')).toBe(false);
+    act(() => {
+      button('Back').click();
+    });
+    expect(container.querySelector('input[aria-label="new brief for demo-1"]')).toBeNull();
+    button('Rebrief');
+    button('Cancel');
+    expect(vi.mocked(fetch).mock.calls.some(([i]) => String(i).endsWith('api/task-resolve'))).toBe(false);
+  });
+
+  it('Rebrief needs a brief and posts it as the note', async () => {
+    mountWith({ ...VIEW, tasks: [blockedTask] });
+    await repoll();
+    act(() => {
+      button('Rebrief').click();
+    });
+    const input = container.querySelector('input[aria-label="new brief for demo-1"]') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(button('Send').disabled).toBe(true);
+    typeInto(input, 'use the staging key');
+    const send = button('Send');
+    expect(send.disabled).toBe(false);
+    act(() => {
+      send.click();
+    });
+    const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/task-resolve'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({
+      project: 'demo', task: 'demo-1', action: 'rebrief', note: 'use the staging key',
+    });
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    });
+    expect(container.textContent).toContain('back to asked');
+  });
+
+  it('a plan need renders its checkpoint list above the verdict buttons', async () => {
+    mountWith({
+      ...VIEW,
+      tasks: [{
+        id: 'demo-2', project: 'demo', asked: iso(30), state: 'plan',
+        updated: iso(20), last_note: 'ship the docs', needs_owner: true,
+        checkpoints: [{ id: 'a', desc: 'write it', etaMin: 5 }, { id: 'b', desc: 'ship it', etaMin: 10 }],
+      }],
+    });
+    await repoll();
+    expect(container.textContent).toContain('a: write it (~5m)');
+    expect(container.textContent).toContain('b: ship it (~10m)');
+    button('Approve plan');
+    button('Send back');
+  });
+
+  it('a stale need is marked and its Nudge posts the status message', async () => {
+    mountWith({ ...VIEW, tasks: [blockedTask] }); // last progress 5h ago
+    await repoll();
+    expect(container.textContent).toContain('stale');
+    act(() => {
+      button('Nudge').click();
+    });
+    expect(container.textContent).toContain('nudging…');
+    const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/message'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({
+      project: 'demo', text: 'demo-1: owner asks for status',
+    });
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    });
+    expect(container.textContent).toContain('asked for status');
+  });
+
+  it('the project card renders checkpoint progress, window names, and the attach hint', async () => {
+    mountWith({
+      ...VIEW,
+      projects: [{
+        ...VIEW.projects[0],
+        orchestrator: { state: 'running', question: false, name: 'demo-orchestrator' },
+        agents: [{ name: 'fixer', state: 'running', ref: 'fixer' }],
+      }],
+      tasks: [{
+        id: 'demo-3', project: 'demo', asked: iso(90), state: 'handed',
+        updated: iso(10), last_note: null, needs_owner: false,
+        checkpoints: [{ id: 'a', desc: 'write it', etaMin: 5 }, { id: 'b', desc: 'ship it', etaMin: 10 }],
+        progress: {
+          a: { status: 'fail', note: 'red', at: iso(20) },
+          b: { status: 'started', at: iso(10) },
+        },
+        last_progress_at: iso(10),
+      }, {
+        id: 'demo-4', project: 'demo', asked: iso(200), state: 'done',
+        updated: iso(5), last_note: null, needs_owner: false,
+        checkpoints: [{ id: 'a', desc: 'write it', etaMin: 5 }],
+        progress: { a: { status: 'ok', at: iso(6) } },
+        last_progress_at: iso(6),
+      }],
+    });
+    await repoll();
+    expect(container.textContent).toContain('1/2 checkpoints');
+    expect(container.textContent).toContain('on b');
+    expect(container.textContent).toContain('failed: a');
+    // A closed task drops off the progress row.
+    expect(container.textContent).not.toContain('demo-4');
+    expect(container.textContent).toContain('demo:demo-orchestrator');
+    expect(container.textContent).toContain('demo:fixer');
+    expect(container.textContent).toContain('attach: tmux -L hive-v2 attach');
+  });
+});
