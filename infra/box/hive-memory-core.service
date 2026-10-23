@@ -1,0 +1,31 @@
+[Unit]
+Description=Agent Memory core gateway (docker, loopback only)
+Requires=docker.service
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+SupplementaryGroups=docker
+EnvironmentFile=/etc/hive-v2/memory.env
+ExecStartPre=-/usr/bin/docker rm -f hive-memory-core
+# The tag is pinned on purpose. Upgrade: bump the tag, push, let the deploy
+# workflow provision the box. Bare -e NAME entries pass the value through
+# from memory.env; systemd reads the file as root, so it stays 0600.
+ExecStart=/usr/bin/docker run --rm --name hive-memory-core \
+  --network tdai-memory-stack --network-alias memory-core \
+  -p 127.0.0.1:8420:8420 \
+  -v tdai-memory-core-data:/data/tdai-memory \
+  -v /etc/hive-v2/tdai-gateway.yaml:/data/config/tdai-gateway.yaml:ro \
+  -e TDAI_GATEWAY_API_KEY \
+  -e TDAI_GATEWAY_PORT=8420 \
+  -e TDAI_GATEWAY_HOST=0.0.0.0 \
+  -e TDAI_DATA_DIR=/data/tdai-memory \
+  -e STORE_MODE=sqlite \
+  agentmemory/memory-core:1.0.3-beta.1
+ExecStop=-/usr/bin/docker stop hive-memory-core
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

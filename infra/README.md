@@ -24,8 +24,10 @@ relay is the only way in. The hive server strips the `/hive` prefix
 before routing, so `/hive/api/view` and `/api/view` are the same endpoint.
 
 - `provision-box.sh` — idempotent root provisioner. Installs units and
-  wrapper only when content differs, keeps an existing
-  `/etc/hive-v2/web.env`, renders and reloads nginx.
+  wrapper only when content differs, keeps existing env files under
+  `/etc/hive-v2`, renders and reloads nginx, renders the memory gateway
+  config, installs docker, and pulls the pinned memory images. The memory
+  stack itself is documented in `docs/memory.md`.
 - `deploy-box.sh` — what the workflow runs on the box over SSM: fetch, reset
   to the merged commit, `npm ci`, build, provision, health-check.
 - `.github/workflows/deploy.yml` — gate job (test, build, lint) then deploy.
