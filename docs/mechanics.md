@@ -27,7 +27,7 @@ Three roots, each with a distinct lifecycle.
 
 - `projects.json` — `{projects:[{name, home, repos[]}]}`; the hub's world model.
 - `hub.json` — the hub's own session identity (claude_pid+started, pane, session_id, window).
-- `tasks.jsonl` — append-only ledger; one event per line. Vocabulary (hh-hub:32): `asked handed plan question answered blocked overnight cleanup decided done cancelled note`. State of a task = last non-note event; `plan/question/blocked` = waits on owner. **This is the entire "what waits on you" data source.**
+- `tasks.jsonl` — append-only ledger; one event per line. Vocabulary (hh-hub:32): `asked handed plan question answered blocked overnight cleanup decided done cancelled note progress planaccept`. State of a task = last event not in {note, progress, planaccept}. `plan/question/blocked` = waits on owner. **This is the entire "what waits on you" data source.**
 - `tasks/<id>.md` — task text + project folders + messaging instructions, handed to the orchestrator as a path.
 - `memory/<project>.md`, `memory/hub-handoff.md` — hub's model-written notes and its own handoff.
 - `panes/<project>.json` — a start/wake the hub launched that hasn't registered yet; stores the exact line to type, `typed` flag, sender pid. Prevents double-starts and enables `continue` after a dialog.
