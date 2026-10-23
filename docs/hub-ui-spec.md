@@ -62,7 +62,13 @@ Needs, in order pushed:
    | `blocked` | `✖` | `blocked` | red |
    | anything else | `•` | the state name itself | white |
 
-   A `plan` task carries the `plan` action (`project`, `taskId` set). If its project's orchestrator has a live question, the first such task also absorbs it: the dialog block keyed `"<project>"` renders on this card and rule 3 is skipped for that project (one card, one answer). With no dialog, the web UI renders the plan action: an **Approve plan** button and a **Send back** button with an optional feedback line; both POST `/api/plan-answer`, which types the verdict as the orchestrator's next line and logs the task `answered` (approve) or `handed` (send back). With no dialog, the TUI renders the same action as two hotkey **Button**s (`paddingLeft: 2`, `columnGap: 1`): `a approve plan` (hotkey `a`) and `b send back` (hotkey `b`). When several plan needs show at once, a hotkey presses the first one. `b` swaps the buttons for a one-line feedback prompt: white `feedback: `, then the typed text in white (gray `what should change? (optional)` while the line is empty), then an inverse-space cursor. Enter sends, Esc cancels, and an empty line means no feedback. While the prompt is open, button hotkeys and Enter stay inert. While the answer runs, the card shows cyan `answering…`.
+   Every task need shows its reason as a detail line under row 1 (web: gray, small): the task's `last_note`, or `no reason recorded` when the note is empty.
+
+   A stale task need also shows the word `stale` in amber after `words`, and a **Nudge** button inside the card, below its action row. Stale means the task is in `plan`, `question`, `blocked`, or `handed` and its `last_progress_at` (or its `updated` stamp when no progress was ever reported) is more than 4 hours old (`STALE_MS`). Nudge POSTs `/api/message` with `{project, text: "<taskId>: owner asks for status"}`. While the send runs the button swaps to cyan `nudging…`. The stale marker and Nudge are web-only.
+
+   A `plan` task carries the `plan` action (`project`, `taskId` set) and its checkpoint list: one line per checkpoint, gray, small, `{id}: {desc} (~{etaMin}m)`, above the verdict buttons. If its project's orchestrator has a live question, the first such task also absorbs it: the dialog block keyed `"<project>"` renders on this card and rule 3 is skipped for that project (one card, one answer). With no dialog, the web UI renders the plan action: an **Approve plan** button and a **Send back** button with an optional feedback line; both POST `/api/plan-answer`, which types the verdict as the orchestrator's next line and logs the task `answered` (approve) or `handed` (send back). With no dialog, the TUI renders the same action as two hotkey **Button**s (`paddingLeft: 2`, `columnGap: 1`): `a approve plan` (hotkey `a`) and `b send back` (hotkey `b`). When several plan needs show at once, a hotkey presses the first one. `b` swaps the buttons for a one-line feedback prompt: white `feedback: `, then the typed text in white (gray `what should change? (optional)` while the line is empty), then an inverse-space cursor. Enter sends, Esc cancels, and an empty line means no feedback. While the prompt is open, button hotkeys and Enter stay inert. While the answer runs, the card shows cyan `answering…`. The checkpoint list and the reason line are web-only. The TUI keeps the verdict row only.
+
+   A `blocked` or `question` task carries the `resolve` action (`project`, `taskId` set), web-only: a **Rebrief** button and a **Cancel** button. Rebrief swaps both buttons for a one-line input (placeholder `the new brief`, aria-label `new brief for <taskId>`), a **Send** button that stays disabled until the line holds text, and a **Back** button that abandons the rebrief and brings the buttons back. Send and Cancel POST `/api/task-resolve` with `{project, task, action, note?}`: `cancel` moves the task to `cancelled`, `rebrief` moves it back to `asked` with the note as its new brief. While the call runs the card shows cyan `resolving…`. The TUI has no resolve action.
 3. **Orchestrator question** (per project with `orchestrator.question`, unless absorbed by a `plan` task per rule 2): glyph `?`, **yellow**, who = project name, words `its orchestrator has a question on its screen`, when empty, plus dialog block keyed `"<project>"`.
 4. **Agent question** (per agent with `question`): glyph `?`, **yellow**, who = `{project} · {agentRef}`, words `a question on its screen`, when empty, plus dialog block keyed `"<project>/<agentRef>"`.
 5. **Starting orchestrator waiting on owner** (`orchestrator.starting` exists, not `typed`, not `sending`): glyph `?`, **yellow**, who = project name, when = `ago(starting.at)`:
@@ -99,6 +105,7 @@ Card = column, `marginTop: 1`.
 
 **`orchestrator` row** — one row of texts:
 - orchestrator `name` — white; fallbacks: `none yet` when state is `none`, `?` otherwise.
+- when `name` is set (web only): gray `  {project}:{name}` — the tmux window the orchestrator lives in.
 - when state `unregistered` and `pane` set: gray `  pane {pane}` (two leading spaces).
 - when `context` is a number: `  {context}%` — color: **gray** if `context_assumed`, else **yellow** if `context >= rotateAt` (plugin option `rotate_at_percent`, default **50**), else **green**.
 - when `context_unknown`: gray `  context unknown`.
@@ -107,6 +114,7 @@ Card = column, `marginTop: 1`.
 - no agents: gray `none`.
 - else one row: for each agent, one of these glyphs **followed by a trailing space** (so two hollow dots don't read as one wide sign): `●` **green** (running), `○` **yellow` (stopped), `✖` **red** (wedged), `?` **red** (unknown/unrecorded). Then white ` {up} of {total}` (leading space; `up` = running count).
 - If any agents are not running, a second line, **yellow**: `{ref} {state}` joined with `, ` (e.g. `fixer stopped, reviewer@/wt/repo unknown`).
+- Web only, a third line, gray, small: the tmux window name of every agent, `{project}:{agent name}` joined with `, `.
 
 **`tasks` row** — white, one string:
 `{open_tasks} open` then optional suffixes, in order:
@@ -114,8 +122,18 @@ Card = column, `marginTop: 1`.
 - ` · {n} cleanup` (state `cleanup`)
 - ` · {n} done today` (state `done`, `updated` same local day)
 
+**`progress` row** (web only, only when the project has tasks with a checkpoint list): one line per such task in a non-closed state, small text, in ledger order. A `done` or `cancelled` task drops off the row.
+- `{taskId}` — white, medium
+- `{done}/{total} checkpoints` — zinc. `done` counts checkpoints with a terminal progress event (`ok`, `fail`, `skip`)
+- `on {checkpoint}` — zinc, only when a checkpoint's latest event is `started`
+- `last progress {ago} ago` or `no progress yet` — gray, from `last_progress_at`
+- `failed: {ids}` — **red**, only when checkpoints hold a `fail`
+- `stale` — amber, plus a **Nudge** button (same behavior as the need card), only when the task is stale per §1.4
+
 **`folders` row** — one line per repo, white, `wrap: truncate-end`:
 `{folder}` + (when `changed` truthy) `  {changed} changed`. (`branch` and `kind` are **not** shown on screen.)
+
+**Attach hint** (web only): the card ends with one gray mono line, `attach: tmux -L hive-v2 attach`. The window names above are what to attach to.
 
 **Resume row** (`paddingLeft: 15`), shown only when `canResume = (state is 'stopped' or 'resumable') && session_id && !starting`:
 - while busy with this project: cyan `resuming…`
@@ -235,6 +253,11 @@ type HubTask = {
   last_note: string | null
   needs_owner: boolean      // state ∈ {plan, question, blocked}
   decisions?: { at: string; reason: string }[]
+  checkpoints?: { id: string; desc: string; etaMin: number }[]  // from the latest plan event
+  progress?: Record<string, { status: 'started' | 'ok' | 'fail' | 'skip'; note?: string; at: string }>
+  last_progress_at?: string | null   // ISO of the latest progress event
+  plan_approved?: boolean
+  checkpoint_accepts?: Record<string, string>  // failed checkpoint id → ISO of owner accept
 }
 
 type HubDialogOption = {
@@ -266,6 +289,8 @@ type HubView = {
   error: string
 }
 ```
+
+A task in a closed state (`done`, `cancelled`) keeps its checkpoint trail in the data, but the project card's progress row (§1.7) drops it.
 
 ## 6. Exact JSON outputs of `bin/hh-hub`
 
@@ -336,14 +361,20 @@ A JSON **array**, sorted by `asked`:
     "updated": "2026-10-13T06:41:22Z",
     "last_note": "which schema do you want?",
     "decisions": [ { "at": "2026-10-13T02:10:00Z", "reason": "chose postgres per the brief" } ],
-    "needs_owner": true
+    "needs_owner": true,
+    "checkpoints": [ { "id": "a", "desc": "write it", "etaMin": 5 } ],
+    "progress": { "a": { "status": "started", "at": "2026-10-13T06:30:00Z" } },
+    "last_progress_at": "2026-10-13T06:30:00Z",
+    "plan_approved": false,
+    "checkpoint_accepts": {}
   }
 ]
 ```
 
-- `state`: last event that is not `note`. Vocabulary: `asked handed plan question answered blocked overnight cleanup decided done cancelled note`.
+- `state`: last event that is not `note`. Vocabulary: `asked handed plan question answered blocked overnight cleanup decided done cancelled note progress planaccept`.
 - Closed states: `done cancelled`. Needs-owner states: `plan question blocked` → `needs_owner`.
 - `decisions` always an array (possibly empty). `last_note` may be `null`.
+- `checkpoints` comes from the latest `plan` event and resets on a fresh plan. `progress` maps checkpoint id to its latest progress event. `last_progress_at` is the newest progress stamp, or `null` when nothing was reported.
 
 ### 6.3 `hh-hub dialog <project> [<agent>[@<team root>]]`
 
@@ -392,13 +423,22 @@ Success (exit 0) prints one line: the pane dialog parse plus identifiers:
 | `a approve plan` / `b send back` hotkey buttons (TUI), `Approve plan` / `Send back` + feedback line (web) | `hh-hub plan-answer <project> <task> <approve|sendback> [feedback]` | 30 s (TUI), 150 s (web) | cyan `answering…` on the need |
 | `Add project` row (web only, §10) | POST `/api/project` with `{name, path}` | 30 s | — |
 | `Send` message row (web only, §11) | POST `/api/message` with `{project, text}` | 150 s | cyan `sending…` on the card |
+| `Rebrief` / `Cancel` on a blocked or question need (web only) | POST `/api/task-resolve` with `{project, task, action, note?}` | 30 s | cyan `resolving…` on the need |
+| `Nudge` on a stale need or progress row (web only) | POST `/api/message` with `{project, text: "<taskId>: owner asks for status"}` | 150 s | cyan `nudging…` on the need or row |
+| (workers, completeness) | POST `/api/progress` with `{project, task, checkpoint, status, note?}` | 30 s | — |
 | `Seen` button | local state only (records the away-period start as seen); no subprocess | — | — |
+
+`/api/task-resolve` validates, in order: `action` is `cancel` or `rebrief`, a rebrief carries a non-empty `note` (the new brief, whitespace-folded, capped at 4000 characters, no control characters — the fold already turns tab and newline into spaces, so what remains is hostile or broken input), the task exists and belongs to the project, and it is not already `done` or `cancelled`. `cancel` appends a `cancelled` task event (note, or `cancelled by the owner`). `rebrief` appends an `asked` event with the note, and the fold clears the old plan's checkpoints, progress, approval, and progress clock. Both append an owner decision (`cancelled {task}` / `rebriefed {task}: {note}`), and the logged rebrief summary holds at most the first 120 characters of the note (same cap as an owner message, §11). Every refusal is a 400 `{ok: false, detail}` and shows as a toast. Ledger appends only: no pane is touched, so a dead orchestrator never blocks the call.
+
+`/api/progress` is a thin pass-through to the hub progress function: `task` and `checkpoint` are required, the task must exist and belong to the project, `status` is `started|ok|fail|skip`, the checkpoint must be in the task's plan, and a `skip` needs a note saying why. Success appends one `progress` event and answers `{ok: true}`. Both endpoints serialize per project like the other actions.
 
 Toasts (on completion):
 - wake/continue success: `{project}: {done} (pane {stdout.trim()})` where `done` is `its orchestrator is coming up; it reports back when its team is up` (wake) or `its first line was sent` (continue).
 - wake/continue failure: `{project}: {last stderr line, "hivehouse: " stripped}`.
 - answer success: `{who}: answered "{option}"` + ` (the dialog is still on its screen)` when `dialog_gone` false; `who` = `{project} · {agent}` or `{project}`. Failure: `{who}: {stderr last line}`.
 - plan-answer success: `{taskId}: plan approved` / `{taskId}: plan sent back`. Failure: `{taskId}: {reason}` (for example the plan prompt came back on the orchestrator's screen).
+- task-resolve success: `{taskId}: cancelled` / `{taskId}: back to asked with the new brief`. Failure: `{taskId}: {reason}` (for example the task is already done).
+- nudge success: `{taskId}: the orchestrator was asked for status`. Failure: `{taskId}: {reason}` (for example the pane is gone).
 - message success: `{project}: the message was typed to its orchestrator`. Failure: `{project}: {reason}` (for example the pane is gone or a dialog waits on its screen).
 - After every action: refresh.
 
@@ -430,6 +470,17 @@ The Ink screen has no add-project row (it has no task-creation row either): regi
 
 Each project card holds a message row above its new-task row. One row: a text input (placeholder `message the orchestrator…`, aria-label `message for {project}`, mono, small) and a **Send** button. Enter in the input submits. The button stays disabled while the input is blank, and the shared one-action-at-a-time gate disables it while any action runs. While this project's send is in flight, the row shows cyan `sending…`. On success the input clears. The row shows on every card, even with no team. The server answers a refusal and the refusal shows as a toast.
 
-A submit POSTs `/api/message` with `{project, text}`. The default target is the project's orchestrator. An optional `agent` field names a team agent (`name`, or `name@<worktree>` when the name is ambiguous). The server checks, in order: `text` trimmed and whitespace-folded is non-empty, it is capped at 4000 characters, it holds no control characters (the fold already turns tab and newline into spaces, so what remains is hostile or broken input), the project exists, the target is in `team.json`, and the target has a recorded pane whose identity (pid plus start time) still matches the live pane. A dialog on the target's screen refuses with `answer it first`. The typed line is `Owner: {text}` and the send reuses the spawn typing path, so the pane identity is verified again before the keys land. Success answers `{ok: true, typed}` and appends the message to `decisions.jsonl` with `by: 'owner'`. A send that cannot be logged answers an error, not a success. Every refusal is a 400 `{ok: false, detail}` and shows as a toast.
+A submit POSTs `/api/message` with `{project, text}`. The default target is the project's orchestrator. An optional `agent` field names a team agent (`name`, or `name@<worktree>` when the name is ambiguous). The server checks, in order: `text` trimmed and whitespace-folded is non-empty, it is capped at 4000 characters, it holds no control characters (the fold already turns tab and newline into spaces, so what remains is hostile or broken input), the project exists, the target is in `team.json`, and the target has a recorded pane whose identity (pid plus start time) still matches the live pane. A dialog on the target's screen refuses with `answer it first`. The typed line is `Owner: {text}` and the send reuses the spawn typing path, so the pane identity is verified again before the keys land. Success answers `{ok: true, typed}` and appends the message to `decisions.jsonl` with `by: 'owner'`. The logged summary holds at most the first 120 characters of the text. A send that cannot be logged answers an error, not a success. Every refusal is a 400 `{ok: false, detail}` and shows as a toast.
 
 The Ink screen has no message row: messaging a live agent stays a web flow, the TUI stays a monitor.
+
+## 12. Decisions feed (web UI only)
+
+The web screen shows a `Decisions` section between the empty state and the project cards, only when the filtered feed is non-empty. Header: gray, small, uppercase, `Decisions`. One row per entry, newest first, capped at 8: a gray dot, the entry's `task` (else its `project`) in white, then the `summary` (stretchtext per §9), and `ago(entry.at)` in gray on the right.
+
+The feed is signal only. The server scans the newest 64 entries of `decisions.jsonl` and drops the noise before capping (`feedKeep` in `src/view.ts`):
+
+- `by: 'watch'` rows whose summary starts with `auto-approved "Approve once"` (tier-1 auto-approvals)
+- `by: 'owner'` rows whose summary starts with `answered "Approve once"`
+
+Everything else stays: plan approvals, send-backs, rebriefs, cancels, owner messages, non-trivial watch decisions, wedged marks, deaths. The web UI renders what the view carries and never filters itself. The TUI has no decisions feed.

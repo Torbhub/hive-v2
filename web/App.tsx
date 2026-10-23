@@ -2,20 +2,20 @@ import React, {
   useCallback, useContext, useEffect, useRef, useState,
 } from 'react';
 import { Toaster, toast } from 'sonner';
-import type { Approvals, HubDialog, HubProject, HubView, ProjectMode } from '../src/types';
-import { APPROVALS_MODES, PROJECT_MODES } from '../src/types';
+import type { Approvals, HubProject, HubView, ProjectMode } from '../src/types';
+import { APPROVALS_MODES, CLOSED_STATES, PROJECT_MODES } from '../src/types';
 import {
   agentGlyph, agentRef, ago, buildNeeds, homeTilde, orchestratorLook,
-  ROTATE_AT_PERCENT, tasksLine, type Need,
+  ROTATE_AT_PERCENT, taskProgress, tasksLine, windowLabel,
 } from '../src/ui/look';
 import { cn } from './lib/utils';
 import { StretchText } from './Stretch';
 import { ActionContext, Btn } from './action';
+import { NeedCard, ProgressRow } from './needs';
 import { AddProjectRow, MessageRow, NewTaskRow } from './rows';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
 import { Card, CardContent, CardHeader } from './components/ui/card';
-import { Input } from './components/ui/input';
 import { Separator } from './components/ui/separator';
 import { ToggleGroup, ToggleGroupItem } from './components/ui/toggle-group';
 
@@ -39,168 +39,6 @@ function StatusDot({ color, className }: { color: string; className?: string }) 
   return <span className={cn('inline-block h-2 w-2 rounded-full shrink-0', cls, className)} />;
 }
 
-const NEED_ACCENT: Record<string, string> = { magenta: 'border-l-fuchsia-400', yellow: 'border-l-amber-400', red: 'border-l-red-500' };
-
-function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="inline-flex h-4 min-w-4 items-center justify-center rounded border border-zinc-700 bg-zinc-800 px-1 font-mono text-[10px] text-zinc-400">
-      {children}
-    </kbd>
-  );
-}
-
-function DialogBlock({
-  dialog, answering, idPrefix, onAnswer,
-}: {
-  dialog: HubDialog;
-  answering: boolean;
-  idPrefix: string;
-  onAnswer: (choice: string) => void;
-}) {
-  const textLines = dialog.text.split('\n').filter((l) => !/^[\s─╌]*$/.test(l)).slice(-14);
-  const offered = dialog.options.filter((o) => o.offered);
-  const notOffered = dialog.options.filter((o) => !o.offered);
-  return (
-    <div className="mt-2 flex flex-col gap-2">
-      <div className="rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 font-mono text-xs text-zinc-400">
-        {textLines.map((l, i) => (
-          <div key={i} className="truncate">{l}</div>
-        ))}
-      </div>
-      {answering && <div className="text-xs text-sky-400">answering…</div>}
-      {(offered.length > 0 || dialog.esc) && (
-        <div className="flex flex-wrap gap-1.5">
-          {offered.map((o) => (
-            <Btn key={o.n} id={`${idPrefix}-${o.n}`} onPress={() => onAnswer(String(o.n))}>
-              <Kbd>{o.n}</Kbd>
-              {`${o.label}${o.saves_rule ? ' (saves a rule)' : ''}`}
-            </Btn>
-          ))}
-          {dialog.esc && <Btn id={`${idPrefix}-esc`} onPress={() => onAnswer('esc')}>Esc</Btn>}
-        </div>
-      )}
-      {offered.filter((o) => o.detail !== '').map((o) => (
-        <div key={o.n} className="text-xs text-zinc-500 truncate">{`${o.n}. ${o.label} ${o.detail}`}</div>
-      ))}
-      {(notOffered.length > 0 || offered.length === 0) && (
-        <div className="text-xs text-amber-300">
-          {dialog.options.length === 0
-            ? 'answer it in the pane'
-            : `${notOffered.map((o) => o.label).join(', ') || 'this dialog'}: answer it in the pane`}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function NeedDialog({
-  dialogKey, dialogs, busy, onAnswer,
-}: {
-  dialogKey: string;
-  dialogs: Record<string, HubDialog>;
-  busy: { project: string; what: string; who?: string } | null;
-  onAnswer: (project: string, agentRefArg: string | undefined, seen: string, choice: string, id: string) => void;
-}) {
-  const dialog = dialogs[dialogKey];
-  if (!dialog) return null;
-  const [project, agent] = dialogKey.split('/');
-  const answering = busy?.what === 'answering' && busy.project === project && busy.who === agent;
-  return (
-    <DialogBlock
-      dialog={dialog}
-      answering={answering}
-      idPrefix={dialogKey}
-      onAnswer={(choice) => onAnswer(project, agent, dialog.fingerprint, choice, `${dialogKey}-${choice}`)}
-    />
-  );
-}
-
-function NeedCard({
-  need, view, busy, onAnswer, onContinue, onPlanAnswer,
-}: {
-  need: Need;
-  view: HubView;
-  busy: { project: string; what: string; who?: string } | null;
-  onAnswer: (project: string, agentRefArg: string | undefined, seen: string, choice: string, id: string) => void;
-  onContinue: (project: string) => void;
-  onPlanAnswer: (project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => void;
-}) {
-  const accent = NEED_ACCENT[need.color] ?? 'border-l-zinc-600';
-  const continuing = need.action === 'continue' && need.project
-    && busy?.project === need.project && busy.what === 'continuing';
-  return (
-    <div className={cn('rounded-md border border-zinc-800 border-l-2 bg-zinc-900/60 px-3 py-2', accent)}>
-      <div className="flex items-baseline justify-between gap-3">
-        <div className="min-w-0 text-sm">
-          <span className="font-medium text-white">{need.who}</span>
-          <span className="text-zinc-300">{`  ${need.words}`}</span>
-        </div>
-        {need.when !== '' && <span className="shrink-0 text-xs text-zinc-500 tabular">{need.when}</span>}
-      </div>
-      {need.dialogKey && (
-        <NeedDialog dialogKey={need.dialogKey} dialogs={view.dialogs} busy={busy} onAnswer={onAnswer} />
-      )}
-      {need.action === 'plan' && need.project && need.taskId && !need.dialogKey && (
-        <PlanActions need={need} busy={busy} onPlanAnswer={onPlanAnswer} />
-      )}
-      {need.action === 'continue' && need.project && (
-        <div className="mt-2">
-          {continuing
-            ? <span className="text-xs text-sky-400">continuing…</span>
-            : <Btn id={`continue-${need.project}`} onPress={() => onContinue(need.project!)}>Continue</Btn>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function PlanActions({
-  need, busy, onPlanAnswer,
-}: {
-  need: Need;
-  busy: { project: string; what: string; who?: string } | null;
-  onPlanAnswer: (project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => void;
-}) {
-  const [sendingBack, setSendingBack] = useState(false);
-  const [feedback, setFeedback] = useState('');
-  const project = need.project!;
-  const taskId = need.taskId!;
-  if (busy?.project === project && busy.what === 'answering' && busy.who === taskId) {
-    return <div className="mt-2 text-xs text-sky-400">answering…</div>;
-  }
-  return (
-    <div className="mt-2 flex flex-col gap-2">
-      <div className="flex flex-wrap gap-1.5">
-        <Btn id={`plan-approve-${taskId}`} variant="primary" onPress={() => onPlanAnswer(project, taskId, 'approve')}>
-          Approve plan
-        </Btn>
-        {!sendingBack && (
-          <Btn id={`plan-sendback-${taskId}`} onPress={() => setSendingBack(true)}>Send back</Btn>
-        )}
-      </div>
-      {sendingBack && (
-        <form
-          className="flex gap-1.5"
-          // Block the native reload; the Send button's onPress is the one
-          // submit path (Enter in the input clicks the submit button).
-          onSubmit={(e) => e.preventDefault()}
-        >
-          <Input
-            autoFocus
-            value={feedback}
-            onChange={(e) => setFeedback(e.target.value)}
-            placeholder="what should change? (optional)"
-            className="h-8 text-xs"
-          />
-          <Btn id={`plan-sendback-go-${taskId}`} onPress={() => onPlanAnswer(project, taskId, 'sendback', feedback.trim() || undefined)}>
-            Send
-          </Btn>
-        </form>
-      )}
-    </div>
-  );
-}
-
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex gap-3 text-sm">
@@ -211,17 +49,18 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 function ProjectCard({
-  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage,
+  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage, onNudge,
 }: {
   project: HubProject;
   view: HubView;
   now: number;
-  busy: { project: string; what: string } | null;
+  busy: { project: string; what: string; who?: string } | null;
   onWake: (project: string) => void;
   onStartTask: (project: string, text: string) => Promise<boolean>;
   onSetMode: (project: string, mode: ProjectMode) => void;
   onSetApprovals: (project: string, approvals: Approvals) => void;
   onMessage: (project: string, text: string) => Promise<boolean>;
+  onNudge: (project: string, taskId: string) => void;
 }) {
   const { acting } = useContext(ActionContext);
   const look = orchestratorLook(p.orchestrator);
@@ -233,6 +72,9 @@ function ProjectCard({
     (o.state === 'stopped' || o.state === 'resumable') && Boolean(o.session_id) && !o.starting;
   const back = 1 + p.agents.filter((a) => a.state === 'stopped').length;
   const resuming = busy?.project === p.name && busy.what === 'resuming';
+  const trail = view.tasks.filter(
+    (t) => t.project === p.name && !CLOSED_STATES.has(t.state) && taskProgress(t) !== null,
+  );
 
   return (
     <Card>
@@ -247,6 +89,7 @@ function ProjectCard({
         <Row label="orchestrator">
           <span>
             <span className="text-zinc-100">{orchName}</span>
+            {o.name && <span className="text-zinc-500">{`  ${windowLabel(p.name, o.name)}`}</span>}
             {o.state === 'unregistered' && o.pane && <span className="text-zinc-500">{`  pane ${o.pane}`}</span>}
             {typeof o.context === 'number' && (
               <span className={o.context_assumed ? 'text-zinc-500' : o.context >= ROTATE_AT_PERCENT ? 'text-amber-300' : 'text-emerald-400'}>
@@ -270,12 +113,24 @@ function ProjectCard({
               {notRunning.length > 0 && (
                 <span className="text-amber-300 text-xs">{notRunning.map((a) => `${agentRef(a)} ${a.state}`).join(', ')}</span>
               )}
+              <span className="text-zinc-500 text-xs">
+                {p.agents.map((a) => windowLabel(p.name, a.name)).join(', ')}
+              </span>
             </span>
           )}
         </Row>
         <Row label="tasks">
           <span className="text-zinc-100">{tasksLine(view.tasks, p.name, p.open_tasks, now)}</span>
         </Row>
+        {trail.length > 0 && (
+          <Row label="progress">
+            <span className="flex flex-col gap-1">
+              {trail.map((t) => (
+                <ProgressRow key={t.id} task={t} now={now} busy={busy} onNudge={onNudge} />
+              ))}
+            </span>
+          </Row>
+        )}
         <Row label="folders">
           <span className="flex flex-col">
             {p.repos.map((r) => (
@@ -328,6 +183,9 @@ function ProjectCard({
         )}
         <MessageRow project={p.name} busy={busy} onMessage={onMessage} />
         <NewTaskRow project={p.name} busy={busy} onStartTask={onStartTask} />
+        <div className="mt-2 border-t border-zinc-800 pt-2.5 font-mono text-xs text-zinc-500">
+          attach: tmux -L hive-v2 attach
+        </div>
       </CardContent>
     </Card>
   );
@@ -336,7 +194,7 @@ function ProjectCard({
 export function App() {
   const [view, setView] = useState<HubView>(EMPTY_VIEW);
   const [acting, setActing] = useState(false);
-  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging'; who?: string } | null>(null);
+  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
   const actingRef = useRef(false);
 
@@ -373,7 +231,7 @@ export function App() {
   const act = useCallback(async (
     id: string,
     project: string,
-    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding' | 'messaging',
+    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding' | 'messaging' | 'resolving' | 'nudging',
     who: string,
     runAction: () => Promise<string>,
     busyWho?: string,
@@ -449,6 +307,20 @@ export function App() {
     }, taskId);
   }, [act]);
 
+  const onResolve = useCallback((project: string, taskId: string, action: 'cancel' | 'rebrief', note?: string) => {
+    void act(`resolve-${taskId}-${action}`, project, 'resolving', taskId, async () => {
+      await post('api/task-resolve', { project, task: taskId, action, note });
+      return action === 'cancel' ? `${taskId}: cancelled` : `${taskId}: back to asked with the new brief`;
+    }, taskId);
+  }, [act]);
+
+  const onNudge = useCallback((project: string, taskId: string) => {
+    void act(`nudge-${taskId}`, project, 'nudging', taskId, async () => {
+      await post('api/message', { project, text: `${taskId}: owner asks for status` });
+      return `${taskId}: the orchestrator was asked for status`;
+    }, taskId);
+  }, [act]);
+
   const onAddProject = useCallback(async (name: string, folder: string): Promise<boolean> => {
     return act('add-project', name, 'adding', name, async () => {
       await post('api/project', { name, path: folder });
@@ -502,6 +374,8 @@ export function App() {
                   onAnswer={onAnswer}
                   onContinue={onContinue}
                   onPlanAnswer={onPlanAnswer}
+                  onResolve={onResolve}
+                  onNudge={onNudge}
                 />
               ))}
             </section>
@@ -539,6 +413,7 @@ export function App() {
               onSetMode={onSetMode}
               onSetApprovals={onSetApprovals}
               onMessage={onMessage}
+              onNudge={onNudge}
             />
           ))}
 

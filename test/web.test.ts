@@ -34,7 +34,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   return { ...orig, paneIs: vi.fn(orig.paneIs), capturePane: vi.fn(orig.capturePane) };
 });
 
-import { hubTask, startProject, wake } from '../src/hub.js';
+import { hubLog, hubTask, startProject, wake } from '../src/hub.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { typeLine } from '../src/spawn.js';
 import { capturePane, paneIs } from '../src/tmux.js';
@@ -423,12 +423,19 @@ describe('POST /api/approvals + decisions in the view', () => {
     expect(back.status).toBe(200);
   });
 
-  it('GET /api/view carries the latest decisions, newest first', async () => {
+  it('GET /api/view carries the latest kept decisions, newest first', async () => {
     const { appendDecision } = await import('../src/state.js');
+    // Tier-1 auto-approvals and "Approve once" clicks are noise: the feed drops them.
     await appendDecision(root, { project: 'demo', by: 'watch', summary: 'auto-approved "Approve once" for: $ ls' });
+    await appendDecision(root, { project: 'demo', by: 'owner', summary: 'approved the plan' });
+    await appendDecision(root, { project: 'demo', by: 'owner', summary: 'answered "Approve once" for: $ rm x' });
+    await appendDecision(root, { project: 'demo', by: 'watch', summary: 'marked fixer wedged: frozen pane, restarting it' });
     const view = await (await fetch(`${base}/api/view`)).json();
-    expect(view.decisions.length).toBeGreaterThan(0);
-    expect(view.decisions[0].summary).toContain('auto-approved');
+    const summaries = view.decisions.map((d: { summary: string }) => d.summary);
+    expect(summaries).toEqual([
+      'marked fixer wedged: frozen pane, restarting it',
+      'approved the plan',
+    ]);
     expect(view.decisions[0].by).toBe('watch');
   });
 });
@@ -595,5 +602,134 @@ describe('POST /api/message', () => {
       vi.mocked(capturePane).mockRestore();
       vi.mocked(typeLine).mockRestore();
     }
+  });
+});
+
+describe('POST /api/task-resolve', () => {
+  beforeAll(async () => {
+    await appendTaskEvent(root, { id: 'demo-8', project: 'demo', event: 'asked', at: new Date().toISOString() });
+    await appendTaskEvent(root, {
+      id: 'demo-8', project: 'demo', event: 'blocked', at: new Date().toISOString(), note: 'no API key',
+    });
+    await appendTaskEvent(root, { id: 'demo-9', project: 'demo', event: 'asked', at: new Date().toISOString() });
+    // demo-9 lives the full cycle before its rebrief: approved plan, progress, then blocked.
+    await appendTaskEvent(root, {
+      id: 'demo-9', project: 'demo', event: 'plan', at: new Date().toISOString(),
+      checkpoints: [{ id: 'a', desc: 'write it', etaMin: 5 }],
+    });
+    await appendTaskEvent(root, {
+      id: 'demo-9', project: 'demo', event: 'answered', at: new Date().toISOString(), note: 'plan approved by owner',
+    });
+    await appendTaskEvent(root, {
+      id: 'demo-9', project: 'demo', event: 'progress', at: new Date().toISOString(), checkpoint: 'a', status: 'started',
+    });
+    await appendTaskEvent(root, {
+      id: 'demo-9', project: 'demo', event: 'blocked', at: new Date().toISOString(), note: 'which schema?',
+    });
+  });
+
+  it('cancel moves a blocked task to cancelled and logs the decision', async () => {
+    const r = await post('/api/task-resolve', { project: 'demo', task: 'demo-8', action: 'cancel' });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true });
+    const view = await (await fetch(`${base}/api/view`)).json();
+    expect(view.tasks.find((t: { id: string }) => t.id === 'demo-8').state).toBe('cancelled');
+    const log = (await fs.readFile(hubPath(root, 'decisions.jsonl'), 'utf8')).trim().split('\n');
+    const last = JSON.parse(log[log.length - 1]);
+    expect(last).toMatchObject({ by: 'owner', task: 'demo-8' });
+    expect(last.summary).toContain('cancelled demo-8');
+  });
+
+  it('a closed task refuses with a 400', async () => {
+    const r = await post('/api/task-resolve', { project: 'demo', task: 'demo-8', action: 'cancel' });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/already cancelled/);
+  });
+
+  it('rebrief without a note is a 400; with a note the task goes back to asked', async () => {
+    // The blocked demo-9 carries an approved plan and a progress trail.
+    const before = await (await fetch(`${base}/api/view`)).json();
+    const b9 = before.tasks.find((x: { id: string }) => x.id === 'demo-9');
+    expect(b9.state).toBe('blocked');
+    expect(b9.plan_approved).toBe(true);
+    expect(b9.progress.a.status).toBe('started');
+    const bare = await post('/api/task-resolve', { project: 'demo', task: 'demo-9', action: 'rebrief' });
+    expect(bare.status).toBe(400);
+    expect((await bare.json()).detail).toMatch(/needs a note/);
+    const r = await post('/api/task-resolve', {
+      project: 'demo', task: 'demo-9', action: 'rebrief', note: 'use postgres, per the brief',
+    });
+    expect(r.status).toBe(200);
+    const view = await (await fetch(`${base}/api/view`)).json();
+    const t = view.tasks.find((x: { id: string }) => x.id === 'demo-9');
+    expect(t.state).toBe('asked');
+    expect(t.last_note).toBe('use postgres, per the brief');
+    expect(t.needs_owner).toBe(false);
+    // The old plan's approval, trail, and progress clock must not carry over.
+    expect(t.plan_approved).toBe(false);
+    expect(t.checkpoints).toEqual([]);
+    expect(t.progress).toEqual({});
+    expect(t.last_progress_at).toBeNull();
+    // The composed gate: with the approval cleared, handed refuses end-to-end.
+    await expect(hubLog(root, 'demo-9', 'handed')).rejects.toThrow(/no approved plan/);
+  });
+
+  it('an unknown task, a bad action, and a cross-site call are refused', async () => {
+    const missing = await post('/api/task-resolve', { project: 'demo', task: 'demo-99', action: 'cancel' });
+    expect(missing.status).toBe(400);
+    expect((await missing.json()).detail).toMatch(/unknown task/);
+    const badAction = await post('/api/task-resolve', { project: 'demo', task: 'demo-9', action: 'kill' });
+    expect(badAction.status).toBe(400);
+    expect((await badAction.json()).detail).toMatch(/cancel\|rebrief/);
+    const cross = await post('/api/task-resolve',
+      { project: 'demo', task: 'demo-9', action: 'cancel' }, { origin: 'https://evil.example' });
+    expect(cross.status).toBe(403);
+  });
+
+  it('a control character in the note is a 400 refusal, same as a message', async () => {
+    const r = await post('/api/task-resolve', { project: 'demo', task: 'demo-9', action: 'rebrief', note: 'bad\u001bnote' });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/control characters/);
+  });
+});
+
+describe('POST /api/progress', () => {
+  beforeAll(async () => {
+    await appendTaskEvent(root, { id: 'demo-10', project: 'demo', event: 'asked', at: new Date().toISOString() });
+    await appendTaskEvent(root, {
+      id: 'demo-10', project: 'demo', event: 'plan', at: new Date().toISOString(),
+      checkpoints: [{ id: 'a', desc: 'write it', etaMin: 5 }, { id: 'b', desc: 'ship it', etaMin: 10 }],
+    });
+  });
+
+  it('records a progress event the fold can read back', async () => {
+    const r = await post('/api/progress', { project: 'demo', task: 'demo-10', checkpoint: 'a', status: 'started' });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true });
+    const ok = await post('/api/progress', { project: 'demo', task: 'demo-10', checkpoint: 'a', status: 'ok' });
+    expect(ok.status).toBe(200);
+    const view = await (await fetch(`${base}/api/view`)).json();
+    const t = view.tasks.find((x: { id: string }) => x.id === 'demo-10');
+    expect(t.progress.a.status).toBe('ok');
+    expect(t.last_progress_at).toBeTruthy();
+  });
+
+  it('a bad status, an unknown checkpoint, and a skip without a note are 400s', async () => {
+    const badStatus = await post('/api/progress', { project: 'demo', task: 'demo-10', checkpoint: 'a', status: 'meh' });
+    expect(badStatus.status).toBe(400);
+    expect((await badStatus.json()).detail).toMatch(/started\|ok\|fail\|skip/);
+    const badCp = await post('/api/progress', { project: 'demo', task: 'demo-10', checkpoint: 'z', status: 'ok' });
+    expect(badCp.status).toBe(400);
+    expect((await badCp.json()).detail).toMatch(/no checkpoint z/);
+    const bareSkip = await post('/api/progress', { project: 'demo', task: 'demo-10', checkpoint: 'b', status: 'skip' });
+    expect(bareSkip.status).toBe(400);
+    expect((await bareSkip.json()).detail).toMatch(/saying why/);
+  });
+
+  it('an unknown task and missing fields are 400s', async () => {
+    const missing = await post('/api/progress', { project: 'demo', task: 'demo-99', checkpoint: 'a', status: 'ok' });
+    expect(missing.status).toBe(400);
+    expect((await missing.json()).detail).toMatch(/unknown task/);
+    expect((await post('/api/progress', { project: 'demo', status: 'ok' })).status).toBe(400);
   });
 });

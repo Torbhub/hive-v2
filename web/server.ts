@@ -1,12 +1,14 @@
 import http from 'node:http';
 import { existsSync, promises as fs } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Refusal, answerDialog, continueProject, hubTask, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { checkName } from '../src/names.js';
 import { addProjectFromBody } from '../src/project.js';
+import { HttpError } from './http-error.js';
+import { recordStretchOpened } from './stretch.js';
+import { handleTaskAction } from './taskactions.js';
 import {
   ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
 } from '../src/view.js';
@@ -24,12 +26,6 @@ const STATIC_HEADERS: Record<string, string> = {
   'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
   'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
 };
-
-class HttpError extends Error {
-  constructor(public code: number, message: string) {
-    super(message);
-  }
-}
 
 function sendJson(res: http.ServerResponse, code: number, value: unknown): void {
   res.writeHead(code, {
@@ -106,29 +102,9 @@ function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 const TASK_TEXT_CAP = 4000;
-const STRETCH_FIELD_CAP = 200;
-
-// The stretchtext skill reads this log to know which spans the owner opened.
-function stretchLogPath(): string {
-  return process.env.HIVE_STRETCH_LOG
-    ?? path.join(os.homedir(), '.kimi-code', 'stretch-opened.jsonl');
-}
-
-async function recordStretchOpened(body: Record<string, unknown>): Promise<unknown> {
-  const short = String(body.short ?? '').trim();
-  if (!short) throw new HttpError(400, 'short is empty');
-  if (short.length > STRETCH_FIELD_CAP) {
-    throw new HttpError(413, `short is capped at ${STRETCH_FIELD_CAP} characters`);
-  }
-  const pane = String(body.pane ?? '').slice(0, STRETCH_FIELD_CAP);
-  const file = stretchLogPath();
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.appendFile(file, `${JSON.stringify({ ts: Date.now(), short, pane })}\n`);
-  return { ok: true };
-}
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/stretch-opened', '/api/project'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/stretch-opened', '/api/project', '/api/task-resolve', '/api/progress'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
@@ -181,6 +157,8 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
       );
       return { ok: true, typed: r.typed };
     }
+    const taskAction = await handleTaskAction(root, project, pathname, body);
+    if (taskAction !== null) return taskAction;
     const r = await withTimeout(
       answerDialog(root, project, agentRefOf(body), String(body.choice ?? ''), String(body.fingerprint ?? '')),
       ANSWER_TIMEOUT_MS,

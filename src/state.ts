@@ -124,6 +124,16 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         t.checkpoint_accepts = {};
         t.plan_approved = false;
       }
+      if (ev.event === 'asked') {
+        // A rebrief is an asked event on an existing task: the old plan, its
+        // approval, and its trail must not carry over. On task creation these
+        // fields already hold their initial values, so the reset is a no-op.
+        t.checkpoints = [];
+        t.progress = {};
+        t.checkpoint_accepts = {};
+        t.plan_approved = false;
+        t.last_progress_at = null;
+      }
       if (ev.event === 'answered' && prev === 'plan') t.plan_approved = true;
       if (ev.event === 'decided') t.decisions.push({ at: ev.at, reason: ev.note ?? '' });
       if (ev.note) t.last_note = ev.note;

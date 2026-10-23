@@ -1,10 +1,21 @@
-import type { HubProject, HubTask, HubView } from './types.js';
+import type { Decision, HubProject, HubTask, HubView } from './types.js';
 import { buildStatus, listTasks, readDialogFor } from './hub.js';
 import { readDecisions } from './state.js';
 
 export const READ_TIMEOUT_MS = 30_000;
 export const ACTION_TIMEOUT_MS = 150_000;
 export const ANSWER_TIMEOUT_MS = 30_000;
+
+const DECISIONS_SHOWN = 8;
+const DECISIONS_SCANNED = 64;
+
+// The feed is signal only: tier-1 auto-approvals and "Approve once" clicks are
+// noise. Plan verdicts, send-backs, watchdog deaths, and wedged marks stay.
+export function feedKeep(d: Decision): boolean {
+  if (d.by === 'watch' && d.summary.startsWith('auto-approved "Approve once"')) return false;
+  if (d.by === 'owner' && d.summary.startsWith('answered "Approve once"')) return false;
+  return true;
+}
 
 export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
@@ -37,7 +48,10 @@ export async function buildView(root: string): Promise<HubView> {
     error = `tasks not read: ${lastLine(e)}`;
   }
   const dialogs = await readDialogs(root, status.projects);
-  const decisions = await readDecisions(root, 8).catch(() => []);
+  // Scan further back than the feed shows, so filtered noise cannot starve it.
+  const decisions = await readDecisions(root, DECISIONS_SCANNED)
+    .then((ds) => ds.filter(feedKeep).slice(0, DECISIONS_SHOWN))
+    .catch(() => []);
   return {
     root,
     hubName: status.hub.name ?? '',
