@@ -44,6 +44,16 @@ request (unset = open on loopback, for development). The screen also creates
 tasks, starts teams, and sets a project's permission mode (`ask`/`yolo`/`auto`
 — passed to kimi as nothing/`-y`/`--auto` on the next launch, resume included).
 
+## Interrupt vs kill
+
+`hive interrupt demo [agent]` — or the Interrupt buttons on the web screen —
+sends Escape to a live pane. A running turn stops mid-turn and the session
+stays alive: its context survives and you can steer the agent after with a
+message or a dialog answer. On an open dialog Escape is the dismiss key, so a
+dialog needs the answer flow instead. Killing the pane (`hive spawn close`,
+`hive cleanup`) ends the session and its context with it. Interrupt first
+when the work matters.
+
 ## The watchdog
 
 `hive watch` is a foreground daemon (one systemd unit:
