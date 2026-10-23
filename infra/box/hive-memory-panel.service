@@ -1,0 +1,43 @@
+[Unit]
+Description=Agent Memory panel + knowledge service (docker, loopback only)
+Requires=docker.service
+# After only: the panel starts without core, knowledge RAG calls just fail.
+After=network.target docker.service hive-memory-core.service
+
+[Service]
+Type=simple
+User=ubuntu
+SupplementaryGroups=docker
+EnvironmentFile=/etc/hive-v2/memory.env
+ExecStartPre=-/usr/bin/docker rm -f hive-memory-panel
+# Same pin rule as hive-memory-core. 8424 is the knowledge API the panel
+# page calls from the browser, so both ports publish on loopback.
+# No REMOTE_INSTANCE_PROXY_URL on purpose: no proxy is deployed here.
+ExecStart=/usr/bin/docker run --rm --name hive-memory-panel \
+  --network tdai-memory-stack --network-alias memory-hub \
+  --add-host=host.docker.internal:host-gateway \
+  -p 127.0.0.1:8125:8125 \
+  -p 127.0.0.1:8424:8424 \
+  -v tdai-panel-data:/data/knowledge \
+  -e PANEL_PORT=8125 \
+  -e KNOWLEDGE_PORT=8424 \
+  -e LLM_MODE=custom \
+  -e REMOTE_INSTANCE_ID=default \
+  -e REMOTE_INSTANCE_NAME=default \
+  -e REMOTE_INSTANCE_URL=http://memory-core:8420 \
+  -e LLM_BASE_URL \
+  -e LLM_API_KEY \
+  -e LLM_MODEL \
+  -e LLM_PROTOCOL \
+  -e REMOTE_INSTANCE_KEY \
+  -e KNOWLEDGE_SERVICE_KEY \
+  -e KNOWLEDGE_AUTH_TOKEN \
+  -e KNOWLEDGE_PUBLIC_BASE_URL \
+  -e KNOWLEDGE_LLM_BINDING_SYNC \
+  agentmemory/memory-hub:1.0.3-beta.1
+ExecStop=-/usr/bin/docker stop hive-memory-panel
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -54,8 +54,8 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   };
 });
 
-import { closeAgent, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
-import { hubAdd, hubInit, hubTask } from '../src/hub.js';
+import { closeAgent, effectiveOrchestratorMode, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
+import { hubAdd, hubInit, hubTask, setProjectApprovals, setProjectMode } from '../src/hub.js';
 import { appendTaskEvent, hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';
 import { capturePane, killWindow, newWindow, paneIs, run, sendArrow, sendEnter } from '../src/tmux.js';
 
@@ -279,6 +279,59 @@ describe('launchCommand', () => {
     expect(() => launchCommand(undefined, 'ask', 'k3 $(whoami)')).toThrow(/model alias/);
     expect(() => launchCommand(undefined, 'ask', '')).toThrow(/model alias/);
   });
+});
+
+describe('effectiveOrchestratorMode', () => {
+  it('upgrades ask to auto only when the watch answers dialogs', () => {
+    expect(effectiveOrchestratorMode('ask', 'smart')).toBe('auto');
+    expect(effectiveOrchestratorMode('ask', 'safe')).toBe('auto');
+    expect(effectiveOrchestratorMode('ask', 'manual')).toBe('ask');
+    expect(effectiveOrchestratorMode('ask', undefined)).toBe('ask');
+    expect(effectiveOrchestratorMode('yolo', 'smart')).toBe('yolo');
+    expect(effectiveOrchestratorMode('auto', 'manual')).toBe('auto');
+  });
+});
+
+describe('orchestrator respawn mode', () => {
+  it('relaunches the orchestrator with --auto when mode is ask and approvals smart', async () => {
+    const { root } = await setup({
+      name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 111, pane_started: 'earlier',
+    });
+    await setProjectMode(root, 'demo', 'ask');
+    await setProjectApprovals(root, 'demo', 'smart');
+    await respawnAgent(root, 'demo', 'demo-orchestrator');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toContain('--auto');
+  }, 20_000);
+
+  it('keeps ask when approvals is manual', async () => {
+    const { root } = await setup({
+      name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 111, pane_started: 'earlier',
+    });
+    await setProjectMode(root, 'demo', 'ask');
+    await setProjectApprovals(root, 'demo', 'manual');
+    await respawnAgent(root, 'demo', 'demo-orchestrator');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run');
+  }, 20_000);
+
+  it('leaves a yolo orchestrator on -y', async () => {
+    const { root } = await setup({
+      name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 111, pane_started: 'earlier',
+    });
+    await setProjectMode(root, 'demo', 'yolo');
+    await setProjectApprovals(root, 'demo', 'smart');
+    await respawnAgent(root, 'demo', 'demo-orchestrator');
+    const cmd = vi.mocked(newWindow).mock.calls.at(-1)?.[2];
+    expect(cmd).toContain('-y');
+    expect(cmd).not.toContain('--auto');
+  }, 20_000);
+
+  it('never upgrades a plain agent under ask+smart', async () => {
+    const { root } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    await setProjectMode(root, 'demo', 'ask');
+    await setProjectApprovals(root, 'demo', 'smart');
+    await respawnAgent(root, 'demo', 'builder');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run');
+  }, 20_000);
 });
 
 async function approvePlan(root: string, id: string): Promise<void> {
