@@ -65,7 +65,8 @@ import { buildStatus, readDialogFor, answerDialog, wake } from '../src/hub.js';
 import { wakeAgent } from '../src/spawn.js';
 import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
 import { capturePane, killWindow, paneExists, run, sleep, tmux } from '../src/tmux.js';
-import { hubPath, readDecisions, readTeam, writeJson, hivePath } from '../src/state.js';
+import { hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, hivePath } from '../src/state.js';
+import { loadProcessedKeys } from '../src/watch-persist.js';
 import {
   extractCommand, neverApprove, tier1Approves, watch, watchCycle, WAKE_MAX_ATTEMPTS,
 } from '../src/watch.js';
@@ -102,7 +103,7 @@ describe('the approval classifier', () => {
 
   it('tier 1 approves read-only chains and rejects any unrecognized segment', () => {
     expect(tier1Approves('ls -la')).toBe(true);
-    expect(tier1Approves('git status && npm test')).toBe(true);
+    expect(tier1Approves('git status && npm run build')).toBe(true);
     expect(tier1Approves('git log --oneline | head -5')).toBe(true);
     expect(tier1Approves('echo hi | wc -l')).toBe(true);
     expect(tier1Approves('hive hub status --json')).toBe(true);
@@ -115,6 +116,8 @@ describe('the approval classifier', () => {
     expect(tier1Approves('jj st && jj git push --bookmark x')).toBe(false);
     expect(tier1Approves('jj describe -m x')).toBe(false);
     expect(tier1Approves('jj new')).toBe(false);
+    // Heavy compute moved to the never-approve list, so it is no leader either.
+    expect(tier1Approves('npm test')).toBe(false);
   });
 
   it('never-approve patterns beat everything', () => {
@@ -130,6 +133,21 @@ describe('the approval classifier', () => {
     expect(neverApprove('$ echo hi > /tmp/out.txt')).toBe(false);
     expect(neverApprove('$ git status')).toBe(false);
     expect(neverApprove('$ jj log -r @')).toBe(false);
+  });
+
+  it('heavy compute is never auto-approved at any tier', () => {
+    expect(neverApprove('$ npm ci')).toBe(true);
+    expect(neverApprove('$ npm install')).toBe(true);
+    expect(neverApprove('$ npm i --save-dev x')).toBe(true);
+    expect(neverApprove('$ npx vitest run')).toBe(true);
+    expect(neverApprove('$ npm test')).toBe(true);
+    expect(neverApprove('$ npx jest')).toBe(true);
+    expect(neverApprove('$ cargo build --release')).toBe(true);
+    expect(neverApprove('$ make all')).toBe(true);
+    expect(neverApprove('$ docker build .')).toBe(true);
+    expect(neverApprove('$ pip install requests')).toBe(true);
+    expect(neverApprove('$ npm run build')).toBe(false);
+    expect(neverApprove('$ npx tsc --noEmit')).toBe(false);
   });
 });
 
@@ -252,6 +270,37 @@ describe('watchCycle watchdog', () => {
     expect(log).not.toContain('resurrected logger');
     const decisions = await readDecisions(root);
     expect(decisions[0].summary).toBe('woke builder after pane %2 died');
+  });
+
+  it('records a death to disk; a restarted watch re-wakes it without re-logging or re-bundling', async () => {
+    const { root, home } = await setupProject({
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'a', session_id: 'session_x' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(false);
+    stubProbes();
+    // Implementations leak between tests (clearAllMocks keeps them), so the
+    // success path is set here, not inherited from the hub mock factory.
+    vi.mocked(wake)
+      .mockRejectedValueOnce(new Error('the teamkimi proxy is down'))
+      .mockImplementation(async () => {
+        await upsertTeamEntry(home, { name: 'demo-orchestrator', pane: '%9' });
+        return '%9';
+      });
+    await watchCycle(root, {}, new Set(), new Map());
+    expect(wake).toHaveBeenCalledTimes(1);
+    let log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log.match(/pane %1 died/g)).toHaveLength(1);
+
+    // Restart: fresh in-memory state, the disk record carries the death over.
+    // The wake is retried (fresh budget) but the death is not reported again.
+    const restored = await loadProcessedKeys(root);
+    expect(restored.has('%1:11')).toBe(true);
+    await watchCycle(root, {}, restored, new Map());
+    expect(wake).toHaveBeenCalledTimes(2);
+    log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log.match(/pane %1 died/g)).toHaveLength(1);
+    expect(log).toContain('resurrected demo-orchestrator in pane %9 (wake attempt 1)');
+    expect(await fs.readdir(hubPath(root, 'deaths'))).toHaveLength(1);
   });
 });
 
@@ -430,21 +479,25 @@ describe('watchCycle auto-approver', () => {
   it('smart mode asks kimi about unknown commands and follows APPROVE/ASK', async () => {
     const { root } = await setupProject({ approvals: 'smart' });
     withQuestion();
-    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ make docs') as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 render_docs.py') as never);
     vi.mocked(run).mockImplementation(async (cmd) => (
       cmd === 'kimi'
         ? { code: 0, stdout: 'APPROVE — builds docs locally', stderr: '' }
         : { code: 0, stdout: '', stderr: '' }
     ));
-    await watchCycle(root);
+    const verdicts = new Map<string, true>();
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
     expect(answerDialog).toHaveBeenCalledTimes(1);
 
+    // A new command, so the cached APPROVE above cannot answer for it.
     vi.mocked(answerDialog).mockClear();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 check_two.py') as never);
     vi.mocked(run).mockImplementation(async (cmd) => (
       cmd === 'kimi' ? { code: 0, stdout: 'ASK the owner', stderr: '' } : { code: 0, stdout: '', stderr: '' }
     ));
-    await watchCycle(root);
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
     expect(answerDialog).not.toHaveBeenCalled();
+    expect(verdicts.has('python3 check_two.py')).toBe(false);
   });
 
   it('manual mode never answers', async () => {
@@ -453,6 +506,187 @@ describe('watchCycle auto-approver', () => {
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ ls') as never);
     await watchCycle(root);
     expect(answerDialog).not.toHaveBeenCalled();
+  });
+
+  const kimiCalls = () => vi.mocked(run).mock.calls.filter((c) => c[0] === 'kimi');
+
+  it('caches an APPROVE by command: one spawn, the next dialog answers from cache', async () => {
+    const { root } = await setupProject({ approvals: 'smart' });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 cache_probe.py') as never);
+    vi.mocked(run).mockImplementation(async (cmd) => (
+      cmd === 'kimi' ? { code: 0, stdout: 'APPROVE cached probe', stderr: '' } : { code: 0, stdout: '', stderr: '' }
+    ));
+    const verdicts = new Map<string, true>();
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    expect(answerDialog).toHaveBeenCalledTimes(1);
+    expect(kimiCalls()).toHaveLength(1);
+
+    vi.mocked(answerDialog).mockClear();
+    vi.mocked(readDialogFor).mockResolvedValue({
+      ...dialogWith('Run this command?\n  $ python3 cache_probe.py'), fingerprint: 'fp2',
+    } as never);
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, '1', 'fp2');
+    expect(kimiCalls()).toHaveLength(1);
+  });
+
+  it('the cache key collapses whitespace: `a  b` and `a b` share a verdict', async () => {
+    const { root } = await setupProject({ approvals: 'smart' });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3  space_probe.py  --fast') as never);
+    vi.mocked(run).mockImplementation(async (cmd) => (
+      cmd === 'kimi' ? { code: 0, stdout: 'APPROVE spaced probe', stderr: '' } : { code: 0, stdout: '', stderr: '' }
+    ));
+    const verdicts = new Map<string, true>();
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    expect(kimiCalls()).toHaveLength(1);
+    expect(verdicts.has('python3 space_probe.py --fast')).toBe(true);
+
+    vi.mocked(answerDialog).mockClear();
+    vi.mocked(readDialogFor).mockResolvedValue({
+      ...dialogWith('Run this command?\n  $ python3 space_probe.py --fast'), fingerprint: 'fp2',
+    } as never);
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    expect(answerDialog).toHaveBeenCalledTimes(1);
+    expect(kimiCalls()).toHaveLength(1);
+  });
+
+  it('never-approve beats a cached APPROVE', async () => {
+    const { root } = await setupProject({ approvals: 'smart' });
+    withQuestion();
+    const verdicts = new Map<string, true>([['python3 cache_probe.py', true]]);
+    vi.mocked(readDialogFor).mockResolvedValue(
+      dialogWith('Run this command?\n  $ python3 cache_probe.py\n  note: this also runs rm -rf build') as never,
+    );
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    expect(answerDialog).not.toHaveBeenCalled();
+  });
+
+  it('an ASK verdict is never cached: the next cycle re-classifies', async () => {
+    const { root } = await setupProject({ approvals: 'smart' });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 ask_probe.py') as never);
+    let verdict = 'ASK the owner';
+    vi.mocked(run).mockImplementation(async (cmd) => (
+      cmd === 'kimi' ? { code: 0, stdout: verdict, stderr: '' } : { code: 0, stdout: '', stderr: '' }
+    ));
+    const verdicts = new Map<string, true>();
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    expect(answerDialog).not.toHaveBeenCalled();
+    expect(verdicts.has('python3 ask_probe.py')).toBe(false);
+    verdict = 'APPROVE on the second look';
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    expect(answerDialog).toHaveBeenCalledTimes(1);
+    expect(kimiCalls()).toHaveLength(2);
+  });
+
+  it('two overlapping cycles spawn one classifier for one dialog', async () => {
+    const { root } = await setupProject({ approvals: 'smart' });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 inflight_probe.py') as never);
+    let release!: (r: { code: number; stdout: string; stderr: string }) => void;
+    const latch = new Promise<{ code: number; stdout: string; stderr: string }>((r) => { release = r; });
+    vi.mocked(run).mockImplementation(async (cmd) => (
+      cmd === 'kimi' ? latch : { code: 0, stdout: '', stderr: '' }
+    ));
+    // Cycle 1 parks inside the classifier, holding the in-flight mark.
+    const c1 = watchCycle(root);
+    for (let i = 0; i < 200 && kimiCalls().length === 0; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(kimiCalls()).toHaveLength(1);
+    // Cycle 2 runs to completion with the latch held: the guard must make it
+    // skip the dialog, so no second spawn and no answer from a fresh cache.
+    await watchCycle(root);
+    expect(kimiCalls()).toHaveLength(1);
+    expect(answerDialog).not.toHaveBeenCalled();
+    release({ code: 0, stdout: 'APPROVE after the wait', stderr: '' });
+    await c1;
+    expect(kimiCalls()).toHaveLength(1);
+    expect(answerDialog).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    'npm ci', 'npm install', 'npx vitest run', 'npm test', 'npx jest',
+    'cargo build --release', 'make all', 'docker build .', 'pip install requests',
+  ])('heavy compute waits for a human even in smart mode: %s', async (cmd) => {
+    const { root } = await setupProject({ approvals: 'smart' });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith(`Run this command?\n  $ ${cmd}`) as never);
+    await watchCycle(root);
+    expect(answerDialog).not.toHaveBeenCalled();
+    expect(kimiCalls()).toEqual([]);
+  });
+
+  it('passes -m to the classifier spawn only when HIVE_CLASSIFIER_MODEL is set', async () => {
+    const { root } = await setupProject({ approvals: 'smart' });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 model_probe.py') as never);
+    vi.mocked(run).mockImplementation(async (cmd) => (
+      cmd === 'kimi' ? { code: 0, stdout: 'ASK the owner', stderr: '' } : { code: 0, stdout: '', stderr: '' }
+    ));
+    process.env.HIVE_CLASSIFIER_MODEL = 'cheap-model';
+    try {
+      await watchCycle(root);
+    } finally {
+      delete process.env.HIVE_CLASSIFIER_MODEL;
+    }
+    expect(kimiCalls()).toHaveLength(1);
+    expect(kimiCalls()[0][1]).toEqual(['-m', 'cheap-model', '-p', expect.any(String)]);
+
+    await watchCycle(root);
+    expect(kimiCalls()).toHaveLength(2);
+    expect(kimiCalls()[1][1]).toEqual(['-p', expect.any(String)]);
+  });
+});
+
+describe('watchCycle stale-lane heartbeat', () => {
+  const idlePane = 'all done\n│ > \n';
+
+  it('a wire log silent for 15m raises one stale decision, not one per cycle', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(idlePane);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 20 * 60_000);
+    const deaths = new Set<string>();
+    await watchCycle(root, {}, deaths);
+    let decisions = await readDecisions(root);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ by: 'watch', project: 'demo' });
+    expect(decisions[0].summary).toMatch(/^stale: demo\/builder no output for \d+m$/);
+
+    await watchCycle(root, {}, deaths);
+    decisions = await readDecisions(root);
+    expect(decisions).toHaveLength(1);
+  });
+
+  it('the stale record survives a restart: same hour still silent', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(idlePane);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 20 * 60_000);
+    await watchCycle(root, {}, new Set());
+    expect(await readDecisions(root)).toHaveLength(1);
+
+    const restored = await loadProcessedKeys(root);
+    await watchCycle(root, {}, restored);
+    expect(await readDecisions(root)).toHaveLength(1);
+  });
+
+  it('a fresh wire log raises no stale flag', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(idlePane);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now());
+    await watchCycle(root, {}, new Set());
+    expect(await readDecisions(root)).toHaveLength(0);
   });
 });
 

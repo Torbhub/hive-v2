@@ -164,6 +164,7 @@ describe('request hardening', () => {
     const body = { project: 'demo', choice: '1', fingerprint: 'x' };
     const cross = await post('/api/answer', body, { origin: 'https://evil.example' });
     expect(cross.status).toBe(403);
+    expect((await cross.json()).detail).toContain('origin host evil.example != host');
     const fetchSite = await post('/api/answer', body, { 'sec-fetch-site': 'cross-site' });
     expect(fetchSite.status).toBe(403);
     const sameHost = await post('/api/answer', body, {
