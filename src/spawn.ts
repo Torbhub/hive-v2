@@ -13,7 +13,6 @@ import {
 } from './state.js';
 import type { Approvals, ProjectMode, TeamEntry } from './types.js';
 import { checkTaskScope } from './scope.js';
-import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 
 export function orchestratorName(project: string): string {
   return `${project}-orchestrator`;
@@ -309,11 +308,6 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
     }
 
     await ensureAgentFiles(worktree, agent, role);
-    if (task) {
-      // Recall never blocks a spawn: memoryBlockFor fails open in 3s.
-      const block = await memoryBlockFor(root, project, task);
-      if (block) await applyMemoryBlock(hivePath(worktree, 'handoffs', `${agent}.md`), block);
-    }
     ({ pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask', opts.model));
     await manifestAdd(home, {
       kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),

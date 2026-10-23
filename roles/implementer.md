@@ -12,5 +12,3 @@ You build what the orchestrator briefs you to build.
   watch. Verdict first.
 - Keep your handoff current: the START HERE block of `.hive/handoffs/<you>.md`
   is how a rotated copy of you picks up. Update it whenever state changes.
-- A lesson worth keeping goes to memory: `hive memory propose <project>
-  <text>`. The owner promotes the good ones to team memory.
