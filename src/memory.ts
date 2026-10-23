@@ -1,6 +1,8 @@
-// Thin client for the Agent Memory gateway on the box (docs/memory.md).
+// Thin client for the Agent Memory stack on the box (docs/memory.md).
 // Every call is fail-open: memory down, slow, or unconfigured returns
 // null/undefined and never throws into the spawn or lane flow.
+// The default URL is the auth relay, which holds the instance key; the
+// caller only ever holds the scoped user key.
 import { promises as fs } from 'node:fs';
 import { hubPath } from './state.js';
 
@@ -27,7 +29,7 @@ async function post<T>(path: string, body: Record<string, unknown>): Promise<T |
   const key = process.env.HIVE_MEMORY_KEY;
   if (!key) return null;
   try {
-    const res = await fetch(`${process.env.HIVE_MEMORY_URL ?? 'http://127.0.0.1:8420'}${path}`, {
+    const res = await fetch(`${process.env.HIVE_MEMORY_URL ?? 'http://127.0.0.1:8421'}${path}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -69,29 +71,45 @@ export async function searchMemory(project: string, query: string, limit = 5): P
 
 export type MemoryProvenance = { session?: string };
 
-// A proposal lands in the private candidates bucket with its provenance in
-// the background field. Returns the candidate id, or null when memory is down.
+// The data plane creates atomic notes only through the extraction pipeline,
+// so candidates are written as conversation entries and distilled in place.
+// The text carries its provenance on a trailing line; it survives promote
+// into the team bucket, where it helps the distiller and the audit trail.
+// Returns the server-assigned entry id, or null when memory is down.
 export async function proposeMemory(
   project: string,
   agent: string,
   text: string,
   provenance: MemoryProvenance = {},
 ): Promise<string | null> {
-  const id = `cand-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const background = [`project: ${project}`, `agent: ${agent}`];
-  if (provenance.session) background.push(`session: ${provenance.session}`);
-  const data = await post<{ id?: string }>('/v3/atomic/update', {
+  const meta = [`project: ${project}`, `agent: ${agent}`];
+  if (provenance.session) meta.push(`session: ${provenance.session}`);
+  const content = `${text.slice(0, 7800)}\n— ${meta.join(', ')}`;
+  const data = await post<{ accepted_ids?: string[] }>('/v3/conversation/add', {
     team_id: teamId(project), agent_id: CANDIDATES_AGENT, user_id: 'hive',
-    id, content: text, background: background.join(', '),
+    session_id: CANDIDATES_AGENT,
+    messages: [{ role: 'user', content }],
   });
-  return data ? id : null;
+  return data?.accepted_ids?.[0] ?? null;
 }
 
+// conversation/query pages at 100 rows; candidates are few, but page anyway
+// so a stuffed bucket cannot hide a candidate from promote.
 export async function listCandidates(project: string, limit = 50): Promise<MemoryHit[] | null> {
-  const data = await post<{ items?: MemoryHit[] }>('/v3/atomic/query', {
-    team_id: teamId(project), agent_id: CANDIDATES_AGENT, user_id: 'hive', limit,
-  });
-  return data?.items ?? null;
+  const out: MemoryHit[] = [];
+  let offset = 0;
+  while (out.length < limit) {
+    const page = Math.min(100, limit - out.length);
+    const data = await post<{ messages?: MemoryHit[] }>('/v3/conversation/query', {
+      team_id: teamId(project), agent_id: CANDIDATES_AGENT, user_id: 'hive',
+      session_id: CANDIDATES_AGENT, limit: page, offset,
+    });
+    if (!data?.messages) return out.length > 0 ? out : null;
+    out.push(...data.messages.map((m) => ({ id: m.id, content: m.content })));
+    if (data.messages.length < page) break;
+    offset += data.messages.length;
+  }
+  return out;
 }
 
 export type PromoteResult =
@@ -107,16 +125,18 @@ export async function promoteCandidate(project: string, id: string): Promise<Pro
   if (candidates === null) return { kind: 'unavailable' };
   const cand = candidates.find((c) => c.id === id);
   if (!cand) return { kind: 'missing' };
-  const teamMemoryId = id.replace(/^cand-/, 'mem-');
-  const written = await post<{ id?: string }>('/v3/atomic/update', {
+  const written = await post<{ accepted_ids?: string[] }>('/v3/conversation/add', {
     team_id: teamId(project), agent_id: TEAM_AGENT, user_id: 'hive',
-    id: teamMemoryId, content: cand.content, background: cand.background,
+    session_id: TEAM_AGENT,
+    messages: [{ role: 'user', content: cand.content }],
   });
-  if (!written) return { kind: 'unavailable' };
-  await post('/v3/atomic/delete', {
-    team_id: teamId(project), agent_id: CANDIDATES_AGENT, user_id: 'hive', ids: [id],
+  const teamId2 = written?.accepted_ids?.[0];
+  if (!teamId2) return { kind: 'unavailable' };
+  await post('/v3/conversation/delete', {
+    team_id: teamId(project), agent_id: CANDIDATES_AGENT, user_id: 'hive',
+    message_ids: [id],
   });
-  return { kind: 'promoted', id: teamMemoryId };
+  return { kind: 'promoted', id: teamId2 };
 }
 
 // The recall query is the task brief itself, capped. Returns the block to

@@ -42,12 +42,16 @@ install_if_different "$BOX_DIR/hive-v2-daily-scan.service" /etc/systemd/system/h
 install_if_different "$BOX_DIR/hive-v2-daily-scan.timer" /etc/systemd/system/hive-v2-daily-scan.timer 644
 install_if_different "$BOX_DIR/hive-memory-core.service" /etc/systemd/system/hive-memory-core.service 644
 install_if_different "$BOX_DIR/hive-memory-panel.service" /etc/systemd/system/hive-memory-panel.service 644
+install_if_different "$BOX_DIR/hive-memory-llm-forward.service" /etc/systemd/system/hive-memory-llm-forward.service 644
+install_if_different "$BOX_DIR/hive-memory-relay.service" /etc/systemd/system/hive-memory-relay.service 644
 install_if_different "$BOX_DIR/hive-v2-tmux.sudoers" /etc/sudoers.d/hive-v2-tmux 440
 install_if_different "$BOX_DIR/hive-v2-dmesg.sudoers" /etc/sudoers.d/hive-v2-dmesg 440
 install_if_different "$BOX_DIR/hive-v2-pstack.sudoers" /etc/sudoers.d/hive-v2-pstack 440
 install_if_different "$BOX_DIR/hive" /usr/local/bin/hive 755
 install_if_different "$BOX_DIR/hub-attach.sh" /opt/hive-v2/hub-attach.sh 755
 install_if_different "$BOX_DIR/daily-scan.sh" /opt/hive-v2/daily-scan.sh 755
+install_if_different "$BOX_DIR/llm-forward.py" /opt/hive-v2/llm-forward.py 755
+install_if_different "$BOX_DIR/memory-relay.py" /opt/hive-v2/memory-relay.py 755
 
 mkdir -p /etc/hive-v2
 if [ ! -f "$ENV_FILE" ]; then
@@ -91,6 +95,10 @@ KNOWLEDGE_AUTH_TOKEN=$ks_key
 # Where the browser reaches the knowledge API. Needs the /v3 suffix.
 KNOWLEDGE_PUBLIC_BASE_URL=http://127.0.0.1:8424/v3
 KNOWLEDGE_LLM_BINDING_SYNC=0
+# System-admin bootstrap for the v3 meta API (user/key minting). Generate a
+# random key once; the core creates this user on startup. Never a lane key.
+TDAI_MEMORY_SYSTEM_USER_ID=
+TDAI_MEMORY_SYSTEM_USER_KEY=
 EOF
   echo "generated: $MEMORY_ENV"
 else
@@ -164,14 +172,18 @@ if ! id -nG ubuntu | grep -qw docker; then
   echo "docker:   added ubuntu to the docker group"
 fi
 if ! docker network inspect tdai-memory-stack >/dev/null 2>&1; then
-  docker network create tdai-memory-stack >/dev/null
+  # Fixed subnet: memory.env points LLM base URLs at the gateway address,
+  # so the gateway must survive a network recreate unchanged.
+  docker network create --subnet=172.18.0.0/16 tdai-memory-stack >/dev/null
   echo "docker:   created network tdai-memory-stack"
+elif [ "$(docker network inspect tdai-memory-stack --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')" != "172.18.0.1" ]; then
+  echo "WARN: tdai-memory-stack gateway is not 172.18.0.1; the LLM base URLs in $MEMORY_ENV assume it" >&2
 fi
 docker pull agentmemory/memory-core:1.0.3-beta.1
 docker pull agentmemory/memory-hub:1.0.3-beta.1
 
 systemctl daemon-reload
-systemctl enable --now hive-v2-web hive-v2-watch hive-v2-webterm hive-memory-core hive-memory-panel >/dev/null
+systemctl enable --now hive-v2-web hive-v2-watch hive-v2-webterm hive-memory-core hive-memory-panel hive-memory-llm-forward hive-memory-relay >/dev/null
 systemctl enable hive-v2-tmux >/dev/null
 # hive-v2-tmux is never restarted here: its cgroup holds every agent pane.
 # Start it only when no server answers the socket. A live server started
@@ -185,8 +197,8 @@ else
   systemctl restart hive-v2-tmux
   echo "tmux:    hive-v2-tmux (re)started"
 fi
-systemctl restart hive-v2-web hive-v2-watch hive-v2-webterm hive-memory-core hive-memory-panel
-echo "services: hive-v2-web hive-v2-watch hive-v2-webterm hive-memory-core hive-memory-panel enabled and restarted"
+systemctl restart hive-v2-web hive-v2-watch hive-v2-webterm hive-memory-core hive-memory-panel hive-memory-llm-forward hive-memory-relay
+echo "services: hive-v2-web hive-v2-watch hive-v2-webterm hive-memory-core hive-memory-panel hive-memory-llm-forward hive-memory-relay enabled and restarted"
 # A timer, not a service: enable and (re)start the timer itself, never the
 # oneshot it fires.
 systemctl enable --now hive-v2-daily-scan.timer >/dev/null

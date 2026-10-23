@@ -1,0 +1,16 @@
+[Unit]
+Description=hive-v2 memory auth relay (loopback, swaps in the instance key)
+After=hive-memory-core.service
+Wants=hive-memory-core.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/hive-v2/memory-relay.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
