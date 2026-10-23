@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import {
-  answerDialog, buildStatus, continueProject, hubAdd, hubInit, hubLog, hubTask,
+  answerDialog, buildStatus, continueProject, hubAdd, hubInit, hubTask, ledgerCommand,
   listTasks, planAnswer, readDialogFor, startProject, wake,
 } from './hub.js';
 import { closeAgent, respawnAgent, spawnAgent } from './spawn.js';
@@ -24,7 +24,7 @@ function validAgentRef(value: string): string {
 }
 
 const USAGE = `usage:
-  hive hub init|add <name> <path>|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note]
+  hive hub init|add <name> <path>|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note] [--checkpoints <json>]|progress <task> <cp> <started|ok|fail|skip> [note]|accept <task> <cp>
   hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
   hive hub wake <project> | start <project> <task-id> | continue <project>
   hive spawn <project> --agent <name> [--role r] [--worktree wt] [--task id] [--model m] | respawn | close
@@ -65,13 +65,9 @@ function parseFlags(args: string[], names: string[]): { flags: Record<string, st
   return { flags: out, pos };
 }
 
-function fail(msg: string): never {
-  throw new UsageError(msg);
-}
+const fail = (msg: string): never => { throw new UsageError(msg); };
 
-function str(v: string | true | undefined): string | undefined {
-  return typeof v === 'string' ? v : undefined;
-}
+const str = (v: string | true | undefined) => (typeof v === 'string' ? v : undefined);
 
 async function hubCommand(args: string[]): Promise<void> {
   const root = process.cwd();
@@ -113,10 +109,14 @@ async function hubCommand(args: string[]): Promise<void> {
       console.log(id);
       return;
     }
-    case 'log': {
-      const [id, event, ...note] = args.slice(1);
-      if (!id || !event) throw new UsageError('usage: hive hub log <id> <event> [note]');
-      await hubLog(root, id, event, note.length ? note.join(' ') : undefined);
+    case 'log':
+    case 'progress':
+    case 'accept': {
+      if (args.length < (sub === 'progress' ? 4 : 3)) {
+        throw new UsageError(`usage: hive hub ${sub === 'log' ? 'log <id> <event> [note] [--checkpoints <json>]' : sub === 'accept' ? 'accept <task> <checkpoint>' : 'progress <task> <checkpoint> <started|ok|fail|skip> [note]'}`);
+      }
+      const out = await ledgerCommand(root, sub, args.slice(1));
+      if (out) console.log(out);
       return;
     }
     case 'dialog': {

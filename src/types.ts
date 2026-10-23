@@ -69,6 +69,11 @@ export type HubProject = {
   approvals?: Approvals;
 };
 
+export type Checkpoint = { id: string; desc: string; etaMin: number };
+
+export type ProgressStatus = 'started' | 'ok' | 'fail' | 'skip';
+export const PROGRESS_STATUSES = ['started', 'ok', 'fail', 'skip'] as const;
+
 export type HubTask = {
   id: string;
   project: string;
@@ -78,6 +83,11 @@ export type HubTask = {
   last_note: string | null;
   needs_owner: boolean;
   decisions?: { at: string; reason: string }[];
+  checkpoints?: Checkpoint[];
+  progress?: Record<string, { status: ProgressStatus; note?: string; at: string }>;
+  last_progress_at?: string | null;
+  plan_approved?: boolean;
+  checkpoint_accepts?: Record<string, string>;
 };
 
 export type HubDialogOption = {
@@ -135,6 +145,7 @@ export type TeamEntry = {
 export const TASK_EVENTS = [
   'asked', 'handed', 'plan', 'question', 'answered', 'blocked',
   'overnight', 'cleanup', 'decided', 'done', 'cancelled', 'note',
+  'progress', 'planaccept',
 ] as const;
 
 export type TaskEvent = {
@@ -143,6 +154,9 @@ export type TaskEvent = {
   event: (typeof TASK_EVENTS)[number];
   at: string;
   note?: string;
+  checkpoints?: Checkpoint[];
+  checkpoint?: string;
+  status?: ProgressStatus;
 };
 
 export const NEEDS_OWNER_STATES = new Set(['plan', 'question', 'blocked']);

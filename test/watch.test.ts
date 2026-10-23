@@ -586,25 +586,23 @@ describe('watchCycle auto-approver', () => {
     withQuestion();
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 inflight_probe.py') as never);
     let release!: (r: { code: number; stdout: string; stderr: string }) => void;
-    const gate = new Promise<{ code: number; stdout: string; stderr: string }>((r) => { release = r; });
+    const latch = new Promise<{ code: number; stdout: string; stderr: string }>((r) => { release = r; });
     vi.mocked(run).mockImplementation(async (cmd) => (
-      cmd === 'kimi' ? gate : { code: 0, stdout: '', stderr: '' }
+      cmd === 'kimi' ? latch : { code: 0, stdout: '', stderr: '' }
     ));
+    // Cycle 1 parks inside the classifier, holding the in-flight mark.
     const c1 = watchCycle(root);
-    // Park cycle 1 inside the classifier before cycle 2 starts.
     for (let i = 0; i < 200 && kimiCalls().length === 0; i++) {
       await new Promise((r) => setImmediate(r));
     }
     expect(kimiCalls()).toHaveLength(1);
-    const c2 = watchCycle(root);
-    // Let cycle 2 read the dialog and pass the in-flight check before the
-    // verdict lands, or it would answer from the fresh cache instead.
-    for (let i = 0; i < 200 && vi.mocked(readDialogFor).mock.calls.length < 2; i++) {
-      await new Promise((r) => setImmediate(r));
-    }
-    await new Promise((r) => setImmediate(r));
+    // Cycle 2 runs to completion with the latch held: the guard must make it
+    // skip the dialog, so no second spawn and no answer from a fresh cache.
+    await watchCycle(root);
+    expect(kimiCalls()).toHaveLength(1);
+    expect(answerDialog).not.toHaveBeenCalled();
     release({ code: 0, stdout: 'APPROVE after the wait', stderr: '' });
-    await Promise.all([c1, c2]);
+    await c1;
     expect(kimiCalls()).toHaveLength(1);
     expect(answerDialog).toHaveBeenCalledTimes(1);
   });

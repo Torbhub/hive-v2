@@ -27,7 +27,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 import { taskScope } from '../src/scope.js';
 import { spawnAgent } from '../src/spawn.js';
 import { hubAdd, hubInit, hubTask } from '../src/hub.js';
-import { hivePath, hubPath, manifestRead, readTeam, writeJson } from '../src/state.js';
+import { appendTaskEvent, hivePath, hubPath, manifestRead, readTeam, writeJson } from '../src/state.js';
 
 function brief(scope: string | null): string {
   const fm = '---\ntitle: "x"\nstatus: ready\ndeps: []\nmax_diff_lines: 300\n---\n\n## Goal\nx\n';
@@ -88,8 +88,18 @@ async function setup() {
   return { root, home };
 }
 
+// A scope-test task carries an approved plan, the same path planAnswer writes:
+// plan with checkpoints, then answered from the plan state.
 async function writeTask(root: string, id: string, text: string) {
   await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), text);
+  const project = id.replace(/-\d+$/, '');
+  const at = new Date().toISOString();
+  await appendTaskEvent(root, { id, project, event: 'asked', at });
+  await appendTaskEvent(root, {
+    id, project, event: 'plan', at,
+    checkpoints: [{ id: 'c1', desc: 'the work', etaMin: 5 }],
+  });
+  await appendTaskEvent(root, { id, project, event: 'answered', at, note: 'plan approved by owner' });
 }
 
 describe('hubTask brief validation', () => {

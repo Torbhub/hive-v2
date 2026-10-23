@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import type {
   HubAgent, HubDialog, HubFolder, HubOrchestrator, HubProject, HubStatus, HubTask, TaskEvent, TeamEntry,
 } from './types.js';
-import { APPROVALS_MODES, CLOSED_STATES, PROJECT_MODES, TASK_EVENTS } from './types.js';
+import { APPROVALS_MODES, CLOSED_STATES, PROJECT_MODES } from './types.js';
 import type { Approvals, ProjectMode } from './types.js';
 import {
   capturePane, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep,
@@ -11,18 +11,18 @@ import {
 import { lines, parseDialog, scrapeContext } from './screen.js';
 import { PROJECT_NAME_RE } from './names.js';
 import {
-  appendDecision, appendTaskEvent, clearPendingPane, foldTasks, hivePath, hubPath, manifestAdd, nextTaskId,
-  readPendingPane, readProjects, readTaskEvents, readTeam, withHubLock, writePendingPane,
+  appendDecision, appendTaskEvent, clearPendingPane, extractCommand, foldTasks, hivePath, hubPath, manifestAdd,
+  nextTaskId, readPendingPane, readProjects, readTaskEvents, readTeam, Refusal, withHubLock, writePendingPane,
   writeProjects, writeJson, readJson, upsertTeamEntry, type PendingPane, type ProjectsFile,
 } from './state.js';
 import {
   ensureAgentFiles, findLatestSession, launchWindow, orchestratorName, pickupLine, preflight, typeLine, waitIdle,
 } from './spawn.js';
+import { planVerdict, settlePendingPane } from './taskgate.js';
 import { taskScope } from './scope.js';
 
-// A deliberate refusal with an operator-safe message. The web layer shows
-// these to the client; every other error is infrastructure and stays server-side.
-export class Refusal extends Error {}
+export { Refusal } from './state.js';
+export { hubAccept, hubLog, hubProgress, ledgerCommand } from './taskgate.js';
 
 export async function hubInit(root: string, name = 'hub'): Promise<void> {
   await fs.mkdir(hubPath(root), { recursive: true });
@@ -86,19 +86,6 @@ export async function hubTask(root: string, project: string, text: string): Prom
     await appendTaskEvent(root, { id, project, event: 'asked', at: new Date().toISOString() });
     return id;
   });
-}
-
-export async function hubLog(root: string, id: string, event: string, note?: string): Promise<void> {
-  const events = await readTaskEvents(root);
-  if (!events.some((e) => e.id === id)) throw new Error(`unknown task: ${id}`);
-  if (!(TASK_EVENTS as readonly string[]).includes(event)) throw new Error(`unknown task event: ${event}`);
-  const project = id.replace(/-\d+$/, '');
-  await appendTaskEvent(root, {
-    id, project, event: event as TaskEvent['event'], at: new Date().toISOString(), note,
-  });
-  if (event === 'decided') {
-    await appendDecision(root, { project, task: id, by: 'orchestrator', summary: note ?? '' });
-  }
 }
 
 export async function listTasks(root: string): Promise<HubTask[]> {
@@ -328,8 +315,10 @@ export async function answerDialog(
   const after = await readDialogFor(root, project, agentRefArg);
   // Lore: every owner answer lands in the permanent decisions log.
   const firstLine = dialog.text.split('\n').map((l) => l.trim()).find((l) => l && !/^[─╌-]+$/.test(l)) ?? '';
+  const command = extractCommand(dialog.text);
+  const subject = command ? `$ ${command}` : firstLine;
   try {
-    await appendDecision(root, { project, by: 'owner', summary: `answered "${option}" for: ${firstLine}` });
+    await appendDecision(root, { project, by: 'owner', summary: `answered "${option}" for: ${subject}` });
   } catch (e) {
     console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
   }
@@ -372,26 +361,18 @@ export async function planAnswer(
   if (!identity) throw new Refusal(`cannot verify the identity of ${orch.pane}`);
 
   const fb = (feedback ?? '').replace(/\s+/g, ' ').trim().slice(0, PLAN_FEEDBACK_CAP);
-  const line = verdict === 'approve'
-    ? `${taskId}: the plan is approved — go ahead.`
-    : `${taskId}: the plan is sent back${fb ? ` — ${fb}` : ''}.`;
-  await typeLine(orch.pane, line, identity);
+  const v = planVerdict(task, verdict, fb);
+  await typeLine(orch.pane, v.line, identity);
 
   await appendTaskEvent(root, {
-    id: taskId, project,
-    event: verdict === 'approve' ? 'answered' : 'handed',
-    at: new Date().toISOString(),
-    note: verdict === 'approve' ? 'plan approved by owner' : `plan sent back${fb ? `: ${fb}` : ''}`,
+    id: taskId, project, event: v.event, at: new Date().toISOString(), note: v.note,
   });
   try {
-    await appendDecision(root, {
-      project, task: taskId, by: 'owner',
-      summary: verdict === 'approve' ? 'approved the plan' : `sent the plan back${fb ? `: ${fb}` : ''}`,
-    });
+    await appendDecision(root, { project, task: taskId, by: 'owner', summary: v.summary });
   } catch (e) {
     console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
   }
-  return { typed: line };
+  return { typed: v.line };
 }
 
 type LaunchKind = 'wake' | 'start';
@@ -415,10 +396,7 @@ async function launchOrchestrator(
   // Claim-then-launch under the hub lock: a second start for the same project
   // must see the pending record, never race past the check.
   const launched = await withHubLock(root, async () => {
-    const existing = await readPendingPane(root, project);
-    if (existing && (await paneExists(existing.pane))) {
-      throw new Refusal(`${project} is already starting in ${existing.pane}; continue it or close the window`);
-    }
+    if (await settlePendingPane(root, project)) return 'continue' as const;
     await preflight();
 
     const team = await readTeam(p.home);
@@ -446,6 +424,10 @@ async function launchOrchestrator(
     await writePendingPane(root, project, pending);
     return { pane, identity, pending, sessionId, name, cwd };
   });
+  if (launched === 'continue') {
+    // A live, young pending pane is a start still in flight; finish it instead of refusing.
+    return continueProject(root, project);
+  }
   const { pane, identity, pending, sessionId, name, cwd } = launched;
   const line = pending.line ?? '';
 

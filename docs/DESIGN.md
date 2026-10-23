@@ -79,8 +79,9 @@ Work folder (hub root), holds `.hive-hub/`:
 - `projects.json` — `{projects:[{name, home, repos:[{folder}]}]}`
 - `tasks.jsonl` — append-only ledger, one event per line. Vocabulary:
   `asked handed plan question answered blocked overnight cleanup decided done
-  cancelled note`. Task state = last non-note event; `plan/question/blocked`
-  = needs owner; `done/cancelled` = closed.
+  cancelled note progress planaccept`. Task state = last event not in
+  {note, progress, planaccept}. `plan/question/blocked` = needs owner.
+  `done/cancelled` = closed.
 - `tasks/<id>.md` — task text handed to the orchestrator as a path.
 - `panes/<project>.json` — a start/wake the hub launched that has not
   registered yet: `{pane, kind, at, typed, task}`.

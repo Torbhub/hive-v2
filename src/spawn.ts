@@ -4,11 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   killWindow, newWindow, paneIdentity, paneIs, capturePane,
-  sendEnter, sendLiteral, sleep, run, windowName, type PaneIdentity,
+  sendArrow, sendEnter, sendLiteral, sleep, run, windowName, type PaneIdentity,
 } from './tmux.js';
-import { classify, lines } from './screen.js';
+import { classify, lines, parseDialog } from './screen.js';
 import {
-  hivePath, manifestAdd, readProjects, readTeam,
+  foldTasks, hivePath, manifestAdd, readProjects, readTaskEvents, readTeam,
   removeTeamEntry, upsertTeamEntry, clearPendingPane, withTeamLock, writeJson, type ProjectsFile,
 } from './state.js';
 import type { ProjectMode, TeamEntry } from './types.js';
@@ -82,6 +82,28 @@ export async function waitIdle(
     await sleep(1000);
   }
   return 'timeout';
+}
+
+// The folder-trust menu on a spawn-created worktree is answered once: hive
+// made the folder, so the answer is always "Trust this folder".
+async function answerTrustMenu(pane: string): Promise<boolean> {
+  const raw = await capturePane(pane);
+  if (raw === null) return false;
+  const d = parseDialog(lines(raw));
+  const opt = d.options.find((o) => o.label === 'Trust this folder');
+  if (d.kind !== 'menu' || !opt) return false;
+  const delta = opt.n - (d.cursor ?? 1);
+  for (let i = 0; i < Math.abs(delta); i++) await sendArrow(pane, delta > 0 ? 'Down' : 'Up');
+  await sendEnter(pane);
+  return true;
+}
+
+// waitIdle with one trust-menu answer in the middle; any other dialog surfaces as before.
+async function waitIdleTrust(pane: string): Promise<'idle' | 'dialog' | 'timeout'> {
+  const idle = await waitIdle(pane);
+  if (idle !== 'dialog') return idle;
+  if (!(await answerTrustMenu(pane))) return 'dialog';
+  return waitIdle(pane);
 }
 
 // The first Enter after a literal send is sometimes swallowed by the TUI; one retry, then give up.
@@ -188,6 +210,14 @@ async function projectEntry(root: string, project: string): Promise<ProjectsFile
   return p;
 }
 
+// Workers never launch on a task whose plan the owner has not approved.
+async function requireApprovedPlan(root: string, task: string): Promise<void> {
+  const t = foldTasks(await readTaskEvents(root)).find((x) => x.id === task);
+  if (!t?.plan_approved) {
+    throw new Error(`${task} has no approved plan; the owner approves the plan before workers spawn`);
+  }
+}
+
 export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string; model?: string };
 
 // Prefer the remote tip; the fallbacks keep offline and master-based repos lane-able.
@@ -230,6 +260,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
         throw new Error(`${project} already has an agent named ${agent} (close or respawn it)`);
       }
       await checkTaskScope(root, project, home, task);
+      await requireApprovedPlan(root, task);
       await writeJson(hivePath(home, 'team.json'), { agents: [...fresh.agents, { name: agent, task }] });
     });
   }
@@ -288,7 +319,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
     throw e;
   }
 
-  const idle = await waitIdle(pane);
+  const idle = await waitIdleTrust(pane);
   if (idle !== 'idle') {
     throw new Error(idle === 'dialog'
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
@@ -343,7 +374,7 @@ async function relaunchAgent(
     name: old.name, pane, pane_pid: identity.pid, pane_started: identity.started,
     session_id: sessionId, closed_at: undefined, wedged_at: undefined,
   });
-  const idle = await waitIdle(pane);
+  const idle = await waitIdleTrust(pane);
   if (idle !== 'idle') {
     throw new Error(idle === 'dialog'
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
@@ -363,6 +394,7 @@ export async function respawnAgent(root: string, project: string, agent: string)
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   checkModel(old.model);
   await preflight();
+  if (old.task && !old.orchestrator) await requireApprovedPlan(root, old.task);
   await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
   try {
     if (old.pane) await killWindow(old.pane, recordedIdentity(old));
@@ -385,6 +417,7 @@ export async function wakeAgent(root: string, project: string, agent: string): P
   if (!old.session_id) throw new Error(`${agent} has no recorded session to resume; respawn it instead`);
   checkModel(old.model);
   await preflight();
+  if (old.task && !old.orchestrator) await requireApprovedPlan(root, old.task);
   if (old.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
     throw new Error(`${agent} is already running`);
   }
