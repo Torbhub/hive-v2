@@ -78,7 +78,7 @@ export async function classifyWithKimi(
 // ASK and timeouts are never cached, so a re-ask always reaches the classifier.
 const approveCache = new Map<string, true>();
 // Fingerprints with a classifier running right now; abandoned cycles skip them.
-const inFlight = new Set<string>();
+const inFlightMarks = new Set<string>();
 
 async function appendWatchLog(root: string, line: string): Promise<void> {
   await fs.mkdir(hubPath(root), { recursive: true });
@@ -93,6 +93,7 @@ async function maybeAutoApprove(
   approvals: Approvals,
   env: NodeJS.ProcessEnv,
   verdicts: Map<string, true>,
+  marks: Set<string>,
 ): Promise<void> {
   const command = extractCommand(dialog.text);
   // neverApprove runs before every tier and before the cache, always.
@@ -103,12 +104,12 @@ async function maybeAutoApprove(
   if (!ok && approvals === 'smart') {
     if (verdicts.has(cacheKey)) {
       ok = true;
-    } else if (!inFlight.has(dialog.fingerprint)) {
-      inFlight.add(dialog.fingerprint);
+    } else if (!marks.has(dialog.fingerprint)) {
+      marks.add(dialog.fingerprint);
       try {
         ok = await classifyWithKimi(project, command, env);
       } finally {
-        inFlight.delete(dialog.fingerprint);
+        marks.delete(dialog.fingerprint);
       }
       if (ok) verdicts.set(cacheKey, true);
     }
@@ -342,8 +343,8 @@ export async function watchCycle(
   deaths: Set<string> = new Set(),
   wakes: WakeState = new Map(),
   stills: Stillness = new Map(),
-  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache }: {
-    wedgeStillMs?: number; verdicts?: Map<string, true>;
+  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache, marks = inFlightMarks }: {
+    wedgeStillMs?: number; verdicts?: Map<string, true>; marks?: Set<string>;
   } = {},
 ): Promise<void> {
   const pf = await readProjects(root);
@@ -375,7 +376,7 @@ export async function watchCycle(
         return null;
       });
       if (!dialog) continue;
-      await maybeAutoApprove(root, p.name, ref, dialog, approvals, env, verdicts);
+      await maybeAutoApprove(root, p.name, ref, dialog, approvals, env, verdicts, marks);
     }
   }
 }

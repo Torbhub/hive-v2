@@ -65,6 +65,7 @@ import { buildStatus, readDialogFor, answerDialog, wake } from '../src/hub.js';
 import { wakeAgent } from '../src/spawn.js';
 import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
 import { capturePane, killWindow, paneExists, run, sleep, tmux } from '../src/tmux.js';
+import { withTimeout } from '../src/view.js';
 import { hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, hivePath } from '../src/state.js';
 import { loadProcessedKeys } from '../src/watch-persist.js';
 import {
@@ -455,11 +456,17 @@ describe('watchCycle auto-approver', () => {
     } as never);
   }
 
+  // Every test drives the approver with its own verdicts/marks, so no test
+  // ever touches the module-level cache or the module-level in-flight guard.
+  const freshApprover = () => ({ verdicts: new Map<string, true>(), marks: new Set<string>() });
+  const cycle = (root: string, s: { verdicts: Map<string, true>; marks: Set<string> }) =>
+    watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts: s.verdicts, marks: s.marks });
+
   it('safe mode approves a whitelisted command with option 1', async () => {
     const { root } = await setupProject({ approvals: 'safe' });
     withQuestion();
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ ls -la && git status') as never);
-    await watchCycle(root);
+    await cycle(root, freshApprover());
     expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, '1', 'fp');
     const decisions = await readDecisions(root);
     expect(decisions[0]).toMatchObject({ by: 'watch', project: 'demo' });
@@ -471,7 +478,7 @@ describe('watchCycle auto-approver', () => {
     withQuestion();
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ rm -rf /tmp/x') as never);
     vi.mocked(run).mockClear();
-    await watchCycle(root);
+    await cycle(root, freshApprover());
     expect(answerDialog).not.toHaveBeenCalled();
     expect(vi.mocked(run).mock.calls.filter((c) => c[0] === 'kimi')).toEqual([]);
   });
@@ -485,8 +492,8 @@ describe('watchCycle auto-approver', () => {
         ? { code: 0, stdout: 'APPROVE — builds docs locally', stderr: '' }
         : { code: 0, stdout: '', stderr: '' }
     ));
-    const verdicts = new Map<string, true>();
-    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    const s = freshApprover();
+    await cycle(root, s);
     expect(answerDialog).toHaveBeenCalledTimes(1);
 
     // A new command, so the cached APPROVE above cannot answer for it.
@@ -495,16 +502,16 @@ describe('watchCycle auto-approver', () => {
     vi.mocked(run).mockImplementation(async (cmd) => (
       cmd === 'kimi' ? { code: 0, stdout: 'ASK the owner', stderr: '' } : { code: 0, stdout: '', stderr: '' }
     ));
-    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    await cycle(root, s);
     expect(answerDialog).not.toHaveBeenCalled();
-    expect(verdicts.has('python3 check_two.py')).toBe(false);
+    expect(s.verdicts.has('python3 check_two.py')).toBe(false);
   });
 
   it('manual mode never answers', async () => {
     const { root } = await setupProject();
     withQuestion();
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ ls') as never);
-    await watchCycle(root);
+    await cycle(root, freshApprover());
     expect(answerDialog).not.toHaveBeenCalled();
   });
 
@@ -517,8 +524,8 @@ describe('watchCycle auto-approver', () => {
     vi.mocked(run).mockImplementation(async (cmd) => (
       cmd === 'kimi' ? { code: 0, stdout: 'APPROVE cached probe', stderr: '' } : { code: 0, stdout: '', stderr: '' }
     ));
-    const verdicts = new Map<string, true>();
-    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    const s = freshApprover();
+    await cycle(root, s);
     expect(answerDialog).toHaveBeenCalledTimes(1);
     expect(kimiCalls()).toHaveLength(1);
 
@@ -526,7 +533,7 @@ describe('watchCycle auto-approver', () => {
     vi.mocked(readDialogFor).mockResolvedValue({
       ...dialogWith('Run this command?\n  $ python3 cache_probe.py'), fingerprint: 'fp2',
     } as never);
-    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    await cycle(root, s);
     expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, '1', 'fp2');
     expect(kimiCalls()).toHaveLength(1);
   });
@@ -538,16 +545,16 @@ describe('watchCycle auto-approver', () => {
     vi.mocked(run).mockImplementation(async (cmd) => (
       cmd === 'kimi' ? { code: 0, stdout: 'APPROVE spaced probe', stderr: '' } : { code: 0, stdout: '', stderr: '' }
     ));
-    const verdicts = new Map<string, true>();
-    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    const s = freshApprover();
+    await cycle(root, s);
     expect(kimiCalls()).toHaveLength(1);
-    expect(verdicts.has('python3 space_probe.py --fast')).toBe(true);
+    expect(s.verdicts.has('python3 space_probe.py --fast')).toBe(true);
 
     vi.mocked(answerDialog).mockClear();
     vi.mocked(readDialogFor).mockResolvedValue({
       ...dialogWith('Run this command?\n  $ python3 space_probe.py --fast'), fingerprint: 'fp2',
     } as never);
-    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    await cycle(root, s);
     expect(answerDialog).toHaveBeenCalledTimes(1);
     expect(kimiCalls()).toHaveLength(1);
   });
@@ -555,11 +562,12 @@ describe('watchCycle auto-approver', () => {
   it('never-approve beats a cached APPROVE', async () => {
     const { root } = await setupProject({ approvals: 'smart' });
     withQuestion();
-    const verdicts = new Map<string, true>([['python3 cache_probe.py', true]]);
+    const s = freshApprover();
+    s.verdicts.set('python3 cache_probe.py', true);
     vi.mocked(readDialogFor).mockResolvedValue(
       dialogWith('Run this command?\n  $ python3 cache_probe.py\n  note: this also runs rm -rf build') as never,
     );
-    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    await cycle(root, s);
     expect(answerDialog).not.toHaveBeenCalled();
   });
 
@@ -571,12 +579,12 @@ describe('watchCycle auto-approver', () => {
     vi.mocked(run).mockImplementation(async (cmd) => (
       cmd === 'kimi' ? { code: 0, stdout: verdict, stderr: '' } : { code: 0, stdout: '', stderr: '' }
     ));
-    const verdicts = new Map<string, true>();
-    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    const s = freshApprover();
+    await cycle(root, s);
     expect(answerDialog).not.toHaveBeenCalled();
-    expect(verdicts.has('python3 ask_probe.py')).toBe(false);
+    expect(s.verdicts.has('python3 ask_probe.py')).toBe(false);
     verdict = 'APPROVE on the second look';
-    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts });
+    await cycle(root, s);
     expect(answerDialog).toHaveBeenCalledTimes(1);
     expect(kimiCalls()).toHaveLength(2);
   });
@@ -586,23 +594,31 @@ describe('watchCycle auto-approver', () => {
     withQuestion();
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 inflight_probe.py') as never);
     let release!: (r: { code: number; stdout: string; stderr: string }) => void;
+    let markParked!: () => void;
+    const parked = new Promise<void>((r) => { markParked = r; });
     const latch = new Promise<{ code: number; stdout: string; stderr: string }>((r) => { release = r; });
-    vi.mocked(run).mockImplementation(async (cmd) => (
-      cmd === 'kimi' ? latch : { code: 0, stdout: '', stderr: '' }
-    ));
-    // Cycle 1 parks inside the classifier, holding the in-flight mark.
-    const c1 = watchCycle(root);
-    for (let i = 0; i < 200 && kimiCalls().length === 0; i++) {
-      await new Promise((r) => setImmediate(r));
+    vi.mocked(run).mockImplementation(async (cmd) => {
+      if (cmd !== 'kimi') return { code: 0, stdout: '', stderr: '' };
+      markParked();
+      return latch;
+    });
+    // Both cycles share one approver state: the guard under test is the seam.
+    const s = freshApprover();
+    const c1 = cycle(root, s);
+    try {
+      // The park is observed from inside the mock, not guessed by turns.
+      await withTimeout(parked, 10_000, 'classifier park');
+      // Cycle 2 runs to completion with the latch held: the guard must make
+      // it skip the dialog, so no second spawn and no answer at all yet.
+      await cycle(root, s);
+      expect(kimiCalls()).toHaveLength(1);
+      expect(answerDialog).not.toHaveBeenCalled();
+    } finally {
+      // Always release and drain cycle 1, so a failed assertion can never
+      // abandon a parked cycle into later tests.
+      release({ code: 0, stdout: 'APPROVE after the wait', stderr: '' });
+      await c1;
     }
-    expect(kimiCalls()).toHaveLength(1);
-    // Cycle 2 runs to completion with the latch held: the guard must make it
-    // skip the dialog, so no second spawn and no answer from a fresh cache.
-    await watchCycle(root);
-    expect(kimiCalls()).toHaveLength(1);
-    expect(answerDialog).not.toHaveBeenCalled();
-    release({ code: 0, stdout: 'APPROVE after the wait', stderr: '' });
-    await c1;
     expect(kimiCalls()).toHaveLength(1);
     expect(answerDialog).toHaveBeenCalledTimes(1);
   });
@@ -614,7 +630,7 @@ describe('watchCycle auto-approver', () => {
     const { root } = await setupProject({ approvals: 'smart' });
     withQuestion();
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith(`Run this command?\n  $ ${cmd}`) as never);
-    await watchCycle(root);
+    await cycle(root, freshApprover());
     expect(answerDialog).not.toHaveBeenCalled();
     expect(kimiCalls()).toEqual([]);
   });
@@ -626,16 +642,17 @@ describe('watchCycle auto-approver', () => {
     vi.mocked(run).mockImplementation(async (cmd) => (
       cmd === 'kimi' ? { code: 0, stdout: 'ASK the owner', stderr: '' } : { code: 0, stdout: '', stderr: '' }
     ));
+    const s = freshApprover();
     process.env.HIVE_CLASSIFIER_MODEL = 'cheap-model';
     try {
-      await watchCycle(root);
+      await cycle(root, s);
     } finally {
       delete process.env.HIVE_CLASSIFIER_MODEL;
     }
     expect(kimiCalls()).toHaveLength(1);
     expect(kimiCalls()[0][1]).toEqual(['-m', 'cheap-model', '-p', expect.any(String)]);
 
-    await watchCycle(root);
+    await cycle(root, s);
     expect(kimiCalls()).toHaveLength(2);
     expect(kimiCalls()[1][1]).toEqual(['-p', expect.any(String)]);
   });
