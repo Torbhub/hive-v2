@@ -11,7 +11,7 @@ import {
   foldTasks, hivePath, manifestAdd, readProjects, readTaskEvents, readTeam,
   removeTeamEntry, upsertTeamEntry, clearPendingPane, withTeamLock, writeJson, type ProjectsFile,
 } from './state.js';
-import type { ProjectMode, TeamEntry } from './types.js';
+import type { Approvals, ProjectMode, TeamEntry } from './types.js';
 import { checkTaskScope } from './scope.js';
 
 export function orchestratorName(project: string): string {
@@ -126,6 +126,14 @@ export async function typeLine(pane: string, text: string, identity: PaneIdentit
 
 // -S combines with -y/--auto/-m per kimi --help, so mode and model apply to resumes too.
 const MODEL_RE = /^[A-Za-z0-9._/[\]-]{1,64}$/;
+
+// In ask mode kimi blocks on its own prompt for every command and the watch
+// answers 5-17s later, stalling the lane. With approvals safe|smart the watch
+// is already the backstop, so launch the orchestrator in auto. Launch-time
+// only: the stored project mode is not rewritten, and manual keeps ask.
+export function effectiveOrchestratorMode(mode: ProjectMode, approvals?: Approvals): ProjectMode {
+  return mode === 'ask' && (approvals === 'safe' || approvals === 'smart') ? 'auto' : mode;
+}
 
 // Called before any side effect (worktree add, pane kill): a bad alias is a
 // recoverable config error and must never orphan a worktree or kill a live agent.
@@ -365,7 +373,8 @@ async function relaunchAgent(
 ): Promise<string> {
   const home = p.home;
   const worktree = old.worktree ?? home;
-  const { pane, identity } = await launchWindow(p.name, old.name, worktree, sessionId, p.mode ?? 'ask', old.model);
+  const mode = old.orchestrator ? effectiveOrchestratorMode(p.mode ?? 'ask', p.approvals) : p.mode ?? 'ask';
+  const { pane, identity } = await launchWindow(p.name, old.name, worktree, sessionId, mode, old.model);
   await manifestAdd(home, {
     kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(p.name, old.name),
     pane_pid: identity.pid, pane_started: identity.started,
