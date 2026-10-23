@@ -98,18 +98,18 @@ async function setupDecoy(command: string) {
 
 describe('smart approvals against a decoy pane', () => {
   it('approves a command the classifier approves, end to end', async () => {
-    const { root, answer, stubLog, env } = await setupDecoy('make docs');
+    const { root, answer, stubLog, env } = await setupDecoy('python3 render_docs.py');
     await watchCycle(root, env);
     expect(await fs.readFile(answer, 'utf8')).toBe('1');
-    expect(await fs.readFile(stubLog, 'utf8')).toContain('make docs');
+    expect(await fs.readFile(stubLog, 'utf8')).toContain('python3 render_docs.py');
     const decisions = await readDecisions(root);
     const auto = decisions.find((d) => d.by === 'watch');
     expect(auto?.summary).toContain('auto-approved "Approve once"');
-    expect(auto?.summary).toContain('make docs');
+    expect(auto?.summary).toContain('python3 render_docs.py');
   }, 30_000);
 
   it('withholds a command the classifier says ASK about', async () => {
-    const { root, pane, answer, stubLog, env } = await setupDecoy('make deploy-prod');
+    const { root, pane, answer, stubLog, env } = await setupDecoy('python3 deploy-prod.py');
     await watchCycle(root, env);
     expect(await fs.readFile(stubLog, 'utf8')).toContain('deploy-prod');
     expect(existsSync(answer)).toBe(false);
