@@ -423,12 +423,19 @@ describe('POST /api/approvals + decisions in the view', () => {
     expect(back.status).toBe(200);
   });
 
-  it('GET /api/view carries the latest decisions, newest first', async () => {
+  it('GET /api/view carries the latest kept decisions, newest first', async () => {
     const { appendDecision } = await import('../src/state.js');
+    // Tier-1 auto-approvals and "Approve once" clicks are noise: the feed drops them.
     await appendDecision(root, { project: 'demo', by: 'watch', summary: 'auto-approved "Approve once" for: $ ls' });
+    await appendDecision(root, { project: 'demo', by: 'owner', summary: 'approved the plan' });
+    await appendDecision(root, { project: 'demo', by: 'owner', summary: 'answered "Approve once" for: $ rm x' });
+    await appendDecision(root, { project: 'demo', by: 'watch', summary: 'marked fixer wedged: frozen pane, restarting it' });
     const view = await (await fetch(`${base}/api/view`)).json();
-    expect(view.decisions.length).toBeGreaterThan(0);
-    expect(view.decisions[0].summary).toContain('auto-approved');
+    const summaries = view.decisions.map((d: { summary: string }) => d.summary);
+    expect(summaries).toEqual([
+      'marked fixer wedged: frozen pane, restarting it',
+      'approved the plan',
+    ]);
     expect(view.decisions[0].by).toBe('watch');
   });
 });
