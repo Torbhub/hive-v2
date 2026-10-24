@@ -122,7 +122,7 @@ hive ui                                  — the hub screen
 ## Kimi session mechanics (the part that replaces hh-spawn)
 
 - Launch, in a new tmux window named `<project>:<agent>`:
-  `KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- [--session <id>] [-y|--auto]`
+  `KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- [--session <id>] [-y|--auto]`
   — the project's `mode` in projects.json (`ask`/`yolo`/`auto`, default `ask`)
   maps to no flag/`-y`/`--auto`, on fresh starts and resumes alike. `exec` so
   the pane process IS the CLI (identity check). Pre-flight: `teamkimi status`

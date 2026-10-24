@@ -230,7 +230,7 @@ describe('wakeAgent', () => {
     expect(pane).toBe('%9');
     expect(newWindow).toHaveBeenCalledWith(
       'demo:builder', home,
-      'KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_b',
+      'KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_b',
     );
     const team = await readTeam(home);
     expect(team.agents[0]).toMatchObject({ pane: '%9', session_id: 'session_b' });
@@ -260,18 +260,23 @@ describe('wakeAgent', () => {
 
 describe('launchCommand', () => {
   it('builds the teamkimi run line per mode, resume included', () => {
-    expect(launchCommand(undefined, 'ask')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run');
-    expect(launchCommand(undefined, 'yolo')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- -y');
-    expect(launchCommand(undefined, 'auto')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --auto');
-    expect(launchCommand('session_abc', 'ask')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc');
-    expect(launchCommand('session_abc', 'yolo')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc -y');
-    expect(launchCommand('session_abc', 'auto')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc --auto');
+    expect(launchCommand(undefined, 'ask')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run');
+    expect(launchCommand(undefined, 'yolo')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -y');
+    expect(launchCommand(undefined, 'auto')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --auto');
+    expect(launchCommand('session_abc', 'ask')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc');
+    expect(launchCommand('session_abc', 'yolo')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -y');
+    expect(launchCommand('session_abc', 'auto')).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc --auto');
   });
 
   it('adds -m for a per-agent model, combined with session and mode', () => {
-    expect(launchCommand(undefined, 'ask', 'kimi-k2')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- -m 'kimi-k2'");
-    expect(launchCommand('session_abc', 'yolo', 'kimi-code/k3')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc -y -m 'kimi-code/k3'");
-    expect(launchCommand(undefined, 'ask', 'k3[1m]')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- -m 'k3[1m]'");
+    expect(launchCommand(undefined, 'ask', 'kimi-k2')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-k2'");
+    expect(launchCommand('session_abc', 'yolo', 'kimi-code/k3')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -y -m 'kimi-code/k3'");
+    expect(launchCommand(undefined, 'ask', 'k3[1m]')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'k3[1m]'");
+  });
+
+  it('sets KIMI_CODE_SESSION_LOCK=0 so a wedged session never prompts for take-over', () => {
+    expect(launchCommand(undefined, 'ask')).toContain('KIMI_CODE_SESSION_LOCK=0');
+    expect(launchCommand('session_abc', 'yolo')).toContain('KIMI_CODE_SESSION_LOCK=0');
   });
 
   it('rejects a model alias outside the safe charset', () => {
@@ -310,7 +315,7 @@ describe('orchestrator respawn mode', () => {
     await setProjectMode(root, 'demo', 'ask');
     await setProjectApprovals(root, 'demo', 'manual');
     await respawnAgent(root, 'demo', 'demo-orchestrator');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run');
   }, 20_000);
 
   it('leaves a yolo orchestrator on -y', async () => {
@@ -330,7 +335,7 @@ describe('orchestrator respawn mode', () => {
     await setProjectMode(root, 'demo', 'ask');
     await setProjectApprovals(root, 'demo', 'smart');
     await respawnAgent(root, 'demo', 'builder');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run');
   }, 20_000);
 });
 

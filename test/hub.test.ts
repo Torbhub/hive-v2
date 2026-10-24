@@ -482,7 +482,7 @@ describe('orchestrator launch mode', () => {
     const pane = await wake(root, 'demo');
     expect(pane).toBe('%9');
     expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2])
-      .toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc --auto');
+      .toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc --auto');
   });
 
   it('wakes in ask when approvals is manual, so the human answers', async () => {
@@ -491,6 +491,6 @@ describe('orchestrator launch mode', () => {
     await setProjectApprovals(root, 'demo', 'manual');
     await wake(root, 'demo');
     expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2])
-      .toBe('KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- --session session_abc');
+      .toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc');
   });
 });
