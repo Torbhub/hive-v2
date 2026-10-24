@@ -18,6 +18,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     paneIdentity: vi.fn(async () => ({ pid: 1, started: 'x' })),
     paneIs: vi.fn(async () => true),
     capturePane: vi.fn(async () => DIALOG),
+    killWindow: vi.fn(async () => {}),
     sleep: vi.fn(async () => {}),
     sendEnter: vi.fn(async () => {}),
     sendEscape: vi.fn(async () => {}),
@@ -37,11 +38,13 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
   };
 });
 
-import { capturePane, newWindow, paneExists, sendArrow, sendEnter } from '../src/tmux.js';
+import { capturePane, killWindow, newWindow, paneExists, sendArrow, sendEnter } from '../src/tmux.js';
 import {
-  answerDialog, hubAccept, hubAdd, hubInit, hubLog, hubProgress, hubTask, listTasks, menuKeys, planAnswer,
+  answerDialog, continueProject, hubAccept, hubAdd, hubInit, hubLog, hubProgress, hubTask, listTasks, menuKeys, planAnswer,
   readDialogFor, setProjectApprovals, setProjectMode, startProject, wake,
 } from '../src/hub.js';
+import { waitIdle } from '../src/spawn.js';
+import { killAgent } from '../src/kill.js';
 import { lines, parseDialog } from '../src/screen.js';
 import { appendTaskEvent, hubPath, hivePath, readDecisions, readPendingPane, readTeam, writeJson, writePendingPane } from '../src/state.js';
 import type { Checkpoint } from '../src/types.js';
@@ -432,6 +435,91 @@ describe('feed line', () => {
   });
 });
 
+describe('wake racing a cascade kill', () => {
+  // The exact timeline from the review: the wake's guard passes (entry
+  // present, unstamped), the owner's Kill lands while the new pane comes up,
+  // and the final upsert must refuse instead of resurrecting — with the
+  // fresh pane taken down.
+  it('a cascade landing mid-wake stops the final upsert and the fresh pane dies', async () => {
+    vi.mocked(killWindow).mockClear();
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc' }],
+    });
+    vi.mocked(waitIdle).mockImplementationOnce(async () => {
+      await killAgent(root, 'demo');
+      return 'idle';
+    });
+    await expect(wake(root, 'demo')).rejects.toThrow(/killed while its new pane came up/);
+    expect(vi.mocked(killWindow).mock.calls.map((c) => c[0])).toEqual(['%9']);
+    expect((await readTeam(home)).agents).toEqual([]);
+    const decisions = await readDecisions(root);
+    expect(decisions.some((d) => d.summary === 'killed demo-orchestrator')).toBe(true);
+  });
+
+  it('a cascade landing mid-continue stops the upsert and the pending pane dies', async () => {
+    vi.mocked(killWindow).mockClear();
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc' }],
+    });
+    await writePendingPane(root, 'demo', {
+      pane: '%7', kind: 'wake', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+    });
+    vi.mocked(waitIdle).mockImplementationOnce(async () => {
+      await killAgent(root, 'demo');
+      return 'idle';
+    });
+    await expect(continueProject(root, 'demo')).rejects.toThrow(/killed while its new pane came up/);
+    expect(vi.mocked(killWindow).mock.calls.map((c) => c[0])).toEqual(['%7']);
+    expect((await readTeam(home)).agents).toEqual([]);
+  });
+});
+
+describe('start after a cleanup stamp', () => {
+  // cleanup stamps closed_at without dropping the entry; that stamp is
+  // history, not a kill in flight, and a deliberate start must proceed.
+  it('start on a stamped project succeeds and clears the stamp', async () => {
+    const { root, home } = await setup();
+    await hubTask(root, 'demo', 'do it');
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', closed_at: new Date().toISOString() }],
+    });
+    const pane = await startProject(root, 'demo', 'demo-1');
+    expect(pane).toBe('%9');
+    const team = await readTeam(home);
+    expect(team.agents[0]).toMatchObject({ name: 'demo-orchestrator', pane: '%9' });
+    expect(team.agents[0].closed_at).toBeUndefined();
+  });
+});
+
+describe('wake after a cascade kill', () => {
+  // The watch's death path reads the team once per tick and wakes from that
+  // stale snapshot. The cascade drops the orchestrator entry (or stamps it
+  // closed mid-flight), so the wake must re-check and refuse.
+  it('refuses when the orchestrator entry is gone', async () => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), { agents: [] });
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    await expect(wake(root, 'demo')).rejects.toThrow(/not in team.json/);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+  });
+
+  it('refuses when the orchestrator is stamped closed', async () => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{
+        name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc',
+        closed_at: new Date().toISOString(),
+      }],
+    });
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    await expect(wake(root, 'demo')).rejects.toThrow(/closed on purpose/);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+  });
+});
+
 describe('wake pending pane', () => {
   const LINE = 'You are demo-orchestrator, the orchestrator of project demo.';
 
@@ -440,7 +528,7 @@ describe('wake pending pane', () => {
     await writePendingPane(root, 'demo', {
       pane: '%7', kind: 'wake', at: new Date(Date.now() - 11 * 60_000).toISOString(), line: LINE,
     });
-    await expect(wake(root, 'demo')).rejects.toThrow(/no recorded session to resume/);
+    await expect(wake(root, 'demo')).rejects.toThrow(/not in team.json/);
     expect(await readPendingPane(root, 'demo')).toBeNull();
   });
 
@@ -448,7 +536,7 @@ describe('wake pending pane', () => {
     const { root } = await setup();
     await writePendingPane(root, 'demo', { pane: '%7', kind: 'wake', at: new Date().toISOString(), line: LINE });
     vi.mocked(paneExists).mockImplementation(async (p) => p !== '%7');
-    await expect(wake(root, 'demo')).rejects.toThrow(/no recorded session to resume/);
+    await expect(wake(root, 'demo')).rejects.toThrow(/not in team.json/);
     expect(await readPendingPane(root, 'demo')).toBeNull();
     vi.mocked(paneExists).mockImplementation(async () => true);
   });
@@ -456,6 +544,9 @@ describe('wake pending pane', () => {
   it('a live young pending pane routes through continue instead of refusing', async () => {
     const { root, home } = await setup();
     await fs.mkdir(hivePath(home), { recursive: true });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc' }],
+    });
     await writePendingPane(root, 'demo', { pane: '%7', kind: 'wake', at: new Date().toISOString(), line: LINE });
     vi.mocked(capturePane).mockImplementation(async () => IDLE);
     const pane = await wake(root, 'demo');
@@ -482,7 +573,7 @@ describe('orchestrator launch mode', () => {
     const pane = await wake(root, 'demo');
     expect(pane).toBe('%9');
     expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2])
-      .toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc --auto');
+      .toBe('HIVE_AGENT=demo-orchestrator KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc --auto');
   });
 
   it('wakes in ask when approvals is manual, so the human answers', async () => {
@@ -491,6 +582,6 @@ describe('orchestrator launch mode', () => {
     await setProjectApprovals(root, 'demo', 'manual');
     await wake(root, 'demo');
     expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2])
-      .toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc');
+      .toBe('HIVE_AGENT=demo-orchestrator KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc');
   });
 });

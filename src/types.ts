@@ -28,6 +28,7 @@ export type HubOrchestrator = {
   pid?: number;
   pane?: string;
   session_id?: string;
+  children?: number;
   context?: number;
   context_assumed?: boolean;
   context_unknown?: boolean;
@@ -133,6 +134,9 @@ export type TeamEntry = {
   worktree?: string;
   session_id?: string;
   handoff?: string;
+  // The agent that spawned this one (the pane's HIVE_AGENT). A spawn from the
+  // owner's shell has none; the orchestrator's children carry its name.
+  parent?: string;
   // Stamped by a deliberate close (cleanup/close/respawn). A crash never
   // stamps, so watch treats a stamped pane as intentionally down.
   closed_at?: string;

@@ -14,6 +14,8 @@ import {
 import type { Approvals, ProjectMode, TeamEntry } from './types.js';
 import { checkTaskScope } from './scope.js';
 import { applyMemoryBlock, memoryBlockFor } from './memory.js';
+import { assertEntryAlive, killEntry, recordedIdentity } from './kill.js';
+export { assertEntryAlive } from './kill.js';
 
 export function orchestratorName(project: string): string {
   return `${project}-orchestrator`;
@@ -163,10 +165,12 @@ export async function launchWindow(
   mode: ProjectMode = 'ask',
   model?: string,
 ): Promise<{ pane: string; identity: PaneIdentity }> {
+  // HIVE_AGENT names the pane's own agent: a `hive spawn` run inside the pane
+  // reads it to record its parent, and the memory CLI already reports with it.
   const pane = await newWindow(
     windowName(project, agent),
     cwd,
-    launchCommand(sessionId, mode, model),
+    `HIVE_AGENT=${agent} ${launchCommand(sessionId, mode, model)}`,
   );
   const deadline = Date.now() + 15_000;
   let identity: PaneIdentity | null = null;
@@ -228,7 +232,7 @@ async function requireApprovedPlan(root: string, task: string): Promise<void> {
   }
 }
 
-export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string; model?: string };
+export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string; model?: string; parent?: string };
 
 // Prefer the remote tip; the fallbacks keep offline and master-based repos lane-able.
 async function jjBaseRev(home: string): Promise<string> {
@@ -245,6 +249,14 @@ async function undoJjWorkspace(home: string, name: string, wt: string): Promise<
   await fs.mkdir(path.dirname(dest), { recursive: true });
   await fs.rename(wt, dest).catch(() => {});
   await run('jj', ['-R', home, 'workspace', 'forget', name], home);
+}
+
+// A spawn run inside a pane records the pane's agent as the child's parent,
+// so a cascade kill can enumerate the orchestrator's children. In the owner's
+// shell HIVE_AGENT is unset and the spawn has no parent.
+function envParent(self: string): string | undefined {
+  const v = process.env.HIVE_AGENT;
+  return v && v !== self && AGENT_NAME_RE.test(v) ? v : undefined;
 }
 
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
@@ -323,6 +335,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
     const entry: TeamEntry = {
       name: agent, pane, pane_pid: identity.pid, pane_started: identity.started,
       worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task, model: opts.model,
+      parent: opts.parent ?? envParent(agent),
     };
     await upsertTeamEntry(home, entry);
   } catch (e) {
@@ -346,29 +359,12 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   return pane;
 }
 
-function recordedIdentity(entry: TeamEntry): PaneIdentity {
-  if (!entry.pane || !entry.pane_pid || !entry.pane_started) {
-    throw new Error(
-      `${entry.name} has no recorded pane identity; refusing to kill ${entry.pane ?? 'it'} — close the window by hand on the hive socket`,
-    );
-  }
-  return { pid: entry.pane_pid, started: entry.pane_started };
-}
-
 export async function closeAgent(root: string, project: string, agent: string): Promise<void> {
   const home = (await projectEntry(root, project)).home;
   const team = await readTeam(home);
   const entry = team.agents.find((a) => a.name === agent);
   if (!entry) throw new Error(`${project} has no agent named ${agent}`);
-  await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
-  try {
-    if (entry.pane) await killWindow(entry.pane, recordedIdentity(entry));
-  } catch (e) {
-    // The pane survived; a surviving stamp would hide it from the watch.
-    await upsertTeamEntry(home, { name: agent, closed_at: undefined });
-    throw e;
-  }
-  await removeTeamEntry(home, agent);
+  await killEntry(home, entry);
   if (entry.orchestrator) await clearPendingPane(root, project);
 }
 
@@ -386,6 +382,9 @@ async function relaunchAgent(
     kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(p.name, old.name),
     pane_pid: identity.pid, pane_started: identity.started,
   });
+  // A cascade that landed mid-launch dropped the entry; never re-register it.
+  // respawnAgent stamped the entry itself, so a stamp alone is not a kill.
+  await assertEntryAlive(home, old, { pane, identity }, { allowStamped: true });
   await upsertTeamEntry(home, {
     name: old.name, pane, pane_pid: identity.pid, pane_started: identity.started,
     session_id: sessionId, closed_at: undefined, wedged_at: undefined,
@@ -416,8 +415,10 @@ export async function respawnAgent(root: string, project: string, agent: string)
     if (old.pane) await killWindow(old.pane, recordedIdentity(old));
     return await relaunchAgent(p, old, undefined);
   } catch (e) {
-    // A failed respawn must not leave the agent invisible to the watch.
-    await upsertTeamEntry(home, { name: agent, closed_at: undefined });
+    // A failed respawn must not leave the agent invisible to the watch — but
+    // when a cascade dropped the entry mid-flight, the kill owns the outcome.
+    const fresh = (await readTeam(home)).agents.find((a) => a.name === agent);
+    if (fresh) await upsertTeamEntry(home, { name: agent, closed_at: undefined });
     throw e;
   }
 }

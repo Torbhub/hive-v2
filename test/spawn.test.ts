@@ -46,6 +46,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     paneIdentity: vi.fn(async () => ({ pid: 4242, started: 'later' })),
     paneIs: vi.fn(async () => true),
     capturePane: vi.fn(async () => IDLE),
+    paneExists: vi.fn(async () => true),
     sendLiteral: vi.fn(async () => {}),
     sendEnter: vi.fn(async () => {}),
     sendArrow: vi.fn(async () => {}),
@@ -205,6 +206,24 @@ describe('spawnAgent', () => {
   }, 20_000);
 });
 
+describe('respawn racing a cascade kill', () => {
+  it('a cascade mid-respawn stops the re-registering upsert and the fresh pane dies', async () => {
+    const { root, home } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    const before = vi.mocked(killWindow).mock.calls.length;
+    // The cascade's drop lands while the respawn's new window comes up.
+    vi.mocked(killWindow).mockImplementation(async (pane) => {
+      if (pane === '%1') await writeJson(hivePath(home, 'team.json'), { agents: [] });
+    });
+    try {
+      await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow(/killed while its new pane came up/);
+    } finally {
+      vi.mocked(killWindow).mockImplementation(async () => {});
+    }
+    expect(vi.mocked(killWindow).mock.calls.slice(before).map((c) => c[0])).toEqual(['%1', '%9']);
+    expect((await readTeam(home)).agents).toEqual([]);
+  }, 20_000);
+});
+
 describe('closeAgent', () => {
   it('refuses to kill a pane whose identity was never recorded', async () => {
     const { root } = await setup({ name: 'builder', pane: '%1' });
@@ -230,7 +249,7 @@ describe('wakeAgent', () => {
     expect(pane).toBe('%9');
     expect(newWindow).toHaveBeenCalledWith(
       'demo:builder', home,
-      'KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_b',
+      'HIVE_AGENT=builder KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_b',
     );
     const team = await readTeam(home);
     expect(team.agents[0]).toMatchObject({ pane: '%9', session_id: 'session_b' });
@@ -315,7 +334,7 @@ describe('orchestrator respawn mode', () => {
     await setProjectMode(root, 'demo', 'ask');
     await setProjectApprovals(root, 'demo', 'manual');
     await respawnAgent(root, 'demo', 'demo-orchestrator');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('HIVE_AGENT=demo-orchestrator KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run');
   }, 20_000);
 
   it('leaves a yolo orchestrator on -y', async () => {
@@ -335,7 +354,7 @@ describe('orchestrator respawn mode', () => {
     await setProjectMode(root, 'demo', 'ask');
     await setProjectApprovals(root, 'demo', 'smart');
     await respawnAgent(root, 'demo', 'builder');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('HIVE_AGENT=builder KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run');
   }, 20_000);
 });
 
@@ -377,6 +396,24 @@ describe('spawn gate', () => {
     expect(vi.mocked(killWindow).mock.calls).toHaveLength(kills);
     await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/no approved plan/);
   });
+});
+
+describe('spawn parent', () => {
+  it('stamps opts.parent, else the pane env, else nothing', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    await spawnAgent(root, 'demo', { agent: 'w1', parent: 'demo-orchestrator' });
+    vi.stubEnv('HIVE_AGENT', 'demo-orchestrator');
+    try {
+      await spawnAgent(root, 'demo', { agent: 'w2' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    await spawnAgent(root, 'demo', { agent: 'w3' });
+    const team = await readTeam(home);
+    expect(team.agents.find((a) => a.name === 'w1')?.parent).toBe('demo-orchestrator');
+    expect(team.agents.find((a) => a.name === 'w2')?.parent).toBe('demo-orchestrator');
+    expect(team.agents.find((a) => a.name === 'w3')?.parent).toBeUndefined();
+  }, 20_000);
 });
 
 describe('trust dialog at spawn', () => {
