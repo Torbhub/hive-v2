@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Refusal, answerDialog, continueProject, hubTask, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
 import { interruptAgent } from '../src/interrupt.js';
+import { killAgent } from '../src/kill.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { checkName } from '../src/names.js';
 import { addProjectFromBody } from '../src/project.js';
@@ -106,7 +107,7 @@ function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
 const TASK_TEXT_CAP = 4000;
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/stretch-opened', '/api/project', '/api/task-resolve', '/api/progress'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/task-resolve', '/api/progress'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
@@ -154,6 +155,12 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
         interruptAgent(root, project, agentRefOf(body)), ACTION_TIMEOUT_MS, 'interrupt',
       );
       return { ok: true, target: r.target, pane: r.pane };
+    }
+    if (pathname === '/api/kill') {
+      const r = await withTimeout(
+        killAgent(root, project, agentRefOf(body)), ACTION_TIMEOUT_MS, 'kill',
+      );
+      return { ok: true, target: r.target, killed: r.killed, summary: r.summary };
     }
     if (pathname === '/api/plan-answer') {
       const r = await withTimeout(

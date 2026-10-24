@@ -29,6 +29,11 @@ vi.mock('../src/interrupt.js', async (importOriginal) => {
   return { ...orig, interruptAgent: vi.fn(orig.interruptAgent) };
 });
 
+vi.mock('../src/kill.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/kill.js')>();
+  return { ...orig, killAgent: vi.fn(orig.killAgent) };
+});
+
 vi.mock('../src/spawn.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/spawn.js')>();
   return { ...orig, typeLine: vi.fn(orig.typeLine) };
@@ -41,6 +46,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 
 import { hubLog, hubTask, startProject, wake } from '../src/hub.js';
 import { interruptAgent } from '../src/interrupt.js';
+import { killAgent } from '../src/kill.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { typeLine } from '../src/spawn.js';
 import { capturePane, paneIs } from '../src/tmux.js';
@@ -788,6 +794,38 @@ describe('POST /api/interrupt', () => {
       expect(maxActive).toBe(1);
     } finally {
       vi.mocked(interruptAgent).mockRestore();
+    }
+  });
+});
+
+describe('POST /api/kill', () => {
+  beforeEach(() => {
+    vi.mocked(killAgent).mockClear();
+  });
+
+  it('an unknown project and a bad agent name are 400s', async () => {
+    const noProject = await post('/api/kill', { project: 'nope' });
+    expect(noProject.status).toBe(400);
+    expect((await noProject.json()).detail).toMatch(/unknown project/);
+    expect((await post('/api/kill', { project: 'demo', agent: 'bad name' })).status).toBe(400);
+  });
+
+  it('success answers the killed list and passes the agent ref through', async () => {
+    vi.mocked(killAgent).mockImplementation(async (_root, project, ref) => ({
+      target: ref ?? `${project}-orchestrator`,
+      killed: ref ? [ref] : ['builder', `${project}-orchestrator`],
+      summary: ref ? `killed ${ref}` : `killed ${project}-orchestrator + 1 agent`,
+    }));
+    try {
+      const r = await post('/api/kill', { project: 'demo' });
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({
+        ok: true, target: 'demo-orchestrator', killed: ['builder', 'demo-orchestrator'],
+        summary: 'killed demo-orchestrator + 1 agent',
+      });
+      expect(vi.mocked(killAgent).mock.calls).toEqual([[root, 'demo', undefined]]);
+    } finally {
+      vi.mocked(killAgent).mockRestore();
     }
   });
 });

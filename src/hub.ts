@@ -16,7 +16,7 @@ import {
   writeProjects, writeJson, readJson, upsertTeamEntry, type PendingPane, type ProjectsFile,
 } from './state.js';
 import {
-  effectiveOrchestratorMode, ensureAgentFiles, findLatestSession, launchWindow, orchestratorName, pickupLine,
+  assertEntryAlive, effectiveOrchestratorMode, ensureAgentFiles, findLatestSession, launchWindow, orchestratorName, pickupLine,
   preflight, typeLine, waitIdle,
 } from './spawn.js';
 import { planVerdict, settlePendingPane } from './taskgate.js';
@@ -151,6 +151,7 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
   const orchestrator: HubOrchestrator = { state: 'none', question: false };
   if (orchEntry) {
     orchestrator.name = orchEntry.name;
+    orchestrator.children = team.agents.filter((a) => !a.orchestrator && a.parent === orchEntry.name).length;
     if (orchEntry.session_id) orchestrator.session_id = orchEntry.session_id;
     const snap = await snapshot(orchEntry);
     orchestrator.state = snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped';
@@ -404,6 +405,13 @@ async function launchOrchestrator(
 
     const team = await readTeam(p.home);
     const old = team.agents.find((a) => a.orchestrator);
+    // The watch's death path wakes from a stale snapshot; re-read under the lock.
+    if (kind === 'wake' && !old) {
+      throw new Refusal(`${project}'s orchestrator is not in team.json; start it instead of waking`);
+    }
+    if (kind === 'wake' && old?.closed_at) {
+      throw new Refusal(`${project}'s orchestrator was closed on purpose at ${old.closed_at}; not waking it`);
+    }
     const name = orchestratorName(project);
     const cwd = old?.worktree ?? p.home;
     const sessionId = kind === 'wake' ? old?.session_id ?? (await findLatestSession(cwd, name)) ?? undefined : undefined;
@@ -430,13 +438,13 @@ async function launchOrchestrator(
     if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
     const pending: PendingPane = { pane, kind, at: new Date().toISOString(), typed: false, task, line };
     await writePendingPane(root, project, pending);
-    return { pane, identity, pending, sessionId, name, cwd };
+    return { pane, identity, pending, sessionId, name, cwd, old };
   });
   if (launched === 'continue') {
     // A live, young pending pane is a start still in flight; finish it instead of refusing.
     return continueProject(root, project);
   }
-  const { pane, identity, pending, sessionId, name, cwd } = launched;
+  const { pane, identity, pending, sessionId, name, cwd, old } = launched;
   const line = pending.line ?? '';
 
   const idle = await waitIdle(pane, { maxMs: 140_000 });
@@ -445,6 +453,7 @@ async function launchOrchestrator(
     return pane;
   }
   await typeLine(pane, line, identity);
+  if (kind === 'wake' && old) await assertEntryAlive(p.home, old, { pane, identity });
   await upsertTeamEntry(p.home, {
     name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
     worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`), closed_at: undefined, wedged_at: undefined,
@@ -485,6 +494,7 @@ export async function continueProject(root: string, project: string): Promise<st
 
   const pf = await readProjects(root);
   const p = pf.projects.find((x) => x.name === project);
+  if (p && pending.kind === 'wake') await assertEntryAlive(p.home, { name: orchestratorName(project) }, { pane: pending.pane, identity: id });
   if (p) {
     await upsertTeamEntry(p.home, {
       name: orchestratorName(project), orchestrator: true,

@@ -12,6 +12,7 @@ import { cn } from './lib/utils';
 import { StretchText } from './Stretch';
 import { ActionContext, Btn } from './action';
 import { LogView } from './logview';
+import { KillControl } from './kill';
 import { NeedCard, ProgressRow } from './needs';
 import { AddProjectRow, MessageRow, NewTaskRow } from './rows';
 import { Button } from './components/ui/button';
@@ -50,7 +51,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 function ProjectCard({
-  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage, onNudge, onInterrupt, onLogs,
+  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage, onNudge, onInterrupt, onLogs, onKill,
 }: {
   project: HubProject;
   view: HubView;
@@ -64,6 +65,7 @@ function ProjectCard({
   onNudge: (project: string, taskId: string) => void;
   onInterrupt: (project: string, ref?: string) => void;
   onLogs: (project: string, ref?: string) => void;
+  onKill: (project: string) => void;
 }) {
   const { acting } = useContext(ActionContext);
   const look = orchestratorLook(p.orchestrator);
@@ -109,6 +111,9 @@ function ProjectCard({
               <span className="ml-2 inline-block">
                 <Btn id={`logs-${p.name}`} onPress={() => onLogs(p.name)}>Logs</Btn>
               </span>
+            )}
+            {o.state === 'running' && (
+              <KillControl project={p.name} children={o.children ?? 0} onKill={onKill} />
             )}
           </span>
         </Row>
@@ -229,7 +234,7 @@ function ProjectCard({
 export function App() {
   const [view, setView] = useState<HubView>(EMPTY_VIEW);
   const [acting, setActing] = useState(false);
-  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting'; who?: string } | null>(null);
+  const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting' | 'killing'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
   const [logs, setLogs] = useState<{ project: string; agent?: string } | null>(null);
   const actingRef = useRef(false);
@@ -267,7 +272,7 @@ export function App() {
   const act = useCallback(async (
     id: string,
     project: string,
-    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting',
+    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting' | 'killing',
     who: string,
     runAction: () => Promise<string>,
     busyWho?: string,
@@ -363,6 +368,13 @@ export function App() {
       const j = await post('api/interrupt', { project, agent: ref });
       return `interrupted ${String(j.target)}`;
     }, ref);
+  }, [act]);
+
+  const onKill = useCallback((project: string) => {
+    void act(`kill-${project}`, project, 'killing', project, async () => {
+      const j = await post('api/kill', { project });
+      return String(j.summary);
+    });
   }, [act]);
 
   const onAddProject = useCallback(async (name: string, folder: string): Promise<boolean> => {
@@ -471,6 +483,7 @@ export function App() {
               onNudge={onNudge}
               onInterrupt={onInterrupt}
               onLogs={onLogs}
+              onKill={onKill}
             />
           ))}
 

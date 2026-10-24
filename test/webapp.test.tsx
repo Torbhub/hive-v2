@@ -483,3 +483,87 @@ describe('interrupt buttons', () => {
     expect(container.textContent).toContain('interrupted builder');
   });
 });
+
+describe('kill button', () => {
+  const killView: HubView = {
+    ...VIEW,
+    projects: [{
+      ...VIEW.projects[0],
+      orchestrator: { state: 'running', question: false, name: 'demo-orchestrator', children: 2 },
+      agents: [],
+    }],
+  };
+
+  function mountKill(): void {
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      if (String(input).endsWith('api/view')) {
+        return Promise.resolve(new Response(JSON.stringify(killView), { status: 200 }));
+      }
+      return new Promise<Response>((resolve) => {
+        resolveAction = resolve;
+      });
+    });
+  }
+
+  async function repoll(): Promise<void> {
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
+    });
+  }
+
+  function button(text: string): HTMLButtonElement {
+    const btn = [...container.querySelectorAll('button')].find((b) => b.textContent === text);
+    if (!btn) throw new Error(`no "${text}" button rendered`);
+    return btn as HTMLButtonElement;
+  }
+
+  it('shows the cascade size and fires only on the confirm click', async () => {
+    mountKill();
+    await repoll();
+    act(() => {
+      button('Kill +2').click();
+    });
+    expect(vi.mocked(fetch).mock.calls.some(([i]) => String(i).endsWith('api/kill'))).toBe(false);
+    // The confirm stays disabled for a beat after arming (double-click guard).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 600));
+    });
+    act(() => {
+      button('Kill +2 for good?').click();
+    });
+    const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/kill'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({ project: 'demo' });
+    await act(async () => {
+      resolveAction!(new Response(
+        JSON.stringify({ ok: true, target: 'demo-orchestrator', killed: ['b1', 'b2', 'demo-orchestrator'], summary: 'killed demo-orchestrator + 2 agents' }),
+        { status: 200 },
+      ));
+    });
+    expect(container.textContent).toContain('killed demo-orchestrator + 2 agents');
+  });
+
+  it('the second hit of a double-click lands on a disabled confirm', async () => {
+    mountKill();
+    await repoll();
+    act(() => {
+      button('Kill +2').click();
+    });
+    act(() => {
+      button('Kill +2 for good?').click();
+    });
+    expect(vi.mocked(fetch).mock.calls.some(([i]) => String(i).endsWith('api/kill'))).toBe(false);
+  });
+
+  it('Back disarms without a post', async () => {
+    mountKill();
+    await repoll();
+    act(() => {
+      button('Kill +2').click();
+    });
+    act(() => {
+      button('Back').click();
+    });
+    button('Kill +2');
+    expect(vi.mocked(fetch).mock.calls.some(([i]) => String(i).endsWith('api/kill'))).toBe(false);
+  });
+});

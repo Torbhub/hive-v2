@@ -109,7 +109,7 @@ Card = column, `marginTop: 1`.
 - when state `unregistered` and `pane` set: gray `  pane {pane}` (two leading spaces).
 - when `context` is a number: `  {context}%` — color: **gray** if `context_assumed`, else **yellow** if `context >= rotateAt` (plugin option `rotate_at_percent`, default **50**), else **green**.
 - when `context_unknown`: gray `  context unknown`.
-- when state is `running` (web only): an **Interrupt** button (§13), spaced off the text.
+- when state is `running` (web only): an **Interrupt** button (§13), spaced off the text, and a **Kill +N** button (§15) where N is the orchestrator's child count (plain **Kill** when N is 0). The first Kill click only arms it.
 
 **`agents` row**:
 - no agents: gray `none`.
@@ -220,6 +220,7 @@ type HubOrchestrator = {
   pid?: number              // unregistered sessions
   pane?: string             // unregistered sessions, e.g. "%12"
   session_id?: string
+  children?: number         // team entries whose parent names this orchestrator (the cascade kill size)
   context?: number
   context_assumed?: boolean
   context_unknown?: boolean
@@ -428,6 +429,7 @@ Success (exit 0) prints one line: the pane dialog parse plus identifiers:
 | `Rebrief` / `Cancel` on a blocked or question need (web only) | POST `/api/task-resolve` with `{project, task, action, note?}` | 30 s | cyan `resolving…` on the need |
 | `Nudge` on a stale need or progress row (web only) | POST `/api/message` with `{project, text: "<taskId>: owner asks for status"}` | 150 s | cyan `nudging…` on the need or row |
 | `Interrupt` / `Interrupt {ref}` buttons (web only, §13) | POST `/api/interrupt` with `{project, agent?}` | 150 s | — |
+| `Kill +N` button on the orchestrator row (web only, §15) | POST `/api/kill` with `{project}` | 150 s | — |
 | (workers, completeness) | POST `/api/progress` with `{project, task, checkpoint, status, note?}` | 30 s | — |
 | `Seen` button | local state only (records the away-period start as seen); no subprocess | — | — |
 
@@ -444,6 +446,7 @@ Toasts (on completion):
 - nudge success: `{taskId}: the orchestrator was asked for status`. Failure: `{taskId}: {reason}` (for example the pane is gone).
 - message success: `{project}: the message was typed to its orchestrator`. Failure: `{project}: {reason}` (for example the pane is gone or a dialog waits on its screen).
 - interrupt success: `interrupted {target}` where `target` is the agent ref or `{project}-orchestrator`. Failure: `{who}: {reason}` with `who` = `{project} · {agent}` or `{project}` (for example the pane is gone).
+- kill success: the server's `summary` line verbatim (`killed {target}`, `killed {target} + {n} agents`, or the nothing-died line) — the same text the decision log gets. Failure: `{project}: {reason}` (for example a pane identity no longer matches its record).
 - After every action: refresh.
 
 ## 8. Notes for the Ink port
@@ -491,7 +494,7 @@ Everything else stays: plan approvals, send-backs, rebriefs, cancels, owner mess
 
 ## 13. Interrupt (web UI and CLI)
 
-`hive interrupt <project> [agent]` and the web **Interrupt** buttons send Escape to a live pane. A running turn stops mid-turn and the session survives, so the owner can steer the agent after with a message or a dialog answer. Killing the pane loses the session and its context. On an open dialog Escape is the dismiss key, and the dialog block's own Esc button covers that case, so a need card has no Interrupt button.
+`hive interrupt <project> [agent]` and the web **Interrupt** buttons send Escape to a live pane. A running turn stops mid-turn and the session survives, so the owner can steer the agent after with a message or a dialog answer. Kill (§15) is the destructive twin: it drops the pane, the session, and its context, so it sits behind an armed confirm and is never the default. On an open dialog Escape is the dismiss key, and the dialog block's own Esc button covers that case, so a need card has no Interrupt button.
 
 The target is the project's orchestrator by default. A starting orchestrator not yet registered is reached through its pending pane. An optional `agent` names a team agent (`name`, or `name@<worktree>` when the name is ambiguous). The checks run in order: the project exists, the target resolves in `team.json`, the pane is live, and its identity (pid plus start time) still matches the record. The send goes through the tmux layer, which re-verifies the pane identity before the key lands. Success answers `{ok: true, target, pane}` and appends `interrupted {target}` to `decisions.jsonl` with `by: 'owner'`. Every refusal is a 400 `{ok: false, detail}` and shows as a toast. The endpoint serializes per project like the other actions. The Ink screen has no interrupt buttons: interrupting stays a web and CLI flow.
 
@@ -512,3 +515,13 @@ The operator can read an orchestrator's (or a running agent's) wire log — its 
 **Redaction.** Logs can hold secrets the agent saw mid-turn; the server redacts before anything leaves the box (`redactSecrets` in `src/logview.ts`). The rules run in this order: an `Authorization` header (optionally followed by `:` or `=`, quotes plain or `\"`-escaped) with scheme `bearer`, `basic`, or `token` — the scheme stays, the credential dies; `Bearer <token>` in any case; `sk-<key>` (8+ chars); GitHub tokens (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`, 16+ chars); Slack tokens (`xoxb-`/`xoxp-`); JWTs (`eyJ…`, two or three dotted base64url segments); a key/value secret whose key name holds `api[_-]?key`, `token`, `secret`, or `password` followed by `:` or `=` — a quoted value (plain or backslash-escaped) needs 3+ chars and runs to its closing quote, with `\.` treated as one escape pair so an interior escaped quote does not end it; a bare value needs 8+ chars and ends at space, quote, comma, brace, bracket, or backslash; the key name is kept; the password in URL userinfo (`://user:pass@`, user kept); AWS access key ids (`AKIA…`/`ASIA…`, 16 chars); and hex strings of 32+ characters. The key/value rule runs before the hex rule so a hex secret in a named field keeps its key name. Redaction runs before the 500-character cap so a truncated token cannot leak.
 
 **Data.** `HubAgent` gains an optional `session_id` (the view already carried it on the orchestrator; agents get it from their team entry).
+## 15. Kill (web UI and CLI)
+
+`hive kill <project> [agent]` and the web **Kill +N** button kill panes. Interrupt (§13) stays the graceful path: it stops the turn and keeps the session. Kill drops the pane, the session, and its context. There is no undo, so the web button arms on the first click and fires on the second (`Kill +N for good?` / `Back`). The confirm stays disabled for a beat after arming, so a mechanical double-click (under about half a second) lands on a dead button.
+
+With no agent the kill is a cascade: the orchestrator and every team entry whose `parent` names it. A spawn run inside a pane records the pane's agent as the child's parent, read from the pane's `HIVE_AGENT`. A spawn from the owner's shell has no parent. Every target is stamped `closed_at` in one locked write before any pane dies, or the watchdog's wake would resurrect the dead. The panes die children first, the orchestrator last. Each pane kill re-verifies the recorded identity (pid plus start time). A pane already dead needs no kill: its entry just leaves team.json. Stamps and drops match name and worktree, so a same-named agent in another worktree keeps its entry and its watch visibility. A drop is skipped when the entry's pane identity changed since the stamp: a respawn landed mid-cascade and the entry is a new lease, not the kill's target. A kept entry is not named as killed — the toast and the log name what actually died, and when nothing died the line says so. A kill that fails mid-cascade hands the survivors' stamps back, reports the failure, and still logs the split: `killed {names} of the {orchestrator} cascade before {reason}; not killed: {names}`. The orchestrator's pending pane record is cleared. A wake that finds the orchestrator entry gone or stamped closed refuses, so the watchdog's death path cannot resurrect a killed orchestrator. A wake or respawn already in flight re-checks the entry under the team lock before its final upsert; a dropped entry refuses, and a stamped entry refuses too unless the stamp is the respawn's own. The just-launched pane is taken down with its in-hand identity. The same re-check guards a continue that finishes a wake (a continue that finishes a start skips it: start is deliberate, and a stamp left by cleanup is history, not a kill in flight). A start skips the re-check for the same reason.
+
+With an agent (`name`, or `name@<worktree>` when the name is ambiguous) the kill is that one agent. Workers spawn nothing, so there is no cascade below a worker.
+
+Success answers `{ok: true, target, killed, summary}` and, when at least one entry died, appends the same `summary` to `decisions.jsonl` with `by: 'owner'`. The toast shows the server's summary verbatim, so the toast and the log never diverge. Kill and tmux failures reach the client as refusals: every refusal is a 400 `{ok: false, detail}` and shows as a toast. The endpoint serializes per project like the other actions. The Ink screen has no kill button: killing stays a web and CLI flow.
+
