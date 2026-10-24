@@ -49,6 +49,9 @@ def pump(src, dst):
 def handle(client):
     try:
         upstream = socket.create_connection(TARGET, timeout=10)
+        # create_connection leaves the 10s connect timeout on the socket;
+        # a slow LLM response would read as a dead peer and get torn down.
+        upstream.settimeout(None)
     except OSError:
         client.close()
         return
