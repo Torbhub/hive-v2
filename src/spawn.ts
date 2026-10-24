@@ -151,7 +151,8 @@ export function launchCommand(sessionId: string | undefined, mode: ProjectMode =
     mode === 'yolo' ? '-y' : mode === 'auto' ? '--auto' : '',
     model ? `-m '${model}'` : '',
   ].filter(Boolean);
-  return `KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run${args.length ? ` -- ${args.join(' ')}` : ''}`;
+  // No session lock: kimi's take-over repair prompt is interactive, and a hive lane is already one client per session.
+  return `KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run${args.length ? ` -- ${args.join(' ')}` : ''}`;
 }
 
 export async function launchWindow(
