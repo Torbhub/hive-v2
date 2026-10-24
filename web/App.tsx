@@ -11,6 +11,7 @@ import {
 import { cn } from './lib/utils';
 import { StretchText } from './Stretch';
 import { ActionContext, Btn } from './action';
+import { LogView } from './logview';
 import { NeedCard, ProgressRow } from './needs';
 import { AddProjectRow, MessageRow, NewTaskRow } from './rows';
 import { Button } from './components/ui/button';
@@ -49,7 +50,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 function ProjectCard({
-  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage, onNudge, onInterrupt,
+  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage, onNudge, onInterrupt, onLogs,
 }: {
   project: HubProject;
   view: HubView;
@@ -62,6 +63,7 @@ function ProjectCard({
   onMessage: (project: string, text: string) => Promise<boolean>;
   onNudge: (project: string, taskId: string) => void;
   onInterrupt: (project: string, ref?: string) => void;
+  onLogs: (project: string, ref?: string) => void;
 }) {
   const { acting } = useContext(ActionContext);
   const look = orchestratorLook(p.orchestrator);
@@ -103,6 +105,11 @@ function ProjectCard({
                 <Btn id={`interrupt-${p.name}`} onPress={() => onInterrupt(p.name)}>Interrupt</Btn>
               </span>
             )}
+            {o.session_id && (
+              <span className="ml-2 inline-block">
+                <Btn id={`logs-${p.name}`} onPress={() => onLogs(p.name)}>Logs</Btn>
+              </span>
+            )}
           </span>
         </Row>
         <Row label="agents">
@@ -126,11 +133,20 @@ function ProjectCard({
                 <span className="mt-1 flex flex-wrap gap-1.5">
                   {p.agents.filter((a) => a.state === 'running').map((a) => (
                     <Btn
-                      key={a.ref ?? a.name}
+                      key={`int-${a.ref ?? a.name}`}
                       id={`interrupt-${p.name}-${agentRef(a)}`}
                       onPress={() => onInterrupt(p.name, agentRef(a))}
                     >
                       {`Interrupt ${agentRef(a)}`}
+                    </Btn>
+                  ))}
+                  {p.agents.filter((a) => a.state === 'running' && a.session_id).map((a) => (
+                    <Btn
+                      key={`log-${a.ref ?? a.name}`}
+                      id={`logs-${p.name}-${agentRef(a)}`}
+                      onPress={() => onLogs(p.name, agentRef(a))}
+                    >
+                      {`Logs ${agentRef(a)}`}
                     </Btn>
                   ))}
                 </span>
@@ -215,6 +231,7 @@ export function App() {
   const [acting, setActing] = useState(false);
   const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
+  const [logs, setLogs] = useState<{ project: string; agent?: string } | null>(null);
   const actingRef = useRef(false);
 
   // A failed read (network error, or updatedAt 0 from the server) keeps the
@@ -362,6 +379,17 @@ export function App() {
     });
   }, [act]);
 
+  const onLogs = useCallback((project: string, agent?: string) => setLogs({ project, agent }), []);
+
+  if (logs) {
+    return (
+      <ActionContext.Provider value={{ acting, pressed }}>
+        <LogView project={logs.project} agent={logs.agent} onBack={() => setLogs(null)} />
+        <Toaster theme="dark" position="bottom-right" />
+      </ActionContext.Provider>
+    );
+  }
+
   const now = Date.now();
   const where = homeTilde(view.root, '');
   const clock = view.updatedAt ? new Date(view.updatedAt).toTimeString().slice(0, 5) : 'reading…';
@@ -442,6 +470,7 @@ export function App() {
               onMessage={onMessage}
               onNudge={onNudge}
               onInterrupt={onInterrupt}
+              onLogs={onLogs}
             />
           ))}
 
