@@ -200,6 +200,7 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
       worktree: a.worktree,
       ref: agentRef(a.name, nameCounts, a.worktree),
     };
+    if (a.session_id) agent.session_id = a.session_id;
     if (snap.context !== null && snap.alive !== 'gone') {
       agent.context = snap.context;
       agent.context_assumed = false;

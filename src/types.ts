@@ -17,6 +17,7 @@ export type HubAgent = {
   context_unknown?: boolean;
   context_tokens?: number;
   worktree?: string;
+  session_id?: string;
   ref?: string;
 };
 

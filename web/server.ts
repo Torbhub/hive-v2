@@ -8,6 +8,7 @@ import { sendOwnerMessage } from '../src/message.js';
 import { checkName } from '../src/names.js';
 import { addProjectFromBody } from '../src/project.js';
 import { HttpError } from './http-error.js';
+import { readAgentLog } from '../src/logview.js';
 import { recordStretchOpened } from './stretch.js';
 import { handleTaskAction } from './taskactions.js';
 import {
@@ -238,6 +239,13 @@ export function createServer(root: string): http.Server {
           return;
         }
         sendJson(res, 200, view);
+        return;
+      }
+      if (pathname === '/api/log' && req.method === 'GET') {
+        const log = await readAgentLog(
+          root, url.searchParams.get('project') ?? '', url.searchParams.get('agent') ?? undefined,
+        );
+        sendJson(res, 200, log);
         return;
       }
       if (pathname.startsWith('/api/')) {

@@ -39,7 +39,7 @@ async function probeRun(name: string, cmd: string, args: string[]): Promise<stri
   });
 }
 
-async function readTailBytes(file: string, bytes: number): Promise<string> {
+export async function readTailBytes(file: string, bytes: number): Promise<string> {
   const st = await fs.stat(file);
   const size = Math.min(bytes, st.size);
   const fh = await fs.open(file, 'r');
@@ -52,7 +52,7 @@ async function readTailBytes(file: string, bytes: number): Promise<string> {
   }
 }
 
-async function findSessionDir(home: string, sessionId: string): Promise<string> {
+export async function findSessionDir(home: string, sessionId: string): Promise<string> {
   const base = path.join(home, '.kimi-code', 'sessions');
   const dirName = sessionId.startsWith('session_') ? sessionId : `session_${sessionId}`;
   for (const wd of await fs.readdir(base)) {
