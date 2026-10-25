@@ -57,7 +57,9 @@ NEXUS_PUSH_SHA=6542be37f15e682c5c18268892fd769911d0bf5b
 NEXUS_PUSH_SHA256=bdf23a9ddca9377a357400110564aedf85b546a5ce8ff762a17cbe3341024cbf
 NEXUS_PUSH_DST=/opt/nexus-push/nexus_push_mcp.py
 
-if [ -f "$NEXUS_PUSH_DST" ] && echo "$NEXUS_PUSH_SHA256  $NEXUS_PUSH_DST" | sha256sum -c --status -; then
+if [ -f "$NEXUS_PUSH_DST" ] && [ ! -L "$NEXUS_PUSH_DST" ] &&
+   [ "$(stat -c '%u:%g:%a' "$NEXUS_PUSH_DST")" = 0:0:644 ] &&
+   echo "$NEXUS_PUSH_SHA256  $NEXUS_PUSH_DST" | sha256sum -c --status -; then
   echo "kept:    $NEXUS_PUSH_DST"
 else
   tmp=$(mktemp)
@@ -69,12 +71,21 @@ else
     echo "FAIL: nexus-push sha256 mismatch at pinned SHA $NEXUS_PUSH_SHA" >&2
     exit 1
   fi
-  install_if_different "$tmp" "$NEXUS_PUSH_DST" 644
+  if [ -e "$NEXUS_PUSH_DST" ] && [ ! -f "$NEXUS_PUSH_DST" ] && [ ! -L "$NEXUS_PUSH_DST" ]; then
+    echo "FAIL: $NEXUS_PUSH_DST is not a regular file" >&2
+    exit 1
+  fi
+  if [ -L "$NEXUS_PUSH_DST" ]; then
+    rm -f "$NEXUS_PUSH_DST"
+  fi
+  install -o root -g root -m 644 -D "$tmp" "$NEXUS_PUSH_DST"
+  echo "updated: $NEXUS_PUSH_DST"
   rm -f "$tmp"
   trap - EXIT
 fi
 
-# Per-agent hive routing comes from HIVE_* env, never from the MCP config.
+# Every kimi session gets the hive-operator MCP server. Per-agent routing
+# comes from the session's own HIVE_* env, never from this file.
 sudo -u ubuntu /opt/node22/bin/node "$REPO/infra/merge-mcp.mjs" /home/ubuntu/.kimi-code/mcp.json
 
 mkdir -p /etc/hive-v2

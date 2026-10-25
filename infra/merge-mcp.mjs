@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Merge hive's MCP registrations into a kimi mcp.json without disturbing
-// any other server or top-level field. Idempotent, atomic, and never writes
-// when the existing file is malformed.
+// Merge the hive-operator MCP registration into a kimi mcp.json without
+// disturbing any other server or top-level field. Idempotent, atomic, and
+// never writes when the existing file is malformed.
 // usage: node infra/merge-mcp.mjs <path-to-mcp.json>
 import { readFileSync, writeFileSync, renameSync, mkdirSync, statSync, lstatSync, rmSync, chmodSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -15,11 +15,6 @@ export const HIVE_OPERATOR_ENTRY = {
   toolTimeoutMs: 604800000,
 };
 
-const NEXUS_PUSH_ENTRY = {
-  command: 'python3',
-  args: ['/opt/nexus-push/nexus_push_mcp.py'],
-};
-
 export function mergeMcpText(raw, entry = HIVE_OPERATOR_ENTRY) {
   const config = raw === null ? {} : JSON.parse(raw);
   if (typeof config !== 'object' || config === null || Array.isArray(config)) {
@@ -29,8 +24,7 @@ export function mergeMcpText(raw, entry = HIVE_OPERATOR_ENTRY) {
   if (typeof servers !== 'object' || servers === null || Array.isArray(servers)) {
     throw new Error('mcp.json mcpServers must be a JSON object');
   }
-  const hiveServers = { 'hive-operator': entry, 'nexus-push': NEXUS_PUSH_ENTRY };
-  return JSON.stringify({ ...config, mcpServers: { ...servers, ...hiveServers } }, null, 2) + '\n';
+  return JSON.stringify({ ...config, mcpServers: { ...servers, 'hive-operator': entry } }, null, 2) + '\n';
 }
 
 function main() {

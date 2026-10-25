@@ -16,26 +16,22 @@ function tmp(name: string): string {
 }
 
 describe('merge-mcp', () => {
-  it('creates a missing file and parent with both hive servers', () => {
+  it('creates a missing file and parent with only the hive server', () => {
     const file = tmp('nested/dir/mcp.json');
     run(file);
     const config = JSON.parse(readFileSync(file, 'utf8'));
     expect(config.mcpServers['hive-operator']).toEqual({
       command: '/usr/local/bin/hive', args: ['mcp'], toolTimeoutMs: 604800000,
     });
-    expect(config.mcpServers['nexus-push']).toEqual({
-      command: 'python3', args: ['/opt/nexus-push/nexus_push_mcp.py'],
-    });
   });
 
-  it('replaces stale hive entries and preserves every other field', () => {
+  it('replaces a stale hive entry and preserves every other field', () => {
     const file = tmp('mcp.json');
     writeFileSync(file, JSON.stringify({
       theme: 'dark',
       mcpServers: {
         'chrome-devtools': { command: 'npx', args: ['-y', 'chrome-devtools-mcp@latest'] },
         'hive-operator': { command: '/old/hive', args: ['mcp'] },
-        'nexus-push': { command: 'python3', args: ['/old/nexus_push_mcp.py'] },
       },
     }));
     run(file);
@@ -44,7 +40,6 @@ describe('merge-mcp', () => {
     expect(config.mcpServers['chrome-devtools'].command).toBe('npx');
     expect(config.mcpServers['hive-operator'].command).toBe('/usr/local/bin/hive');
     expect(config.mcpServers['hive-operator'].toolTimeoutMs).toBe(604800000);
-    expect(config.mcpServers['nexus-push'].args).toEqual(['/opt/nexus-push/nexus_push_mcp.py']);
   });
 
   it('a second run is byte-identical', () => {
