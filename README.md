@@ -175,6 +175,40 @@ environment that routes their batches to the right project.
   `handoffs/<agent>.md` (the agent's persistent memory; rotation works because
   of it), `manifest.jsonl` (what hive created; cleanup's only input).
 
+## The nexus-push tools
+
+The nexus-push client provides three MCP tools: `nexus_notify` posts a note
+to the pulse feed, `box_tab_status` sets or clears a tab status on the
+terminal deck, and `box_pane_text` captures a local tmux pane. The client is
+a pinned copy of citadel's `scripts/nexus_push_mcp.py`.
+`infra/provision-box.sh` fetches it at a pinned commit, checks the sha256
+against a second pin, and installs it to
+`/opt/nexus-push/nexus_push_mcp.py`. Bump both pins together to upgrade.
+
+The tools post to `https://nexus.dexima.ai` with a bearer token. The token
+comes from the `NEXUS_PUSH_TOKEN` env var, or from the Secrets Manager
+secret `citadel/kimi-permanent-01/nexus-push` through the box instance
+role. The secret is shared with the citadel fleet. Rotation: put the new
+token in the secret. The box reads it per call, so no reprovision is
+needed. Reprovision only to bump the client pin.
+
+hive does not register the client. The pinned client's `box_pane_text` reads
+the default tmux socket. Explicit registration belongs only in a trusted
+operator context. Do not register the client for agents.
+
+A trusted operator can use this explicit MCP config:
+
+```json
+{
+  "mcpServers": {
+    "nexus-push": {
+      "command": "python3",
+      "args": ["/opt/nexus-push/nexus_push_mcp.py"]
+    }
+  }
+}
+```
+
 ## Deployment
 
 The hub lives inside nexus at `nexus.dexima.ai/hive` and is reachable only

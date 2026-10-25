@@ -53,6 +53,37 @@ install_if_different "$BOX_DIR/daily-scan.sh" /opt/hive-v2/daily-scan.sh 755
 install_if_different "$BOX_DIR/llm-forward.py" /opt/hive-v2/llm-forward.py 755
 install_if_different "$BOX_DIR/memory-relay.py" /opt/hive-v2/memory-relay.py 755
 
+NEXUS_PUSH_SHA=6542be37f15e682c5c18268892fd769911d0bf5b
+NEXUS_PUSH_SHA256=bdf23a9ddca9377a357400110564aedf85b546a5ce8ff762a17cbe3341024cbf
+NEXUS_PUSH_DST=/opt/nexus-push/nexus_push_mcp.py
+
+if [ -f "$NEXUS_PUSH_DST" ] && [ ! -L "$NEXUS_PUSH_DST" ] &&
+   [ "$(stat -c '%u:%g:%a' "$NEXUS_PUSH_DST")" = 0:0:644 ] &&
+   echo "$NEXUS_PUSH_SHA256  $NEXUS_PUSH_DST" | sha256sum -c --status -; then
+  echo "kept:    $NEXUS_PUSH_DST"
+else
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp"' EXIT
+  runuser -u ubuntu -- gh api \
+    "repos/Torbhub/citadel/contents/scripts/nexus_push_mcp.py?ref=$NEXUS_PUSH_SHA" \
+    -H "Accept: application/vnd.github.raw" > "$tmp"
+  if ! echo "$NEXUS_PUSH_SHA256  $tmp" | sha256sum -c --status -; then
+    echo "FAIL: nexus-push sha256 mismatch at pinned SHA $NEXUS_PUSH_SHA" >&2
+    exit 1
+  fi
+  if [ -e "$NEXUS_PUSH_DST" ] && [ ! -f "$NEXUS_PUSH_DST" ] && [ ! -L "$NEXUS_PUSH_DST" ]; then
+    echo "FAIL: $NEXUS_PUSH_DST is not a regular file" >&2
+    exit 1
+  fi
+  if [ -L "$NEXUS_PUSH_DST" ]; then
+    rm -f "$NEXUS_PUSH_DST"
+  fi
+  install -o root -g root -m 644 -D "$tmp" "$NEXUS_PUSH_DST"
+  echo "updated: $NEXUS_PUSH_DST"
+  rm -f "$tmp"
+  trap - EXIT
+fi
+
 # Every kimi session gets the hive-operator MCP server. Per-agent routing
 # comes from the session's own HIVE_* env, never from this file.
 sudo -u ubuntu /opt/node22/bin/node "$REPO/infra/merge-mcp.mjs" /home/ubuntu/.kimi-code/mcp.json
