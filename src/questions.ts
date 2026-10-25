@@ -205,6 +205,9 @@ export const VIEW_BATCH_CAP = 50;
 // than the wait limit is abandoned, so it cancels with an audit note.
 // Closed history is capped so the archive never grows without bound.
 export async function sweepQuestionBatches(root: string, now = Date.now()): Promise<void> {
+  // Nothing on disk means nothing to expire or prune, and no writes at all.
+  const present = await fs.stat(hubPath(root, 'questions')).catch(() => null);
+  if (!present?.isDirectory()) return;
   await withHubLock(root, async () => {
     for (const batch of await listOpenQuestionBatches(root)) {
       if (now - Date.parse(batch.createdAt) > OPEN_BATCH_TTL_MS) {

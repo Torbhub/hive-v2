@@ -10,10 +10,12 @@ cp -r "$task" "$work/task"
 git clone -q --filter=blob:none https://github.com/Torbhub/hive-v2 "$work/hive"
 cd "$work/hive"
 git checkout -q "$(cat "$work/task/rev")"
-npm ci --no-audit --no-fund
-bash "$work/task/setup.sh"
+npm ci --no-audit --no-fund >&2
+bash "$work/task/setup.sh" >&2
 if [ $# -gt 0 ]; then
-  "$@" || true
+  # The agent's own output is diagnostic and goes to stderr; stdout stays
+  # reserved for the verdict line, or the caller's line count breaks.
+  "$@" >&2 || true
 fi
 changed="$(git status --porcelain | cut -c4- || true)"
 verdict=fail
