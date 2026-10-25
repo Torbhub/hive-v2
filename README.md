@@ -134,7 +134,26 @@ tmux -L hive-v2 attach
 4. The hub screen (`hive ui`) is where you see all of it: tasks that need you,
    dialogs waiting on any agent's screen (answerable from the screen, with a
    fingerprint check so a changed dialog is never blindly answered), context
-   percentages, and one-key refresh.
+   percentages, and one-key refresh. On the web screen, `Questions N` opens
+   the structured decisions waiting on you (next section).
+
+## Asking the operator
+
+An agent that needs decisions calls the `ask_operator` MCP tool
+(`mcp__hive-operator__ask_operator`). One call carries the whole batch: the
+overarching context, then each question with its own context, a priority,
+2-8 described choices, and one recommendation. The call waits for you.
+
+You answer on the web screen under `Questions N`. Batches read top to bottom:
+why this is being asked, who asks, then the questions in priority order.
+Recommendations come pre-selected, so accepting them all is one Submit.
+Every question also takes Other with your own words. Submit answers the
+whole batch at once, and the waiting agent gets your choices as JSON.
+Cancel is the escape hatch and tells the agent not to assume an answer.
+
+The tool is registered for every kimi session by provision. Agents launched
+before that registration need a respawn to see it and to get the HIVE_*
+environment that routes their batches to the right project.
 5. Before anything lands: the gate. `hive gate` runs the steps and logs every
    exit code; `hive gate-verify log --commit <tip>` is GREEN only when the log
    vouches for exactly that commit on a clean tree.
@@ -145,7 +164,8 @@ tmux -L hive-v2 attach
 
 - Hub root: `.hive-hub/` — `projects.json`, `tasks.jsonl` (append-only
   ledger), `tasks/<id>.md`, `panes/<project>.json` (a starting orchestrator),
-  `hub.json`.
+  `questions/<id>.json` (an open operator question batch, moving to
+  `questions/closed/` when answered or cancelled), `hub.json`.
 - Per project: `.hive/` — `team.json` (who should be running, with pane
   identity = pid + start time), `team/<agent>/role.md` + `RULES.md`,
   `handoffs/<agent>.md` (the agent's persistent memory; rotation works because

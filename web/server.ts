@@ -11,7 +11,7 @@ import { addProjectFromBody } from '../src/project.js';
 import { HttpError } from './http-error.js';
 import { readAgentLog } from '../src/logview.js';
 import { recordStretchOpened } from './stretch.js';
-import { handleTaskAction } from './taskactions.js';
+import { handleTaskAction } from './taskactions.js'; import { handleQuestionAction } from './questionactions.js';
 import {
   ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
 } from '../src/view.js';
@@ -38,12 +38,12 @@ function sendJson(res: http.ServerResponse, code: number, value: unknown): void 
   res.end(JSON.stringify(value));
 }
 
-async function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+async function readBody(req: http.IncomingMessage, cap = BODY_CAP): Promise<Record<string, unknown>> {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > BODY_CAP) throw new HttpError(413, 'body too large');
+    if (size > cap) throw new HttpError(413, 'body too large');
     chunks.push(chunk as Buffer);
   }
   try {
@@ -107,6 +107,7 @@ function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
 const TASK_TEXT_CAP = 4000;
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
+  const questionAction = await handleQuestionAction(root, pathname, body); if (questionAction !== null) return questionAction;
   if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/task-resolve', '/api/progress'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
@@ -241,7 +242,7 @@ export function createServer(root: string): http.Server {
           console.error('hive web: view error:', view.error);
           sendJson(res, 200, {
             ...view,
-            error: view.updatedAt === 0 ? 'the status read failed' : 'the tasks read failed',
+            error: view.updatedAt === 0 ? 'the status read failed' : view.error.startsWith('questions') ? 'the questions read failed' : 'the tasks read failed',
           });
           return;
         }
@@ -260,7 +261,7 @@ export function createServer(root: string): http.Server {
         checkBrowserHeaders(req);
         const contentType = req.headers['content-type'] ?? '';
         if (!contentType.startsWith('application/json')) throw new HttpError(415, 'POST a JSON body');
-        sendJson(res, 200, await handlePost(root, pathname, await readBody(req)));
+        sendJson(res, 200, await handlePost(root, pathname, await readBody(req, pathname === '/api/questions/answer' ? 512 * 1024 : BODY_CAP)));
         return;
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'GET only');

@@ -162,6 +162,7 @@ export function launchCommand(sessionId: string | undefined, mode: ProjectMode =
 }
 
 export async function launchWindow(
+  root: string,
   project: string,
   agent: string,
   cwd: string,
@@ -171,10 +172,12 @@ export async function launchWindow(
 ): Promise<{ pane: string; identity: PaneIdentity }> {
   // HIVE_AGENT names the pane's own agent: a `hive spawn` run inside the pane
   // reads it to record its parent, and the memory CLI already reports with it.
+  // HIVE_PROJECT + HIVE_HUB_ROOT route the agent's ask_operator MCP calls.
+  const quote = (v: string): string => `'${v.replaceAll("'", `'\\''`)}'`;
   const pane = await newWindow(
     windowName(project, agent),
     cwd,
-    `HIVE_AGENT=${agent} ${launchCommand(sessionId, mode, model)}`,
+    `HIVE_AGENT=${agent} HIVE_PROJECT=${project} HIVE_HUB_ROOT=${quote(path.resolve(root))} ${launchCommand(sessionId, mode, model)}`,
   );
   const deadline = Date.now() + 15_000;
   let identity: PaneIdentity | null = null;
@@ -332,7 +335,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
       if (block) await applyMemoryBlock(hivePath(worktree, 'handoffs', `${agent}.md`), block);
     }
     const model = opts.model ?? DEFAULT_MODEL;
-    ({ pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask', model));
+    ({ pane, identity } = await launchWindow(root, project, agent, worktree, undefined, p.mode ?? 'ask', model));
     await manifestAdd(home, {
       kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
       pane_pid: identity.pid, pane_started: identity.started,
@@ -375,6 +378,7 @@ export async function closeAgent(root: string, project: string, agent: string): 
 
 // Shared tail of respawnAgent and wakeAgent: new window, team record, pickup line.
 async function relaunchAgent(
+  root: string,
   p: ProjectsFile['projects'][number],
   old: TeamEntry,
   sessionId: string | undefined,
@@ -382,7 +386,7 @@ async function relaunchAgent(
   const home = p.home;
   const worktree = old.worktree ?? home;
   const mode = old.orchestrator ? effectiveOrchestratorMode(p.mode ?? 'ask', p.approvals) : p.mode ?? 'ask';
-  const { pane, identity } = await launchWindow(p.name, old.name, worktree, sessionId, mode, old.model);
+  const { pane, identity } = await launchWindow(root, p.name, old.name, worktree, sessionId, mode, old.model);
   await manifestAdd(home, {
     kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(p.name, old.name),
     pane_pid: identity.pid, pane_started: identity.started,
@@ -419,7 +423,7 @@ export async function respawnAgent(root: string, project: string, agent: string)
   await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
   try {
     if (old.pane) await killWindow(old.pane, recordedIdentity(old));
-    return await relaunchAgent(p, old, undefined);
+    return await relaunchAgent(root, p, old, undefined);
   } catch (e) {
     // A failed respawn must not leave the agent invisible to the watch — but
     // when a cascade dropped the entry mid-flight, the kill owns the outcome.
@@ -444,5 +448,5 @@ export async function wakeAgent(root: string, project: string, agent: string): P
   if (old.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
     throw new Error(`${agent} is already running`);
   }
-  return relaunchAgent(p, old, old.session_id);
+  return relaunchAgent(root, p, old, old.session_id);
 }

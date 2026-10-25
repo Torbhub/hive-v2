@@ -36,7 +36,7 @@ const USAGE = `usage:
   hive cleanup <project> [--dry-run]
   hive interrupt <project> [agent] | hive kill <project> [agent]
   hive doctor | ui | watch
-  hive web [--port N]
+  hive web [--port N] | mcp
   hive memory propose <project> <text...> | ls <project> | promote <project> <id>`;
 
 class UsageError extends Error {}
@@ -286,6 +286,7 @@ async function main(): Promise<void> {
       console.log(`hive: hub web on http://127.0.0.1:${port} (root ${process.cwd()})`);
       return;
     }
+    case 'mcp': return (await import('./mcp.js')).main();
     default:
       throw new UsageError(`unknown command: ${cmd}`);
   }

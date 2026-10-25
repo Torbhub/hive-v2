@@ -64,7 +64,7 @@ describe('agentRef / homeTilde', () => {
 
 describe('buildNeeds', () => {
   const base: HubView = {
-    root: '/r', hubName: 'hub', projects: [], tasks: [], dialogs: {}, updatedAt: NOW, error: '',
+    root: '/r', hubName: 'hub', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], updatedAt: NOW, error: '',
   };
   it('hub-not-recorded need first', () => {
     const needs = buildNeeds({ ...base, hubName: '' }, NOW);

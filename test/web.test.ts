@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promises as fs } from 'node:fs';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'node:http';
 
 const WEB_DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web', 'dist');
@@ -47,6 +47,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 import { hubLog, hubTask, startProject, wake } from '../src/hub.js';
 import { interruptAgent } from '../src/interrupt.js';
 import { killAgent } from '../src/kill.js';
+import { createQuestionBatch } from '../src/questions.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { typeLine } from '../src/spawn.js';
 import { capturePane, paneIs } from '../src/tmux.js';
@@ -827,5 +828,138 @@ describe('POST /api/kill', () => {
     } finally {
       vi.mocked(killAgent).mockRestore();
     }
+  });
+});
+
+describe('operator question endpoints', () => {
+  let questionRoot: string;
+  let questionServer: Server;
+  let questionBase: string;
+
+  beforeEach(async () => {
+    questionRoot = mkdtempSync(path.join(tmpdir(), 'hive-web-questions-'));
+    const home = path.join(questionRoot, 'demo');
+    await writeJson(hubPath(questionRoot, 'projects.json'), {
+      projects: [{ name: 'demo', home, repos: [{ folder: home }] }],
+    });
+    await writeJson(hubPath(questionRoot, 'hub.json'), { name: 'hub' });
+    const listening = await listenOn(questionRoot);
+    questionServer = listening.s;
+    questionBase = listening.url;
+  });
+
+  afterEach(() => {
+    questionServer.close();
+  });
+
+  const questionPost = (pathname: string, body: unknown) => fetch(questionBase + pathname, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  const openBatch = () => createQuestionBatch(questionRoot, { project: 'demo', agent: 'builder' }, {
+    context: 'Choose the launch setup.',
+    questions: [{
+      question: 'Which database should we use?',
+      context: 'The hub keeps project state.',
+      priority: 1,
+      choices: [
+        { label: 'Postgres', description: 'Use the existing database.' },
+        { label: 'SQLite', description: 'Keep state on this box.' },
+      ],
+      recommended: 'c1',
+    }, {
+      question: 'When should we launch?',
+      context: 'The deploy window starts soon.',
+      priority: 2,
+      choices: [
+        { label: 'Now', description: 'Use the next deploy.' },
+        { label: 'Later', description: 'Wait for another review.' },
+      ],
+      recommended: 'c2',
+    }],
+  });
+
+  it('answers without a project and returns only open batches in the view', async () => {
+    const batch = await openBatch();
+    const before = await (await fetch(`${questionBase}/api/view`)).json();
+    expect(before.questions).toEqual([batch]);
+
+    const answers = [
+      { question: 'q1', choice: 'c1' },
+      { question: 'q2', choice: 'other', text: 'Next week' },
+    ];
+    const r = await questionPost('/api/questions/answer', { id: batch.id, answers });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({
+      ok: true,
+      batch: { id: batch.id, status: 'answered', answers },
+    });
+    const after = await (await fetch(`${questionBase}/api/view`)).json();
+    expect(after.questions).toEqual([]);
+  });
+
+  it('cancels without a project and refuses a second terminal transition', async () => {
+    const batch = await openBatch();
+    const r = await questionPost('/api/questions/cancel', { id: batch.id });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ ok: true, batch: { id: batch.id, status: 'cancelled' } });
+    const after = await (await fetch(`${questionBase}/api/view`)).json();
+    expect(after.questions).toEqual([]);
+
+    const again = await questionPost('/api/questions/cancel', { id: batch.id });
+    expect(again.status).toBe(400);
+    expect(await again.json()).toMatchObject({ ok: false, detail: expect.stringMatching(/already cancelled/) });
+  });
+
+  it('returns clean 400s for invalid answers and leaves the batch open', async () => {
+    const batch = await openBatch();
+    const invalid = await questionPost('/api/questions/answer', {
+      id: batch.id,
+      answers: [{ question: 'q1', choice: 'nope' }, { question: 'q2', choice: 'c2' }],
+    });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({ ok: false, detail: expect.stringMatching(/q1 offers/) });
+    const blankOther = await questionPost('/api/questions/answer', {
+      id: batch.id,
+      answers: [{ question: 'q1', choice: 'c1' }, { question: 'q2', choice: 'other', text: '  ' }],
+    });
+    expect(blankOther.status).toBe(400);
+    const view = await (await fetch(`${questionBase}/api/view`)).json();
+    expect(view.questions).toEqual([batch]);
+  });
+
+  it('allows one terminal transition and turns the race loser into a 400', async () => {
+    const batch = await openBatch();
+    const answers = [{ question: 'q1', choice: 'c1' }, { question: 'q2', choice: 'c2' }];
+    const responses = await Promise.all([
+      questionPost('/api/questions/answer', { id: batch.id, answers }),
+      questionPost('/api/questions/cancel', { id: batch.id }),
+    ]);
+    expect(responses.map((r) => r.status).sort()).toEqual([200, 400]);
+    const loser = responses.find((r) => r.status === 400)!;
+    expect(await loser.json()).toMatchObject({ ok: false, detail: expect.stringMatching(/already answered|already cancelled/) });
+  });
+
+  it('a question-only read failure is labeled questions, not tasks', async () => {
+    const batch = await openBatch();
+    await fs.writeFile(hubPath(questionRoot, 'questions', `${batch.id}.json`), '{broken');
+    const view = await (await fetch(`${questionBase}/api/view`)).json();
+    expect(view.error).toBe('the questions read failed');
+  });
+
+  it('accepts twenty full-length Other answers past the old 64KiB body cap', async () => {
+    const batch = await createQuestionBatch(questionRoot, { project: 'demo', agent: 'builder' }, {
+      context: 'A large batch.',
+      questions: Array.from({ length: 20 }, (_, i) => ({
+        question: `Question ${i + 1}?`, context: 'Background.', priority: i + 1, recommended: 'c1',
+        choices: [{ label: 'A', description: 'First.' }, { label: 'B', description: 'Second.' }],
+      })),
+    });
+    const answers = batch.questions.map((q) => ({ question: q.id, choice: 'other', text: 'é'.repeat(4000) }));
+    const r = await questionPost('/api/questions/answer', { id: batch.id, answers });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ ok: true, batch: { status: 'answered' } });
   });
 });

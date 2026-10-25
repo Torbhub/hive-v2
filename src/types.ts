@@ -109,6 +109,31 @@ export type HubDialog = {
   fingerprint: string;
 };
 
+export type QuestionChoice = { id: string; label: string; description: string };
+
+export type OperatorQuestion = {
+  id: string;
+  question: string;
+  context: string;
+  priority: number;
+  choices: QuestionChoice[];
+  recommended: string;
+};
+
+export type QuestionAnswer = { question: string; choice: string; text?: string };
+
+export type QuestionBatch = {
+  id: string;
+  project: string;
+  agent: string;
+  context: string;
+  questions: OperatorQuestion[];
+  status: 'open' | 'answered' | 'cancelled';
+  createdAt: string;
+  closedAt?: string;
+  answers?: QuestionAnswer[];
+};
+
 export type HubView = {
   root: string;
   hubName: string;
@@ -116,6 +141,7 @@ export type HubView = {
   tasks: HubTask[];
   dialogs: Record<string, HubDialog>;
   decisions: Decision[];
+  questions: QuestionBatch[];
   updatedAt: number;
   error: string;
 };

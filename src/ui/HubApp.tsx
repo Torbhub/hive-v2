@@ -161,7 +161,7 @@ function NeedPlan({
 
 export function HubApp({ root }: { root: string }) {
   const [view, setView] = useState<HubView>({
-    root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], updatedAt: 0, error: '',
+    root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], updatedAt: 0, error: '',
   });
   const [acting, setActing] = useState(false);
   const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'answering'; who?: string } | null>(null);

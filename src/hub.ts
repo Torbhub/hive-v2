@@ -429,7 +429,7 @@ async function launchOrchestrator(
       if (block) await applyMemoryBlock(hivePath(cwd, 'handoffs', `${name}.md`), block);
     }
     const mode = effectiveOrchestratorMode(p.mode ?? 'ask', p.approvals);
-    const { pane, identity } = await launchWindow(project, name, cwd, sessionId, mode, old?.model);
+    const { pane, identity } = await launchWindow(root, project, name, cwd, sessionId, mode, old?.model);
     await manifestAdd(p.home, {
       kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}`,
       pane_pid: identity.pid, pane_started: identity.started,

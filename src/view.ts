@@ -1,5 +1,6 @@
-import type { Decision, HubProject, HubTask, HubView } from './types.js';
+import type { Decision, HubProject, HubTask, HubView, QuestionBatch } from './types.js';
 import { buildStatus, listTasks, readDialogFor } from './hub.js';
+import { listOpenQuestionBatches } from './questions.js';
 import { readDecisions } from './state.js';
 
 export const READ_TIMEOUT_MS = 30_000;
@@ -38,7 +39,7 @@ export async function buildView(root: string): Promise<HubView> {
   try {
     status = await withTimeout(buildStatus(root), READ_TIMEOUT_MS, 'status');
   } catch (e) {
-    return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], updatedAt: 0, error: lastLine(e) };
+    return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], updatedAt: 0, error: lastLine(e) };
   }
   let tasks: HubTask[] = [];
   let error = '';
@@ -46,6 +47,12 @@ export async function buildView(root: string): Promise<HubView> {
     tasks = await withTimeout(listTasks(root), READ_TIMEOUT_MS, 'tasks');
   } catch (e) {
     error = `tasks not read: ${lastLine(e)}`;
+  }
+  let questions: QuestionBatch[] = [];
+  try {
+    questions = await withTimeout(listOpenQuestionBatches(root), READ_TIMEOUT_MS, 'questions');
+  } catch (e) {
+    error = [error, `questions not read: ${lastLine(e)}`].filter(Boolean).join(' · ');
   }
   const dialogs = await readDialogs(root, status.projects);
   // Scan further back than the feed shows, so filtered noise cannot starve it.
@@ -59,6 +66,7 @@ export async function buildView(root: string): Promise<HubView> {
     tasks,
     dialogs,
     decisions,
+    questions,
     updatedAt: Date.now(),
     error,
   };
