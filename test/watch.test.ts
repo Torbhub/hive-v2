@@ -459,8 +459,8 @@ describe('watchCycle auto-approver', () => {
   // Every test drives the approver with its own verdicts/marks, so no test
   // ever touches the module-level cache or the module-level in-flight guard.
   const freshApprover = () => ({ verdicts: new Map<string, true>(), marks: new Set<string>() });
-  const cycle = (root: string, s: { verdicts: Map<string, true>; marks: Set<string> }) =>
-    watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts: s.verdicts, marks: s.marks });
+  const cycle = (root: string, s: { verdicts: Map<string, true>; marks: Set<string> }, env: NodeJS.ProcessEnv = {}) =>
+    watchCycle(root, env, new Set(), new Map(), new Map(), { verdicts: s.verdicts, marks: s.marks });
 
   it('safe mode approves a whitelisted command with option 1', async () => {
     const { root } = await setupProject({ approvals: 'safe' });
@@ -635,7 +635,7 @@ describe('watchCycle auto-approver', () => {
     expect(kimiCalls()).toEqual([]);
   });
 
-  it('passes -m to the classifier spawn only when HIVE_CLASSIFIER_MODEL is set', async () => {
+  it('applies blank-aware classifier model precedence', async () => {
     const { root } = await setupProject({ approvals: 'smart' });
     withQuestion();
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 model_probe.py') as never);
@@ -649,12 +649,26 @@ describe('watchCycle auto-approver', () => {
     } finally {
       delete process.env.HIVE_CLASSIFIER_MODEL;
     }
-    expect(kimiCalls()).toHaveLength(1);
-    expect(kimiCalls()[0][1]).toEqual(['-m', 'cheap-model', '-p', expect.any(String)]);
-
     await cycle(root, s);
-    expect(kimiCalls()).toHaveLength(2);
-    expect(kimiCalls()[1][1]).toEqual(['-p', expect.any(String)]);
+    await cycle(root, s, { HIVE_CLASSIFIER_MODEL: '' });
+    await cycle(root, s, { HIVE_CLASSIFIER_MODEL: ' \t ' });
+    process.env.HIVE_CLASSIFIER_MODEL = ' \t ';
+    try {
+      await cycle(root, s);
+    } finally {
+      delete process.env.HIVE_CLASSIFIER_MODEL;
+    }
+    process.env.HIVE_CLASSIFIER_MODEL = ' process-model ';
+    try {
+      await cycle(root, s, { HIVE_CLASSIFIER_MODEL: '  ' });
+    } finally {
+      delete process.env.HIVE_CLASSIFIER_MODEL;
+    }
+    expect(kimiCalls()[0][1]).toEqual(['-m', 'cheap-model', '-p', expect.any(String)]);
+    expect(kimiCalls().map((call) => call[1][1])).toEqual([
+      'cheap-model', 'kimi-code/k3.1-pro', 'kimi-code/k3.1-pro',
+      'kimi-code/k3.1-pro', 'kimi-code/k3.1-pro', ' process-model ',
+    ]);
   });
 });
 
