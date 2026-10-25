@@ -146,12 +146,16 @@ function checkModel(model: string | undefined): void {
   }
 }
 
-export function launchCommand(sessionId: string | undefined, mode: ProjectMode = 'ask', model?: string): string {
+// Sessions without an explicit model get the house default, not whatever
+// default_model a drifting config.toml happens to say.
+export const DEFAULT_MODEL = 'kimi-code/k3.1-pro';
+
+export function launchCommand(sessionId: string | undefined, mode: ProjectMode = 'ask', model: string = DEFAULT_MODEL): string {
   checkModel(model);
   const args = [
     sessionId ? `--session ${sessionId}` : '',
     mode === 'yolo' ? '-y' : mode === 'auto' ? '--auto' : '',
-    model ? `-m '${model}'` : '',
+    `-m '${model}'`,
   ].filter(Boolean);
   // No session lock: kimi's take-over repair prompt is interactive, and a hive lane is already one client per session.
   return `KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run${args.length ? ` -- ${args.join(' ')}` : ''}`;
@@ -327,14 +331,15 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
       const block = await memoryBlockFor(root, project, task);
       if (block) await applyMemoryBlock(hivePath(worktree, 'handoffs', `${agent}.md`), block);
     }
-    ({ pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask', opts.model));
+    const model = opts.model ?? DEFAULT_MODEL;
+    ({ pane, identity } = await launchWindow(project, agent, worktree, undefined, p.mode ?? 'ask', model));
     await manifestAdd(home, {
       kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
       pane_pid: identity.pid, pane_started: identity.started,
     });
     const entry: TeamEntry = {
       name: agent, pane, pane_pid: identity.pid, pane_started: identity.started,
-      worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task, model: opts.model,
+      worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task, model,
       parent: opts.parent ?? envParent(agent),
     };
     await upsertTeamEntry(home, entry);
@@ -388,6 +393,7 @@ async function relaunchAgent(
   await upsertTeamEntry(home, {
     name: old.name, pane, pane_pid: identity.pid, pane_started: identity.started,
     session_id: sessionId, closed_at: undefined, wedged_at: undefined,
+    model: old.model ?? DEFAULT_MODEL,
   });
   const idle = await waitIdleTrust(pane);
   if (idle !== 'idle') {
