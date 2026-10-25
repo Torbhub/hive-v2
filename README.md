@@ -150,6 +150,10 @@ Recommendations come pre-selected, so accepting them all is one Submit.
 Every question also takes Other with your own words. Submit answers the
 whole batch at once, and the waiting agent gets your choices as JSON.
 Cancel is the escape hatch and tells the agent not to assume an answer.
+A batch left open for more than 7 days expires the next time the hub view
+runs its sweep, and closed history keeps only the newest 200. The screen
+shows the oldest 50 open batches and tells you when more are waiting
+behind them.
 
 The tool is registered for every kimi session by provision. Agents launched
 before that registration need a respawn to see it and to get the HIVE_*

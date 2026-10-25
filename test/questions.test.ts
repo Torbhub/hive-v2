@@ -217,3 +217,40 @@ describe('validateAnswers', () => {
     expect(() => validateAnswers(batch, 'yes')).toThrow(/an array/);
   });
 });
+
+describe('sweepQuestionBatches', () => {
+  it('expires an orphaned open batch with an audit note and spares a fresh one', async () => {
+    const r = await root();
+    const old = await createQuestionBatch(r, meta, input());
+    const fresh = await createQuestionBatch(r, meta, input());
+    const staleDate = new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString();
+    await writeJson(hubPath(r, 'questions', `${old.id}.json`), { ...old, createdAt: staleDate });
+    const { sweepQuestionBatches } = await import('../src/questions.js');
+    await sweepQuestionBatches(r);
+    expect((await readQuestionBatch(r, old.id)).status).toBe('cancelled');
+    expect((await readQuestionBatch(r, fresh.id)).status).toBe('open');
+    const audit = await readFile(hubPath(r, 'decisions.jsonl'), 'utf8');
+    expect(audit).toContain(`expired question batch ${old.id}`);
+  });
+
+  it('prunes closed history to the cap, oldest first', async () => {
+    const r = await root();
+    const { sweepQuestionBatches, CLOSED_BATCH_CAP } = await import('../src/questions.js');
+    const dir = hubPath(r, 'questions', 'closed');
+    const { utimes, mkdir, readdir } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const extra = 5;
+    for (let i = 0; i < CLOSED_BATCH_CAP + extra; i++) {
+      const id = randomUUID();
+      const file = `${dir}/${id}.json`;
+      await writeJson(file, { id, status: 'answered' });
+      await utimes(file, new Date(i * 1000), new Date(i * 1000));
+    }
+    await sweepQuestionBatches(r);
+    const left = await readdir(dir);
+    expect(left).toHaveLength(CLOSED_BATCH_CAP);
+    const { stat } = await import('node:fs/promises');
+    const oldestLeft = Math.min(...await Promise.all(left.map(async (f) => (await stat(`${dir}/${f}`)).mtimeMs)));
+    expect(oldestLeft).toBeGreaterThanOrEqual(extra * 1000);
+  });
+});

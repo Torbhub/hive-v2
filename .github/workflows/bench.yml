@@ -156,7 +156,7 @@ jobs:
               PROMPT="$(mktemp)"
               { cat "$role"; echo; cat "$task/prompt.md"; } > "$PROMPT"
               echo "=== bench: role=$role task=$(basename "$task")"
-              timeout 1500 bash bench/run.sh "$task" kimi --auto -p "$(cat "$PROMPT")" >> "$OUT" || RC=1
+              timeout 1500 bash bench/run.sh "$task" kimi -p "$(cat "$PROMPT")" >> "$OUT" || RC=1
               rm -f "$PROMPT"
             done
           done

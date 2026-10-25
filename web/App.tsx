@@ -424,7 +424,7 @@ export function App() {
     return (
       <ActionContext.Provider value={{ acting, pressed }}>
         <Questions
-          batches={view.questions}
+          batches={view.questions} total={view.questionsTotal ?? view.questions.length}
           onBack={() => setQuestionsOpen(false)}
           onAnswer={onQuestionAnswer}
           onCancel={onQuestionCancel}
@@ -458,7 +458,7 @@ export function App() {
           {view.questions.length > 0 && (
             <div>
               <Btn id="questions-open" onPress={() => setQuestionsOpen(true)}>
-                Questions {view.questions.length}
+                Questions {view.questionsTotal ?? view.questions.length}
               </Btn>
             </div>
           )}

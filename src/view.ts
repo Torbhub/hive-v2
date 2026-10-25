@@ -1,6 +1,6 @@
 import type { Decision, HubProject, HubTask, HubView, QuestionBatch } from './types.js';
 import { buildStatus, listTasks, readDialogFor } from './hub.js';
-import { listOpenQuestionBatches } from './questions.js';
+import { VIEW_BATCH_CAP, listOpenQuestionBatches, sweepQuestionBatches } from './questions.js';
 import { readDecisions } from './state.js';
 
 export const READ_TIMEOUT_MS = 30_000;
@@ -39,7 +39,7 @@ export async function buildView(root: string): Promise<HubView> {
   try {
     status = await withTimeout(buildStatus(root), READ_TIMEOUT_MS, 'status');
   } catch (e) {
-    return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], updatedAt: 0, error: lastLine(e) };
+    return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], questionsTotal: 0, updatedAt: 0, error: lastLine(e) };
   }
   let tasks: HubTask[] = [];
   let error = '';
@@ -49,8 +49,12 @@ export async function buildView(root: string): Promise<HubView> {
     error = `tasks not read: ${lastLine(e)}`;
   }
   let questions: QuestionBatch[] = [];
+  let questionsTotal = 0;
   try {
-    questions = await withTimeout(listOpenQuestionBatches(root), READ_TIMEOUT_MS, 'questions');
+    await withTimeout(sweepQuestionBatches(root), READ_TIMEOUT_MS, 'questions-sweep');
+    const open = await withTimeout(listOpenQuestionBatches(root), READ_TIMEOUT_MS, 'questions');
+    questionsTotal = open.length;
+    questions = open.slice(0, VIEW_BATCH_CAP);
   } catch (e) {
     error = [error, `questions not read: ${lastLine(e)}`].filter(Boolean).join(' · ');
   }
@@ -67,6 +71,7 @@ export async function buildView(root: string): Promise<HubView> {
     dialogs,
     decisions,
     questions,
+    questionsTotal,
     updatedAt: Date.now(),
     error,
   };

@@ -151,7 +151,11 @@ hive ui                                  — the hub screen
   bodies up to 512KiB so twenty full-length Other answers fit. The MCP call
   then returns `{id, status, answers}` as JSON text, or a tool error on cancel.
 - A dead MCP child never closes its batch: an orphaned batch stays open and
-  the owner can cancel it. There is no idempotent resume by design.
+  the owner can cancel it. There is no idempotent resume by design. A lazy
+  sweep (driven by the hub view) cancels open batches older than 7 days with
+  an `expired` audit note, and prunes closed history to the newest 200.
+  `/api/view` carries the oldest 50 open batches and `questionsTotal` counts
+  them all, so a full screen never turns into a giant payload.
 
 ## Kimi session mechanics (the part that replaces hh-spawn)
 

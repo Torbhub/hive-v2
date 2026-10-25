@@ -143,25 +143,30 @@ function BatchCard({
 }
 
 export function Questions({
-  batches, onBack, onAnswer, onCancel,
+  batches, total, onBack, onAnswer, onCancel,
 }: {
   batches: QuestionBatch[];
+  total?: number;
   onBack: () => void;
   onAnswer: (batch: QuestionBatch, answers: QuestionAnswer[]) => void;
   onCancel: (batch: QuestionBatch) => void;
 }) {
   const ordered = [...batches].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const open = total ?? batches.length;
   return (
     <div className="min-h-screen bg-zinc-950">
       <div className="mx-auto flex max-w-2xl flex-col gap-5 px-4 py-8">
         <header className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
             <span className="text-lg font-semibold tracking-tight text-white">Questions</span>
-            <Badge>{`${batches.length} open`}</Badge>
+            <Badge>{`${open} open`}</Badge>
           </div>
           <Btn id="questions-back" variant="ghost" onPress={onBack}>back</Btn>
         </header>
         <Separator />
+        {open > batches.length && (
+          <div className="text-sm text-zinc-500">{`Showing the oldest ${batches.length} of ${open}. Answer or cancel these to see the rest.`}</div>
+        )}
         {ordered.length === 0 && <div className="text-sm text-zinc-500">No open questions.</div>}
         {ordered.map((batch) => (
           <BatchCard key={batch.id} batch={batch} onAnswer={onAnswer} onCancel={onCancel} />

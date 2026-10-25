@@ -142,6 +142,9 @@ export type HubView = {
   dialogs: Record<string, HubDialog>;
   decisions: Decision[];
   questions: QuestionBatch[];
+  // Total open batches, including any beyond the view's first 50. Optional
+  // so older fixtures and callers without a count stay valid.
+  questionsTotal?: number;
   updatedAt: number;
   error: string;
 };

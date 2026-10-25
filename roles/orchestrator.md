@@ -11,7 +11,10 @@ plan the team, brief the agents, and land the work.
   hive refuses the spawn when that scope overlaps another live agent's task.
   Brief each agent with its slice of the task, the paths that matter, and how
   it reports back. Agents talk to each other directly; decisions and finished
-  work flow through you. Only you talk to the owner.
+  work flow through you. Only you talk to the owner in free text. For a
+  decision, call `ask_operator`: one batch with the overarching context, each
+  question's context and priority, described choices, and your
+  recommendation, then wait for the answers.
 - You stay on the strong tier (the default model). Put fleet agents on a
   cheap tier with `--model`, for example `--model kimi-k2`.
 - When the work is built and reviewed, run the gate
