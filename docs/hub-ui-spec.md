@@ -279,12 +279,35 @@ type HubDialog = {
   fingerprint: string       // 40-char hex sha1 of text; `answer` re-checks it
 }
 
+type QuestionChoice = { id: string, label: string, description: string }
+type OperatorQuestion = {
+  id: string
+  question: string
+  context: string
+  priority: number
+  choices: QuestionChoice[]
+  recommended: string
+}
+type QuestionAnswer = { question: string, choice: string, text?: string }
+type QuestionBatch = {
+  id: string
+  project: string
+  agent: string
+  context: string
+  questions: OperatorQuestion[]
+  status: 'open' | 'answered' | 'cancelled'
+  createdAt: string
+  closedAt?: string
+  answers?: QuestionAnswer[]
+}
+
 type HubView = {
   root: string
   hubName: string
   projects: HubProject[]
   tasks: HubTask[]
   dialogs: Record<string, HubDialog>  // "<project>" = orchestrator, "<project>/<agent>" = agent
+  questions: QuestionBatch[]  // open batches only, oldest first
   away: { until: number; since?: string } | null   // until = epoch SECONDS
   awayRefused: string | null
   lastAway: { since: string; until: number } | null
@@ -524,4 +547,32 @@ With no agent the kill is a cascade: the orchestrator and every team entry whose
 With an agent (`name`, or `name@<worktree>` when the name is ambiguous) the kill is that one agent. Workers spawn nothing, so there is no cascade below a worker.
 
 Success answers `{ok: true, target, killed, summary}` and, when at least one entry died, appends the same `summary` to `decisions.jsonl` with `by: 'owner'`. The toast shows the server's summary verbatim, so the toast and the log never diverge. Kill and tmux failures reach the client as refusals: every refusal is a 400 `{ok: false, detail}` and shows as a toast. The endpoint serializes per project like the other actions. The Ink screen has no kill button: killing stays a web and CLI flow.
+
+## 16. Operator questions (web UI only)
+
+**Entry point.** The main screen shows a **Questions {N}** button below the top rule when open batches exist. `N = view.questions.length`. The button opens a whole-screen view. The **back** button returns to the main screen. The Ink screen has no questions UI.
+
+**Screen.** The header shows `Questions`, an `{N} open` badge, and **back**. One card per batch follows, oldest `createdAt` first. The card header shows the batch context, `{project} · {agent}`, and the ISO `createdAt` value. With no open batches, the body shows `No open questions.`
+
+Questions sort by numeric `priority` ascending. Equal priorities keep their batch order. Each question shows a `P{priority}` badge, its question text, and its context as supporting text. Choices use native radio inputs. Each choice shows its label and description. The recommended choice carries a `recommended` badge and starts selected. A submit with no changes accepts every recommendation.
+
+Every question also has an **Other** radio and a free-text input. The input starts disabled. Selecting **Other** enables it and makes it required. Its value is capped at 4000 characters. Whitespace alone is not a valid answer. Selecting a listed choice disables the input and removes the requirement. The draft keeps the text.
+
+Each batch has one **Submit** button. It stays disabled until every question has a valid answer. A submit POSTs `/api/questions/answer` with no project field. Answers follow the displayed question order. Other text is sent as entered.
+
+```json
+{"id":"<uuid>","answers":[{"question":"q1","choice":"c1"},{"question":"q2","choice":"other","text":"..."}]}
+```
+
+The server validates the answers through `answerQuestionBatch`. Success answers `{ok: true, batch}` with the answered batch. A refusal answers 400 `{ok: false, detail}` and shows a toast. A failed submit keeps every draft. The shared action gate disables action buttons during the request.
+
+**Cancel.** Each batch has a two-step **Cancel batch** action. The first click only shows **Cancel batch?** and **Keep batch**. It posts nothing. **Keep batch** abandons the cancel. The confirm stays disabled for about half a second after arming. The second click POSTs `/api/questions/cancel` with no project field.
+
+```json
+{"id":"<uuid>"}
+```
+
+The server closes the batch through `cancelQuestionBatch`. Success answers `{ok: true, batch}` with the cancelled batch. A terminal-state race produces one success and one 400 refusal.
+
+The screen uses the main view's 20-second polling and post-action refresh. It has no second polling loop. The next view omits answered and cancelled batches. A failed status read keeps the previous batches.
 

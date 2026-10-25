@@ -26,7 +26,9 @@ before routing, so `/hive/api/view` and `/api/view` are the same endpoint.
 - `provision-box.sh` — idempotent root provisioner. Installs units and
   wrapper only when content differs, keeps existing env files under
   `/etc/hive-v2`, renders and reloads nginx, renders the memory gateway
-  config, installs docker, and pulls the pinned memory images. The memory
+  config, installs docker, and pulls the pinned memory images. It also merges
+  the `hive-operator` MCP server into `/home/ubuntu/.kimi-code/mcp.json`
+  (`infra/merge-mcp.mjs`), preserving every other server. The memory
   stack itself is documented in `docs/memory.md`.
 - `deploy-box.sh` — what the workflow runs on the box over SSM: fetch, reset
   to the merged commit, `npm ci`, build, provision, health-check.

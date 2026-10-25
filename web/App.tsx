@@ -2,7 +2,7 @@ import React, {
   useCallback, useContext, useEffect, useRef, useState,
 } from 'react';
 import { Toaster, toast } from 'sonner';
-import type { Approvals, HubProject, HubView, ProjectMode } from '../src/types';
+import type { Approvals, HubProject, HubView, ProjectMode, QuestionAnswer, QuestionBatch } from '../src/types';
 import { APPROVALS_MODES, CLOSED_STATES, PROJECT_MODES } from '../src/types';
 import {
   agentGlyph, agentRef, ago, buildNeeds, homeTilde, orchestratorLook,
@@ -14,6 +14,7 @@ import { ActionContext, Btn } from './action';
 import { LogView } from './logview';
 import { KillControl } from './kill';
 import { NeedCard, ProgressRow } from './needs';
+import { Questions } from './questions';
 import { AddProjectRow, MessageRow, NewTaskRow } from './rows';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
@@ -23,7 +24,7 @@ import { ToggleGroup, ToggleGroupItem } from './components/ui/toggle-group';
 
 const EVERY_MS = 20_000;
 
-const EMPTY_VIEW: HubView = { root: '', hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], updatedAt: 0, error: '' };
+const EMPTY_VIEW: HubView = { root: '', hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], updatedAt: 0, error: '' };
 
 async function post(pathname: string, body: unknown): Promise<Record<string, unknown>> {
   const r = await fetch(pathname, {
@@ -237,6 +238,7 @@ export function App() {
   const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting' | 'killing'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
   const [logs, setLogs] = useState<{ project: string; agent?: string } | null>(null);
+  const [questionsOpen, setQuestionsOpen] = useState(false);
   const actingRef = useRef(false);
 
   // A failed read (network error, or updatedAt 0 from the server) keeps the
@@ -393,10 +395,40 @@ export function App() {
 
   const onLogs = useCallback((project: string, agent?: string) => setLogs({ project, agent }), []);
 
+  const onQuestionAnswer = useCallback((batch: QuestionBatch, answers: QuestionAnswer[]) => {
+    const who = `${batch.project} · ${batch.agent}`;
+    void act(`question-answer-${batch.id}`, batch.project, 'answering', who, async () => {
+      await post('api/questions/answer', { id: batch.id, answers });
+      return `${batch.project}: question batch answered`;
+    });
+  }, [act]);
+
+  const onQuestionCancel = useCallback((batch: QuestionBatch) => {
+    const who = `${batch.project} · ${batch.agent}`;
+    void act(`question-cancel-${batch.id}`, batch.project, 'answering', who, async () => {
+      await post('api/questions/cancel', { id: batch.id });
+      return `${batch.project}: question batch cancelled`;
+    });
+  }, [act]);
+
   if (logs) {
     return (
       <ActionContext.Provider value={{ acting, pressed }}>
         <LogView project={logs.project} agent={logs.agent} onBack={() => setLogs(null)} />
+        <Toaster theme="dark" position="bottom-right" />
+      </ActionContext.Provider>
+    );
+  }
+
+  if (questionsOpen) {
+    return (
+      <ActionContext.Provider value={{ acting, pressed }}>
+        <Questions
+          batches={view.questions}
+          onBack={() => setQuestionsOpen(false)}
+          onAnswer={onQuestionAnswer}
+          onCancel={onQuestionCancel}
+        />
         <Toaster theme="dark" position="bottom-right" />
       </ActionContext.Provider>
     );
@@ -422,6 +454,14 @@ export function App() {
             </div>
           </header>
           <Separator />
+
+          {view.questions.length > 0 && (
+            <div>
+              <Btn id="questions-open" onPress={() => setQuestionsOpen(true)}>
+                Questions {view.questions.length}
+              </Btn>
+            </div>
+          )}
 
           {view.error !== '' && (
             <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">

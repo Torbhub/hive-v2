@@ -35,10 +35,10 @@ export async function readJson<T>(file: string): Promise<T | null> {
 }
 
 // tmp + rename so a concurrent reader never sees a half-written file.
-export async function writeJson(file: string, value: unknown): Promise<void> {
+export async function writeJson(file: string, value: unknown, mode?: number): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp.${process.pid}`;
-  await fs.writeFile(tmp, JSON.stringify(value, null, 2) + '\n');
+  await fs.writeFile(tmp, JSON.stringify(value, null, 2) + '\n', mode === undefined ? {} : { mode });
   await fs.rename(tmp, file);
 }
 
@@ -206,6 +206,8 @@ const LOCK_STALE_MS = 10 * 60_000;
 // mkdir is the lock: atomic on every filesystem hive runs on. A lock older
 // than LOCK_STALE_MS is a crashed holder, not a live one.
 async function withDirLock<T>(lock: string, fn: () => Promise<T>): Promise<T> {
+  // A fresh root has no state dir yet; the lock's parent must exist first.
+  await fs.mkdir(path.dirname(lock), { recursive: true });
   const deadline = Date.now() + 10_000;
   for (;;) {
     try {

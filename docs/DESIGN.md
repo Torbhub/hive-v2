@@ -119,14 +119,50 @@ hive ui                                  — the hub screen
 `status --json` and `tasks --json` emit exactly the shapes in spec §6.1/§6.2
 (minus away fields) — the screen is a dumb renderer over them.
 
+## Operator questions (ask_operator MCP)
+
+- `hive mcp` (src/mcp.ts) is a stdio MCP server, newline-delimited JSON-RPC,
+  no SDK. It advertises one tool, `ask_operator`, registered for every kimi
+  session as `hive-operator` in `~/.kimi-code/mcp.json` by provision
+  (infra/merge-mcp.mjs). `toolTimeoutMs` is 7 days because a batch waits for
+  a human. Outside a hive session the tool returns an env error.
+- The tool input is strict (src/questions.ts): an overarching `context` and
+  1-20 questions. Each question carries `question`, `context` (why it is
+  asked), `priority` (1 decides first), 2-8 choices with `label` +
+  `description`, and a required `recommended` choice. Ids are server-made:
+  q1..qn for questions, c1..cn for choices in their given order. A violation
+  comes back as a tool error naming the exact field, so the agent fixes the
+  call instead of guessing.
+- A call creates `.hive-hub/questions/<uuid>.json` (status open) and waits,
+  polling the file every 2s without the hub lock. The read loop stays live:
+  ping and client cancellation work mid-wait, and a cancelled wait leaves the
+  batch open for the operator. One outstanding batch per agent session, at
+  most 200 open batches hub-wide, MCP lines capped at 1MiB. Answer, cancel,
+  and create all transition under `withHubLock`, so a web POST and an MCP
+  process cannot both close a batch. On a close the file moves to
+  `questions/closed/`, so the open listing never scans history. Batch files
+  are 0600. An answered or cancelled batch appends one owner decision to
+  `decisions.jsonl`.
+- The hub web screen (`web/questions.tsx`) lists open batches from
+  `/api/view`. The owner answers with `POST /api/questions/answer`
+  (`{id, answers: [{question, choice, text?}]}`) or cancels with
+  `POST /api/questions/cancel` (`{id}`). `other` answers require text, and
+  the server re-validates everything the UI checked. The answer route takes
+  bodies up to 512KiB so twenty full-length Other answers fit. The MCP call
+  then returns `{id, status, answers}` as JSON text, or a tool error on cancel.
+- A dead MCP child never closes its batch: an orphaned batch stays open and
+  the owner can cancel it. There is no idempotent resume by design.
+
 ## Kimi session mechanics (the part that replaces hh-spawn)
 
 - Launch, in a new tmux window named `<project>:<agent>`:
-  `KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- [--session <id>] [-y|--auto] -m '<model>'`
+  `HIVE_AGENT=<agent> HIVE_PROJECT=<project> HIVE_HUB_ROOT='<root>' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- [--session <id>] [-y|--auto] -m '<model>'`
   — the project's `mode` in projects.json (`ask`/`yolo`/`auto`, default `ask`)
   maps to no flag/`-y`/`--auto`, on fresh starts and resumes alike. The model
   is the house default `kimi-code/k3.1-pro` unless the spawn passed `--model`,
-  and the effective model is stamped into team.json. `exec` so
+  and the effective model is stamped into team.json. The HIVE_* variables name
+  the agent and route its ask_operator MCP calls; the root is shell-quoted.
+  `exec` so
   the pane process IS the CLI (identity check). Pre-flight: `teamkimi status`
   must succeed, else refuse.
 - Pickup line (typed once the pane is idle):

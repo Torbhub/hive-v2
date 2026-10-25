@@ -249,11 +249,26 @@ describe('wakeAgent', () => {
     expect(pane).toBe('%9');
     expect(newWindow).toHaveBeenCalledWith(
       'demo:builder', home,
-      'HIVE_AGENT=builder KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_b -m \'kimi-code/k3.1-pro\'',
+      `HIVE_AGENT=builder HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_b -m 'kimi-code/k3.1-pro'`,
     );
     const team = await readTeam(home);
     expect(team.agents[0]).toMatchObject({ pane: '%9', session_id: 'session_b', model: 'kimi-code/k3.1-pro' });
     expect(team.agents[0].closed_at).toBeUndefined();
+  }, 20_000);
+
+  it('shell-quotes a hub root containing spaces and a quote', async () => {
+    const root = path.join(mkdtempSync(path.join(tmpdir(), 'hive-spawn-')), "root with ' quote");
+    const home = path.join(root, 'demo');
+    await fs.mkdir(home, { recursive: true });
+    await hubInit(root);
+    await hubAdd(root, 'demo', home);
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b' }],
+    });
+    vi.mocked(paneIs).mockResolvedValueOnce(false);
+    await wakeAgent(root, 'demo', 'builder');
+    const cmd = vi.mocked(newWindow).mock.calls.at(-1)?.[2];
+    expect(cmd).toContain(`HIVE_HUB_ROOT='${root.replaceAll("'", `'\\''`)}'`);
   }, 20_000);
 
   it('never wakes a pane that was closed on purpose', async () => {
@@ -334,7 +349,7 @@ describe('orchestrator respawn mode', () => {
     await setProjectMode(root, 'demo', 'ask');
     await setProjectApprovals(root, 'demo', 'manual');
     await respawnAgent(root, 'demo', 'demo-orchestrator');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('HIVE_AGENT=demo-orchestrator KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m \'kimi-code/k3.1-pro\'');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'`);
   }, 20_000);
 
   it('leaves a yolo orchestrator on -y', async () => {
@@ -354,7 +369,7 @@ describe('orchestrator respawn mode', () => {
     await setProjectMode(root, 'demo', 'ask');
     await setProjectApprovals(root, 'demo', 'smart');
     await respawnAgent(root, 'demo', 'builder');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe('HIVE_AGENT=builder KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m \'kimi-code/k3.1-pro\'');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=builder HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'`);
   }, 20_000);
 });
 

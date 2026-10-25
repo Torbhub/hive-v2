@@ -77,6 +77,7 @@ describe('buildView', () => {
     // orchestrator question → "demo", agent question → "demo/fixer"
     expect(Object.keys(view.dialogs).sort()).toEqual(['demo', 'demo/fixer']);
     expect(view.dialogs.demo.pane).toBe('%1');
+    expect(view.questions).toEqual([]);
     expect(view.updatedAt).toBeGreaterThan(0);
     expect(view.error).toBe('');
   });

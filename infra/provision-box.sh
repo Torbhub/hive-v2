@@ -53,6 +53,10 @@ install_if_different "$BOX_DIR/daily-scan.sh" /opt/hive-v2/daily-scan.sh 755
 install_if_different "$BOX_DIR/llm-forward.py" /opt/hive-v2/llm-forward.py 755
 install_if_different "$BOX_DIR/memory-relay.py" /opt/hive-v2/memory-relay.py 755
 
+# Every kimi session gets the hive-operator MCP server. Per-agent routing
+# comes from the session's own HIVE_* env, never from this file.
+sudo -u ubuntu /opt/node22/bin/node "$REPO/infra/merge-mcp.mjs" /home/ubuntu/.kimi-code/mcp.json
+
 mkdir -p /etc/hive-v2
 if [ ! -f "$ENV_FILE" ]; then
   umask 077
