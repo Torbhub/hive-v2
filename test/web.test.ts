@@ -962,4 +962,11 @@ describe('operator question endpoints', () => {
     expect(r.status).toBe(200);
     expect(await r.json()).toMatchObject({ ok: true, batch: { status: 'answered' } });
   });
+
+  it('bounds the view to 50 open batches and reports the total', async () => {
+    for (let i = 0; i < 55; i++) await openBatch();
+    const view = await (await fetch(`${questionBase}/api/view`)).json();
+    expect(view.questions).toHaveLength(50);
+    expect(view.questionsTotal).toBe(55);
+  });
 });

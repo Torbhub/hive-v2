@@ -7,9 +7,12 @@ description: Start a hive team on a task — plan the team, spawn the agents, br
 
 You are the orchestrator. The task text is in the file the hub handed you.
 
-1. Read the task. If anything is unclear, ask through the hub
-   (`hive hub log <id> question "<what you need>"`) and wait for the answer
-   (`answered` event).
+1. Read the task. If anything is unclear and the owner must decide, call the
+   `ask_operator` MCP tool with every open decision as one structured batch:
+   the overarching context, then each question with its own context,
+   a priority, 2-8 described choices, and one recommendation. The call waits
+   for the answers. Use `hive hub log <id> question "<what you need>"` only
+   for free-form clarification that has no choices.
 2. Plan the team: which agents, which roles, why. Break the work into
    checkpoints. Each checkpoint has an id, a one-line desc, and an etaMin
    in minutes. Log the plan with its checkpoints:

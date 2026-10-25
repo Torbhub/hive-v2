@@ -157,32 +157,36 @@ export async function listOpenQuestionBatches(root: string): Promise<QuestionBat
   return batches.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+async function closeBatchLocked(
+  root: string, id: string, status: 'answered' | 'cancelled', rawAnswers?: unknown, audit?: string,
+): Promise<QuestionBatch> {
+  const batch = await readQuestionBatch(root, id);
+  if (batch.status !== 'open') throw new Refusal(`question batch ${id} is already ${batch.status}`);
+  const answers = status === 'answered' ? validateAnswers(batch, rawAnswers) : undefined;
+  const closed: QuestionBatch = { ...batch, status, answers, closedAt: new Date().toISOString() };
+  // The terminal state lands at the open path first. A crash before the
+  // move still leaves a terminal file: the listing filters it out and the
+  // waiter reads it, so no answer is ever shadowed by a stale open copy.
+  await writeBatch(root, id, closed);
+  await fs.mkdir(hubPath(root, 'questions', 'closed'), { recursive: true, mode: 0o700 });
+  await fs.rename(batchPath(root, id), batchPath(root, id, true));
+  try {
+    await appendDecision(root, {
+      project: batch.project, by: 'owner',
+      summary: audit ?? `${status} question batch ${id} from ${batch.agent} (${batch.questions.length} questions)`,
+    });
+  } catch (e) {
+    // The close is already committed; an audit gap must not read as a
+    // failed answer to the operator.
+    console.error(`hive: question batch ${id} closed but its audit append failed:`, e);
+  }
+  return closed;
+}
+
 async function closeBatch(
   root: string, id: string, status: 'answered' | 'cancelled', rawAnswers?: unknown,
 ): Promise<QuestionBatch> {
-  return withHubLock(root, async () => {
-    const batch = await readQuestionBatch(root, id);
-    if (batch.status !== 'open') throw new Refusal(`question batch ${id} is already ${batch.status}`);
-    const answers = status === 'answered' ? validateAnswers(batch, rawAnswers) : undefined;
-    const closed: QuestionBatch = { ...batch, status, answers, closedAt: new Date().toISOString() };
-    // The terminal state lands at the open path first. A crash before the
-    // move still leaves a terminal file: the listing filters it out and the
-    // waiter reads it, so no answer is ever shadowed by a stale open copy.
-    await writeBatch(root, id, closed);
-    await fs.mkdir(hubPath(root, 'questions', 'closed'), { recursive: true, mode: 0o700 });
-    await fs.rename(batchPath(root, id), batchPath(root, id, true));
-    try {
-      await appendDecision(root, {
-        project: batch.project, by: 'owner',
-        summary: `${status} question batch ${id} from ${batch.agent} (${batch.questions.length} questions)`,
-      });
-    } catch (e) {
-      // The close is already committed; an audit gap must not read as a
-      // failed answer to the operator.
-      console.error(`hive: question batch ${id} closed but its audit append failed:`, e);
-    }
-    return closed;
-  });
+  return withHubLock(root, () => closeBatchLocked(root, id, status, rawAnswers));
 }
 
 export function answerQuestionBatch(root: string, id: string, answers: unknown): Promise<QuestionBatch> {
@@ -191,4 +195,36 @@ export function answerQuestionBatch(root: string, id: string, answers: unknown):
 
 export function cancelQuestionBatch(root: string, id: string): Promise<QuestionBatch> {
   return closeBatch(root, id, 'cancelled');
+}
+
+export const OPEN_BATCH_TTL_MS = 7 * 24 * 60 * 60_000;
+export const CLOSED_BATCH_CAP = 200;
+export const VIEW_BATCH_CAP = 50;
+
+// Lazy expiry and retention, driven by the hub view: an open batch older
+// than the wait limit is abandoned, so it cancels with an audit note.
+// Closed history is capped so the archive never grows without bound.
+export async function sweepQuestionBatches(root: string, now = Date.now()): Promise<void> {
+  await withHubLock(root, async () => {
+    for (const batch of await listOpenQuestionBatches(root)) {
+      if (now - Date.parse(batch.createdAt) > OPEN_BATCH_TTL_MS) {
+        await closeBatchLocked(root, batch.id, 'cancelled', undefined,
+          `expired question batch ${batch.id} from ${batch.agent} (open over 7 days without an answer)`);
+      }
+    }
+    const dir = hubPath(root, 'questions', 'closed');
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch((e) => {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [] as Dirent[];
+      throw e;
+    });
+    const files = entries.filter((e) => e.isFile() && UUID_RE.test(e.name.replace(/\.json$/, '')) && e.name.endsWith('.json'));
+    if (files.length <= CLOSED_BATCH_CAP) return;
+    const ages = await Promise.all(files.map(async (f) => ({
+      name: f.name, mtime: (await fs.stat(hubPath(root, 'questions', 'closed', f.name))).mtimeMs,
+    })));
+    ages.sort((a, b) => a.mtime - b.mtime);
+    for (const old of ages.slice(0, ages.length - CLOSED_BATCH_CAP)) {
+      await fs.rm(hubPath(root, 'questions', 'closed', old.name), { force: true });
+    }
+  });
 }
