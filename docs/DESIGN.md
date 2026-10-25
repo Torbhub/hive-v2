@@ -63,11 +63,11 @@ src/
   ui/look.ts      — the shared look: ago, look tables, needs-building (Ink and web both import it)
   ui/buttons.tsx  — keyboard-driven button (Tab focus, Enter press, hotkeys)
   view.ts         — one HubView assembly (status + tasks + dialogs) for both screens
-roles/         — orchestrator.md, implementer.md, reviewer.md (read by spawned sessions)
+roles/         — orchestrator.md, implementer.md, reviewer.md, council-*.md, researcher.md, news-scout.md, deslop-reviewer.md (read by spawned sessions)
 rules/RULES.md — the team's working rules (git, gate, reporting, handoff format)
-skills/        — start, gate, cleanup (Kimi Code skills; load with --skills-dir)
+skills/        — start, gate, cleanup, council, retro, digest-triage, experiment (Kimi Code skills; load with --skills-dir)
 web/           — server.ts (node:http, loopback) + the React/vite SPA (built to web/dist)
-docs/          — this file, hub-ui-spec.md, mechanics.md (what was kept/cut and why)
+docs/          — this file, hub-ui-spec.md, mechanics.md (what was kept/cut and why), crawl-sources.md + crawl/ (the daily loop's ledger and findings)
 test/          — vitest: screen parsing, gate-verify, task ledger, arg parsing
 README.md      — written for a new SWE: what it is, install, the 6 commands you actually use
 ```
@@ -79,8 +79,9 @@ Work folder (hub root), holds `.hive-hub/`:
 - `projects.json` — `{projects:[{name, home, repos:[{folder}]}]}`
 - `tasks.jsonl` — append-only ledger, one event per line. Vocabulary:
   `asked handed plan question answered blocked overnight cleanup decided done
-  cancelled note`. Task state = last non-note event; `plan/question/blocked`
-  = needs owner; `done/cancelled` = closed.
+  cancelled note progress planaccept`. Task state = last event not in
+  {note, progress, planaccept}. `plan/question/blocked` = needs owner.
+  `done/cancelled` = closed.
 - `tasks/<id>.md` — task text handed to the orchestrator as a path.
 - `panes/<project>.json` — a start/wake the hub launched that has not
   registered yet: `{pane, kind, at, typed, task}`.
@@ -118,12 +119,54 @@ hive ui                                  — the hub screen
 `status --json` and `tasks --json` emit exactly the shapes in spec §6.1/§6.2
 (minus away fields) — the screen is a dumb renderer over them.
 
+## Operator questions (ask_operator MCP)
+
+- `hive mcp` (src/mcp.ts) is a stdio MCP server, newline-delimited JSON-RPC,
+  no SDK. It advertises one tool, `ask_operator`, registered for every kimi
+  session as `hive-operator` in `~/.kimi-code/mcp.json` by provision
+  (infra/merge-mcp.mjs). `toolTimeoutMs` is 7 days because a batch waits for
+  a human. Outside a hive session the tool returns an env error.
+- The tool input is strict (src/questions.ts): an overarching `context` and
+  1-20 questions. Each question carries `question`, `context` (why it is
+  asked), `priority` (1 decides first), 2-8 choices with `label` +
+  `description`, and a required `recommended` choice. Ids are server-made:
+  q1..qn for questions, c1..cn for choices in their given order. A violation
+  comes back as a tool error naming the exact field, so the agent fixes the
+  call instead of guessing.
+- A call creates `.hive-hub/questions/<uuid>.json` (status open) and waits,
+  polling the file every 2s without the hub lock. The read loop stays live:
+  ping and client cancellation work mid-wait, and a cancelled wait leaves the
+  batch open for the operator. One outstanding batch per agent session, at
+  most 200 open batches hub-wide, MCP lines capped at 1MiB. Answer, cancel,
+  and create all transition under `withHubLock`, so a web POST and an MCP
+  process cannot both close a batch. On a close the file moves to
+  `questions/closed/`, so the open listing never scans history. Batch files
+  are 0600. An answered or cancelled batch appends one owner decision to
+  `decisions.jsonl`.
+- The hub web screen (`web/questions.tsx`) lists open batches from
+  `/api/view`. The owner answers with `POST /api/questions/answer`
+  (`{id, answers: [{question, choice, text?}]}`) or cancels with
+  `POST /api/questions/cancel` (`{id}`). `other` answers require text, and
+  the server re-validates everything the UI checked. The answer route takes
+  bodies up to 512KiB so twenty full-length Other answers fit. The MCP call
+  then returns `{id, status, answers}` as JSON text, or a tool error on cancel.
+- A dead MCP child never closes its batch: an orphaned batch stays open and
+  the owner can cancel it. There is no idempotent resume by design. A lazy
+  sweep (driven by the hub view) cancels open batches older than 7 days with
+  an `expired` audit note, and prunes closed history to the newest 200.
+  `/api/view` carries the oldest 50 open batches and `questionsTotal` counts
+  them all, so a full screen never turns into a giant payload.
+
 ## Kimi session mechanics (the part that replaces hh-spawn)
 
 - Launch, in a new tmux window named `<project>:<agent>`:
-  `KIMI_CODE_NO_AUTO_UPDATE=1 exec teamkimi run -- [--session <id>] [-y|--auto]`
+  `HIVE_AGENT=<agent> HIVE_PROJECT=<project> HIVE_HUB_ROOT='<root>' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- [--session <id>] [-y|--auto] -m '<model>'`
   — the project's `mode` in projects.json (`ask`/`yolo`/`auto`, default `ask`)
-  maps to no flag/`-y`/`--auto`, on fresh starts and resumes alike. `exec` so
+  maps to no flag/`-y`/`--auto`, on fresh starts and resumes alike. The model
+  is the house default `kimi-code/k3.1-pro` unless the spawn passed `--model`,
+  and the effective model is stamped into team.json. The HIVE_* variables name
+  the agent and route its ask_operator MCP calls; the root is shell-quoted.
+  `exec` so
   the pane process IS the CLI (identity check). Pre-flight: `teamkimi status`
   must succeed, else refuse.
 - Pickup line (typed once the pane is idle):
@@ -152,7 +195,9 @@ hive ui                                  — the hub screen
 after a failure, per-step output to `L.d/<name>.log`, appends `<name> exit
 <n>`. `gate-verify log L [--commit sha]`: GREEN only with ≥1 step line, all
 `exit 0`, no duplicates, every header step present, and (with --commit) head
-match + clean tree. `gate-verify commits a..b`: per commit non-empty
+match + clean tree. A green step whose name starts with `test` also needs its
+`L.d/<name>.log` to show a vitest summary with passed > 0 and zero errors —
+exit 0 alone is not evidence. `gate-verify commits a..b`: per commit non-empty
 subject, ≤ N files vs first parent, empty range is RED. A gate with no step
 lines is RED, never vacuously green.
 

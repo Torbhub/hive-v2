@@ -1,0 +1,187 @@
+name: bench
+# Bench-in-CI for role changes. A roles/ edit steers agent behavior and the
+# gate cannot see behavior, so every roles/ PR gets a live bench run here
+# (README "The bench"). For each changed role file and each task in
+# bench/tasks/, an agent carrying the candidate role works the task prompt;
+# bench/run.sh prints one JSON verdict line per (role, task). The lines land
+# in a single upserted "bench verdict" PR comment.
+#
+# The agent is a real kimi CLI run, so the job needs a model credential.
+# There is no Kimi Platform key and there never will be: auth is the
+# teamkimi proxy on the hub box, reached over an SSM port-forward (the
+# proxy itself stays on loopback). The repo secret TEAMKIMI_PROXY_KEY is
+# the teamkimi proxy.apiKey; KIMI_BENCH_MODEL overrides the model.
+# AWS access is the hive-v2-gh-bench role: ssm:StartSession for
+# port-forwarding only, no deploy or mutex permissions.
+# Without the secret the bench CANNOT run: the job posts a loud verdict
+# comment naming what is missing and goes red. Green means the bench
+# ran and every verdict is pass.
+on:
+  pull_request:
+    paths: ['roles/**']
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+concurrency:
+  group: bench-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.HIVE_BENCH_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Open the teamkimi tunnel over SSM
+        env:
+          INSTANCE_ID: ${{ vars.KIMI_BOX_ID }}
+        run: |
+          set -euo pipefail
+          # No deploy mutex: this role can only open a port-forward. There is
+          # no state to serialize against a deploy.
+          if ! command -v session-manager-plugin >/dev/null; then
+            echo "::error::session-manager-plugin is missing on this runner"
+            exit 1
+          fi
+          aws ssm start-session --target "$INSTANCE_ID" \
+            --document-name AWS-StartPortForwardingSession \
+            --parameters '{"portNumber":["3466"],"localPortNumber":["3466"]}' \
+            > /tmp/hive-bench-tunnel.log 2>&1 &
+          echo $! > /tmp/hive-bench-tunnel.pid
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/3466) 2>/dev/null; then
+              echo "tunnel up after ${i} checks"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the teamkimi tunnel never came up"
+          cat /tmp/hive-bench-tunnel.log
+          exit 1
+      - name: Run the bench and upsert the verdict comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          # Auth for the headless agent: the KIMI_MODEL_* family synthesizes
+          # a provider from env alone, nothing is written to config.toml.
+          # The base URL is the local end of the SSM tunnel to teamkimi.
+          KIMI_MODEL_PROVIDER_TYPE: openai
+          KIMI_MODEL_BASE_URL: http://127.0.0.1:3466/v1
+          KIMI_MODEL_API_KEY: ${{ secrets.TEAMKIMI_PROXY_KEY }}
+          KIMI_MODEL_NAME: ${{ vars.KIMI_BENCH_MODEL || 'kimi-k2' }}
+          KIMI_CODE_NO_AUTO_UPDATE: "1"
+          KIMI_CODE_TRUST_WORKSPACE: "1"
+        run: |
+          set -uo pipefail
+
+          comment() {
+            local file="$1" id
+            id="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+              --jq '.[] | select(.body | startswith("<!-- bench-verdict -->")) | .id' | tail -1)"
+            if [ -n "$id" ]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@"$file" >/dev/null
+            else
+              gh pr comment "$PR" --body-file "$file" >/dev/null
+            fi
+          }
+
+          BODYF="$(mktemp)"
+          if [ -z "${KIMI_MODEL_API_KEY:-}" ]; then
+            cat > "$BODYF" <<'EOF'
+          <!-- bench-verdict -->
+          ## bench verdict: CANNOT RUN
+
+          The bench did not run. Missing: the `TEAMKIMI_PROXY_KEY` repo secret
+          (the teamkimi proxy.apiKey). The bench action is a live kimi agent
+          run and auth is the teamkimi proxy on the hub box, reached over an
+          SSM port-forward. There is no Kimi Platform key by design.
+
+          This PR still owes a bench verdict (README § The bench): run every
+          task in `bench/tasks/` with an agent carrying the candidate role on
+          a machine with Node 22 and a signed-in kimi, and paste the JSON
+          lines here. Or provision `TEAMKIMI_PROXY_KEY` (optionally a
+          `KIMI_BENCH_MODEL` repo variable) and re-run this workflow.
+          EOF
+            comment "$BODYF"
+            echo "::error::bench cannot run: TEAMKIMI_PROXY_KEY secret is not provisioned"
+            exit 1
+          fi
+
+          # Pinned and scriptless: the key is in env, so no lifecycle scripts.
+          if ! npm install -g @moonshot-ai/kimi-code@2.3.0 --no-audit --no-fund --ignore-scripts; then
+            echo "::error::kimi CLI install failed"
+            exit 1
+          fi
+          if ! kimi --version; then
+            echo "::error::kimi CLI not runnable after install"
+            exit 1
+          fi
+
+          # previous_filename too: a roles/x -> docs/y rename must not read as
+          # "no roles changed" and exit green without a word.
+          ROLES="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate \
+            --jq '.[] | .filename, (.previous_filename // empty)' | grep '^roles/' | sort -u || true)"
+          # A renamed-away role is gone from the PR head; only bench what exists.
+          ROLES="$(for r in $ROLES; do [ -f "$r" ] && printf '%s\n' "$r"; done)"
+          if [ -z "$ROLES" ]; then
+            cat > "$BODYF" <<'EOF'
+          <!-- bench-verdict -->
+          ## bench verdict: NOTHING TO BENCH
+
+          This PR touched `roles/` paths but no `roles/*.md` file exists on the
+          PR head (renamed away or deleted). No bench run was possible.
+          EOF
+            comment "$BODYF"
+            echo "no roles/ files on the PR head — verdict comment posted"
+            exit 0
+          fi
+
+          OUT="$(mktemp)"; : > "$OUT"
+          EXPECTED=0; RC=0
+          for role in $ROLES; do
+            for task in bench/tasks/*/; do
+              EXPECTED=$((EXPECTED + 1))
+              PROMPT="$(mktemp)"
+              { cat "$role"; echo; cat "$task/prompt.md"; } > "$PROMPT"
+              echo "=== bench: role=$role task=$(basename "$task")"
+              timeout 1500 bash bench/run.sh "$task" kimi -p "$(cat "$PROMPT")" >> "$OUT" || RC=1
+              rm -f "$PROMPT"
+            done
+          done
+
+          TOTAL="$(wc -l < "$OUT")"
+          PASSN="$(grep -c '"verdict":"pass"' "$OUT" || true)"
+          if [ "$RC" = 0 ] && [ "$TOTAL" = "$EXPECTED" ]; then
+            TITLE="bench verdict: PASS ($PASSN/$TOTAL)"
+          else
+            TITLE="bench verdict: FAIL ($PASSN/$TOTAL passed, $EXPECTED expected)"
+          fi
+          ROLELIST="$(printf '%s\n' $ROLES | sed 's/^.*$/`&`/' | paste -sd ' ')"
+          {
+            printf '<!-- bench-verdict -->\n## %s\n\n' "$TITLE"
+            printf 'Roles under test: %s\n\n' "$ROLELIST"
+            printf '```json\n'
+            cat "$OUT"
+            printf '```\n'
+          } > "$BODYF"
+          comment "$BODYF"
+          echo "$TITLE"
+          [ "$RC" = 0 ] && [ "$TOTAL" = "$EXPECTED" ]
+      - name: Close the tunnel
+        if: always()
+        run: |
+          if [ -f /tmp/hive-bench-tunnel.pid ]; then
+            kill "$(cat /tmp/hive-bench-tunnel.pid)" 2>/dev/null || true
+          fi

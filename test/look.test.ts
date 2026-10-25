@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { HubView } from '../src/types.js';
+import type { HubTask, HubView } from '../src/types.js';
 import {
-  agentRef, ago, buildNeeds, homeTilde, orchestratorLook, untilLabel, waitLook,
+  agentRef, ago, buildNeeds, homeTilde, orchestratorLook, staleTask,
+  taskProgress, untilLabel, waitLook, windowLabel,
 } from '../src/ui/look.js';
 
 const NOW = Date.parse('2026-10-13T12:00:00Z');
@@ -63,7 +64,7 @@ describe('agentRef / homeTilde', () => {
 
 describe('buildNeeds', () => {
   const base: HubView = {
-    root: '/r', hubName: 'hub', projects: [], tasks: [], dialogs: {}, updatedAt: NOW, error: '',
+    root: '/r', hubName: 'hub', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], updatedAt: NOW, error: '',
   };
   it('hub-not-recorded need first', () => {
     const needs = buildNeeds({ ...base, hubName: '' }, NOW);
@@ -135,5 +136,76 @@ describe('buildNeeds', () => {
     }, NOW);
     expect(needs[0]).toMatchObject({ key: 'task-demo-1', action: 'plan', taskId: 'demo-1' });
     expect(needs[0].dialogKey).toBeUndefined();
+  });
+
+  const task = (over: Partial<HubTask>): HubTask => ({
+    id: 'demo-1', project: 'demo', asked: '2026-10-13T10:00:00Z', state: 'blocked',
+    updated: '2026-10-13T11:00:00Z', last_note: null, needs_owner: true, ...over,
+  });
+
+  it('a blocked or question need carries its reason and the resolve action', () => {
+    const needs = buildNeeds({ ...base, tasks: [task({ last_note: 'the API key is missing' })] }, NOW);
+    expect(needs[0]).toMatchObject({
+      key: 'task-demo-1', who: 'demo-1', words: 'blocked', action: 'resolve',
+      project: 'demo', taskId: 'demo-1', detail: 'the API key is missing',
+    });
+    const question = buildNeeds({ ...base, tasks: [task({ state: 'question' })] }, NOW);
+    expect(question[0]).toMatchObject({ action: 'resolve', detail: 'no reason recorded' });
+  });
+
+  it('a plan need carries its checkpoint list', () => {
+    const checkpoints = [{ id: 'a', desc: 'write it', etaMin: 5 }, { id: 'b', desc: 'ship it', etaMin: 10 }];
+    const needs = buildNeeds({ ...base, tasks: [task({ state: 'plan', checkpoints })] }, NOW);
+    expect(needs[0]).toMatchObject({ action: 'plan', checkpoints });
+  });
+
+  it('stale math: 4h past last progress, or past the latest activity, live states only', () => {
+    expect(staleTask(task({ state: 'blocked', last_progress_at: '2026-10-13T07:59:59Z' }), NOW)).toBe(true);
+    expect(staleTask(task({ state: 'blocked', last_progress_at: '2026-10-13T08:00:01Z' }), NOW)).toBe(false);
+    // No progress yet: the clock starts at the latest activity (updated), so a
+    // rebriefed days-old task is not instantly stale.
+    expect(staleTask(task({ state: 'handed', needs_owner: false, updated: '2026-10-13T06:00:00Z' }), NOW)).toBe(true);
+    expect(staleTask(task({ state: 'handed', needs_owner: false, asked: '2026-10-10T06:00:00Z' }), NOW)).toBe(false);
+    expect(staleTask(task({ state: 'done', needs_owner: false }), NOW)).toBe(false);
+    expect(staleTask(task({ state: 'asked', needs_owner: false }), NOW)).toBe(false);
+    const needs = buildNeeds({ ...base, tasks: [task({ last_progress_at: '2026-10-13T06:00:00Z' })] }, NOW);
+    expect(needs[0].stale).toBe(true);
+  });
+});
+
+describe('taskProgress', () => {
+  const planned: HubTask = {
+    id: 'demo-1', project: 'demo', asked: '2026-10-13T06:00:00Z', state: 'handed',
+    updated: '2026-10-13T11:00:00Z', last_note: null, needs_owner: false,
+    checkpoints: [
+      { id: 'a', desc: 'write it', etaMin: 5 },
+      { id: 'b', desc: 'test it', etaMin: 5 },
+      { id: 'c', desc: 'ship it', etaMin: 5 },
+    ],
+    progress: {
+      a: { status: 'ok', at: '2026-10-13T10:00:00Z' },
+      b: { status: 'fail', note: 'red tests', at: '2026-10-13T10:30:00Z' },
+      c: { status: 'started', at: '2026-10-13T11:00:00Z' },
+    },
+    last_progress_at: '2026-10-13T11:00:00Z',
+  };
+
+  it('counts terminal checkpoints, finds the live one, lists the failed', () => {
+    expect(taskProgress(planned)).toEqual({
+      done: 2, total: 3, current: 'c', lastAt: '2026-10-13T11:00:00Z', failed: ['b'],
+    });
+  });
+
+  it('no checkpoints means no progress, no events means nothing done or live', () => {
+    expect(taskProgress({ ...planned, checkpoints: [] })).toBeNull();
+    const fresh = { ...planned, progress: {}, last_progress_at: null };
+    expect(taskProgress(fresh)).toEqual({ done: 0, total: 3, current: null, lastAt: null, failed: [] });
+  });
+});
+
+describe('windowLabel', () => {
+  it('is the tmux window name <project>:<agent>', () => {
+    expect(windowLabel('demo', 'demo-orchestrator')).toBe('demo:demo-orchestrator');
+    expect(windowLabel('demo', 'fixer')).toBe('demo:fixer');
   });
 });

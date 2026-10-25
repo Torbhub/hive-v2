@@ -24,6 +24,7 @@ hive hub add demo ~/src/demo      # a project = a name + a folder with a git rep
 hive hub task demo "add a /health endpoint"
 hive ui                           # the hub screen: what waits on you
 hive hub start demo demo-1        # bring the orchestrator up on a task
+hive doctor                       # preflight: is this box ready for a task
 hive gate --log g.log -- build "npm run build" test "npm test"
 ```
 
@@ -43,12 +44,33 @@ request (unset = open on loopback, for development). The screen also creates
 tasks, starts teams, and sets a project's permission mode (`ask`/`yolo`/`auto`
 — passed to kimi as nothing/`-y`/`--auto` on the next launch, resume included).
 
+## Interrupt vs kill
+
+`hive interrupt demo [agent]` — or the Interrupt buttons on the web screen —
+sends Escape to a live pane. A running turn stops mid-turn and the session
+stays alive: its context survives and you can steer the agent after with a
+message or a dialog answer. On an open dialog Escape is the dismiss key, so a
+dialog needs the answer flow instead. Killing the pane (`hive spawn close`,
+`hive cleanup`) ends the session and its context with it. Interrupt first
+when the work matters.
+
 ## The watchdog
 
 `hive watch` is a foreground daemon (one systemd unit:
 `ExecStart=/path/to/hive watch`, run from the hub root): every 5s it logs
-dead panes to `.hive-hub/watch.log` with timestamps and re-wakes a dead
-orchestrator by session id, and it auto-answers permission dialogs per the
+dead panes to `.hive-hub/watch.log` with timestamps and re-wakes the dead by
+session id. A failed wake is retried with backoff (60 attempts over hours,
+then it gives up and says so). A pane closed on purpose (`hive cleanup`,
+`hive spawn close`, a respawn) is stamped `closed_at` in `team.json` first,
+and the watch never re-wakes a stamped pane. A dead agent with a recorded
+session is re-woken the same way as the orchestrator. A live pane frozen on
+a spinner for 10 minutes is marked `wedged` on the hub, but only when
+nothing corroborates life: no CPU advance in its process tree and a stale
+wire log. Before any restart of a wedged pane the watch saves a stack dump
+(`sudo pstack`, plus `py-spy dump` when installed) to `.hive/wedges/`, then
+kills the pane so the death path re-wakes it. The watch also pulses
+`.hive-hub/watch-status.json` every cycle. A stale file means the watch
+itself is wedged. It auto-answers permission dialogs per the
 project's `approvals` setting (`manual`/`safe`/`smart`). `safe` approves only
 deterministic read-only commands (a whitelist over every segment of a
 `&&`/`;`/`|` chain; destructive patterns like `rm`, `git push`, `sudo`,
@@ -59,11 +81,36 @@ only a reply starting with APPROVE counts). It only ever picks option 1,
 in `.hive-hub/decisions.jsonl` with `by:"watch"`, as do owner answers
 (`by:"owner"`) and `hive hub log <id> decided <reason>` (`by:"orchestrator"`);
 the web screen shows the latest eight under DECISIONS.
+`test/watch-e2e.test.ts` proves the smart tier end to end: a decoy tmux pane
+plays a fake approval dialog, and the real watch cycle detects it, calls the
+classifier (a stub `kimi` on PATH), and answers the pane or correctly holds
+back.
+
+## The daily loop
+
+Once a day the box posts a `daily-scan` task to the hivev2 project by
+itself (a systemd timer, `hive-v2-daily-scan.timer`, provisioned from
+`infra/box/` — never made by hand). The orchestrator that picks it up
+follows the experiment skill (`skills/experiment/SKILL.md`): a news-scout
+crawls the standing sources in `docs/crawl-sources.md` plus one web-search
+pass and writes a dated findings note in `docs/crawl/` with at most three
+candidate experiments. The orchestrator tries at most one, in its own lane,
+through the gate and a PR. The deslop-reviewer reviews that PR. Only a
+CLEAN verdict earns the `deslop-clean` label that lets auto-merge land it.
+An experiment that touches the loop's control plane never auto-merges:
+`infra/`, `.github/`, `scripts/`, `roles/`, `skills/`, `rules/`, or
+`AGENTS.md`. It waits for you. A day where the scout finds nothing worth
+trying closes as done with a note, and that is the loop working.
 
 ## How a task flows
 
 1. You record a task: `hive hub task demo "..."`. It lands in the ledger
-   (`.hive-hub/tasks.jsonl`) in state `asked`.
+   (`.hive-hub/tasks.jsonl`) in state `asked`. A task can also be a
+   structured brief: frontmatter between `---` lines plus a
+   `## Files to touch` section that claims the paths the work will change.
+   Paste one with `hive hub task demo "$(cat brief.md)"`. hive validates the
+   brief before recording it and keeps the frontmatter at the top of
+   `tasks/<id>.md`.
 2. You start the team: `hive hub start demo demo-1`. hive opens a tmux window
    (`demo:demo-orchestrator` in the `hive` tmux session), waits for kimi to go
    idle, and types the pickup line: who it is, where its handoff is, where the
@@ -77,12 +124,40 @@ yourself:
 ```bash
 tmux -L hive-v2 attach
 ```
-3. The orchestrator plans, asks, and spawns agents (`hive spawn`). Every state
-   change is a ledger event: `plan`, `question`, `blocked`, `done`.
+3. The orchestrator plans, asks, and spawns agents (`hive spawn`). With
+   `--task <id>` the spawn binds the agent to a task whose brief claims a
+   file scope. hive refuses the spawn when the scope overlaps another live
+   agent's task scope, and when either brief's scope does not parse. Two
+   agents on the same task never collide. A task with no scope claim spawns
+   unchecked. Every state change is a ledger event: `plan`, `question`,
+   `blocked`, `done`.
 4. The hub screen (`hive ui`) is where you see all of it: tasks that need you,
    dialogs waiting on any agent's screen (answerable from the screen, with a
    fingerprint check so a changed dialog is never blindly answered), context
-   percentages, and one-key refresh.
+   percentages, and one-key refresh. On the web screen, `Questions N` opens
+   the structured decisions waiting on you (next section).
+
+## Asking the operator
+
+An agent that needs decisions calls the `ask_operator` MCP tool
+(`mcp__hive-operator__ask_operator`). One call carries the whole batch: the
+overarching context, then each question with its own context, a priority,
+2-8 described choices, and one recommendation. The call waits for you.
+
+You answer on the web screen under `Questions N`. Batches read top to bottom:
+why this is being asked, who asks, then the questions in priority order.
+Recommendations come pre-selected, so accepting them all is one Submit.
+Every question also takes Other with your own words. Submit answers the
+whole batch at once, and the waiting agent gets your choices as JSON.
+Cancel is the escape hatch and tells the agent not to assume an answer.
+A batch left open for more than 7 days expires the next time the hub view
+runs its sweep, and closed history keeps only the newest 200. The screen
+shows the oldest 50 open batches and tells you when more are waiting
+behind them.
+
+The tool is registered for every kimi session by provision. Agents launched
+before that registration need a respawn to see it and to get the HIVE_*
+environment that routes their batches to the right project.
 5. Before anything lands: the gate. `hive gate` runs the steps and logs every
    exit code; `hive gate-verify log --commit <tip>` is GREEN only when the log
    vouches for exactly that commit on a clean tree.
@@ -93,7 +168,8 @@ tmux -L hive-v2 attach
 
 - Hub root: `.hive-hub/` — `projects.json`, `tasks.jsonl` (append-only
   ledger), `tasks/<id>.md`, `panes/<project>.json` (a starting orchestrator),
-  `hub.json`.
+  `questions/<id>.json` (an open operator question batch, moving to
+  `questions/closed/` when answered or cancelled), `hub.json`.
 - Per project: `.hive/` — `team.json` (who should be running, with pane
   identity = pid + start time), `team/<agent>/role.md` + `RULES.md`,
   `handoffs/<agent>.md` (the agent's persistent memory; rotation works because
@@ -116,27 +192,44 @@ role. The secret is shared with the citadel fleet. Rotation: put the new
 token in the secret. The box reads it per call, so no reprovision is
 needed. Reprovision only to bump the client pin.
 
-hive ships no MCP config. Point a project's `.kimi-code/mcp.json` at the
-installed client:
-
-```json
-{
-  "mcpServers": {
-    "nexus-push": {
-      "command": "python3",
-      "args": ["/opt/nexus-push/nexus_push_mcp.py"]
-    }
-  }
-}
-```
+Provision registers the client in `/home/ubuntu/.kimi-code/mcp.json`. Agents
+started before that registration need a respawn to see the tools.
 
 ## Deployment
 
-The hub lives inside nexus at `nexus.dexima.ai/hive` (CloudFront proxies
-`/hive/*` to the box; the nexus session gate is the auth). Infrastructure
+The hub lives inside nexus at `nexus.dexima.ai/hive` and is reachable only
+through that relay (CloudFront `/hive/*` → nexus Lambda → SSM tunnel to the
+box loopback; the nexus session gate is the auth). No public hostname, cert,
+or DNS record exists for the hub. Infrastructure
 lives in `infra/` (one CloudFormation stack plus the committed box config)
 and every push to main deploys through `.github/workflows/deploy.yml` over
 SSM. Bootstrap steps and the drift-adoption story: `infra/README.md`.
+
+## The bench
+
+`bench/` holds small canary tasks about hive's own code. Each task in
+`bench/tasks/<id>/` pins a rev, breaks one thing (`setup.sh`), and checks
+the fix (`check.sh`). `bench/run.sh <task> [action...]` clones hive at the
+pinned rev, breaks it, runs the optional action (an agent working from
+`prompt.md`), and prints one JSON verdict line: pass or fail. The verdict
+comes from the gate itself. The runner commits the candidate and reads the
+check through `hive gate` plus `hive gate-verify --commit HEAD`, exactly
+like work that lands.
+
+A change to `roles/`, `rules/`, or `skills/` steers agent behavior, and the
+PR gate cannot see behavior. Such a change must post a bench verdict in its
+PR body. Run every task in `bench/tasks/` with an agent that carries the
+candidate role or rules, and paste the JSON lines. A task the agent solved
+before the change must stay green after it.
+
+The runner does heavy work: a full clone, `npm ci`, a build, vitest. Do not
+run it on the hub box. Run it on any other machine with Node 22.
+
+In CI the bench authenticates through the teamkimi proxy on the hub box,
+reached over an SSM port-forward from the runner (`TEAMKIMI_PROXY_KEY`).
+There is no Kimi Platform key by design. AWS access uses the
+`hive-v2-gh-bench` role, which allows `ssm:StartSession` for
+port-forwarding only, so PR code never touches the deploy role.
 
 ## Development
 

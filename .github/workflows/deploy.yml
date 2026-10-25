@@ -10,13 +10,16 @@ on:
       - 'package*.json'
       - 'tsconfig*.json'
       - '.github/workflows/deploy.yml'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
   # Newest-wins, same as citadel's deploy-nexus: a newer push cancels the
   # stale run, and the staleness step below keeps a survivor from reverting
   # the box to an older SHA. A cancelled run reads as normal, not an incident.
-  group: deploy-hive-v2
+  # PR runs gate per-branch in their own group so they never cancel a deploy.
+  group: ${{ github.event_name == 'pull_request' && format('gate-{0}', github.ref) || 'deploy-hive-v2' }}
   cancel-in-progress: true
 
 jobs:
@@ -31,6 +34,8 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      - name: Discipline ratchet — god-file line counts
+        run: node scripts/discipline-gate.mjs
       - name: Syntax-check the infra scripts
         run: bash -n infra/provision-box.sh && bash -n infra/deploy-box.sh && bash -n infra/deploy-mutex.sh
       - name: Lint the CloudFormation template
@@ -40,6 +45,11 @@ jobs:
 
   deploy:
     needs: gate
+    # Deploys run from main only. A branch dispatch runs the gate alone — the
+    # no-silent-red tripwire uses that to gate its revert before merging.
+    if: >-
+      ${{ github.event_name == 'push'
+         || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write

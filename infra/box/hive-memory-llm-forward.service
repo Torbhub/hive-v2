@@ -1,0 +1,18 @@
+[Unit]
+Description=hive-v2 memory LLM loopback forwarder (bridge gateway to teamkimi)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=docker
+ExecStart=/opt/hive-v2/llm-forward.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

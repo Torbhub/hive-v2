@@ -1,6 +1,8 @@
 [Unit]
 Description=hive-v2 hub webapp (loopback only; nginx fronts TLS + basic auth)
-After=network.target
+# After only: the tmux unit starts the server first when present, but a
+# missing unit must never block this one.
+After=network.target hive-v2-tmux.service
 
 [Service]
 Type=simple

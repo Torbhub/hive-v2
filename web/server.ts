@@ -3,7 +3,15 @@ import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Refusal, answerDialog, continueProject, hubTask, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
+import { interruptAgent } from '../src/interrupt.js';
+import { killAgent } from '../src/kill.js';
+import { sendOwnerMessage } from '../src/message.js';
 import { checkName } from '../src/names.js';
+import { addProjectFromBody } from '../src/project.js';
+import { HttpError } from './http-error.js';
+import { readAgentLog } from '../src/logview.js';
+import { recordStretchOpened } from './stretch.js';
+import { handleTaskAction } from './taskactions.js'; import { handleQuestionAction } from './questionactions.js';
 import {
   ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
 } from '../src/view.js';
@@ -11,31 +19,16 @@ import {
 const BODY_CAP = 64 * 1024;
 
 const CONTENT_TYPES: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.map': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
 };
 
 const STATIC_HEADERS: Record<string, string> = {
-  'x-content-type-options': 'nosniff',
-  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
   'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
 };
-
-class HttpError extends Error {
-  constructor(
-    public code: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
 
 function sendJson(res: http.ServerResponse, code: number, value: unknown): void {
   res.writeHead(code, {
@@ -45,12 +38,12 @@ function sendJson(res: http.ServerResponse, code: number, value: unknown): void 
   res.end(JSON.stringify(value));
 }
 
-async function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+async function readBody(req: http.IncomingMessage, cap = BODY_CAP): Promise<Record<string, unknown>> {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > BODY_CAP) throw new HttpError(413, 'body too large');
+    if (size > cap) throw new HttpError(413, 'body too large');
     chunks.push(chunk as Buffer);
   }
   try {
@@ -75,7 +68,8 @@ function checkBrowserHeaders(req: http.IncomingMessage): void {
     } catch {
       throw new HttpError(403, 'bad origin header');
     }
-    if (host !== req.headers.host) throw new HttpError(403, 'cross-site request');
+    if (host !== req.headers.host)
+      throw new HttpError(403, `cross-site request (origin host ${host} != host ${req.headers.host})`);
   }
 }
 
@@ -98,16 +92,14 @@ function agentRefOf(body: Record<string, unknown>): string | undefined {
   return ref;
 }
 
-// Same-project actions run one at a time; different projects run freely.
+// projects.json writers share one key so their read-modify-write cannot race. Other actions serialize per project.
 const actionChains = new Map<string, Promise<void>>();
 
 function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = actionChains.get(key) ?? Promise.resolve();
   const run = prev.then(fn, fn);
-  const tail = run.then(
-    () => { if (actionChains.get(key) === tail) actionChains.delete(key); },
-    () => { if (actionChains.get(key) === tail) actionChains.delete(key); },
-  );
+  const sweep = () => { if (actionChains.get(key) === tail) actionChains.delete(key); };
+  const tail = run.then(sweep, sweep);
   actionChains.set(key, tail);
   return run;
 }
@@ -115,11 +107,14 @@ function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
 const TASK_TEXT_CAP = 4000;
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer'].includes(pathname)) {
+  const questionAction = await handleQuestionAction(root, pathname, body); if (questionAction !== null) return questionAction;
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/task-resolve', '/api/progress'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
+  if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
+  if (pathname === '/api/project') return serialized('projects', () => addProjectFromBody(root, body));
   const project = projectName(body);
-  return serialized(project, async () => {
+  return serialized(['/api/mode', '/api/approvals'].includes(pathname) ? 'projects' : project, async () => {
     if (pathname === '/api/mode') {
       return { ok: true, mode: await setProjectMode(root, project, String(body.mode ?? '')) };
     }
@@ -150,6 +145,24 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
       );
       return { ok: true, pane };
     }
+    if (pathname === '/api/message') {
+      const r = await withTimeout(
+        sendOwnerMessage(root, project, agentRefOf(body), String(body.text ?? '')), ACTION_TIMEOUT_MS, 'message',
+      );
+      return { ok: true, typed: r.typed };
+    }
+    if (pathname === '/api/interrupt') {
+      const r = await withTimeout(
+        interruptAgent(root, project, agentRefOf(body)), ACTION_TIMEOUT_MS, 'interrupt',
+      );
+      return { ok: true, target: r.target, pane: r.pane };
+    }
+    if (pathname === '/api/kill') {
+      const r = await withTimeout(
+        killAgent(root, project, agentRefOf(body)), ACTION_TIMEOUT_MS, 'kill',
+      );
+      return { ok: true, target: r.target, killed: r.killed, summary: r.summary };
+    }
     if (pathname === '/api/plan-answer') {
       const r = await withTimeout(
         planAnswer(
@@ -160,6 +173,8 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
       );
       return { ok: true, typed: r.typed };
     }
+    const taskAction = await handleTaskAction(root, project, pathname, body);
+    if (taskAction !== null) return taskAction;
     const r = await withTimeout(
       answerDialog(root, project, agentRefOf(body), String(body.choice ?? ''), String(body.fingerprint ?? '')),
       ANSWER_TIMEOUT_MS,
@@ -227,11 +242,18 @@ export function createServer(root: string): http.Server {
           console.error('hive web: view error:', view.error);
           sendJson(res, 200, {
             ...view,
-            error: view.updatedAt === 0 ? 'the status read failed' : 'the tasks read failed',
+            error: view.updatedAt === 0 ? 'the status read failed' : view.error.startsWith('questions') ? 'the questions read failed' : 'the tasks read failed',
           });
           return;
         }
         sendJson(res, 200, view);
+        return;
+      }
+      if (pathname === '/api/log' && req.method === 'GET') {
+        const log = await readAgentLog(
+          root, url.searchParams.get('project') ?? '', url.searchParams.get('agent') ?? undefined,
+        );
+        sendJson(res, 200, log);
         return;
       }
       if (pathname.startsWith('/api/')) {
@@ -239,7 +261,7 @@ export function createServer(root: string): http.Server {
         checkBrowserHeaders(req);
         const contentType = req.headers['content-type'] ?? '';
         if (!contentType.startsWith('application/json')) throw new HttpError(415, 'POST a JSON body');
-        sendJson(res, 200, await handlePost(root, pathname, await readBody(req)));
+        sendJson(res, 200, await handlePost(root, pathname, await readBody(req, pathname === '/api/questions/answer' ? 512 * 1024 : BODY_CAP)));
         return;
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'GET only');

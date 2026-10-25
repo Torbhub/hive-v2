@@ -3,25 +3,28 @@ import { promises as fs } from 'node:fs';
 import type {
   HubAgent, HubDialog, HubFolder, HubOrchestrator, HubProject, HubStatus, HubTask, TaskEvent, TeamEntry,
 } from './types.js';
-import { APPROVALS_MODES, CLOSED_STATES, PROJECT_MODES, TASK_EVENTS } from './types.js';
+import { APPROVALS_MODES, CLOSED_STATES, PROJECT_MODES } from './types.js';
 import type { Approvals, ProjectMode } from './types.js';
 import {
   capturePane, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep,
 } from './tmux.js';
 import { lines, parseDialog, scrapeContext } from './screen.js';
+import { PROJECT_NAME_RE } from './names.js';
 import {
-  appendDecision, appendTaskEvent, clearPendingPane, foldTasks, hivePath, hubPath, manifestAdd, nextTaskId,
-  readPendingPane, readProjects, readTaskEvents, readTeam, withHubLock, writePendingPane,
+  appendDecision, appendTaskEvent, clearPendingPane, extractCommand, foldTasks, hivePath, hubPath, manifestAdd,
+  nextTaskId, readPendingPane, readProjects, readTaskEvents, readTeam, Refusal, withHubLock, writePendingPane,
   writeProjects, writeJson, readJson, upsertTeamEntry, type PendingPane, type ProjectsFile,
 } from './state.js';
 import {
-  ensureAgentFiles, findLatestSession, launchWindow, orchestratorName, pickupLine, preflight, typeLine, waitIdle,
+  assertEntryAlive, effectiveOrchestratorMode, ensureAgentFiles, findLatestSession, launchWindow, orchestratorName, pickupLine,
+  preflight, typeLine, waitIdle,
 } from './spawn.js';
+import { planVerdict, settlePendingPane } from './taskgate.js';
+import { taskScope } from './scope.js';
+import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 
-// A deliberate refusal with an operator-safe message (unknown project, stale
-// fingerprint, already running…). The web layer shows these to the client;
-// every other error is infrastructure and stays server-side.
-export class Refusal extends Error {}
+export { Refusal } from './state.js';
+export { hubAccept, hubLog, hubProgress, ledgerCommand } from './taskgate.js';
 
 export async function hubInit(root: string, name = 'hub'): Promise<void> {
   await fs.mkdir(hubPath(root), { recursive: true });
@@ -34,7 +37,7 @@ export async function hubInit(root: string, name = 'hub'): Promise<void> {
 }
 
 export async function hubAdd(root: string, name: string, folder: string): Promise<void> {
-  if (!/^[a-z][a-z0-9-]{0,31}$/.test(name)) {
+  if (!PROJECT_NAME_RE.test(name)) {
     throw new Error(`a project name is lowercase letters, digits, '-': ${name}`);
   }
   const home = path.resolve(root, folder);
@@ -73,27 +76,18 @@ export async function setProjectApprovals(root: string, project: string, approva
 export async function hubTask(root: string, project: string, text: string): Promise<string> {
   const pf = await readProjects(root);
   if (!pf.projects.some((p) => p.name === project)) throw new Refusal(`unknown project: ${project}`);
+  const scope = taskScope(text);
+  if (scope.kind === 'invalid') throw new Refusal(`the brief does not parse: ${scope.why}`);
   // The lock makes id allocation + task file + ledger append one step.
   return withHubLock(root, async () => {
     const id = await nextTaskId(root, project);
     await fs.mkdir(hubPath(root, 'tasks'), { recursive: true });
-    await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), `# ${id}\n\n${text}\n`);
+    // A brief keeps its frontmatter at the top of the file.
+    const body = text.startsWith('---') ? `${text.trimEnd()}\n` : `# ${id}\n\n${text}\n`;
+    await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), body);
     await appendTaskEvent(root, { id, project, event: 'asked', at: new Date().toISOString() });
     return id;
   });
-}
-
-export async function hubLog(root: string, id: string, event: string, note?: string): Promise<void> {
-  const events = await readTaskEvents(root);
-  if (!events.some((e) => e.id === id)) throw new Error(`unknown task: ${id}`);
-  if (!(TASK_EVENTS as readonly string[]).includes(event)) throw new Error(`unknown task event: ${event}`);
-  const project = id.replace(/-\d+$/, '');
-  await appendTaskEvent(root, {
-    id, project, event: event as TaskEvent['event'], at: new Date().toISOString(), note,
-  });
-  if (event === 'decided') {
-    await appendDecision(root, { project, task: id, by: 'orchestrator', summary: note ?? '' });
-  }
 }
 
 export async function listTasks(root: string): Promise<HubTask[]> {
@@ -157,6 +151,7 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
   const orchestrator: HubOrchestrator = { state: 'none', question: false };
   if (orchEntry) {
     orchestrator.name = orchEntry.name;
+    orchestrator.children = team.agents.filter((a) => !a.orchestrator && a.parent === orchEntry.name).length;
     if (orchEntry.session_id) orchestrator.session_id = orchEntry.session_id;
     const snap = await snapshot(orchEntry);
     orchestrator.state = snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped';
@@ -198,11 +193,15 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
     const snap = await snapshot(a);
     const agent: HubAgent = {
       name: a.name,
-      state: !a.pane ? 'unrecorded' : snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped',
+      state: !a.pane ? 'unrecorded'
+        : snap.alive !== 'gone' && a.wedged_at ? 'wedged'
+        : snap.alive === 'running' ? 'running'
+        : snap.alive === 'unknown' ? 'unknown' : 'stopped',
       question: snap.alive !== 'gone' && snap.dialog !== null,
       worktree: a.worktree,
       ref: agentRef(a.name, nameCounts, a.worktree),
     };
+    if (a.session_id) agent.session_id = a.session_id;
     if (snap.context !== null && snap.alive !== 'gone') {
       agent.context = snap.context;
       agent.context_assumed = false;
@@ -320,8 +319,10 @@ export async function answerDialog(
   const after = await readDialogFor(root, project, agentRefArg);
   // Lore: every owner answer lands in the permanent decisions log.
   const firstLine = dialog.text.split('\n').map((l) => l.trim()).find((l) => l && !/^[─╌-]+$/.test(l)) ?? '';
+  const command = extractCommand(dialog.text);
+  const subject = command ? `$ ${command}` : firstLine;
   try {
-    await appendDecision(root, { project, by: 'owner', summary: `answered "${option}" for: ${firstLine}` });
+    await appendDecision(root, { project, by: 'owner', summary: `answered "${option}" for: ${subject}` });
   } catch (e) {
     console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
   }
@@ -364,26 +365,18 @@ export async function planAnswer(
   if (!identity) throw new Refusal(`cannot verify the identity of ${orch.pane}`);
 
   const fb = (feedback ?? '').replace(/\s+/g, ' ').trim().slice(0, PLAN_FEEDBACK_CAP);
-  const line = verdict === 'approve'
-    ? `${taskId}: the plan is approved — go ahead.`
-    : `${taskId}: the plan is sent back${fb ? ` — ${fb}` : ''}.`;
-  await typeLine(orch.pane, line, identity);
+  const v = planVerdict(task, verdict, fb);
+  await typeLine(orch.pane, v.line, identity);
 
   await appendTaskEvent(root, {
-    id: taskId, project,
-    event: verdict === 'approve' ? 'answered' : 'handed',
-    at: new Date().toISOString(),
-    note: verdict === 'approve' ? 'plan approved by owner' : `plan sent back${fb ? `: ${fb}` : ''}`,
+    id: taskId, project, event: v.event, at: new Date().toISOString(), note: v.note,
   });
   try {
-    await appendDecision(root, {
-      project, task: taskId, by: 'owner',
-      summary: verdict === 'approve' ? 'approved the plan' : `sent the plan back${fb ? `: ${fb}` : ''}`,
-    });
+    await appendDecision(root, { project, task: taskId, by: 'owner', summary: v.summary });
   } catch (e) {
     console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
   }
-  return { typed: line };
+  return { typed: v.line };
 }
 
 type LaunchKind = 'wake' | 'start';
@@ -407,14 +400,18 @@ async function launchOrchestrator(
   // Claim-then-launch under the hub lock: a second start for the same project
   // must see the pending record, never race past the check.
   const launched = await withHubLock(root, async () => {
-    const existing = await readPendingPane(root, project);
-    if (existing && (await paneExists(existing.pane))) {
-      throw new Refusal(`${project} is already starting in ${existing.pane}; continue it or close the window`);
-    }
+    if (await settlePendingPane(root, project)) return 'continue' as const;
     await preflight();
 
     const team = await readTeam(p.home);
     const old = team.agents.find((a) => a.orchestrator);
+    // The watch's death path wakes from a stale snapshot; re-read under the lock.
+    if (kind === 'wake' && !old) {
+      throw new Refusal(`${project}'s orchestrator is not in team.json; start it instead of waking`);
+    }
+    if (kind === 'wake' && old?.closed_at) {
+      throw new Refusal(`${project}'s orchestrator was closed on purpose at ${old.closed_at}; not waking it`);
+    }
     const name = orchestratorName(project);
     const cwd = old?.worktree ?? p.home;
     const sessionId = kind === 'wake' ? old?.session_id ?? (await findLatestSession(cwd, name)) ?? undefined : undefined;
@@ -427,7 +424,12 @@ async function launchOrchestrator(
     }
 
     await ensureAgentFiles(cwd, name, 'orchestrator');
-    const { pane, identity } = await launchWindow(project, name, cwd, sessionId, p.mode ?? 'ask');
+    if (task) {
+      const block = await memoryBlockFor(root, project, task);
+      if (block) await applyMemoryBlock(hivePath(cwd, 'handoffs', `${name}.md`), block);
+    }
+    const mode = effectiveOrchestratorMode(p.mode ?? 'ask', p.approvals);
+    const { pane, identity } = await launchWindow(root, project, name, cwd, sessionId, mode, old?.model);
     await manifestAdd(p.home, {
       kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}`,
       pane_pid: identity.pid, pane_started: identity.started,
@@ -436,9 +438,13 @@ async function launchOrchestrator(
     if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
     const pending: PendingPane = { pane, kind, at: new Date().toISOString(), typed: false, task, line };
     await writePendingPane(root, project, pending);
-    return { pane, identity, pending, sessionId, name, cwd };
+    return { pane, identity, pending, sessionId, name, cwd, old };
   });
-  const { pane, identity, pending, sessionId, name, cwd } = launched;
+  if (launched === 'continue') {
+    // A live, young pending pane is a start still in flight; finish it instead of refusing.
+    return continueProject(root, project);
+  }
+  const { pane, identity, pending, sessionId, name, cwd, old } = launched;
   const line = pending.line ?? '';
 
   const idle = await waitIdle(pane, { maxMs: 140_000 });
@@ -447,9 +453,10 @@ async function launchOrchestrator(
     return pane;
   }
   await typeLine(pane, line, identity);
+  if (kind === 'wake' && old) await assertEntryAlive(p.home, old, { pane, identity });
   await upsertTeamEntry(p.home, {
     name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
-    worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`),
+    worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`), closed_at: undefined, wedged_at: undefined,
   });
   await writePendingPane(root, project, { ...pending, typed: true });
   const sid = kind === 'wake' ? sessionId : await findLatestSession(cwd, name);
@@ -487,11 +494,13 @@ export async function continueProject(root: string, project: string): Promise<st
 
   const pf = await readProjects(root);
   const p = pf.projects.find((x) => x.name === project);
+  if (p && pending.kind === 'wake') await assertEntryAlive(p.home, { name: orchestratorName(project) }, { pane: pending.pane, identity: id });
   if (p) {
     await upsertTeamEntry(p.home, {
       name: orchestratorName(project), orchestrator: true,
       pane: pending.pane, pane_pid: id.pid, pane_started: id.started,
       worktree: p.home, handoff: hivePath(p.home, 'handoffs', `${orchestratorName(project)}.md`),
+      closed_at: undefined, wedged_at: undefined,
     });
     const sid = await findLatestSession(p.home, orchestratorName(project));
     if (sid) await upsertTeamEntry(p.home, { name: orchestratorName(project), session_id: sid });

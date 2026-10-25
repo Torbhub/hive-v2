@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { killWindow, paneExists, paneIs, processStartTime, run, type PaneIdentity } from './tmux.js';
-import { hivePath, manifestRead, manifestWrite, readProjects, type ManifestRecord } from './state.js';
+import { hivePath, manifestRead, manifestWrite, readProjects, readTeam, upsertTeamEntry, type ManifestRecord } from './state.js';
 
 export type CleanupAction = { record: ManifestRecord; action: string; acted: boolean };
 
@@ -39,7 +39,23 @@ export async function cleanupProject(
         continue;
       }
       actions.push({ record: rec, action: `kill tmux window ${rec.window ?? pane} (${pane})`, acted: !dryRun });
-      if (!dryRun) await killWindow(pane, identity);
+      if (!dryRun) {
+        // Stamp the intent before the kill so watch never reads it as a crash.
+        const team = await readTeam(p.home);
+        const stamped = team.agents.filter((x) => x.pane === pane).map((x) => x.name);
+        for (const name of stamped) {
+          await upsertTeamEntry(p.home, { name, closed_at: new Date().toISOString() });
+        }
+        try {
+          await killWindow(pane, identity);
+        } catch (e) {
+          // The pane survived; a surviving stamp would hide it from the watch.
+          for (const name of stamped) {
+            await upsertTeamEntry(p.home, { name, closed_at: undefined });
+          }
+          throw e;
+        }
+      }
       continue;
     }
     if (rec.kind === 'process') {
@@ -80,6 +96,32 @@ export async function cleanupProject(
         await fs.mkdir(trashDir, { recursive: true });
         await fs.rename(abs, dest);
         await run('git', ['worktree', 'prune'], p.home);
+      }
+      continue;
+    }
+    if (rec.kind === 'jj-workspace') {
+      const wt = String(rec.path ?? '');
+      const abs = wt ? path.resolve(wt) : '';
+      const st = abs ? await fs.stat(abs).catch(() => null) : null;
+      if (!abs || !st) continue;
+      // Same trust rule as worktrees, with jj as the witness.
+      const underHome = abs.startsWith(path.resolve(p.home) + path.sep);
+      const listed = underHome
+        ? (await run('jj', ['-R', p.home, 'workspace', 'list', '-T', 'root ++ "\\n"'], p.home)).stdout
+            .split('\n')
+            .some((l) => l.trim() === abs)
+        : false;
+      if (!underHome || !listed) {
+        actions.push({ record: rec, action: `left jj workspace ${abs} alone: not a registered workspace under ${p.home}`, acted: false });
+        keep.push(rec);
+        continue;
+      }
+      const dest = path.join(trashDir, path.basename(abs));
+      actions.push({ record: rec, action: `trash jj workspace ${abs} -> ${dest}`, acted: !dryRun });
+      if (!dryRun) {
+        await fs.mkdir(trashDir, { recursive: true });
+        await fs.rename(abs, dest);
+        await run('jj', ['-R', p.home, 'workspace', 'forget', path.basename(abs)], p.home);
       }
       continue;
     }

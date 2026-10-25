@@ -52,6 +52,17 @@ Resources:
                 Effect: Allow
                 Action: ssm:GetCommandInvocation
                 Resource: '*'
+              - Sid: SsmPortForwardToKimiBox
+                Effect: Allow
+                Action: ssm:StartSession
+                Resource: arn:aws:ec2:us-east-1:594552273052:instance/*
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/Role: nexus-kimi-session
+              - Sid: SsmPortForwardingDocument
+                Effect: Allow
+                Action: ssm:StartSession
+                Resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession
               - Sid: CloudFormationSelfDeploy
                 Effect: Allow
                 # the complete action set of a changeset-based
@@ -89,7 +100,45 @@ Resources:
                   - dynamodb:DeleteItem
                 Resource: arn:aws:dynamodb:us-east-1:594552273052:table/citadel-deploy-mutex
 
+  BenchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: hive-v2-gh-bench
+      Description: Assumed by the Torbhub/hive-v2 bench workflow via GitHub OIDC. Port-forward only.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GithubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub '${GithubSubjectPrefix}:*'
+      Policies:
+        - PolicyName: hive-v2-bench
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SsmPortForwardToKimiBox
+                Effect: Allow
+                Action: ssm:StartSession
+                Resource: arn:aws:ec2:us-east-1:594552273052:instance/*
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/Role: nexus-kimi-session
+              - Sid: SsmPortForwardingDocument
+                Effect: Allow
+                Action: ssm:StartSession
+                Resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession
+
 Outputs:
+
   DeployRoleArn:
     Description: ARN the GitHub workflow assumes (set as secret HIVE_DEPLOY_ROLE_ARN).
     Value: !GetAtt DeployRole.Arn
+  BenchRoleArn:
+    Description: ARN the bench workflow assumes (set as secret HIVE_BENCH_ROLE_ARN).
+    Value: !GetAtt BenchRole.Arn

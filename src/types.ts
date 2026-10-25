@@ -6,7 +6,7 @@ export type HubOrchestratorState =
   | 'unregistered'
   | 'resumable';
 
-export type HubAgentState = 'running' | 'stopped' | 'unknown' | 'unrecorded';
+export type HubAgentState = 'running' | 'stopped' | 'unknown' | 'unrecorded' | 'wedged';
 
 export type HubAgent = {
   name: string;
@@ -17,6 +17,7 @@ export type HubAgent = {
   context_unknown?: boolean;
   context_tokens?: number;
   worktree?: string;
+  session_id?: string;
   ref?: string;
 };
 
@@ -27,6 +28,7 @@ export type HubOrchestrator = {
   pid?: number;
   pane?: string;
   session_id?: string;
+  children?: number;
   context?: number;
   context_assumed?: boolean;
   context_unknown?: boolean;
@@ -69,6 +71,11 @@ export type HubProject = {
   approvals?: Approvals;
 };
 
+export type Checkpoint = { id: string; desc: string; etaMin: number };
+
+export type ProgressStatus = 'started' | 'ok' | 'fail' | 'skip';
+export const PROGRESS_STATUSES = ['started', 'ok', 'fail', 'skip'] as const;
+
 export type HubTask = {
   id: string;
   project: string;
@@ -78,6 +85,11 @@ export type HubTask = {
   last_note: string | null;
   needs_owner: boolean;
   decisions?: { at: string; reason: string }[];
+  checkpoints?: Checkpoint[];
+  progress?: Record<string, { status: ProgressStatus; note?: string; at: string }>;
+  last_progress_at?: string | null;
+  plan_approved?: boolean;
+  checkpoint_accepts?: Record<string, string>;
 };
 
 export type HubDialogOption = {
@@ -97,6 +109,31 @@ export type HubDialog = {
   fingerprint: string;
 };
 
+export type QuestionChoice = { id: string; label: string; description: string };
+
+export type OperatorQuestion = {
+  id: string;
+  question: string;
+  context: string;
+  priority: number;
+  choices: QuestionChoice[];
+  recommended: string;
+};
+
+export type QuestionAnswer = { question: string; choice: string; text?: string };
+
+export type QuestionBatch = {
+  id: string;
+  project: string;
+  agent: string;
+  context: string;
+  questions: OperatorQuestion[];
+  status: 'open' | 'answered' | 'cancelled';
+  createdAt: string;
+  closedAt?: string;
+  answers?: QuestionAnswer[];
+};
+
 export type HubView = {
   root: string;
   hubName: string;
@@ -104,6 +141,10 @@ export type HubView = {
   tasks: HubTask[];
   dialogs: Record<string, HubDialog>;
   decisions: Decision[];
+  questions: QuestionBatch[];
+  // Total open batches, including any beyond the view's first 50. Optional
+  // so older fixtures and callers without a count stay valid.
+  questionsTotal?: number;
   updatedAt: number;
   error: string;
 };
@@ -122,11 +163,23 @@ export type TeamEntry = {
   worktree?: string;
   session_id?: string;
   handoff?: string;
+  // The agent that spawned this one (the pane's HIVE_AGENT). A spawn from the
+  // owner's shell has none; the orchestrator's children carry its name.
+  parent?: string;
+  // Stamped by a deliberate close (cleanup/close/respawn). A crash never
+  // stamps, so watch treats a stamped pane as intentionally down.
+  closed_at?: string;
+  // Stamped by the watchdog when the pane is frozen on a spinner with a stale
+  // wire log. Cleared when the pane moves again or is relaunched.
+  wedged_at?: string;
+  task?: string;
+  model?: string;
 };
 
 export const TASK_EVENTS = [
   'asked', 'handed', 'plan', 'question', 'answered', 'blocked',
   'overnight', 'cleanup', 'decided', 'done', 'cancelled', 'note',
+  'progress', 'planaccept',
 ] as const;
 
 export type TaskEvent = {
@@ -135,6 +188,9 @@ export type TaskEvent = {
   event: (typeof TASK_EVENTS)[number];
   at: string;
   note?: string;
+  checkpoints?: Checkpoint[];
+  checkpoint?: string;
+  status?: ProgressStatus;
 };
 
 export const NEEDS_OWNER_STATES = new Set(['plan', 'question', 'blocked']);

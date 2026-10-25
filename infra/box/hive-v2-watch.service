@@ -1,6 +1,8 @@
 [Unit]
 Description=hive-v2 watch daemon (pane watchdog + auto-approver)
-After=network.target
+# After only: the tmux unit starts the server first when present, but a
+# missing unit must never block this one.
+After=network.target hive-v2-tmux.service
 
 [Service]
 Type=simple

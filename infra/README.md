@@ -5,27 +5,32 @@ box (a dedicated EC2 instance). One CloudFormation stack plus the box config.
 
 - `template.yaml` — stack `hive-v2-infra`: the IAM role the GitHub deploy
   workflow assumes over OIDC.
-- `box/` — the live box config: both systemd units, the `hive` wrapper, and
-  the nginx site (with `__HIVE_WEB_SECRET__` and `__HIVE_ORIGIN_KEY__`
-  placeholders, rendered at provision time).
+- `box/` — the live box config: the systemd units, the `hive` wrapper, and
+  the nginx site (with the `__HIVE_WEB_SECRET__` placeholder, rendered at
+  provision time). `hive-v2-tmux.service` owns the
+  tmux server so deploy restarts of the web and watch units cannot kill the
+  panes. Deploys never restart it.
 
 ## The one way in
 
-The hub lives inside nexus: `nexus.dexima.ai/hive`. CloudFront proxies
-`/hive/*` to the box's nginx vhost with a custom origin header
-`x-hive-origin: <HIVE_ORIGIN_KEY>`. The nexus session gate is the auth.
-nginx checks the origin key on `location /hive/` and serves nothing else on
-the hostname. The hive server strips the `/hive` prefix before routing, so
-`/hive/api/view` and `/api/view` are the same endpoint.
-
-The hostname `hive.44.192.48.70.sslip.io` exists only as the CloudFront
-origin (CloudFront cannot target a bare IP). It serves no public UI.
+The hub lives inside nexus: `nexus.dexima.ai/hive`. CloudFront sends
+`/hive/*` to the nexus Lambda, which relays the request over an SSM
+port-forward tunnel to the box's loopback. nginx on the box listens on
+`127.0.0.1:8081`, injects the app secret, and proxies to hive-web on 7684.
+The nexus session gate is the auth. The relay finds the box by its
+`Role=nexus-kimi-session` tag, so no hostname, IP, certificate, or DNS
+record references it. There is no public hive hostname or TLS cert; the
+relay is the only way in. The hive server strips the `/hive` prefix
+before routing, so `/hive/api/view` and `/api/view` are the same endpoint.
 
 - `provision-box.sh` — idempotent root provisioner. Installs units and
-  wrapper only when content differs, keeps an existing
-  `/etc/hive-v2/web.env`, renders and reloads nginx. Installs the pinned
-  nexus-push MCP client to `/opt/nexus-push/` (pins at the top of the
-  section, bump both to upgrade).
+  wrapper only when content differs, keeps existing env files under
+  `/etc/hive-v2`, renders and reloads nginx, renders the memory gateway
+  config, installs docker, and pulls the pinned memory images. It installs
+  the pinned nexus-push client, then merges `hive-operator` and `nexus-push`
+  into `/home/ubuntu/.kimi-code/mcp.json` (`infra/merge-mcp.mjs`), preserving
+  every other server. Bump the client commit and sha256 pins together to
+  upgrade. The memory stack itself is documented in `docs/memory.md`.
 - `deploy-box.sh` — what the workflow runs on the box over SSM: fetch, reset
   to the merged commit, `npm ci`, build, provision, health-check.
 - `.github/workflows/deploy.yml` — gate job (test, build, lint) then deploy.
@@ -52,31 +57,9 @@ origin (CloudFront cannot target a bare IP). It serves no public UI.
 2. In the GitHub repo settings, set:
    - secret `HIVE_DEPLOY_ROLE_ARN` = the stack's `DeployRoleArn` output
    - variable `KIMI_BOX_ID` = `i-004e23820520cbf3c`
-   - on the citadel repo, secret `HIVE_ORIGIN_KEY` = the `HIVE_ORIGIN_KEY`
-     line from `/etc/hive-v2/web.env` on the box. The citadel deploy-nexus
-     workflow consumes it to set the CloudFront origin header; this repo
-     never reads it from GitHub.
 
 3. Done. Every push to main that touches `src/`, `web/`, `infra/`, or the
    package files runs the gate and then deploys over SSM.
-
-## Swapping the origin hostname (e.g. to hive.dexima.ai)
-
-The CloudFront origin hostname is a deploy-time context on the citadel side,
-so the swap is four steps, no code archaeology:
-
-1. Point the new hostname's DNS at the box (`44.192.48.70`).
-2. Cert on the box: `sudo certbot --nginx -d hive.dexima.ai` (http-01 works
-   once DNS resolves; the le-http01 nginx site already answers challenges).
-3. Edit `infra/box/nginx-hive.conf`: `server_name` and both
-   `ssl_certificate*` paths to the new hostname, push. The deploy workflow
-   reprovisions the box. `nginx -t` gates the reload, so a missing cert
-   fails safe.
-4. On the citadel repo set the variable `HIVE_ORIGIN_HOST` to the new
-   hostname. The next deploy-nexus run points CloudFront at it.
-
-The old sslip hostname then serves nothing and its cert can lapse.
-
 
 ## Drift adoption
 

@@ -1,10 +1,22 @@
-import type { HubProject, HubTask, HubView } from './types.js';
+import type { Decision, HubProject, HubTask, HubView, QuestionBatch } from './types.js';
 import { buildStatus, listTasks, readDialogFor } from './hub.js';
+import { VIEW_BATCH_CAP, listOpenQuestionBatches, sweepQuestionBatches } from './questions.js';
 import { readDecisions } from './state.js';
 
 export const READ_TIMEOUT_MS = 30_000;
 export const ACTION_TIMEOUT_MS = 150_000;
 export const ANSWER_TIMEOUT_MS = 30_000;
+
+const DECISIONS_SHOWN = 8;
+const DECISIONS_SCANNED = 64;
+
+// The feed is signal only: tier-1 auto-approvals and "Approve once" clicks are
+// noise. Plan verdicts, send-backs, watchdog deaths, and wedged marks stay.
+export function feedKeep(d: Decision): boolean {
+  if (d.by === 'watch' && d.summary.startsWith('auto-approved "Approve once"')) return false;
+  if (d.by === 'owner' && d.summary.startsWith('answered "Approve once"')) return false;
+  return true;
+}
 
 export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
@@ -27,7 +39,7 @@ export async function buildView(root: string): Promise<HubView> {
   try {
     status = await withTimeout(buildStatus(root), READ_TIMEOUT_MS, 'status');
   } catch (e) {
-    return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], updatedAt: 0, error: lastLine(e) };
+    return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], questionsTotal: 0, updatedAt: 0, error: lastLine(e) };
   }
   let tasks: HubTask[] = [];
   let error = '';
@@ -36,8 +48,21 @@ export async function buildView(root: string): Promise<HubView> {
   } catch (e) {
     error = `tasks not read: ${lastLine(e)}`;
   }
+  let questions: QuestionBatch[] = [];
+  let questionsTotal = 0;
+  try {
+    await withTimeout(sweepQuestionBatches(root), READ_TIMEOUT_MS, 'questions-sweep');
+    const open = await withTimeout(listOpenQuestionBatches(root), READ_TIMEOUT_MS, 'questions');
+    questionsTotal = open.length;
+    questions = open.slice(0, VIEW_BATCH_CAP);
+  } catch (e) {
+    error = [error, `questions not read: ${lastLine(e)}`].filter(Boolean).join(' · ');
+  }
   const dialogs = await readDialogs(root, status.projects);
-  const decisions = await readDecisions(root, 8).catch(() => []);
+  // Scan further back than the feed shows, so filtered noise cannot starve it.
+  const decisions = await readDecisions(root, DECISIONS_SCANNED)
+    .then((ds) => ds.filter(feedKeep).slice(0, DECISIONS_SHOWN))
+    .catch(() => []);
   return {
     root,
     hubName: status.hub.name ?? '',
@@ -45,6 +70,8 @@ export async function buildView(root: string): Promise<HubView> {
     tasks,
     dialogs,
     decisions,
+    questions,
+    questionsTotal,
     updatedAt: Date.now(),
     error,
   };

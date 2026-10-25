@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import net from 'node:net';
+import path from 'node:path';
 
 export const HIVE_SESSION = 'hive';
 
@@ -24,7 +26,38 @@ export async function tmux(args: string[], timeoutMs?: number): Promise<RunResul
   return run('tmux', ['-L', tmuxSocket(), ...args], undefined, undefined, timeoutMs);
 }
 
+export function tmuxSocketPath(): string {
+  const uid = process.getuid!();
+  const dir = process.env.TMUX_TMPDIR ?? `/tmp/tmux-${uid}`;
+  return path.join(dir, tmuxSocket());
+}
+
+// A bare connect proves a server owns the socket; the server reads EOF and
+// drops it. tmux itself cannot ask this question without starting a server.
+export function serverReachable(socket: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const c = net.createConnection(socket);
+    c.once('connect', () => { c.destroy(); resolve(true); });
+    c.once('error', () => { c.destroy(); resolve(false); });
+  });
+}
+
+// The server must run inside hive-v2-tmux.service's cgroup: deploys restart
+// hive-v2-watch and hive-v2-web, and KillMode=control-group takes a server
+// born in one of those cgroups down with every pane. When no server answers,
+// start one through the unit (sudoers provisioned). If that fails, the
+// tmux calls below auto-start one in this cgroup — alive, but deploy-fragile.
+async function ensureServer(): Promise<void> {
+  if (await serverReachable(tmuxSocketPath())) return;
+  // RemainAfterExit keeps the unit active after the server dies, so `start`
+  // would be a no-op; restart covers both cases and kills nothing when no
+  // server answers.
+  await run('sudo', ['-n', 'systemctl', 'restart', 'hive-v2-tmux'], undefined, undefined, 15_000);
+}
+
 export async function ensureHiveSession(): Promise<void> {
+  // Tests run on throwaway sockets; only the production socket has a unit.
+  if (tmuxSocket() === 'hive-v2') await ensureServer();
   const probe = await tmux(['has-session', '-t', HIVE_SESSION]);
   if (probe.code !== 0) {
     const made = await tmux(['new-session', '-d', '-s', HIVE_SESSION, '-n', 'hive', '-x', '220', '-y', '50']);

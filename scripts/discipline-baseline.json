@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "files": {
+    "web/App.tsx": 545,
+    "src/hub.ts": 510,
+    "src/ui/HubApp.tsx": 447,
+    "src/cli.ts": 303,
+    "web/server.ts": 295
+  }
+}

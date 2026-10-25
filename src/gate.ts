@@ -6,6 +6,9 @@ import { run } from './tmux.js';
 const STEP_NAME_RE = /^(?!.*\.\.)[A-Za-z0-9_.-]+$/;
 const HEADER_RE = /^# hive-gate steps: ([,A-Za-z0-9_.-]+) head=([0-9a-f]{40}|none) dirty=([01])$/;
 const STEP_LINE_RE = /^[A-Za-z0-9_.-]+ exit [0-9]+$/;
+const TEST_STEP_RE = /^test/;
+const VITEST_TESTS_RE = /^\s*Tests\s+(.+)$/m;
+const VITEST_ERRORS_RE = /^\s*Errors\s+(\d+) error/m;
 const CONVENTIONAL_RE = /^(feat|fix|refactor|docs|style|test|chore|perf)(\([a-z0-9-]+\))?: .+/;
 const ATTRIBUTION_RE = /^\s*(co-authored-by|claude-session)\s*:|generated with \[?claude code/i;
 
@@ -107,6 +110,22 @@ export async function runGate(logPath: string, steps: GateStep[], cwd: string): 
 
 export type VerifyLogResult = { green: boolean; out: string; note?: string };
 
+// Exit 0 is not evidence: a test step must show passed > 0, zero failed, and
+// zero errors in the vitest summary of its own output log.
+async function vacuity(file: string, name: string): Promise<string | null> {
+  const stepLog = path.join(`${file}.d`, `${name}.log`);
+  const out = await fs.readFile(stepLog, 'utf8').catch(() => '');
+  if (!out) return `no step output at ${stepLog}`;
+  const tests = out.match(VITEST_TESTS_RE)?.[1] ?? '';
+  const passed = Number(tests.match(/(\d+) passed/)?.[1] ?? 0);
+  const failed = Number(tests.match(/(\d+) failed/)?.[1] ?? 0);
+  const errors = Number(out.match(VITEST_ERRORS_RE)?.[1] ?? 0);
+  if (passed === 0) return 'zero passing tests — the step evidences nothing';
+  if (failed > 0) return `${failed} failed test(s) in the summary — the exit code was masked`;
+  if (errors > 0) return `${errors} error(s) — tests did not run to a verdict`;
+  return null;
+}
+
 export async function verifyLog(
   file: string,
   { expect = [], commit = '' }: { expect?: string[]; commit?: string } = {},
@@ -143,6 +162,15 @@ export async function verifyLog(
   const present = new Set(stepLines.map((l) => l.split(' ')[0]));
   const missing = names.filter((n) => !present.has(n));
 
+  const vacuous: string[] = [];
+  for (const l of stepLines) {
+    const name = l.split(' ')[0];
+    if (l.endsWith(' exit 0') && TEST_STEP_RE.test(name)) {
+      const why = await vacuity(file, name);
+      if (why) vacuous.push(`${name}: ${why}`);
+    }
+  }
+
   let reasons = '';
   if (commit) {
     const shaR = await run('git', ['rev-parse', '--verify', '--quiet', '--end-of-options', `${commit}^{commit}`], cwd);
@@ -153,11 +181,12 @@ export async function verifyLog(
     else if (hdirty === '1') reasons = 'the gate ran on a dirty tree, so it vouches for no commit';
   }
 
-  if (red.length || missing.length || twice.length || reasons) {
+  if (red.length || missing.length || twice.length || vacuous.length || reasons) {
     const out = ['RED:'];
     if (red.length) out.push(...red);
     if (missing.length) out.push(`missing: ${missing.join(' ')}`);
     if (twice.length) out.push(`twice: ${twice.join(' ')}`);
+    if (vacuous.length) out.push(...vacuous);
     if (reasons) out.push(reasons);
     return { green: false, out: out.join('\n') };
   }
@@ -250,4 +279,46 @@ export async function pushByHash(remote: string, sha: string, branch: string, cw
   }
   const pushed = await run('git', ['push', remote, `${sha}:refs/heads/${branch}`], cwd);
   if (pushed.code !== 0) throw new Error(pushed.stderr.trim() || 'git push failed');
+}
+
+const BOOKMARK_RE = /^(?!.*\.\.)[A-Za-z0-9_.-]+$/;
+
+export type LandArgs = {
+  remote?: string; sha?: string; branch?: string; bookmark?: string; title?: string; body?: string;
+};
+
+// jj push is the repo-local gated alias — jj git push fires no hooks.
+export async function landPr(args: LandArgs, cwd: string): Promise<string> {
+  const gh = await run('gh', ['--version'], cwd);
+  if (gh.code !== 0) throw new Error('gh is not on PATH. Install the GitHub CLI, then run hive land again');
+
+  if (args.body && !args.title) throw new Error('--body needs --title');
+
+  let head: string;
+  if ((await run('jj', ['root'], cwd)).code === 0) {
+    if ((await run('jj', ['git', 'root'], cwd)).code !== 0) {
+      throw new Error('this repo is jj-native, not colocated. hive land pushes a bookmark only when a git remote exists');
+    }
+    const bookmark = args.bookmark ?? '';
+    if (!bookmark) throw new Error('this repo is jj-colocated. Land with --bookmark <name>');
+    if (bookmark.startsWith('-')) throw new Error(`a bookmark may not start with '-': ${bookmark}`);
+    if (!BOOKMARK_RE.test(bookmark)) throw new Error(`a bookmark is letters, digits, '-', '_' and '.': ${bookmark}`);
+    const pushed = await run('jj', ['push', '--bookmark', bookmark], cwd);
+    if (pushed.code !== 0) throw new Error(pushed.stderr.trim() || 'jj push failed');
+    head = bookmark;
+  } else {
+    const { remote, sha, branch } = args;
+    if (!remote || !sha || !branch) throw new Error('this repo is plain git. Land with <remote> <sha> <branch>');
+    await pushByHash(remote, sha, branch, cwd);
+    head = branch;
+  }
+
+  const prArgs = ['pr', 'create', '--head', head];
+  if (args.title) prArgs.push('--title', args.title, '--body', args.body ?? '');
+  else prArgs.push('--fill');
+  const pr = await run('gh', prArgs, cwd);
+  if (pr.code !== 0) {
+    throw new Error(`${head} is pushed, but gh pr create failed: ${pr.stderr.trim() || 'no output from gh'}`);
+  }
+  return pr.stdout.trim();
 }

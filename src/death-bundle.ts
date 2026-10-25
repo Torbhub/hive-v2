@@ -39,7 +39,7 @@ async function probeRun(name: string, cmd: string, args: string[]): Promise<stri
   });
 }
 
-async function readTailBytes(file: string, bytes: number): Promise<string> {
+export async function readTailBytes(file: string, bytes: number): Promise<string> {
   const st = await fs.stat(file);
   const size = Math.min(bytes, st.size);
   const fh = await fs.open(file, 'r');
@@ -52,7 +52,7 @@ async function readTailBytes(file: string, bytes: number): Promise<string> {
   }
 }
 
-async function findSessionDir(home: string, sessionId: string): Promise<string> {
+export async function findSessionDir(home: string, sessionId: string): Promise<string> {
   const base = path.join(home, '.kimi-code', 'sessions');
   const dirName = sessionId.startsWith('session_') ? sessionId : `session_${sessionId}`;
   for (const wd of await fs.readdir(base)) {
@@ -74,6 +74,15 @@ async function findWireLog(sessionDir: string): Promise<string> {
     if (st?.isFile()) return file;
   }
   throw new Error(`no wire.jsonl under ${agentsDir}`);
+}
+
+// The wedge judge's liveness signal: when the session last wrote a wire event.
+export async function wireLogMtime(home: string, sessionId: string): Promise<number | null> {
+  try {
+    return (await fs.stat(await findWireLog(await findSessionDir(home, sessionId)))).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 // Only type and timestamp leave this function; payloads never enter the bundle.
@@ -148,7 +157,7 @@ export async function captureDeathBundle(
       ? r.stdout
       : `no process with pid ${agent.pane_pid} (confirmed gone)`;
   });
-  const dmesg = cap(await probeRun('dmesg', 'dmesg', []), 20);
+  const dmesg = cap(await probeRun('dmesg', 'sudo', ['-n', 'dmesg']), 20);
   const free = await probeRun('free', 'free', ['-m']);
   const sessionId = agent.session_id;
   const wire = sessionId

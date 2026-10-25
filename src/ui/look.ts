@@ -1,6 +1,58 @@
-import type { HubAgent, HubOrchestrator, HubView } from '../types.js';
+import type { Checkpoint, HubAgent, HubOrchestrator, HubTask, HubView } from '../types.js';
 
 export const ROTATE_AT_PERCENT = 50;
+
+// A task with no progress sign in this window reads as stale.
+export const STALE_MS = 4 * 60 * 60_000;
+
+const STALE_STATES = new Set(['plan', 'question', 'blocked', 'handed']);
+
+export function staleTask(t: HubTask, now: number): boolean {
+  if (!STALE_STATES.has(t.state)) return false;
+  // No progress yet: the clock starts at the latest activity, so a rebriefed
+  // old task is not instantly stale.
+  const at = Date.parse(t.last_progress_at ?? t.updated);
+  return !Number.isNaN(at) && now - at > STALE_MS;
+}
+
+type TaskProgress = {
+  done: number;
+  total: number;
+  current: string | null;
+  lastAt: string | null;
+  failed: string[];
+};
+
+// The checkpoint trail of one task. null when the task has no plan checkpoints.
+export function taskProgress(t: HubTask): TaskProgress | null {
+  const cps = t.checkpoints ?? [];
+  if (cps.length === 0) return null;
+  const progress = t.progress ?? {};
+  const terminal = new Set(['ok', 'fail', 'skip']);
+  const done = cps.filter((c) => terminal.has(progress[c.id]?.status ?? '')).length;
+  let current: string | null = null;
+  let currentAt = '';
+  for (const c of cps) {
+    const p = progress[c.id];
+    if (p?.status === 'started' && p.at >= currentAt) {
+      current = c.id;
+      currentAt = p.at;
+    }
+  }
+  return {
+    done,
+    total: cps.length,
+    current,
+    lastAt: t.last_progress_at ?? null,
+    failed: cps.filter((c) => progress[c.id]?.status === 'fail').map((c) => c.id),
+  };
+}
+
+// tmux window names are "<project>:<agent>" (src/tmux.ts windowName); look.ts
+// stays web-bundled, so the format is repeated here instead of imported.
+export function windowLabel(project: string, agent: string): string {
+  return `${project}:${agent}`;
+}
 
 export function ago(iso: string, now: number): string {
   const t = Date.parse(iso);
@@ -55,6 +107,7 @@ export function agentRef(a: HubAgent): string {
 export function agentGlyph(a: HubAgent): { glyph: string; color: string } {
   if (a.state === 'running') return { glyph: '●', color: 'green' };
   if (a.state === 'stopped') return { glyph: '○', color: 'yellow' };
+  if (a.state === 'wedged') return { glyph: '✖', color: 'red' };
   return { glyph: '?', color: 'red' };
 }
 
@@ -70,9 +123,12 @@ export type Need = {
   words: string;
   when: string;
   dialogKey?: string;
-  action?: 'continue' | 'plan';
+  action?: 'continue' | 'plan' | 'resolve';
   project?: string;
   taskId?: string;
+  detail?: string;
+  checkpoints?: Checkpoint[];
+  stale?: boolean;
 };
 
 export function buildNeeds(view: HubView, now: number): Need[] {
@@ -98,9 +154,12 @@ export function buildNeeds(view: HubView, now: number): Need[] {
       key: `task-${t.id}`, glyph: look.glyph, color: look.color, who: t.id,
       words: look.words, when: ago(t.updated, now),
       dialogKey: absorb ? t.project : undefined,
-      action: t.state === 'plan' ? 'plan' : undefined,
-      project: t.state === 'plan' ? t.project : undefined,
-      taskId: t.state === 'plan' ? t.id : undefined,
+      action: t.state === 'plan' ? 'plan' : 'resolve',
+      project: t.project,
+      taskId: t.id,
+      detail: t.last_note?.trim() ? t.last_note : 'no reason recorded',
+      checkpoints: t.state === 'plan' ? t.checkpoints ?? [] : undefined,
+      stale: staleTask(t, now),
     });
   }
   for (const p of view.projects) {
