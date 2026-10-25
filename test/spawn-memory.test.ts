@@ -70,7 +70,7 @@ describe('spawn memory recall', () => {
     const task = await approvedTask(root, 'wire the recall lane');
     blockFor.mockResolvedValue('## Memory\n\n- the gate needs a green run\n');
     await spawnAgent(root, 'demo', { agent: 'worker1', task });
-    const handoff = await fs.readFile(hivePath(home, 'handoffs', 'worker1.md'), 'utf8');
+    const handoff = await fs.readFile(hivePath(hivePath(home, 'lanes', 'worker1'), 'handoffs', 'worker1.md'), 'utf8');
     expect(handoff).toContain('## Memory\n\n- the gate needs a green run');
     expect(vi.mocked(blockFor).mock.calls[0].slice(0, 3)).toEqual([root, 'demo', task]);
   }, 20_000);
@@ -80,7 +80,7 @@ describe('spawn memory recall', () => {
     const task = await approvedTask(root, 'wire the recall lane');
     const pane = await spawnAgent(root, 'demo', { agent: 'worker1', task });
     expect(pane).toBe('%9');
-    const handoff = await fs.readFile(hivePath(home, 'handoffs', 'worker1.md'), 'utf8');
+    const handoff = await fs.readFile(hivePath(hivePath(home, 'lanes', 'worker1'), 'handoffs', 'worker1.md'), 'utf8');
     expect(handoff).not.toContain('## Memory');
   }, 20_000);
 
