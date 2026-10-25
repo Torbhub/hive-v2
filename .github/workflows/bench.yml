@@ -11,6 +11,8 @@ name: bench
 # teamkimi proxy on the hub box, reached over an SSM port-forward (the
 # proxy itself stays on loopback). The repo secret TEAMKIMI_PROXY_KEY is
 # the teamkimi proxy.apiKey; KIMI_BENCH_MODEL overrides the model.
+# AWS access is the hive-v2-gh-bench role: ssm:StartSession for
+# port-forwarding only, no deploy or mutex permissions.
 # Without the secret the bench CANNOT run: the job posts a loud verdict
 # comment naming what is missing and goes red. Green means the bench
 # ran and every verdict is pass.
@@ -22,6 +24,7 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  id-token: write
 
 concurrency:
   group: bench-${{ github.event.pull_request.number }}
@@ -38,14 +41,15 @@ jobs:
           node-version: 22
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ secrets.HIVE_BENCH_ROLE_ARN }}
           aws-region: us-east-1
       - name: Open the teamkimi tunnel over SSM
         env:
           INSTANCE_ID: ${{ vars.KIMI_BOX_ID }}
         run: |
           set -euo pipefail
-          bash infra/deploy-mutex.sh acquire aws-acts "hive-v2/bench-${{ github.run_id }}"
+          # No deploy mutex: this role can only open a port-forward. There is
+          # no state to serialize against a deploy.
           if ! command -v session-manager-plugin >/dev/null; then
             echo "::error::session-manager-plugin is missing on this runner"
             exit 1
@@ -175,10 +179,9 @@ jobs:
           comment "$BODYF"
           echo "$TITLE"
           [ "$RC" = 0 ] && [ "$TOTAL" = "$EXPECTED" ]
-      - name: Close the tunnel and release the mutex
+      - name: Close the tunnel
         if: always()
         run: |
           if [ -f /tmp/hive-bench-tunnel.pid ]; then
             kill "$(cat /tmp/hive-bench-tunnel.pid)" 2>/dev/null || true
           fi
-          bash infra/deploy-mutex.sh release aws-acts "hive-v2/bench-${{ github.run_id }}" || true
