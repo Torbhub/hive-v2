@@ -6,10 +6,13 @@ name: bench
 # bench/run.sh prints one JSON verdict line per (role, task). The lines land
 # in a single upserted "bench verdict" PR comment.
 #
-# The agent is a real kimi CLI run, so the job needs the KIMI_API_KEY repo
-# secret (a Kimi Platform key; model overridable via the KIMI_BENCH_MODEL
-# repo variable). Without the key the bench CANNOT run: the job posts a loud
-# verdict comment naming what is missing and goes red. Green means the bench
+# The agent is a real kimi CLI run, so the job needs a model credential.
+# There is no Kimi Platform key and there never will be: auth is the
+# teamkimi proxy on the hub box, reached over an SSM port-forward (the
+# proxy itself stays on loopback). The repo secret TEAMKIMI_PROXY_KEY is
+# the teamkimi proxy.apiKey; KIMI_BENCH_MODEL overrides the model.
+# Without the secret the bench CANNOT run: the job posts a loud verdict
+# comment naming what is missing and goes red. Green means the bench
 # ran and every verdict is pass.
 on:
   pull_request:
@@ -33,6 +36,35 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Open the teamkimi tunnel over SSM
+        env:
+          INSTANCE_ID: ${{ vars.KIMI_BOX_ID }}
+        run: |
+          set -euo pipefail
+          bash infra/deploy-mutex.sh acquire aws-acts "hive-v2/bench-${{ github.run_id }}"
+          if ! command -v session-manager-plugin >/dev/null; then
+            echo "::error::session-manager-plugin is missing on this runner"
+            exit 1
+          fi
+          aws ssm start-session --target "$INSTANCE_ID" \
+            --document-name AWS-StartPortForwardingSession \
+            --parameters '{"portNumber":["3466"],"localPortNumber":["3466"]}' \
+            > /tmp/hive-bench-tunnel.log 2>&1 &
+          echo $! > /tmp/hive-bench-tunnel.pid
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/3466) 2>/dev/null; then
+              echo "tunnel up after ${i} checks"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the teamkimi tunnel never came up"
+          cat /tmp/hive-bench-tunnel.log
+          exit 1
       - name: Run the bench and upsert the verdict comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -40,8 +72,11 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           # Auth for the headless agent: the KIMI_MODEL_* family synthesizes
           # a provider from env alone, nothing is written to config.toml.
-          KIMI_MODEL_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          KIMI_MODEL_NAME: ${{ vars.KIMI_BENCH_MODEL || 'kimi-for-coding' }}
+          # The base URL is the local end of the SSM tunnel to teamkimi.
+          KIMI_MODEL_PROVIDER_TYPE: openai
+          KIMI_MODEL_BASE_URL: http://127.0.0.1:3466/v1
+          KIMI_MODEL_API_KEY: ${{ secrets.TEAMKIMI_PROXY_KEY }}
+          KIMI_MODEL_NAME: ${{ vars.KIMI_BENCH_MODEL || 'kimi-k2' }}
           KIMI_CODE_NO_AUTO_UPDATE: "1"
           KIMI_CODE_TRUST_WORKSPACE: "1"
         run: |
@@ -64,19 +99,19 @@ jobs:
           <!-- bench-verdict -->
           ## bench verdict: CANNOT RUN
 
-          The bench did not run. Missing: the `KIMI_API_KEY` repo secret (a Kimi
-          Platform API key). The bench action is a live kimi agent run, this repo
-          has no model credential, and the teamkimi proxy exists only on the hub
-          box.
+          The bench did not run. Missing: the `TEAMKIMI_PROXY_KEY` repo secret
+          (the teamkimi proxy.apiKey). The bench action is a live kimi agent
+          run and auth is the teamkimi proxy on the hub box, reached over an
+          SSM port-forward. There is no Kimi Platform key by design.
 
-          This PR still owes a bench verdict (README § The bench): run every task
-          in `bench/tasks/` with an agent carrying the candidate role on a machine
-          with Node 22 and a signed-in kimi, and paste the JSON lines here. Or
-          provision `KIMI_API_KEY` (optionally a `KIMI_BENCH_MODEL` repo variable)
-          and re-run this workflow.
+          This PR still owes a bench verdict (README § The bench): run every
+          task in `bench/tasks/` with an agent carrying the candidate role on
+          a machine with Node 22 and a signed-in kimi, and paste the JSON
+          lines here. Or provision `TEAMKIMI_PROXY_KEY` (optionally a
+          `KIMI_BENCH_MODEL` repo variable) and re-run this workflow.
           EOF
             comment "$BODYF"
-            echo "::error::bench cannot run: KIMI_API_KEY secret is not provisioned"
+            echo "::error::bench cannot run: TEAMKIMI_PROXY_KEY secret is not provisioned"
             exit 1
           fi
 
@@ -140,3 +175,10 @@ jobs:
           comment "$BODYF"
           echo "$TITLE"
           [ "$RC" = 0 ] && [ "$TOTAL" = "$EXPECTED" ]
+      - name: Close the tunnel and release the mutex
+        if: always()
+        run: |
+          if [ -f /tmp/hive-bench-tunnel.pid ]; then
+            kill "$(cat /tmp/hive-bench-tunnel.pid)" 2>/dev/null || true
+          fi
+          bash infra/deploy-mutex.sh release aws-acts "hive-v2/bench-${{ github.run_id }}" || true

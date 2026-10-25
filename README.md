@@ -201,6 +201,11 @@ before the change must stay green after it.
 The runner does heavy work: a full clone, `npm ci`, a build, vitest. Do not
 run it on the hub box. Run it on any other machine with Node 22.
 
+In CI the bench authenticates through the teamkimi proxy on the hub box,
+reached over an SSM port-forward from the runner (`TEAMKIMI_PROXY_KEY`).
+There is no Kimi Platform key by design. The deploy role allows
+`ssm:StartSession` only for that document and only on this box.
+
 ## Development
 
 ```bash
