@@ -3,7 +3,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { captureDeathBundle, wireLogMtime } from './death-bundle.js';
 import { answerDialog, buildStatus, readDialogFor, Refusal, wake } from './hub.js';
-import { wakeAgent } from './spawn.js';
+import { DEFAULT_MODEL, wakeAgent } from './spawn.js';
 import { classify, lines } from './screen.js';
 import { appendDecision, hivePath, hubPath, readProjects, readTeam, upsertTeamEntry, writeJson } from './state.js';
 import { capturePane, killWindow, paneExists, run, sleep } from './tmux.js';
@@ -67,9 +67,10 @@ export async function classifyWithKimi(
   env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
   const prompt = `In project ${project}, an agent asks to run this command:\n$ ${command}\nAnswer APPROVE only if this is clearly a safe, read-only or build/test action with no external side effects. Otherwise answer ASK.`;
-  const model = env.HIVE_CLASSIFIER_MODEL ?? process.env.HIVE_CLASSIFIER_MODEL;
+  const model = [env.HIVE_CLASSIFIER_MODEL, process.env.HIVE_CLASSIFIER_MODEL]
+    .find((value) => value?.trim()) ?? DEFAULT_MODEL;
   const spawnEnv = { ...process.env, ...env, KIMI_CODE_NO_AUTO_UPDATE: '1' };
-  const args = model ? ['-m', model, '-p', prompt] : ['-p', prompt];
+  const args = ['-m', model, '-p', prompt];
   const r = await run('kimi', args, undefined, spawnEnv, CLASSIFY_TIMEOUT_MS);
   return r.code === 0 && r.stdout.trimStart().startsWith('APPROVE');
 }
