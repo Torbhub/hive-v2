@@ -52,6 +52,17 @@ Resources:
                 Effect: Allow
                 Action: ssm:GetCommandInvocation
                 Resource: '*'
+              - Sid: SsmPortForwardToKimiBox
+                Effect: Allow
+                Action: ssm:StartSession
+                Resource: arn:aws:ec2:us-east-1:594552273052:instance/*
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/Role: nexus-kimi-session
+              - Sid: SsmPortForwardingDocument
+                Effect: Allow
+                Action: ssm:StartSession
+                Resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession
               - Sid: CloudFormationSelfDeploy
                 Effect: Allow
                 # the complete action set of a changeset-based
