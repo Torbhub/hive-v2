@@ -125,16 +125,71 @@ describe('spawnAgent', () => {
     expect(vi.mocked(run).mock.calls).toHaveLength(runs);
   }, 20_000);
 
+  it('places a default jj lane under .hive/lanes instead of the repo root', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const wt = hivePath(home, 'lanes', 'builder2');
+    await spawnAgent(root, 'demo', { agent: 'builder2' });
+    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[2] === home && c[1].includes('add'));
+    expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', wt, '-r', 'main@origin']);
+    const recs = (await manifestRead(home)).filter((r) => r.kind === 'jj-workspace');
+    expect(recs).toHaveLength(1);
+    expect(recs[0].path).toBe(wt);
+    expect((await readTeam(home)).agents.find((a) => a.name === 'builder2')?.worktree).toBe(wt);
+  }, 20_000);
+
+  it('places a default git lane under .hive/lanes instead of the repo root', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const wt = hivePath(home, 'lanes', 'builder2');
+    vi.mocked(run).mockImplementation(async (cmd) => cmd === 'jj'
+      ? { code: 1, stdout: '', stderr: 'no jj here' }
+      : { code: 0, stdout: '', stderr: '' });
+    try {
+      await spawnAgent(root, 'demo', { agent: 'builder2' });
+    } finally {
+      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
+    }
+    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'git' && c[2] === home && c[1][0] === 'worktree');
+    expect(add?.[1]).toEqual(['worktree', 'add', '-q', '-b', 'demo/builder2', wt, 'HEAD']);
+    expect((await readTeam(home)).agents.find((a) => a.name === 'builder2')?.worktree).toBe(wt);
+  }, 20_000);
+
+  it('launches a plain default lane when neither VCS probe finds a repo', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const wt = hivePath(home, 'lanes', 'builder2');
+    vi.mocked(run).mockImplementation(async (cmd) => cmd === 'jj' || cmd === 'git'
+      ? { code: 1, stdout: '', stderr: 'no repository here' }
+      : { code: 0, stdout: '', stderr: '' });
+    try {
+      await spawnAgent(root, 'demo', { agent: 'builder2' });
+    } finally {
+      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
+    }
+    expect((await fs.stat(wt)).isDirectory()).toBe(true);
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[1]).toBe(wt);
+    expect((await readTeam(home)).agents.find((a) => a.name === 'builder2')?.worktree).toBe(wt);
+    const recs = (await manifestRead(home)).filter((r) => r.kind === 'worktree' || r.kind === 'jj-workspace');
+    expect(recs).toEqual([]);
+  }, 20_000);
+
+  it('preserves an absolute --worktree path', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const wt = path.join(root, 'absolute-lane');
+    await spawnAgent(root, 'demo', { agent: 'builder2', worktree: wt });
+    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[2] === home && c[1].includes('add'));
+    expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', wt, '-r', 'main@origin']);
+    expect((await readTeam(home)).agents.find((a) => a.name === 'builder2')?.worktree).toBe(wt);
+  }, 20_000);
+
   it('lanes into a jj workspace when jj root answers in the project home', async () => {
     const { root, home } = await setup({ name: 'builder' });
     await spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' });
-    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1].includes('add'));
+    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[2] === home && c[1].includes('add'));
     expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', path.join(home, 'lane'), '-r', 'main@origin']);
     const recs = (await manifestRead(home)).filter((r) => r.kind === 'jj-workspace');
     expect(recs).toHaveLength(1);
     expect(recs[0].path).toBe(path.join(home, 'lane'));
     expect(recs[0].branch).toBeUndefined();
-    expect(vi.mocked(run).mock.calls.some((c) => c[0] === 'git' && c[1][0] === 'worktree')).toBe(false);
+    expect(vi.mocked(run).mock.calls.some((c) => c[0] === 'git' && c[2] === home && c[1][0] === 'worktree')).toBe(false);
   }, 20_000);
 
   it('falls back to a git worktree when the jj probe fails', async () => {
@@ -147,7 +202,7 @@ describe('spawnAgent', () => {
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
-    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'git' && c[1][0] === 'worktree');
+    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'git' && c[2] === home && c[1][0] === 'worktree');
     expect(add?.[1]).toEqual(['worktree', 'add', '-q', '-b', 'demo/builder2', path.join(home, 'lane'), 'HEAD']);
     const recs = (await manifestRead(home)).filter((r) => r.kind === 'worktree');
     expect(recs).toHaveLength(1);

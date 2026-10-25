@@ -296,37 +296,40 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
 
   let pane: string;
   let identity: PaneIdentity;
-  let worktree = home;
+  let worktree: string;
   let jjLane: { name: string; path: string } | null = null;
   try {
-    if (opts.worktree) {
-      const wt = path.resolve(home, opts.worktree);
-      // Neither jj workspace add nor git worktree add creates missing parent dirs.
-      await fs.mkdir(path.dirname(wt), { recursive: true });
-      // jj root answers only inside a jj repo; any probe failure keeps the git lane.
-      if ((await run('jj', ['root'], home)).code === 0) {
-        const base = await jjBaseRev(home);
-        const existed = existsSync(wt);
-        const made = await run('jj', ['-R', home, 'workspace', 'add', wt, '-r', base], home);
-        if (made.code !== 0) {
-          // jj can register the workspace and create the dir yet still fail.
-          if (!existed && existsSync(wt)) await undoJjWorkspace(home, path.basename(wt), wt);
-          throw new Error(`jj workspace add failed: ${made.stderr.trim()}`);
-        }
-        jjLane = { name: path.basename(wt), path: wt };
-        if (existsSync(path.join(wt, 'scripts', 'install-git-hooks.sh'))) {
-          const hooks = await run('bash', ['scripts/install-git-hooks.sh'], wt);
-          if (hooks.code !== 0) throw new Error(`install-git-hooks failed in ${wt}: ${hooks.stderr.trim()}`);
-        }
-        await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: wt });
-      } else {
-        const branch = `${project}/${agent}`;
-        const made = await run('git', ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD'], home);
-        if (made.code !== 0) throw new Error(`git worktree add failed: ${made.stderr.trim()}`);
-        await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: wt, branch });
+    const wt = opts.worktree ? path.resolve(home, opts.worktree) : hivePath(home, 'lanes', agent);
+    // Neither jj workspace add nor git worktree add creates missing parent dirs.
+    await fs.mkdir(path.dirname(wt), { recursive: true });
+    // jj root answers only inside a jj repo; a failure tries git next.
+    const jjRepo = (await run('jj', ['root'], home)).code === 0;
+    const plainFolder = !opts.worktree && !jjRepo &&
+      (await run('git', ['rev-parse', '--is-inside-work-tree'], home)).code !== 0;
+    if (jjRepo) {
+      const base = await jjBaseRev(home);
+      const existed = existsSync(wt);
+      const made = await run('jj', ['-R', home, 'workspace', 'add', wt, '-r', base], home);
+      if (made.code !== 0) {
+        // jj can register the workspace and create the dir yet still fail.
+        if (!existed && existsSync(wt)) await undoJjWorkspace(home, path.basename(wt), wt);
+        throw new Error(`jj workspace add failed: ${made.stderr.trim()}`);
       }
-      worktree = wt;
+      jjLane = { name: path.basename(wt), path: wt };
+      if (existsSync(path.join(wt, 'scripts', 'install-git-hooks.sh'))) {
+        const hooks = await run('bash', ['scripts/install-git-hooks.sh'], wt);
+        if (hooks.code !== 0) throw new Error(`install-git-hooks failed in ${wt}: ${hooks.stderr.trim()}`);
+      }
+      await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: wt });
+    } else if (plainFolder) {
+      await fs.mkdir(wt, { recursive: true });
+    } else {
+      const branch = `${project}/${agent}`;
+      const made = await run('git', ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD'], home);
+      if (made.code !== 0) throw new Error(`git worktree add failed: ${made.stderr.trim()}`);
+      await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: wt, branch });
     }
+    worktree = wt;
 
     await ensureAgentFiles(worktree, agent, role);
     if (task) {
