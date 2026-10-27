@@ -15,6 +15,8 @@ import {
   writeProjects, writeJson, readJson, type ProjectsFile,
 } from './state.js';
 import { addProject } from './project.js';
+import { listOpenQuestionBatches } from './questions.js';
+import type { QuestionBatch } from './types.js';
 import { orchestratorName, typeLine } from './spawn.js';
 import { planVerdict } from './taskgate.js';
 import { taskScope } from './scope.js';
@@ -132,12 +134,19 @@ async function folderStatus(root: string, folder: string): Promise<HubFolder> {
 
 type ProjectEntry = ProjectsFile['projects'][number];
 
-async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): Promise<HubProject> {
+async function projectStatus(
+  root: string, p: ProjectEntry, tasks: HubTask[], batches: QuestionBatch[],
+): Promise<HubProject> {
   const team = await readTeam(p.home);
   const pending = await readPendingPane(root, p.name);
   const orchEntry = team.agents.find((a) => a.orchestrator);
+  const waiting = new Set(batches.filter((b) => b.project === p.name).map((b) => b.agent));
 
-  const orchestrator: HubOrchestrator = { state: 'none', question: false };
+  const orchestrator: HubOrchestrator = {
+    state: 'none',
+    question: orchEntry ? waiting.has(orchEntry.name) : waiting.has(orchestratorName(p.name)),
+    operator_question: orchEntry ? waiting.has(orchEntry.name) : waiting.has(orchestratorName(p.name)),
+  };
   if (orchEntry) {
     orchestrator.name = orchEntry.name;
     orchestrator.children = team.agents.filter((a) => !a.orchestrator && a.parent === orchEntry.name).length;
@@ -146,7 +155,7 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
     orchestrator.state = snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped';
     if (snap.alive === 'running' && orchEntry.pane) orchestrator.pane = orchEntry.pane;
     if (snap.alive !== 'gone') {
-      orchestrator.question = snap.dialog !== null;
+      orchestrator.question = snap.dialog !== null || orchestrator.operator_question === true;
       if (snap.context !== null) {
         orchestrator.context = snap.context;
         orchestrator.context_assumed = false;
@@ -187,7 +196,8 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
         : snap.alive !== 'gone' && a.wedged_at ? 'wedged'
         : snap.alive === 'running' ? 'running'
         : snap.alive === 'unknown' ? 'unknown' : 'stopped',
-      question: snap.alive !== 'gone' && snap.dialog !== null,
+      question: waiting.has(a.name) || (snap.alive !== 'gone' && snap.dialog !== null),
+      operator_question: waiting.has(a.name),
       worktree: a.worktree,
       ref: agentRef(a.name, nameCounts, a.worktree),
     };
@@ -217,7 +227,8 @@ export async function buildStatus(root: string): Promise<HubStatus> {
   const hubJson = await readJson<{ name?: string }>(hubPath(root, 'hub.json'));
   const pf = await readProjects(root);
   const tasks = await listTasks(root);
-  const projects = await Promise.all(pf.projects.map((p) => projectStatus(root, p, tasks)));
+  const batches = await listOpenQuestionBatches(root);
+  const projects = await Promise.all(pf.projects.map((p) => projectStatus(root, p, tasks, batches)));
 
   return {
     hub: hubJson?.name ? { root, name: hubJson.name } : { root },

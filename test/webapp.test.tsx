@@ -954,6 +954,33 @@ describe('operator questions', () => {
     });
   }
 
+  it('shows actionable question cards on the main screen and answers inline', async () => {
+    const update = mountQuestions({ ...VIEW, questions: [BATCH] });
+    await act(async () => {
+      button('refresh').click();
+    });
+    expect(container.textContent).toContain(BATCH.context);
+    expect(container.textContent).toContain(BATCH.questions[0].question);
+
+    act(() => {
+      button('Submit').click();
+    });
+    const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/questions/answer'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({
+      id: 'batch-1',
+      answers: [
+        { question: 'q2', choice: 'c2' },
+        { question: 'q3', choice: 'c1' },
+        { question: 'q1', choice: 'c1' },
+      ],
+    });
+    update({ ...VIEW, questions: [] });
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    });
+    expect(container.textContent).not.toContain(BATCH.context);
+  });
+
   it('shows the count, lists oldest batches first, and returns to the hub', async () => {
     mountQuestions({
       ...VIEW,

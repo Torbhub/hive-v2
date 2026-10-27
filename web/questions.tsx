@@ -34,7 +34,7 @@ function CancelBatch({ batch, onCancel }: { batch: QuestionBatch; onCancel: () =
   );
 }
 
-function BatchCard({
+export function BatchCard({
   batch, onAnswer, onCancel,
 }: {
   batch: QuestionBatch;

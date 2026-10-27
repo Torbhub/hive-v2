@@ -12,6 +12,7 @@ export type HubAgent = {
   name: string;
   state: HubAgentState;
   question?: boolean;
+  operator_question?: boolean;
   context?: number;
   context_assumed?: boolean;
   context_unknown?: boolean;
@@ -24,6 +25,7 @@ export type HubAgent = {
 export type HubOrchestrator = {
   state: HubOrchestratorState;
   question?: boolean;
+  operator_question?: boolean;
   name?: string;
   pid?: number;
   pane?: string;

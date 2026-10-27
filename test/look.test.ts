@@ -129,6 +129,24 @@ describe('buildNeeds', () => {
     }, NOW);
     expect(needs[0]).toMatchObject({ key: 'orch-demo', dialogKey: 'demo' });
   });
+  it('structured-only questions use their inline cards, not fake screen dialogs', () => {
+    const needs = buildNeeds({
+      ...base,
+      projects: [{
+        name: 'demo', home: '/r/demo', repos: [], open_tasks: 1,
+        orchestrator: { state: 'running', question: true, operator_question: true },
+        agents: [{ name: 'builder', state: 'running', question: true, operator_question: true, ref: 'builder' }],
+      }],
+      tasks: [{
+        id: 'demo-1', project: 'demo', asked: '2026-10-13T10:00:00Z', state: 'plan',
+        updated: '2026-10-13T11:00:00Z', last_note: null, needs_owner: true,
+      }],
+    }, NOW);
+    expect(needs).toHaveLength(1);
+    expect(needs[0]).toMatchObject({ key: 'task-demo-1', action: 'plan' });
+    expect(needs[0].dialogKey).toBeUndefined();
+  });
+
   it('a plan task with no screen question offers the plan action and no dialog', () => {
     const needs = buildNeeds({
       ...base,

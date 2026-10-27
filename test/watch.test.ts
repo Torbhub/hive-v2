@@ -504,6 +504,30 @@ describe('watchCycle wedge detection', () => {
     expect(await fs.readdir(hivePath(home, 'wedges'))).toHaveLength(1);
   });
 
+  it('an open structured question is an expected wait, not stale or wedged', async () => {
+    const { root, home } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 0,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: true, operator_question: true, ref: 'builder' }],
+      }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(WORKING);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 60 * 60_000);
+
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { wedgeStillMs: 0 });
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { wedgeStillMs: 0 });
+
+    expect((await readTeam(home)).agents[0].wedged_at).toBeUndefined();
+    expect(await readDecisions(root)).toEqual([]);
+    expect(killWindow).not.toHaveBeenCalled();
+  });
+
   it('a frozen screen with an advancing CPU tree is working, not wedged', async () => {
     const { root, home } = await setupProject({
       agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],

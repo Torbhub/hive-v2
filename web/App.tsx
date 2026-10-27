@@ -9,7 +9,7 @@ import { ActionContext, Btn } from './action';
 import { LogView } from './logview';
 import { ProjectCard, StatusDot } from './project';
 import { NeedCard } from './needs';
-import { Questions } from './questions';
+import { BatchCard, Questions } from './questions';
 import { AddProjectRow } from './rows';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
@@ -265,11 +265,16 @@ export function App() {
           <Separator />
 
           {view.questions.length > 0 && (
-            <div>
-              <Btn id="questions-open" onPress={() => setQuestionsOpen(true)}>
-                Questions {view.questionsTotal ?? view.questions.length}
-              </Btn>
-            </div>
+            <section className="flex flex-col gap-3">
+              <div>
+                <Btn id="questions-open" onPress={() => setQuestionsOpen(true)}>
+                  Questions {view.questionsTotal ?? view.questions.length}
+                </Btn>
+              </div>
+              {view.questions.map((batch) => (
+                <BatchCard key={batch.id} batch={batch} onAnswer={onQuestionAnswer} onCancel={onQuestionCancel} />
+              ))}
+            </section>
           )}
 
           {view.error !== '' && (

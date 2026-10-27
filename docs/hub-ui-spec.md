@@ -554,9 +554,9 @@ Success answers `{ok: true, target, killed, summary}` and, when at least one ent
 
 ## 16. Operator questions (web UI only)
 
-**Entry point.** The main screen shows a **Questions {N}** button below the top rule when open batches exist. `N = view.questionsTotal ?? view.questions.length`. The button opens a whole-screen view. The **back** button returns to the main screen. The Ink screen has no questions UI.
+**Entry point.** The main screen shows every loaded open batch below the **Questions {N}** button. The full question text and answer controls are visible without opening another screen. `N = view.questionsTotal ?? view.questions.length`. The button opens the whole-screen view. The **back** button returns to the main screen. The Ink screen has no questions UI.
 
-**Screen.** The header shows `Questions`, an `{N} open` badge with the same total, and **back**. The view carries at most the oldest 50 open batches and `questionsTotal` counts all of them. When more remain, a line reads `Showing the oldest {loaded} of {total}. Answer or cancel these to see the rest.` One card per batch follows, oldest `createdAt` first. The card header shows the batch context, `{project} · {agent}`, and the ISO `createdAt` value. With no open batches, the body shows `No open questions.`
+**Screen.** Both views use the same batch cards. The whole-screen header shows `Questions`, an `{N} open` badge with the same total, and **back**. The view carries at most the oldest 50 open batches and `questionsTotal` counts all of them. When more remain, the whole-screen view reads `Showing the oldest {loaded} of {total}. Answer or cancel these to see the rest.` Cards follow oldest `createdAt` first. The card header shows the batch context, `{project} · {agent}`, and the ISO `createdAt` value. With no open batches, the whole-screen body shows `No open questions.`
 
 Questions sort by numeric `priority` ascending. Equal priorities keep their batch order. Each question shows a `P{priority}` badge, its question text, and its context as supporting text. Choices use native radio inputs. Each choice shows its label and description. The recommended choice carries a `recommended` badge and starts selected. A submit with no changes accepts every recommendation.
 
