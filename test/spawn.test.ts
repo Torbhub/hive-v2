@@ -119,6 +119,14 @@ describe('respawnAgent', () => {
 });
 
 describe('spawnAgent', () => {
+  it('types the absolute hub decisions path into the worker pickup', async () => {
+    const { root } = await setup({ name: 'builder' });
+    await spawnAgent(root, 'demo', { agent: 'builder2' });
+    const typed = vi.mocked(sendLiteral).mock.calls.at(-1)?.[1];
+    expect(typed).toContain(`Decisions so far: read ${path.join(root, '.hive-hub', 'decisions.jsonl')} — they are permanent.`);
+    expect(typed).not.toContain('read .hive-hub/decisions.jsonl');
+  }, 20_000);
+
   it('rejects a bad --model before any side effect', async () => {
     const { root } = await setup({ name: 'builder' });
     const runs = vi.mocked(run).mock.calls.length;

@@ -86,7 +86,7 @@ async function launchRegisteredOrchestrator(
       kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}`,
       pane_pid: identity.pid, pane_started: identity.started,
     });
-    let line = pickupLine(project, name);
+    let line = pickupLine(root, project, name);
     if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
     const pending = {
       pane, kind, at: new Date().toISOString(), typed: false, sending: true, claim_token: randomUUID(), task, line,
