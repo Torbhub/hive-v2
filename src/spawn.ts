@@ -8,7 +8,7 @@ import {
 } from './tmux.js';
 import { classify, lines, parseDialog } from './screen.js';
 import {
-  foldTasks, hivePath, manifestAdd, readProjects, readTaskEvents, readTeam,
+  appendDecision, foldTasks, hivePath, manifestAdd, readProjects, readTaskEvents, readTeam,
   removeTeamEntry, upsertTeamEntry, clearPendingPane, withTeamLock, writeJson, type ProjectsFile,
 } from './state.js';
 import type { Approvals, ProjectMode, TeamEntry } from './types.js';
@@ -309,6 +309,7 @@ async function spawnRegisteredAgent(
   let identity: PaneIdentity;
   let worktree: string;
   let jjLane: { name: string; path: string } | null = null;
+  let hookInstallFailed = false;
   try {
     const wt = opts.worktree ? path.resolve(home, opts.worktree) : hivePath(home, 'lanes', agent);
     // Neither jj workspace add nor git worktree add creates missing parent dirs.
@@ -329,7 +330,7 @@ async function spawnRegisteredAgent(
       jjLane = { name: path.basename(wt), path: wt };
       if (existsSync(path.join(wt, 'scripts', 'install-git-hooks.sh'))) {
         const hooks = await run('bash', ['scripts/install-git-hooks.sh'], wt);
-        if (hooks.code !== 0) throw new Error(`install-git-hooks failed in ${wt}: ${hooks.stderr.trim()}`);
+        hookInstallFailed = hooks.code !== 0;
       }
       await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: wt });
     } else if (plainFolder) {
@@ -360,6 +361,16 @@ async function spawnRegisteredAgent(
       parent: opts.parent ?? envParent(agent),
     };
     await withProjectLock(root, project, () => upsertTeamEntry(home, entry));
+    if (hookInstallFailed) {
+      try {
+        await appendDecision(root, {
+          project, by: 'orchestrator',
+          summary: `WARNING: worker ${agent} started without push hooks; repair push hooks before pushing`,
+        });
+      } catch (e) {
+        console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
+      }
+    }
   } catch (e) {
     if (jjLane) {
       // A failed spawn must not strand a registered lane.
