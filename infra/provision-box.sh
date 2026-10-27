@@ -52,6 +52,7 @@ install_if_different "$BOX_DIR/hub-attach.sh" /opt/hive-v2/hub-attach.sh 755
 install_if_different "$BOX_DIR/daily-scan.sh" /opt/hive-v2/daily-scan.sh 755
 install_if_different "$BOX_DIR/llm-forward.py" /opt/hive-v2/llm-forward.py 755
 install_if_different "$BOX_DIR/memory-relay.py" /opt/hive-v2/memory-relay.py 755
+install_if_different "$REPO/infra/question-guard.mjs" /opt/hive-v2/question-guard.mjs 755
 
 NEXUS_PUSH_SHA=6542be37f15e682c5c18268892fd769911d0bf5b
 NEXUS_PUSH_SHA256=bdf23a9ddca9377a357400110564aedf85b546a5ce8ff762a17cbe3341024cbf
@@ -87,6 +88,7 @@ fi
 # Every kimi session gets the hive-operator MCP server. Per-agent routing
 # comes from the session's own HIVE_* env, never from this file.
 sudo -u ubuntu /opt/node22/bin/node "$REPO/infra/merge-mcp.mjs" /home/ubuntu/.kimi-code/mcp.json
+sudo -u ubuntu python3 "$REPO/infra/merge-question-hook.py" /home/ubuntu/.kimi-code/config.toml
 
 mkdir -p /etc/hive-v2
 if [ ! -f "$ENV_FILE" ]; then

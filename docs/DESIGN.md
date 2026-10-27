@@ -180,10 +180,13 @@ hive ui                                  — the hub screen
 
 - Launch, in a new tmux window named `<project>:<agent>`:
   `HIVE_AGENT=<agent> HIVE_PROJECT=<project> HIVE_HUB_ROOT='<root>' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- [--session <id>] [--agent-file <profile>] [-y|--auto] -m '<model>'`
-  — fresh sessions bind `.hive/team/<agent>/agent.md`. Its `disallowedTools`
-  contains `AskUserQuestion`, its body keeps `${base_prompt}`, and it directs
-  decisions to `mcp__hive-operator__ask_operator`. Resume restores that bound
-  profile without the flag. Non-Hive Kimi sessions keep their own tool policy.
+  — fresh sessions also bind `.hive/team/<agent>/agent.md` in print mode. Its
+  `disallowedTools` contains `AskUserQuestion`. Interactive Kimi 2.3.1 ignores
+  profile-selection flags, so a conditional `PreToolUse` hook enforces the same
+  rule when `HIVE_AGENT` is set. The hook returns exit 2 and directs the agent
+  to `mcp__hive-operator__ask_operator`. Non-Hive sessions return exit 0. If the
+  hook misses a dialog, the watchdog detects its exact footer, sends Escape once,
+  and types one MCP redirect. It never selects a native answer.
   The project's `mode` in projects.json (`ask`/`yolo`/`auto`, default `ask`)
   maps to no flag for `ask` and `-y` for `yolo` and `auto`, on fresh starts and
   resumes alike. Derived `ask` plus `safe` or `smart` orchestrator launches use

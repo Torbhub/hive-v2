@@ -15,6 +15,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     paneIs: vi.fn(async () => true),
     capturePane: vi.fn(async () => null),
     killWindow: vi.fn(async () => {}),
+    sendEscape: vi.fn(async () => {}),
     sleep: vi.fn(async () => {}),
   };
 });
@@ -48,6 +49,7 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
   const state = await import('../src/state.js');
   return {
     ...orig,
+    typeLine: vi.fn(async () => {}),
     wakeAgent: vi.fn(async (root: string, project: string, agent: string) => {
       const pf = await state.readProjects(root);
       const home = pf.projects.find((p) => p.name === project)?.home ?? '';
@@ -68,9 +70,9 @@ vi.mock('../src/death-bundle.js', async (importOriginal) => {
 });
 
 import { buildStatus, continueProject, readDialogFor, answerDialog, wake } from '../src/hub.js';
-import { wakeAgent } from '../src/spawn.js';
+import { typeLine, wakeAgent } from '../src/spawn.js';
 import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
-import { capturePane, killWindow, paneExists, paneIs, run, sleep, tmux } from '../src/tmux.js';
+import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep, tmux } from '../src/tmux.js';
 import { withTimeout } from '../src/view.js';
 import { hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, writePendingPane, hivePath } from '../src/state.js';
 import { loadProcessedKeys } from '../src/watch-persist.js';
@@ -86,6 +88,7 @@ function tmp(): string {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(paneIs).mockImplementation(async () => true);
+  vi.mocked(sleep).mockImplementation(async () => {});
 });
 
 // Stubs every exec probe a death-bundle capture can fire; the suite never
@@ -502,6 +505,60 @@ describe('watchCycle wedge detection', () => {
     await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
     expect(killWindow).toHaveBeenCalledTimes(1);
     expect(await fs.readdir(hivePath(home, 'wedges'))).toHaveLength(1);
+  });
+
+  it('dismisses each native question once and redirects the agent to Hive MCP', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    const raw = await fs.readFile(path.join(import.meta.dirname, 'fixtures', 'dialog-ask-user-question.txt'), 'utf8');
+    const idle = await fs.readFile(path.join(import.meta.dirname, 'fixtures', 'idle-empty-prompt.txt'), 'utf8');
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now());
+    vi.mocked(capturePane)
+      .mockResolvedValueOnce(raw)
+      .mockResolvedValueOnce(idle)
+      .mockResolvedValueOnce(idle)
+      .mockResolvedValueOnce(idle)
+      .mockResolvedValueOnce(raw)
+      .mockResolvedValueOnce(idle);
+
+    await watchCycle(root);
+    await watchCycle(root);
+    await watchCycle(root);
+    await watchCycle(root);
+
+    expect(sendEscape).toHaveBeenCalledTimes(2);
+    expect(sendEscape).toHaveBeenCalledWith('%2', { pid: 22, started: 'b' });
+    expect(typeLine).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(typeLine).mock.calls[0][1]).toContain('mcp__hive-operator__ask_operator');
+    expect((await readDecisions(root)).map((d) => d.summary)).toEqual([
+      'blocked native AskUserQuestion for demo/builder; redirected to mcp__hive-operator__ask_operator',
+      'blocked native AskUserQuestion for demo/builder; redirected to mcp__hive-operator__ask_operator',
+    ]);
+  });
+
+  it('retries when the post-redirect capture fails instead of recording success', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    const raw = await fs.readFile(path.join(import.meta.dirname, 'fixtures', 'dialog-ask-user-question.txt'), 'utf8');
+    const idle = await fs.readFile(path.join(import.meta.dirname, 'fixtures', 'idle-empty-prompt.txt'), 'utf8');
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now());
+    vi.mocked(capturePane)
+      .mockResolvedValueOnce(raw)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(raw)
+      .mockResolvedValueOnce(idle);
+
+    await watchCycle(root);
+    await watchCycle(root);
+
+    expect(sendEscape).toHaveBeenCalledTimes(2);
+    expect((await readDecisions(root)).map((d) => d.summary)).toEqual([
+      'blocked native AskUserQuestion for demo/builder; redirected to mcp__hive-operator__ask_operator',
+    ]);
   });
 
   it('suppresses only a live MCP wait and resets stillness when the wait ends', async () => {

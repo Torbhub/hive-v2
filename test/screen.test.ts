@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  ansiClean, classify, dialogFingerprint, hasEmptyPrompt, hasSpinner, lines, parseDialog, scrapeContext,
+  ansiClean, classify, dialogFingerprint, hasEmptyPrompt, hasSpinner, isNativeQuestion, lines, parseDialog, scrapeContext,
 } from '../src/screen.js';
 
 const fixtures = path.join(import.meta.dirname, 'fixtures');
@@ -46,6 +46,14 @@ describe('context scrape', () => {
     const ctx = scrapeContext(fixture('idle-after-reply.txt'));
     expect(ctx?.percent).toBe(3);
     expect(ctx?.used).toBe('26.7k');
+  });
+});
+
+describe('native question detection', () => {
+  it('matches only the captured native-question footer', () => {
+    expect(isNativeQuestion(fixture('dialog-ask-user-question.txt'))).toBe(true);
+    expect(isNativeQuestion(fixture('dialog-permission.txt'))).toBe(false);
+    expect(isNativeQuestion(fixture('dialog-trust-menu.txt'))).toBe(false);
   });
 });
 

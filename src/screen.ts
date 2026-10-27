@@ -44,6 +44,10 @@ const DIALOG_PHRASES = [
 const NOT_OFFERED_RE = /^(Type something\.?|Chat about this)$/i;
 const SAVES_RULE_RE = /always allow|don't ask again|switch to accept edits/i;
 
+export function isNativeQuestion(ls: string[]): boolean {
+  return ls.some((line) => /↑↓ select\s+\d+-\d+ \/ ↵ choose\s+←\/→\/tab switch\s+esc cancel/.test(line));
+}
+
 export type ContextInfo = { percent: number; used: string; window: string };
 
 export function scrapeContext(ls: string[]): ContextInfo | null {

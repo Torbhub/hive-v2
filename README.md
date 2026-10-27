@@ -157,8 +157,9 @@ tmux -L hive-v2 attach
 ## Asking the operator
 
 An agent that needs decisions calls the `ask_operator` MCP tool
-(`mcp__hive-operator__ask_operator`). Hive's agent profile disables native
-`AskUserQuestion`, so these batches are the only structured question path.
+(`mcp__hive-operator__ask_operator`). A conditional Kimi hook disables native
+`AskUserQuestion` only for Hive agents. If the hook misses a dialog, the watchdog
+dismisses it and redirects the agent here. Non-Hive sessions keep the native tool.
 One call carries the whole batch: the
 overarching context, then each question with its own context, a priority,
 2-8 described choices, and one recommendation. The call waits for you.
