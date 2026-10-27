@@ -66,13 +66,20 @@ describe('buildNeeds', () => {
   const base: HubView = {
     root: '/r', hubName: 'hub', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], updatedAt: NOW, error: '',
   };
+  const taskBase: HubView = {
+    ...base,
+    projects: [{
+      name: 'demo', home: '/r/demo', repos: [], agents: [], open_tasks: 1,
+      orchestrator: { state: 'running', question: false },
+    }],
+  };
   it('hub-not-recorded need first', () => {
     const needs = buildNeeds({ ...base, hubName: '' }, NOW);
     expect(needs[0]).toMatchObject({ key: 'hub', glyph: '!', color: 'red', who: 'hub' });
   });
   it('task needs carry waitLook and ago', () => {
     const needs = buildNeeds({
-      ...base,
+      ...taskBase,
       tasks: [{
         id: 'demo-1', project: 'demo', asked: '2026-10-13T10:00:00Z', state: 'plan',
         updated: '2026-10-13T11:00:00Z', last_note: null, needs_owner: true,
@@ -144,19 +151,33 @@ describe('buildNeeds', () => {
   });
 
   it('a blocked or question need carries its reason and the resolve action', () => {
-    const needs = buildNeeds({ ...base, tasks: [task({ last_note: 'the API key is missing' })] }, NOW);
+    const needs = buildNeeds({ ...taskBase, tasks: [task({ last_note: 'the API key is missing' })] }, NOW);
     expect(needs[0]).toMatchObject({
       key: 'task-demo-1', who: 'demo-1', words: 'blocked', action: 'resolve',
       project: 'demo', taskId: 'demo-1', detail: 'the API key is missing',
     });
-    const question = buildNeeds({ ...base, tasks: [task({ state: 'question' })] }, NOW);
+    const question = buildNeeds({ ...taskBase, tasks: [task({ state: 'question' })] }, NOW);
     expect(question[0]).toMatchObject({ action: 'resolve', detail: 'no reason recorded' });
   });
 
   it('a plan need carries its checkpoint list', () => {
     const checkpoints = [{ id: 'a', desc: 'write it', etaMin: 5 }, { id: 'b', desc: 'ship it', etaMin: 10 }];
-    const needs = buildNeeds({ ...base, tasks: [task({ state: 'plan', checkpoints })] }, NOW);
+    const needs = buildNeeds({ ...taskBase, tasks: [task({ state: 'plan', checkpoints })] }, NOW);
     expect(needs[0]).toMatchObject({ action: 'plan', checkpoints });
+  });
+
+  it('suppresses task actions for unregistered and no-team projects without changing task data', () => {
+    const projects = (['running', 'none'] as const).map((state) => ({
+      name: state, home: `/r/${state}`, repos: [], agents: [], open_tasks: 1,
+      orchestrator: { state, question: false },
+    }));
+    const tasks = projects.map((p) => task({ id: `${p.name}-1`, project: p.name }));
+    tasks.push(task({ id: 'ghost-1', project: 'ghost' }));
+    const view = { ...base, projects, tasks };
+    const needs = buildNeeds(view, NOW);
+    expect(needs.map((n) => n.key)).toEqual(['task-running-1']);
+    expect(view.tasks).toHaveLength(3);
+    expect(view.projects.map((p) => p.open_tasks)).toEqual([1, 1]);
   });
 
   it('stale math: 4h past last progress, or past the latest activity, live states only', () => {
@@ -168,7 +189,7 @@ describe('buildNeeds', () => {
     expect(staleTask(task({ state: 'handed', needs_owner: false, asked: '2026-10-10T06:00:00Z' }), NOW)).toBe(false);
     expect(staleTask(task({ state: 'done', needs_owner: false }), NOW)).toBe(false);
     expect(staleTask(task({ state: 'asked', needs_owner: false }), NOW)).toBe(false);
-    const needs = buildNeeds({ ...base, tasks: [task({ last_progress_at: '2026-10-13T06:00:00Z' })] }, NOW);
+    const needs = buildNeeds({ ...taskBase, tasks: [task({ last_progress_at: '2026-10-13T06:00:00Z' })] }, NOW);
     expect(needs[0].stale).toBe(true);
   });
 });

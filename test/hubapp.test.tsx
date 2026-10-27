@@ -4,7 +4,13 @@ import { render } from 'ink';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/hub.js', () => ({
-  buildStatus: vi.fn(async () => ({ hub: { root: '/r', name: 'hub' }, projects: [] })),
+  buildStatus: vi.fn(async () => ({
+    hub: { root: '/r', name: 'hub' },
+    projects: [{
+      name: 'demo', home: '/r/demo', repos: [], agents: [], open_tasks: 1,
+      orchestrator: { state: 'running' as const, question: false },
+    }],
+  })),
   listTasks: vi.fn(async () => []),
   readDialogFor: vi.fn(async () => null),
   answerDialog: vi.fn(),

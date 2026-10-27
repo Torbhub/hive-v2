@@ -38,9 +38,9 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
   };
 });
 
-import { capturePane, killWindow, newWindow, paneExists, sendArrow, sendEnter } from '../src/tmux.js';
+import { capturePane, killWindow, newWindow, paneExists, paneIs, sendArrow, sendEnter } from '../src/tmux.js';
 import {
-  answerDialog, continueProject, hubAccept, hubAdd, hubInit, hubLog, hubProgress, hubTask, listTasks, menuKeys, planAnswer,
+  answerDialog, buildStatus, continueProject, hubAccept, hubAdd, hubInit, hubLog, hubProgress, hubTask, listTasks, menuKeys, planAnswer,
   readDialogFor, setProjectApprovals, setProjectMode, startProject, wake,
 } from '../src/hub.js';
 import { waitIdle } from '../src/spawn.js';
@@ -57,6 +57,20 @@ async function setup() {
   await hubAdd(root, 'demo', home);
   return { root, home };
 }
+
+describe('buildStatus pane identity', () => {
+  it('reports cannot tell when a live pane has a different process identity', async () => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'old' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(paneIs).mockResolvedValueOnce(false);
+    const status = await buildStatus(root);
+    expect(status.projects[0].orchestrator.state).toBe('unknown');
+    expect(paneIs).toHaveBeenCalledWith('%1', { pid: 11, started: 'old' });
+  });
+});
 
 describe('hubTask', () => {
   it('allocates distinct ids under a concurrent storm', async () => {

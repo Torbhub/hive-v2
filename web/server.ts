@@ -7,7 +7,7 @@ import { interruptAgent } from '../src/interrupt.js';
 import { killAgent } from '../src/kill.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { checkName } from '../src/names.js';
-import { addProjectFromBody } from '../src/project.js';
+import { addProjectFromBody, removeProject } from '../src/project.js';
 import { HttpError } from './http-error.js';
 import { readAgentLog } from '../src/logview.js';
 import { recordStretchOpened } from './stretch.js';
@@ -92,7 +92,6 @@ function agentRefOf(body: Record<string, unknown>): string | undefined {
   return ref;
 }
 
-// projects.json writers share one key so their read-modify-write cannot race. Other actions serialize per project.
 const actionChains = new Map<string, Promise<void>>();
 
 function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -108,12 +107,13 @@ const TASK_TEXT_CAP = 4000;
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
   const questionAction = await handleQuestionAction(root, pathname, body); if (questionAction !== null) return questionAction;
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/task-resolve', '/api/progress'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/project-delete', '/api/task-resolve', '/api/progress'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
   if (pathname === '/api/project') return serialized('projects', () => addProjectFromBody(root, body));
   const project = projectName(body);
+  if (pathname === '/api/project-delete') return serialized('projects', () => serialized(project, () => removeProject(root, project)));
   return serialized(['/api/mode', '/api/approvals'].includes(pathname) ? 'projects' : project, async () => {
     if (pathname === '/api/mode') {
       return { ok: true, mode: await setProjectMode(root, project, String(body.mode ?? '')) };

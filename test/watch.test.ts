@@ -12,6 +12,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     run: vi.fn(orig.run),
     tmux: vi.fn(async () => ({ code: 1, stdout: '', stderr: 'tmux not stubbed in test' })),
     paneExists: vi.fn(async () => true),
+    paneIs: vi.fn(async () => true),
     capturePane: vi.fn(async () => null),
     killWindow: vi.fn(async () => {}),
     sleep: vi.fn(async () => {}),
@@ -30,7 +31,9 @@ vi.mock('../src/hub.js', async (importOriginal) => {
     wake: vi.fn(async (root: string, project: string) => {
       const pf = await state.readProjects(root);
       const home = pf.projects.find((p) => p.name === project)?.home ?? '';
-      await state.upsertTeamEntry(home, { name: `${project}-orchestrator`, pane: '%9' });
+      await state.upsertTeamEntry(home, {
+        name: `${project}-orchestrator`, pane: '%9', pane_pid: 99, pane_started: 'fresh',
+      });
       return '%9';
     }),
     answerDialog: vi.fn(async () => ({
@@ -47,7 +50,9 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
     wakeAgent: vi.fn(async (root: string, project: string, agent: string) => {
       const pf = await state.readProjects(root);
       const home = pf.projects.find((p) => p.name === project)?.home ?? '';
-      await state.upsertTeamEntry(home, { name: agent, pane: '%8' });
+      await state.upsertTeamEntry(home, {
+        name: agent, pane: '%8', pane_pid: 88, pane_started: 'fresh',
+      });
       return '%8';
     }),
   };
@@ -64,7 +69,7 @@ vi.mock('../src/death-bundle.js', async (importOriginal) => {
 import { buildStatus, readDialogFor, answerDialog, wake } from '../src/hub.js';
 import { wakeAgent } from '../src/spawn.js';
 import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
-import { capturePane, killWindow, paneExists, run, sleep, tmux } from '../src/tmux.js';
+import { capturePane, killWindow, paneExists, paneIs, run, sleep, tmux } from '../src/tmux.js';
 import { withTimeout } from '../src/view.js';
 import { hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, hivePath } from '../src/state.js';
 import { loadProcessedKeys } from '../src/watch-persist.js';
@@ -76,9 +81,10 @@ function tmp(): string {
   return mkdtempSync(path.join(tmpdir(), 'hive-watch-'));
 }
 
-// Clears call history only; the factory implementations survive.
+// Most factory implementations survive. Identity checks start fresh each test.
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(paneIs).mockImplementation(async () => true);
 });
 
 // Stubs every exec probe a death-bundle capture can fire; the suite never
@@ -191,7 +197,7 @@ describe('watchCycle watchdog', () => {
     expect(wake).toHaveBeenCalledTimes(1);
 
     // After the backoff the retry runs, the death is not relogged, and the
-    // resurrection is logged only because the team entry moved to the new pane.
+    // resurrection is logged only after the new pane identity registers.
     for (const w of wakes.values()) w.nextAt = 0;
     await watchCycle(root, {}, deaths, wakes);
     expect(wake).toHaveBeenCalledTimes(2);
@@ -217,6 +223,42 @@ describe('watchCycle watchdog', () => {
     expect(log).not.toContain('resurrected');
     expect(await readDecisions(root)).toHaveLength(0);
     expect((await readTeam(home)).agents[0].pane).toBe('%1');
+  });
+
+  it('rejects a stale process identity when a wake returns the same pane', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'a', session_id: 'session_x' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(false);
+    vi.mocked(paneIs).mockResolvedValue(false);
+    stubProbes();
+    vi.mocked(wake).mockResolvedValue('%1');
+    await watchCycle(root, {}, new Set(), new Map());
+    expect(paneIs).toHaveBeenCalledWith('%1', { pid: 11, started: 'a' });
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log).toContain('wake attempt 1 failed: wake returned %1 but the team entry has a stale process identity');
+    expect(log).not.toContain('resurrected');
+    expect(await readDecisions(root)).toHaveLength(0);
+  });
+
+  it('accepts a fresh process identity when a wake returns the same pane', async () => {
+    const { root, home } = await setupProject({
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'a', session_id: 'session_x' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(false);
+    vi.mocked(paneIs).mockResolvedValue(true);
+    stubProbes();
+    vi.mocked(wake).mockImplementation(async () => {
+      await upsertTeamEntry(home, {
+        name: 'demo-orchestrator', pane: '%1', pane_pid: 12, pane_started: 'fresh',
+      });
+      return '%1';
+    });
+    await watchCycle(root, {}, new Set(), new Map());
+    expect(paneIs).toHaveBeenCalledWith('%1', { pid: 12, started: 'fresh' });
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log).toContain('resurrected demo-orchestrator in pane %1');
+    expect(await readDecisions(root)).toHaveLength(1);
   });
 
   it('gives up waking after the attempts run out and says so once', async () => {
@@ -284,7 +326,9 @@ describe('watchCycle watchdog', () => {
     vi.mocked(wake)
       .mockRejectedValueOnce(new Error('the teamkimi proxy is down'))
       .mockImplementation(async () => {
-        await upsertTeamEntry(home, { name: 'demo-orchestrator', pane: '%9' });
+        await upsertTeamEntry(home, {
+          name: 'demo-orchestrator', pane: '%9', pane_pid: 99, pane_started: 'fresh',
+        });
         return '%9';
       });
     await watchCycle(root, {}, new Set(), new Map());

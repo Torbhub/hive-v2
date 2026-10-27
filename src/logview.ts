@@ -152,11 +152,6 @@ async function resolveEntry(
   return { entry, name };
 }
 
-// main first, then the subagents by name — same order findWireLog walks.
-function sortAgentDirs(dirs: string[]): string[] {
-  return dirs.sort((a, b) => (a === 'main' ? -1 : b === 'main' ? 1 : a.localeCompare(b)));
-}
-
 export async function readAgentLog(
   root: string,
   project: string,
@@ -174,15 +169,14 @@ export async function readAgentLog(
     // record is operator-facing state, not a server fault.
     throw new Refusal(`${name}'s session ${entry.session_id} has no wire log under ~/.kimi-code/sessions`);
   }
-  const agentsDir = path.join(sessionDir, 'agents');
-  const dirs = await fs.readdir(agentsDir).catch(() => [] as string[]);
-  const agents: AgentLog['agents'] = [];
-  for (const agentId of sortAgentDirs(dirs)) {
-    const file = path.join(agentsDir, agentId, 'wire.jsonl');
-    const st = await fs.stat(file).catch(() => null);
-    if (!st?.isFile()) continue;
-    const entries = parseWireText(await readTailBytes(file, TAIL_BYTES)).slice(-MAX_ENTRIES);
-    if (entries.length > 0) agents.push({ agentId, entries });
-  }
-  return { agent: name, session_id: entry.session_id, agents };
+  const file = path.join(sessionDir, 'agents', 'main', 'wire.jsonl');
+  const st = await fs.stat(file).catch(() => null);
+  const entries = st?.isFile()
+    ? parseWireText(await readTailBytes(file, TAIL_BYTES)).slice(-MAX_ENTRIES)
+    : [];
+  return {
+    agent: name,
+    session_id: entry.session_id,
+    agents: entries.length > 0 ? [{ agentId: 'main', entries }] : [],
+  };
 }

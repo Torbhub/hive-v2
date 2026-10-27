@@ -6,7 +6,7 @@ import { answerDialog, buildStatus, readDialogFor, Refusal, wake } from './hub.j
 import { DEFAULT_MODEL, wakeAgent } from './spawn.js';
 import { classify, lines } from './screen.js';
 import { appendDecision, hivePath, hubPath, readProjects, readTeam, upsertTeamEntry, writeJson } from './state.js';
-import { capturePane, killWindow, paneExists, run, sleep } from './tmux.js';
+import { capturePane, killWindow, paneExists, paneIs, run, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
 import { loadProcessedKeys, recordProcessedKey } from './watch-persist.js';
 import type { Approvals, TeamEntry } from './types.js';
@@ -166,12 +166,14 @@ async function handleDeath(
   wakes.set(key, { attempts: attempt, nextAt: Date.now() + Math.min(5000 * 2 ** (attempt - 1), 600_000) });
   try {
     const pane = a.orchestrator ? await wake(root, project) : await wakeAgent(root, project, a.name);
-    // wake() can return a pane it never registered (waitIdle timed out before
-    // the pickup line landed). Only a team entry pointing at the new pane
-    // counts as a resurrection; anything else is a failed attempt.
+    // A timeout can return an unregistered pane. A resurrection needs both the
+    // returned pane and its new process identity in the team entry.
     const entry = (await readTeam(home)).agents.find((x) => x.name === a.name);
     if (entry?.pane !== pane) {
       throw new Error(`wake returned ${pane} but the team entry still points at ${entry?.pane ?? 'nothing'}`);
+    }
+    if (!(await paneIs(pane, { pid: entry.pane_pid ?? 0, started: entry.pane_started ?? '' }))) {
+      throw new Error(`wake returned ${pane} but the team entry has a stale process identity`);
     }
     await appendDecision(root, {
       project, by: 'watch',

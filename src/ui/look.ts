@@ -139,13 +139,17 @@ export function buildNeeds(view: HubView, now: number): Need[] {
       words: 'has not recorded its session, so nobody can reply to it', when: '',
     });
   }
+  const actionableProjects = new Set(
+    view.projects.filter((p) => p.orchestrator.state !== 'none').map((p) => p.name),
+  );
+  const actionableTasks = view.tasks.filter((t) => t.needs_owner && actionableProjects.has(t.project));
   // A live orchestrator dialog belongs on the plan card when a plan waits:
   // one card with one answer, not two rows for the same question.
   const planProjects = new Set(
-    view.tasks.filter((t) => t.needs_owner && t.state === 'plan').map((t) => t.project),
+    actionableTasks.filter((t) => t.state === 'plan').map((t) => t.project),
   );
   const absorbed = new Set<string>();
-  for (const t of view.tasks.filter((t) => t.needs_owner)) {
+  for (const t of actionableTasks) {
     const look = waitLook(t.state);
     const p = view.projects.find((x) => x.name === t.project);
     const absorb = t.state === 'plan' && p?.orchestrator.question === true && !absorbed.has(t.project);

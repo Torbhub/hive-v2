@@ -62,7 +62,7 @@ Needs, in order pushed:
    | `blocked` | `✖` | `blocked` | red |
    | anything else | `•` | the state name itself | white |
 
-   Every task need shows its reason as a detail line under row 1 (web: gray, small): the task's `last_note`, or `no reason recorded` when the note is empty.
+   Every task need shows its reason as a detail line under row 1 (web: gray, small): the task's `last_note`, or `no reason recorded` when the note is empty. Task needs appear only when their project is registered and its orchestrator state is not `none`. An unregistered project or a no-team project keeps its task ledger and open counts, but its tasks have no owner-action cards.
 
    A stale task need also shows the word `stale` in amber after `words`, and a **Nudge** button inside the card, below its action row. Stale means the task is in `plan`, `question`, `blocked`, or `handed` and its `last_progress_at` (or its `updated` stamp when no progress was ever reported) is more than 4 hours old (`STALE_MS`). Nudge POSTs `/api/message` with `{project, text: "<taskId>: owner asks for status"}`. While the send runs the button swaps to cyan `nudging…`. The stale marker and Nudge are web-only.
 
@@ -124,7 +124,7 @@ Card = column, `marginTop: 1`.
 - ` · {n} cleanup` (state `cleanup`)
 - ` · {n} done today` (state `done`, `updated` same local day)
 
-**`progress` row** (web only, only when the project has tasks with a checkpoint list): one line per such task in a non-closed state, small text, in ledger order. A `done` or `cancelled` task drops off the row.
+**`progress` row** (web only, only when the orchestrator state is not `none` and the project has tasks with a checkpoint list): one line per such task in a non-closed state, small text, in ledger order. A `done` or `cancelled` task drops off the row. A no-team project hides the whole row, including stale markers and Nudge buttons.
 - `{taskId}` — white, medium
 - `{done}/{total} checkpoints` — zinc. `done` counts checkpoints with a terminal progress event (`ok`, `fail`, `skip`)
 - `on {checkpoint}` — zinc, only when a checkpoint's latest event is `started`
@@ -135,7 +135,7 @@ Card = column, `marginTop: 1`.
 **`folders` row** — one line per repo, white, `wrap: truncate-end`:
 `{folder}` + (when `changed` truthy) `  {changed} changed`. (`branch` and `kind` are **not** shown on screen.)
 
-**Attach hint** (web only): the card ends with one gray mono line, `attach: tmux -L hive-v2 attach`. The window names above are what to attach to.
+**Attach hint** (web only): the card ends with one gray mono line. When the orchestrator has a `name`, the line is `attach: tmux -L hive-v2 attach -t hive:{project}:{name}`. Without a name, the line is `attach: tmux -L hive-v2 attach`.
 
 **Resume row** (`paddingLeft: 15`), shown only when `canResume = (state is 'stopped' or 'resumable') && session_id && !starting`:
 - while busy with this project: cyan `resuming…`
@@ -449,6 +449,7 @@ Success (exit 0) prints one line: the pane dialog parse plus identifiers:
 | `Esc` button | same with `--choice esc` | 30 s | — |
 | `a approve plan` / `b send back` hotkey buttons (TUI), `Approve plan` / `Send back` + feedback line (web) | `hh-hub plan-answer <project> <task> <approve|sendback> [feedback]` | 30 s (TUI), 150 s (web) | cyan `answering…` on the need |
 | `Add project` row (web only, §10) | POST `/api/project` with `{name, path}` | 30 s | — |
+| `Delete project?` button (web only, §17) | POST `/api/project-delete` with `{project}` | 30 s | cyan `deleting…` on the card |
 | `Send` message row (web only, §11) | POST `/api/message` with `{project, text}` | 150 s | cyan `sending…` on the card |
 | `Rebrief` / `Cancel` on a blocked or question need (web only) | POST `/api/task-resolve` with `{project, task, action, note?}` | 30 s | cyan `resolving…` on the need |
 | `Nudge` on a stale need or progress row (web only) | POST `/api/message` with `{project, text: "<taskId>: owner asks for status"}` | 150 s | cyan `nudging…` on the need or row |
@@ -493,7 +494,7 @@ Every expand (never a collapse) fires a fire-and-forget POST to `/api/stretch-op
 
 The web screen ends its project list with an add-project row, rendered after the last project card and before the footer (so it is also the answer to the §1.6 empty state). One row: a `name` input (placeholder `name`, aria-label `new project name`, fixed narrow width), a `path` input (placeholder `/absolute/path`, aria-label `new project path`, grows), and a primary **Add project** button. Both inputs are mono, small. Enter in either input submits. The button stays disabled until both fields hold text.
 
-A submit POSTs `/api/project` with `{name, path}` (trimmed). The server checks, in order: the name matches the CLI rule (`/^[a-z][a-z0-9-]{0,31}$/`), `path` is absolute, it is a directory, and it holds a git repo (a `.git` directory, or a `.git` file that starts with `gitdir:` — a worktree pointer). A duplicate name is refused. Optional `mode` (`ask|yolo|auto`) and `approvals` (`manual|safe|smart`) fields are validated the same way when present. The form does not send them: the project card's toggles set them after the add. Success writes `projects.json` exactly like `hive hub add` and answers `{ok: true, name}`. Any refusal is a 400 `{ok: false, detail}` and shows as a toast. On success the row clears, a `{name}: project added` toast shows, and the view refreshes so the new card appears. All `projects.json` writes (`/api/project`, `/api/mode`, `/api/approvals`) serialize on one key, so their read-modify-write cannot race.
+A submit POSTs `/api/project` with `{name, path}` (trimmed). The server checks, in order: the name matches the CLI rule (`/^[a-z][a-z0-9-]{0,31}$/`), `path` is absolute, it is a directory, and it holds a git repo (a `.git` directory, or a `.git` file that starts with `gitdir:` — a worktree pointer). A duplicate name is refused. Optional `mode` (`ask|yolo|auto`) and `approvals` (`manual|safe|smart`) fields are validated the same way when present. The form does not send them: the project card's toggles set them after the add. Success writes `projects.json` exactly like `hive hub add` and answers `{ok: true, name}`. Any refusal is a 400 `{ok: false, detail}` and shows as a toast. On success the row clears, a `{name}: project added` toast shows, and the view refreshes so the new card appears. The `/api/project`, `/api/mode`, and `/api/approvals` writes serialize on one registry key, so their read-modify-write cannot race. `/api/project-delete` uses that key and the project action key (§17).
 
 The Ink screen has no add-project row (it has no task-creation row either): registration stays a web flow, the TUI stays a monitor.
 
@@ -528,13 +529,13 @@ The operator can read an orchestrator's (or a running agent's) wire log — its 
 
 **Entry points.** The orchestrator row of a project card gets a **Logs** button when the orchestrator has a recorded `session_id`. The running-agents button row gets one **Logs {ref}** button per running agent with a recorded `session_id`. A press opens the log screen; the **back** button in its header returns to the hub. The Ink screen has no log view.
 
-**Screen.** Header: the project name, gray `logs · {who}` (`{who}` is the agent ref, or `orchestrator`), a badge with the total entry count, and the back button. Before the first read answers, the screen shows gray `reading the wire log…`. Body: one card per wire-logging agent of the session, `main` first, then subagents in name order. Card header: the agent id and `{n} entries, newest last`. One row per entry, newest last: a gray `HH:MM:SS` clock, a right-aligned gray kind label (`think` / `say` / `tool` / `you`), then the text. Think entries are dimmed zinc, tool entries compact mono, prompt entries sky, text entries plain. The screen polls `GET /api/log` on open and every 20 s (the hub's `EVERY_MS`) and scrolls to the newest entry after each read. A fetch failure shows the red error line and keeps the old data. With no entries yet: `no thinking recorded yet under session {session_id}`.
+**Screen.** Header: the project name, gray `logs · {who}` (`{who}` is the agent ref, or `orchestrator`), a badge with the total entry count, and the back button. Before the first read answers, the screen shows gray `reading the wire log…`. Body: one `main` card when the selected session has entries. The card header is `main` and `{n} entries, newest last`. One row per entry, newest last: a gray `HH:MM:SS` clock, a right-aligned gray kind label (`think` / `say` / `tool` / `you`), then the text. Think entries are dimmed zinc, tool entries compact mono, prompt entries sky, text entries plain. The screen polls `GET /api/log` on open and every 20 s (the hub's `EVERY_MS`) and scrolls to the newest entry after each read. A fetch failure shows the red error line and keeps the old data. With no entries yet: `no thinking recorded yet under session {session_id}`.
 
-**Endpoint.** `GET /api/log?project=<name>[&agent=<ref>]` — a GET like `/api/view` (no browser-header check, no POST-only guard). `agent` is a team agent name (`name@<worktree>` when ambiguous); absent means the project's orchestrator. The server resolves the team entry, takes its `session_id` (a session id with a slash or backslash is refused), finds the session dir by scanning every entry of `~/.kimi-code/sessions` for `session_<id>` (one stat per entry, no recursion), and reads the tail (256 KB) of each `agents/<agentId>/wire.jsonl`. Unknown project/agent, an invalid name, an ambiguous bare name, or a stale or missing session is a `Refusal` → 400 `{ok: false, detail}`.
+**Endpoint.** `GET /api/log?project=<name>[&agent=<ref>]` — a GET like `/api/view` (no browser-header check, no POST-only guard). `agent` is a team agent name (`name@<worktree>` when ambiguous); absent means the project's orchestrator. The server resolves the team entry, takes its `session_id` (a session id with a slash or backslash is refused), and finds the session dir by scanning every entry of `~/.kimi-code/sessions` for `session_<id>` (one stat per entry, no recursion). The server reads the tail (256 KB) of only `agents/main/wire.jsonl` in that session. It never reads another session or an internal agent's wire log. Unknown project/agent, an invalid name, an ambiguous bare name, or a stale or missing session is a `Refusal` → 400 `{ok: false, detail}`.
 
 **Entry extraction** (one JSON record per line; unparseable lines are dropped): `context.append_loop_event` records whose `event.type` is `content.part` with `part.type` `think` (text from `part.think`) or `text` (from `part.text`), or `tool.call` (text is the tool name plus its `display.operation`/`display.path`, else its args JSON), plus `context.append_message` records with `role` `user` (kind `prompt`). Steps, tool results, and assistant messages never enter the view. `at` is the record's `time` (ms epoch) as ISO.
 
-**Response.** `{ agent, session_id, agents: [{ agentId, entries: [{ at, kind: think|text|tool|prompt, text }] }] }`. Newest last, at most 100 entries per agent, each text redacted and capped at 500 characters.
+**Response.** `{ agent, session_id, agents: [{ agentId: "main", entries: [{ at, kind: think|text|tool|prompt, text }] }] }`. Newest last, at most 100 entries in `main`, each text redacted and capped at 500 characters. The `agents` array is empty when `main` has no entries.
 
 **Redaction.** Logs can hold secrets the agent saw mid-turn; the server redacts before anything leaves the box (`redactSecrets` in `src/logview.ts`). The rules run in this order: an `Authorization` header (optionally followed by `:` or `=`, quotes plain or `\"`-escaped) with scheme `bearer`, `basic`, or `token` — the scheme stays, the credential dies; `Bearer <token>` in any case; `sk-<key>` (8+ chars); GitHub tokens (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`, 16+ chars); Slack tokens (`xoxb-`/`xoxp-`); JWTs (`eyJ…`, two or three dotted base64url segments); a key/value secret whose key name holds `api[_-]?key`, `token`, `secret`, or `password` followed by `:` or `=` — a quoted value (plain or backslash-escaped) needs 3+ chars and runs to its closing quote, with `\.` treated as one escape pair so an interior escaped quote does not end it; a bare value needs 8+ chars and ends at space, quote, comma, brace, bracket, or backslash; the key name is kept; the password in URL userinfo (`://user:pass@`, user kept); AWS access key ids (`AKIA…`/`ASIA…`, 16 chars); and hex strings of 32+ characters. The key/value rule runs before the hex rule so a hex secret in a named field keeps its key name. Redaction runs before the 500-character cap so a truncated token cannot leak.
 
@@ -576,4 +577,14 @@ The server validates the answers through `answerQuestionBatch`. Success answers 
 The server closes the batch through `cancelQuestionBatch`. Success answers `{ok: true, batch}` with the cancelled batch. A terminal-state race produces one success and one 400 refusal.
 
 The screen uses the main view's 20-second polling and post-action refresh. It has no second polling loop. The next view omits answered and cancelled batches. A failed status read keeps the previous batches.
+
+## 17. Project deletion (web UI only)
+
+A project card shows **Delete** below its new-task row only when the orchestrator state is `none`, the agents list is empty, and no `starting` record exists. A stopped orchestrator does not pass this guard. Any team entry also blocks deletion, including a stopped or closed entry.
+
+The first click shows **Delete project?** and **Keep project**. It sends nothing. **Keep project** abandons the deletion. The second click POSTs `/api/project-delete` with `{project}`. The card shows cyan `deleting…` while the request runs. Success answers `{ok: true, name}` and shows `{project}: project deleted`. Success and failure both refresh the view. A refusal answers 400 `{ok: false, detail}` and shows a toast.
+
+The server validates the project name and checks that the project exists, no launch is pending, and `team.json` has no entries. The endpoint takes the shared registry chain first and the project action chain second. It checks the guards after it has both chains. All registry writers use the shared chain. Launches and other project actions use the project chain. This order prevents a launch or registry write from crossing the check and the registry write.
+
+Deletion removes only the project's entry from `projects.json`. It preserves tasks, decisions, handoffs, manifests, repositories, and team files. A refused deletion preserves the pending launch record and every other record.
 

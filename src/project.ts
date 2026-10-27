@@ -2,7 +2,9 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { Refusal } from './hub.js';
 import { PROJECT_NAME_RE } from './names.js';
-import { readProjects, writeProjects, type ProjectsFile } from './state.js';
+import {
+  readPendingPane, readProjects, readTeam, writeProjects, type ProjectsFile,
+} from './state.js';
 import { APPROVALS_MODES, PROJECT_MODES } from './types.js';
 import type { Approvals, ProjectMode } from './types.js';
 
@@ -46,6 +48,18 @@ async function looksLikeGit(home: string): Promise<boolean> {
   if (!st?.isFile()) return false;
   const content = await fs.readFile(gitPath, 'utf8').catch(() => '');
   return content.startsWith('gitdir:');
+}
+
+export async function removeProject(root: string, name: string): Promise<{ ok: true; name: string }> {
+  const pf = await readProjects(root);
+  const project = pf.projects.find((p) => p.name === name);
+  if (!project) throw new Refusal(`unknown project: ${name}`);
+  if (await readPendingPane(root, name)) throw new Refusal(`${name}'s launch is pending`);
+  if ((await readTeam(project.home)).agents.length > 0) {
+    throw new Refusal(`${name}'s team is not empty`);
+  }
+  await writeProjects(root, { ...pf, projects: pf.projects.filter((p) => p.name !== name) });
+  return { ok: true, name };
 }
 
 export async function addProjectFromBody(
