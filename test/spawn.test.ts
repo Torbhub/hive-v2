@@ -58,7 +58,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 import { closeAgent, effectiveOrchestratorMode, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
 import { hubAdd, hubInit, hubTask, setProjectApprovals, setProjectMode } from '../src/hub.js';
 import { removeProject } from '../src/project.js';
-import { appendTaskEvent, hivePath, manifestRead, readProjects, readTeam, writeJson, writeProjects } from '../src/state.js';
+import { appendTaskEvent, hivePath, manifestRead, readDecisions, readProjects, readTeam, writeJson, writeProjects } from '../src/state.js';
 import { capturePane, killWindow, newWindow, paneIs, run, sendArrow, sendEnter } from '../src/tmux.js';
 
 async function setup(teamEntry: Record<string, unknown>) {
@@ -136,6 +136,52 @@ describe('spawnAgent', () => {
     expect(recs).toHaveLength(1);
     expect(recs[0].path).toBe(wt);
     expect((await readTeam(home)).agents.find((a) => a.name === 'builder2')?.worktree).toBe(wt);
+  }, 20_000);
+
+  it('launches and warns when jj lane hook installation fails', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const wt = path.join(home, 'lane');
+    await fs.mkdir(path.join(wt, 'scripts'), { recursive: true });
+    await fs.writeFile(path.join(wt, 'scripts', 'install-git-hooks.sh'), '#!/bin/sh\n');
+    vi.mocked(run).mockImplementation(async (cmd) => cmd === 'bash'
+      ? { code: 1, stdout: '', stderr: 'fatal: not a git repository' }
+      : { code: 0, stdout: '', stderr: '' });
+    try {
+      await expect(spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' })).resolves.toBe('%9');
+    } finally {
+      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
+    }
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[1]).toBe(wt);
+    expect((await readTeam(home)).agents.some((a) => a.name === 'builder2' && a.pane === '%9')).toBe(true);
+    expect((await readDecisions(root))[0]).toMatchObject({
+      project: 'demo', by: 'orchestrator',
+      summary: 'WARNING: worker builder2 started without push hooks; repair push hooks before pushing',
+    });
+    expect(vi.mocked(run).mock.calls.some((c) => c[0] === 'jj' && c[1].includes('forget'))).toBe(false);
+    expect(await fs.stat(wt)).toBeTruthy();
+  }, 20_000);
+
+  it('keeps the launched worker and jj lane when the hook warning cannot be logged', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const wt = path.join(home, 'lane');
+    await fs.mkdir(path.join(wt, 'scripts'), { recursive: true });
+    await fs.writeFile(path.join(wt, 'scripts', 'install-git-hooks.sh'), '#!/bin/sh\n');
+    await fs.mkdir(path.join(root, '.hive-hub', 'decisions.jsonl'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(run).mockImplementation(async (cmd) => cmd === 'bash'
+      ? { code: 1, stdout: '', stderr: 'fatal: not a git repository' }
+      : { code: 0, stdout: '', stderr: '' });
+    try {
+      await expect(spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' })).resolves.toBe('%9');
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('hive: the decision was not logged:'));
+    } finally {
+      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
+      error.mockRestore();
+    }
+    expect((await readTeam(home)).agents.some((a) => a.name === 'builder2' && a.pane === '%9')).toBe(true);
+    expect((await manifestRead(home)).some((r) => r.kind === 'jj-workspace' && r.path === wt)).toBe(true);
+    expect(await fs.stat(wt)).toBeTruthy();
+    expect(vi.mocked(run).mock.calls.some((c) => c[0] === 'jj' && c[1].includes('forget'))).toBe(false);
   }, 20_000);
 
   it('places a default git lane under .hive/lanes instead of the repo root', async () => {
