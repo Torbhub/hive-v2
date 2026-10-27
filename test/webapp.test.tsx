@@ -422,7 +422,7 @@ describe('needs-ui', () => {
     await repoll();
     const hints = [...container.querySelectorAll('div')].map((el) => el.textContent)
       .filter((text) => text?.startsWith('attach: tmux'));
-    expect(hints).toEqual(['attach: tmux -L hive-v2 attach -t hive \\; select-pane -t %15']);
+    expect(hints).toEqual(['attach: tmux -L hive-v2 attach -t hive \\; select-window -t %15 \\; select-pane -t %15']);
     expect(container.textContent).not.toContain('hive:simplification-agent:citadel-orchestrator');
   });
 

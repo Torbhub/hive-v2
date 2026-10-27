@@ -135,7 +135,7 @@ Card = column, `marginTop: 1`.
 **`folders` row** — one line per repo, white, `wrap: truncate-end`:
 `{folder}` + (when `changed` truthy) `  {changed} changed`. (`branch` and `kind` are **not** shown on screen.)
 
-**Attach hint** (web only): the card ends with one gray mono line. When the orchestrator state is `running` and status carries a `pane`, the line is `attach: tmux -L hive-v2 attach -t hive \; select-pane -t {pane}`. Status sets `pane` only after the pane and its recorded process identity match. `attach-session` takes the `hive` session, then `select-pane` selects the verified pane. Otherwise the line is `attach: tmux -L hive-v2 attach`. The hint never derives a target from the project and orchestrator names.
+**Attach hint** (web only): the card ends with one gray mono line. When the orchestrator state is `running` and status carries a `pane`, the line is `attach: tmux -L hive-v2 attach -t hive \; select-window -t {pane} \; select-pane -t {pane}`. Status sets `pane` only after the pane and its recorded process identity match. `attach-session` takes the `hive` session, `select-window` selects the pane's window, then `select-pane` selects the verified pane in that window. Otherwise the line is `attach: tmux -L hive-v2 attach`. The hint never derives a target from the project and orchestrator names.
 
 **Resume row** (`paddingLeft: 15`), shown only when `canResume = (state is 'stopped' or 'resumable') && session_id && !starting`:
 - while busy with this project: cyan `resuming…`
