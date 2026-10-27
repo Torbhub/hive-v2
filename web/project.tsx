@@ -212,7 +212,7 @@ export function ProjectCard({
           </div>
         )}
         <div className="mt-2 border-t border-zinc-800 pt-2.5 font-mono text-xs text-zinc-500">
-          {`attach: tmux -L hive-v2 attach${o.name ? ` -t hive:${windowLabel(p.name, o.name)}` : ''}`}
+          {`attach: tmux -L hive-v2 attach${o.state === 'running' && o.pane ? ` -t hive \\; select-pane -t ${o.pane}` : ''}`}
         </div>
       </CardContent>
     </Card>
