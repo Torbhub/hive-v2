@@ -293,8 +293,16 @@ export async function manifestWrite(projectHome: string, recs: ManifestRecord[])
 
 export type PendingPane = {
   pane: string; kind: string; at: string;
-  typed?: boolean; sending?: boolean; question?: boolean; task?: string; line?: string;
+  typed?: boolean; sending?: boolean; claim_token?: string; question?: boolean; task?: string; line?: string;
 };
+
+const SENDING_CLAIM_STALE_MS = 10 * 60_000;
+
+export function hasLiveSendingClaim(pending: PendingPane, now = Date.now()): boolean {
+  if (!pending.sending) return false;
+  const age = now - Date.parse(pending.at);
+  return !Number.isFinite(age) || age <= SENDING_CLAIM_STALE_MS;
+}
 
 export async function readPendingPane(root: string, project: string): Promise<PendingPane | null> {
   return readJson<PendingPane>(hubPath(root, 'panes', `${project}.json`));

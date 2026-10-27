@@ -9,16 +9,16 @@
 - Two lanes never share a working copy.
 - Push through the gate: run `bash scripts/install-git-hooks.sh` once per
   clone, then push with `jj push`. `jj git push` fires no git hooks and
-  bypasses the gate. The local gate is fast static checks only (bash -n on
-  shell scripts, yaml parse of workflows). The real gate runs in CI.
+  bypasses the gate. The local gate runs the full test, build, discipline,
+  shell, workflow, and CloudFormation checks before any push.
   `PRESUBMIT=off` bypasses with a loud warning. Declare the escape in your
   lane pulse.
 
 ## Box compute (HARD)
 
-- No heavy local compute in lanes: no npm ci, no test suites, no builds on
-  this box. Write the code, push the branch, let the PR gate run them in CI.
-  Cheap syntax checks (`bash -n`, yaml parse) are fine.
+- Do not run ad-hoc or parallel builds and test suites on this box. The
+  pre-push hook runs one bounded full gate before a push. CI verifies the
+  same gate again on the PR.
 - The box runs the live hub and the orchestrators. A lane that chugs it
   kills the product it's working on.
 

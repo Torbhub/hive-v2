@@ -81,6 +81,79 @@ function NeedDialog({
   );
 }
 
+const PLAN_PHASE_RE = /\b(AUDIT|DESIGN|BUILD|REVIEW|GATE|SCHEDULE):?\s+/g;
+
+function parsePlan(detail: string) {
+  const text = detail.replace(/^\s*Plan:\s*/, '');
+  const matches = [...text.matchAll(PLAN_PHASE_RE)];
+  const sections: { heading?: string; text: string }[] = matches.length === 0
+    ? [{ text }]
+    : matches.map((match, index) => ({
+      heading: match[1],
+      text: text.slice((match.index ?? 0) + match[0].length, matches[index + 1]?.index ?? text.length).trim(),
+    }));
+  const prefix = matches[0] ? text.slice(0, matches[0].index).trim() : '';
+  if (prefix) sections.unshift({ text: prefix });
+  const guardrails: string[] = [];
+  const proseSections = sections.map((section) => {
+    const sentences = section.text.split(/(?<=[.!?])\s+/);
+    const prose: string[] = [];
+    for (const sentence of sentences.map((s) => s.trim()).filter(Boolean)) {
+      if (/^(?:No\b|.*\b(?:will not|must not|never)\b)/i.test(sentence)) guardrails.push(sentence);
+      else prose.push(sentence);
+    }
+    return { ...section, text: prose.join(' ') };
+  }).filter((section) => section.text !== '');
+  return { sections: proseSections, guardrails, fallback: matches.length === 0 };
+}
+
+function PlanDetail({ detail, checkpoints }: { detail: string; checkpoints: Need['checkpoints'] }) {
+  const { sections, guardrails, fallback } = parsePlan(detail);
+  return (
+    <div data-plan className="mt-2 flex flex-col gap-3 text-xs">
+      {sections.map((section, index) => (
+        <section
+          key={`${section.heading ?? 'prose'}-${index}`}
+          data-plan-section={section.heading}
+          data-plan-fallback={fallback ? '' : undefined}
+        >
+          {section.heading && <h3 className="text-[11px] font-semibold tracking-wide text-zinc-300">{section.heading}</h3>}
+          <p data-plan-prose className="mt-0.5 whitespace-pre-wrap break-words text-zinc-400">{section.text}</p>
+        </section>
+      ))}
+      {guardrails.length > 0 && (
+        <section data-plan-guardrails>
+          <h3 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-300">Guardrails</h3>
+          <div className="mt-0.5 flex flex-col gap-1 text-zinc-400">
+            {guardrails.map((sentence, index) => <p key={index} className="whitespace-pre-wrap break-words">{sentence}</p>)}
+          </div>
+        </section>
+      )}
+      {checkpoints && checkpoints.length > 0 && (
+        <section data-plan-checkpoints>
+          <h3 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-300">Checkpoints</h3>
+          <ol className="mt-1 flex flex-col gap-1.5">
+            {checkpoints.map((checkpoint, index) => (
+              <li
+                key={checkpoint.id}
+                data-checkpoint-id={checkpoint.id}
+                className="grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-baseline gap-x-2"
+              >
+                <span data-checkpoint-number aria-hidden="true" className="text-zinc-500">{index + 1}.</span>
+                <span data-checkpoint-id={checkpoint.id} className="font-mono text-zinc-300">{checkpoint.id}</span>
+                <span data-checkpoint-description className="min-w-0 whitespace-normal break-words text-zinc-400">
+                  {checkpoint.desc}
+                </span>
+                <span data-checkpoint-estimate className="text-right text-zinc-500 tabular">~{checkpoint.etaMin}m</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+    </div>
+  );
+}
+
 export function NeedCard({
   need, view, busy, onAnswer, onContinue, onPlanAnswer, onResolve, onNudge,
 }: {
@@ -108,13 +181,19 @@ export function NeedCard({
         </div>
         {need.when !== '' && <span className="shrink-0 text-xs text-zinc-500 tabular">{need.when}</span>}
       </div>
-      {need.detail && <div className="mt-1 text-xs text-zinc-500">{need.detail}</div>}
-      {need.checkpoints && need.checkpoints.length > 0 && (
-        <div className="mt-1 flex flex-col text-xs text-zinc-400">
-          {need.checkpoints.map((c) => (
-            <span key={c.id} className="truncate">{`${c.id}: ${c.desc} (~${c.etaMin}m)`}</span>
-          ))}
-        </div>
+      {need.action === 'plan' ? (
+        <PlanDetail detail={need.detail ?? ''} checkpoints={need.checkpoints} />
+      ) : (
+        <>
+          {need.detail && <div className="mt-1 text-xs text-zinc-500">{need.detail}</div>}
+          {need.checkpoints && need.checkpoints.length > 0 && (
+            <div className="mt-1 flex flex-col text-xs text-zinc-400">
+              {need.checkpoints.map((c) => (
+                <span key={c.id} className="truncate">{`${c.id}: ${c.desc} (~${c.etaMin}m)`}</span>
+              ))}
+            </div>
+          )}
+        </>
       )}
       {need.dialogKey && (
         <NeedDialog dialogKey={need.dialogKey} dialogs={view.dialogs} busy={busy} onAnswer={onAnswer} />

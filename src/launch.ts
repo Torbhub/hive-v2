@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { capturePane, paneExists, paneIdentity, paneIs } from './tmux.js';
 import { lines, parseDialog } from './screen.js';
 import {
-  clearPendingPane, hivePath, hubPath, manifestAdd, readPendingPane, readTeam, Refusal,
-  upsertTeamEntry, withHubLock, writePendingPane, type PendingPane, type ProjectsFile,
+  clearPendingPane, hasLiveSendingClaim, hivePath, hubPath, manifestAdd, readPendingPane, readTeam, Refusal,
+  upsertTeamEntry, withHubLock, writePendingPane, type ProjectsFile,
 } from './state.js';
 import {
   assertEntryAlive, effectiveOrchestratorMode, ensureAgentFiles, findLatestSession,
@@ -15,6 +16,15 @@ import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 
 type ProjectEntry = ProjectsFile['projects'][number];
 type LaunchKind = 'wake' | 'start';
+
+async function releasePendingSending(root: string, project: string, claimToken: string, question = false): Promise<void> {
+  await withHubLock(root, async () => {
+    const current = await readPendingPane(root, project);
+    if (current?.sending && current.claim_token === claimToken) {
+      await writePendingPane(root, project, { ...current, ...(question ? { question: true } : {}), sending: false });
+    }
+  });
+}
 
 async function launchOrchestrator(
   root: string,
@@ -78,7 +88,9 @@ async function launchRegisteredOrchestrator(
     });
     let line = pickupLine(project, name);
     if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
-    const pending: PendingPane = { pane, kind, at: new Date().toISOString(), typed: false, task, line };
+    const pending = {
+      pane, kind, at: new Date().toISOString(), typed: false, sending: true, claim_token: randomUUID(), task, line,
+    };
     await writePendingPane(root, project, pending);
     return { pane, identity, pending, sessionId, name, cwd, old };
   });
@@ -89,23 +101,32 @@ async function launchRegisteredOrchestrator(
   const { pane, identity, pending, sessionId, name, cwd, old } = launched;
   const line = pending.line ?? '';
 
-  const idle = await waitIdle(pane, { maxMs: 140_000 });
-  if (idle !== 'idle') {
-    if (idle === 'dialog') await writePendingPane(root, project, { ...pending, question: true });
-    return pane;
-  }
-  await typeLine(pane, line, identity);
-  await withProjectLock(root, project, async () => {
-    if (kind === 'wake' && old) await assertEntryAlive(p.home, old, { pane, identity });
-    await upsertTeamEntry(p.home, {
-      name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
-      worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`), closed_at: undefined, wedged_at: undefined,
+  try {
+    const idle = await waitIdle(pane, { maxMs: 140_000 });
+    if (idle !== 'idle') {
+      await releasePendingSending(root, project, pending.claim_token, idle === 'dialog');
+      return pane;
+    }
+    await withProjectLock(root, project, async () => {
+      if (kind === 'wake' && old) await assertEntryAlive(p.home, old, { pane, identity });
+      const current = await readPendingPane(root, project);
+      if (!current || current.typed || !current.sending || current.claim_token !== pending.claim_token) {
+        throw new Refusal(`${project}'s sending claim is no longer active`);
+      }
+      await typeLine(pane, line, identity);
+      await upsertTeamEntry(p.home, {
+        name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
+        worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`), closed_at: undefined, wedged_at: undefined,
+      });
+      await writePendingPane(root, project, { ...current, typed: true, sending: false });
     });
-    await writePendingPane(root, project, { ...pending, typed: true });
-  });
-  const sid = kind === 'wake' ? sessionId : await findLatestSession(cwd, name);
-  if (sid) await withProjectLock(root, project, () => upsertTeamEntry(p.home, { name, session_id: sid }));
-  return pane;
+    const sid = kind === 'wake' ? sessionId : await findLatestSession(cwd, name);
+    if (sid) await withProjectLock(root, project, () => upsertTeamEntry(p.home, { name, session_id: sid }));
+    return pane;
+  } catch (e) {
+    await releasePendingSending(root, project, pending.claim_token);
+    throw e;
+  }
 }
 
 export async function wake(root: string, project: string): Promise<string> {
@@ -122,38 +143,55 @@ export async function continueProject(root: string, project: string): Promise<st
 
 async function continueRegisteredProject(root: string, p: ProjectEntry): Promise<string> {
   const project = p.name;
-  const pending = await readPendingPane(root, project);
-  if (!pending) throw new Refusal(`${project} is not waiting on a first line`);
-  if (pending.typed) throw new Refusal(`${project}'s first line was already sent`);
-  if (!pending.line) throw new Refusal(`${project}'s pending record has no line to type`);
-  if (!(await paneExists(pending.pane))) {
-    await clearPendingPane(root, project);
-    throw new Refusal(`${project}'s starting pane ${pending.pane} is gone; start again`);
-  }
-  const raw = await capturePane(pending.pane);
-  if (raw !== null && parseDialog(lines(raw)).kind !== 'none') {
-    await writePendingPane(root, project, { ...pending, question: true });
-    throw new Refusal(`a dialog is on the screen of ${pending.pane}; answer it, then continue`);
-  }
-  const idle = await waitIdle(pending.pane, { maxMs: 140_000 });
-  if (idle !== 'idle') throw new Refusal(`${pending.pane} never went idle; nothing was typed`);
-  const id = await paneIdentity(pending.pane);
-  if (!id) throw new Refusal(`pane ${pending.pane} has no readable identity`);
-  await typeLine(pending.pane, pending.line, id);
-
-  await withProjectLock(root, project, async () => {
-    if (pending.kind === 'wake') {
-      await assertEntryAlive(p.home, { name: orchestratorName(project) }, { pane: pending.pane, identity: id });
-    }
-    await upsertTeamEntry(p.home, {
-      name: orchestratorName(project), orchestrator: true,
-      pane: pending.pane, pane_pid: id.pid, pane_started: id.started,
-      worktree: p.home, handoff: hivePath(p.home, 'handoffs', `${orchestratorName(project)}.md`),
-      closed_at: undefined, wedged_at: undefined,
-    });
-    await writePendingPane(root, project, { ...pending, typed: true });
+  const pending = await withProjectLock(root, project, async () => {
+    const current = await readPendingPane(root, project);
+    if (!current) throw new Refusal(`${project} is not waiting on a first line`);
+    if (current.typed) throw new Refusal(`${project}'s first line was already sent`);
+    if (hasLiveSendingClaim(current)) throw new Refusal(`${project}'s first line is already sending`);
+    if (!current.line) throw new Refusal(`${project}'s pending record has no line to type`);
+    const claimed = {
+      ...current, at: new Date().toISOString(), line: current.line, sending: true, claim_token: randomUUID(),
+    };
+    await writePendingPane(root, project, claimed);
+    return claimed;
   });
-  const sid = await findLatestSession(p.home, orchestratorName(project));
-  if (sid) await withProjectLock(root, project, () => upsertTeamEntry(p.home, { name: orchestratorName(project), session_id: sid }));
-  return pending.pane;
+  try {
+    if (!(await paneExists(pending.pane))) {
+      await clearPendingPane(root, project);
+      throw new Refusal(`${project}'s starting pane ${pending.pane} is gone; start again`);
+    }
+    const raw = await capturePane(pending.pane);
+    if (raw !== null && parseDialog(lines(raw)).kind !== 'none') {
+      await releasePendingSending(root, project, pending.claim_token, true);
+      throw new Refusal(`a dialog is on the screen of ${pending.pane}; answer it, then continue`);
+    }
+    const idle = await waitIdle(pending.pane, { maxMs: 140_000 });
+    if (idle !== 'idle') throw new Refusal(`${pending.pane} never went idle; nothing was typed`);
+    const id = await paneIdentity(pending.pane);
+    if (!id) throw new Refusal(`pane ${pending.pane} has no readable identity`);
+
+    await withProjectLock(root, project, async () => {
+      if (pending.kind === 'wake') {
+        await assertEntryAlive(p.home, { name: orchestratorName(project) }, { pane: pending.pane, identity: id });
+      }
+      const current = await readPendingPane(root, project);
+      if (!current || current.typed || !current.sending || current.claim_token !== pending.claim_token) {
+        throw new Refusal(`${project}'s sending claim is no longer active`);
+      }
+      await typeLine(pending.pane, pending.line, id);
+      await upsertTeamEntry(p.home, {
+        name: orchestratorName(project), orchestrator: true,
+        pane: pending.pane, pane_pid: id.pid, pane_started: id.started,
+        worktree: p.home, handoff: hivePath(p.home, 'handoffs', `${orchestratorName(project)}.md`),
+        closed_at: undefined, wedged_at: undefined,
+      });
+      await writePendingPane(root, project, { ...current, typed: true, sending: false });
+    });
+    const sid = await findLatestSession(p.home, orchestratorName(project));
+    if (sid) await withProjectLock(root, project, () => upsertTeamEntry(p.home, { name: orchestratorName(project), session_id: sid }));
+    return pending.pane;
+  } catch (e) {
+    await releasePendingSending(root, project, pending.claim_token);
+    throw e;
+  }
 }

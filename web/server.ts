@@ -8,6 +8,7 @@ import { killAgent } from '../src/kill.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { checkName } from '../src/names.js';
 import { addProjectFromBody, removeProject } from '../src/project.js';
+import { handleCurrentOrchestratorDialog } from '../src/watch.js';
 import { HttpError } from './http-error.js';
 import { readAgentLog } from '../src/logview.js';
 import { recordStretchOpened } from './stretch.js';
@@ -106,10 +107,14 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
   if (pathname === '/api/project-delete') return serialized('projects', () => serialized(`project:${project}`, () => removeProject(root, project)));
   const action = serialized(['/api/mode', '/api/approvals'].includes(pathname) ? 'projects' : `project:${project}`, async () => {
     if (pathname === '/api/mode') {
-      return { ok: true, mode: await setProjectMode(root, project, String(body.mode ?? '')) };
+      const mode = await setProjectMode(root, project, String(body.mode ?? ''));
+      await handleCurrentOrchestratorDialog(root, project);
+      return { ok: true, mode };
     }
     if (pathname === '/api/approvals') {
-      return { ok: true, approvals: await setProjectApprovals(root, project, String(body.approvals ?? '')) };
+      const approvals = await setProjectApprovals(root, project, String(body.approvals ?? ''));
+      await handleCurrentOrchestratorDialog(root, project);
+      return { ok: true, approvals };
     }
     if (pathname === '/api/wake') {
       return { ok: true, pane: await wake(root, project) };

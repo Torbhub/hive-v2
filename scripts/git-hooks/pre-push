@@ -3,24 +3,18 @@
 # scripts/install-git-hooks.sh copies it into .git/hooks. Edit the tracked
 # copy, not the installed one.
 #
-# Box rules forbid local builds and test runs, so this gate is FAST STATIC
-# CHECKS ONLY: bash -n on every tracked shell script and a yaml parse of the
-# workflows. It catches the failure classes a push can ship in those files
-# (a broken infra script, a malformed workflow). The real gate (npm test,
-# build, cfn-lint) runs in CI on the PR.
-#
 # jj git push fires NO git hooks — jj users: `jj push` (wired by
 # scripts/install-git-hooks.sh via scripts/jj-push-gate.sh), never bare
 # `jj git push`. Bypass: PRESUBMIT=off (loud warning; declare it in your
 # lane pulse) or `git push --no-verify`.
 case "${PRESUBMIT:-on}" in
   off|0)
-    echo "!! WARNING: PRESUBMIT=${PRESUBMIT} — pushing WITHOUT the static gate. !!" >&2
-    echo "!! Declare this escape in your lane pulse.                         !!" >&2
+    echo "!! WARNING: PRESUBMIT=${PRESUBMIT} — pushing WITHOUT the full gate. !!" >&2
+    echo "!! Declare this escape in your lane pulse.                       !!" >&2
     exit 0
     ;;
 esac
-set -e
+set -euo pipefail
 
 # A jj workspace has no .git — resolve the root through jj first, git second.
 if root="$(jj root 2>/dev/null)"; then
@@ -31,6 +25,11 @@ else
   list_scripts() { git ls-files '*.sh'; }
 fi
 
+if [ ! -d node_modules ]; then
+  npm ci
+fi
+command -v cfn-lint >/dev/null || { echo "pre-push: cfn-lint is required" >&2; exit 1; }
+
 list_scripts | while read -r f; do
   bash -n "$f" || { echo "pre-push: bash -n failed: $f" >&2; exit 1; }
 done
@@ -40,3 +39,8 @@ for f in .github/workflows/*.yml .github/workflows/*.yaml; do
   python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$f" \
     || { echo "pre-push: yaml parse failed: $f" >&2; exit 1; }
 done
+
+npm test
+npm run build
+node scripts/discipline-gate.mjs
+cfn-lint infra/template.yaml

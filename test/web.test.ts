@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,6 +9,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { Server } from 'node:http';
 
 const WEB_DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web', 'dist');
+const COMMAND_DIALOG = readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'dialog-permission.txt'), 'utf8',
+);
 
 // The view reads state only; no pane exists, but keep tmux pointed at a
 // throwaway socket anyway.
@@ -41,7 +44,11 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
 
 vi.mock('../src/tmux.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/tmux.js')>();
-  return { ...orig, paneIs: vi.fn(orig.paneIs), capturePane: vi.fn(orig.capturePane) };
+  return {
+    ...orig,
+    paneIs: vi.fn(orig.paneIs), paneExists: vi.fn(orig.paneExists), capturePane: vi.fn(orig.capturePane),
+    sendLiteral: vi.fn(orig.sendLiteral), sleep: vi.fn(orig.sleep), run: vi.fn(orig.run),
+  };
 });
 
 import { hubLog, hubTask, startProject, wake } from '../src/hub.js';
@@ -50,9 +57,9 @@ import { killAgent } from '../src/kill.js';
 import { createQuestionBatch } from '../src/questions.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { typeLine } from '../src/spawn.js';
-import { capturePane, paneIs } from '../src/tmux.js';
+import { capturePane, paneExists, paneIs, run, sendLiteral, sleep } from '../src/tmux.js';
 import { createServer } from '../web/server.js';
-import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
+import { appendTaskEvent, hivePath, hubPath, readProjects, writeJson } from '../src/state.js';
 
 let server: Server;
 let base: string;
@@ -450,6 +457,45 @@ describe('POST /api/approvals + decisions in the view', () => {
       'approved the plan',
     ]);
     expect(view.decisions[0].by).toBe('watch');
+  });
+});
+
+describe('POST settings with a current dialog', () => {
+  it.each([
+    { pathname: '/api/mode', change: { mode: 'auto' }, expected: { ok: true, mode: 'auto' } },
+    { pathname: '/api/approvals', change: { approvals: 'smart' }, expected: { ok: true, approvals: 'smart' } },
+  ])('$pathname persists and answers before responding', async ({ pathname, change, expected }) => {
+    const home = path.join(root, 'demo');
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
+    });
+    let answered = false;
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockImplementation(async () => answered ? '' : COMMAND_DIALOG);
+    vi.mocked(sendLiteral).mockClear().mockImplementation(async () => { answered = true; });
+    vi.mocked(sleep).mockResolvedValue(undefined);
+    vi.mocked(run).mockClear().mockImplementation(async (cmd) => ({
+      code: 0, stdout: cmd === 'kimi' ? 'APPROVE current command' : '', stderr: '',
+    }));
+    try {
+      const r = await post(pathname, { project: 'demo', ...change });
+
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual(expected);
+      expect(sendLiteral).toHaveBeenCalledWith('%1', '1');
+      expect((await readProjects(root)).projects[0]).toMatchObject(change);
+      if ('mode' in change) expect(vi.mocked(run).mock.calls.filter((c) => c[0] === 'kimi')).toEqual([]);
+    } finally {
+      await writeJson(hivePath(home, 'team.json'), { agents: [] });
+      await writeJson(hubPath(root, 'projects.json'), {
+        projects: [{ name: 'demo', home, repos: [{ folder: home }] }],
+      });
+      vi.mocked(paneExists).mockRestore();
+      vi.mocked(capturePane).mockRestore();
+      vi.mocked(sendLiteral).mockRestore();
+      vi.mocked(sleep).mockRestore();
+      vi.mocked(run).mockRestore();
+    }
   });
 });
 

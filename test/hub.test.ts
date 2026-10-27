@@ -2,7 +2,7 @@ import { promises as fs, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const DIALOG = readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'dialog-permission.txt'),
@@ -38,12 +38,13 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
   };
 });
 
-import { capturePane, killWindow, newWindow, paneExists, paneIs, sendArrow, sendEnter } from '../src/tmux.js';
+import { capturePane, killWindow, newWindow, paneExists, paneIs, sendArrow, sendEnter, sendLiteral } from '../src/tmux.js';
 import {
   answerDialog, buildStatus, continueProject, hubAccept, hubAdd, hubInit, hubLog, hubProgress, hubTask, listTasks, menuKeys, planAnswer,
   readDialogFor, setProjectApprovals, setProjectMode, startProject, wake,
 } from '../src/hub.js';
-import { preflight, waitIdle } from '../src/spawn.js';
+import { handleCurrentOrchestratorDialog } from '../src/watch.js';
+import { preflight, typeLine, waitIdle } from '../src/spawn.js';
 import { killAgent } from '../src/kill.js';
 import { removeProject } from '../src/project.js';
 import { lines, parseDialog } from '../src/screen.js';
@@ -482,6 +483,245 @@ describe('feed line', () => {
   });
 });
 
+describe('orchestrator dialog pane resolution', () => {
+  afterEach(() => {
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(DIALOG);
+  });
+
+  it('Auto answers a live pending approval instead of the stale registered pane', async () => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'old' }],
+    });
+    await writePendingPane(root, 'demo', {
+      pane: '%2', kind: 'wake', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+    });
+    await setProjectMode(root, 'demo', 'auto');
+    vi.mocked(paneExists).mockImplementation(async (pane) => pane === '%2');
+    vi.mocked(capturePane).mockImplementation(async (pane) => pane === '%2' ? DIALOG : IDLE);
+    vi.mocked(sendLiteral).mockClear();
+
+    await handleCurrentOrchestratorDialog(root, 'demo');
+
+    expect(sendLiteral).toHaveBeenCalledTimes(1);
+    expect(sendLiteral).toHaveBeenCalledWith('%2', '1');
+  });
+
+  it('a dead pending pane does not hide a live registered orchestrator', async () => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'current' }],
+    });
+    await writePendingPane(root, 'demo', {
+      pane: '%2', kind: 'wake', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+    });
+    vi.mocked(paneExists).mockImplementation(async (pane) => pane === '%1');
+    vi.mocked(capturePane).mockResolvedValue(DIALOG);
+
+    await expect(readDialogFor(root, 'demo')).resolves.toMatchObject({ pane: '%1' });
+  });
+});
+
+describe('continue sending claim', () => {
+  async function setupPending() {
+    const { root } = await setup();
+    await writePendingPane(root, 'demo', {
+      pane: '%7', kind: 'start', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+    });
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    vi.mocked(typeLine).mockClear();
+    return root;
+  }
+
+  it('lets only one overlapping continuation reach typeLine', async () => {
+    const root = await setupPending();
+    let markTyping!: () => void;
+    let releaseTyping!: () => void;
+    const typing = new Promise<void>((resolve) => { markTyping = resolve; });
+    const release = new Promise<void>((resolve) => { releaseTyping = resolve; });
+    vi.mocked(typeLine)
+      .mockImplementationOnce(async () => { markTyping(); await release; })
+      .mockImplementation(async () => {});
+    const first = continueProject(root, 'demo');
+    let second: ReturnType<typeof continueProject> | undefined;
+    try {
+      await typing;
+      const status = await buildStatus(root);
+      expect(status.projects[0].orchestrator.starting?.sending).toBe(true);
+      second = continueProject(root, 'demo');
+      expect(typeLine).toHaveBeenCalledTimes(1);
+      releaseTyping();
+      await first;
+      await expect(second).rejects.toThrow(/already sent/);
+    } finally {
+      releaseTyping();
+      await Promise.allSettled(second ? [first, second] : [first]);
+    }
+    expect(await readPendingPane(root, 'demo')).toMatchObject({ typed: true, sending: false });
+  });
+
+  it('refuses a recent durable sending claim', async () => {
+    const root = await setupPending();
+    const at = new Date().toISOString();
+    await writePendingPane(root, 'demo', {
+      pane: '%7', kind: 'start', at, typed: false, sending: true, line: 'You are demo-orchestrator.',
+    });
+
+    await expect(continueProject(root, 'demo')).rejects.toThrow(/already sending/);
+
+    expect(typeLine).not.toHaveBeenCalled();
+    expect(await readPendingPane(root, 'demo')).toMatchObject({ at, typed: false, sending: true });
+  });
+
+  it('reclaims an orphaned sending claim and refreshes its activity timestamp', async () => {
+    const root = await setupPending();
+    const staleAt = new Date(Date.now() - 11 * 60_000).toISOString();
+    await writePendingPane(root, 'demo', {
+      pane: '%7', kind: 'start', at: staleAt, typed: false, sending: true, line: 'You are demo-orchestrator.',
+    });
+
+    await expect(continueProject(root, 'demo')).resolves.toBe('%7');
+
+    expect(typeLine).toHaveBeenCalledTimes(1);
+    const claimed = await readPendingPane(root, 'demo');
+    expect(claimed).toMatchObject({ typed: true, sending: false });
+    expect(Date.parse(claimed!.at)).toBeGreaterThan(Date.parse(staleAt));
+  });
+
+  it('releases a failed claim without overwriting changed pending state', async () => {
+    const root = await setupPending();
+    vi.mocked(typeLine)
+      .mockImplementationOnce(async () => {
+        const current = await readPendingPane(root, 'demo');
+        await writePendingPane(root, 'demo', { ...current!, question: true });
+        throw new Error('type failed');
+      })
+      .mockImplementation(async () => {});
+
+    await expect(continueProject(root, 'demo')).rejects.toThrow('type failed');
+
+    expect(await readPendingPane(root, 'demo')).toMatchObject({
+      typed: false, sending: false, question: true, line: 'You are demo-orchestrator.',
+    });
+    await expect(continueProject(root, 'demo')).resolves.toBe('%7');
+    expect(typeLine).toHaveBeenCalledTimes(2);
+    expect(await readPendingPane(root, 'demo')).toMatchObject({ typed: true, sending: false });
+  });
+});
+
+describe('original launch sending claim', () => {
+  async function setupStart() {
+    const { root } = await setup();
+    await hubTask(root, 'demo', 'do it');
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    vi.mocked(typeLine).mockClear();
+    return { root };
+  }
+
+  it('lets only the original launcher reach typeLine when Continue overlaps', async () => {
+    const { root } = await setupStart();
+    let markWaiting!: () => void;
+    let releaseWaiting!: () => void;
+    const waiting = new Promise<void>((resolve) => { markWaiting = resolve; });
+    const release = new Promise<void>((resolve) => { releaseWaiting = resolve; });
+    vi.mocked(waitIdle)
+      .mockImplementationOnce(async () => { markWaiting(); await release; return 'idle' as const; })
+      .mockImplementation(async () => 'idle' as const);
+    const original = startProject(root, 'demo', 'demo-1');
+    try {
+      await waiting;
+      await expect(continueProject(root, 'demo')).rejects.toThrow(/already sending/);
+      expect(typeLine).not.toHaveBeenCalled();
+    } finally {
+      releaseWaiting();
+      await original;
+    }
+    expect(typeLine).toHaveBeenCalledTimes(1);
+    expect(await readPendingPane(root, 'demo')).toMatchObject({ typed: true, sending: false });
+  });
+
+  it('fences a stale original owner after a replacement claim', async () => {
+    const { root } = await setupStart();
+    let markOriginalWaiting!: () => void;
+    let releaseOriginalWaiting!: () => void;
+    let markReplacementWaiting!: () => void;
+    let releaseReplacementWaiting!: () => void;
+    const originalWaiting = new Promise<void>((resolve) => { markOriginalWaiting = resolve; });
+    const originalRelease = new Promise<void>((resolve) => { releaseOriginalWaiting = resolve; });
+    const replacementWaiting = new Promise<void>((resolve) => { markReplacementWaiting = resolve; });
+    const replacementRelease = new Promise<void>((resolve) => { releaseReplacementWaiting = resolve; });
+    vi.mocked(waitIdle)
+      .mockImplementationOnce(async () => { markOriginalWaiting(); await originalRelease; return 'idle' as const; })
+      .mockImplementationOnce(async () => { markReplacementWaiting(); await replacementRelease; return 'idle' as const; })
+      .mockImplementation(async () => 'idle' as const);
+    vi.mocked(typeLine).mockImplementation(async () => {});
+    const original = startProject(root, 'demo', 'demo-1');
+    let replacement: ReturnType<typeof continueProject> | undefined;
+    try {
+      await originalWaiting;
+      const originalClaim = (await readPendingPane(root, 'demo'))!;
+      await writePendingPane(root, 'demo', {
+        ...originalClaim, at: new Date(Date.now() - 11 * 60_000).toISOString(),
+      });
+      replacement = continueProject(root, 'demo');
+      await replacementWaiting;
+
+      releaseOriginalWaiting();
+      await expect(original).rejects.toThrow(/no longer active/);
+
+      expect(typeLine).not.toHaveBeenCalled();
+      const replacementClaim = await readPendingPane(root, 'demo');
+      expect(replacementClaim).toMatchObject({ typed: false, sending: true });
+      expect(replacementClaim?.claim_token).toBeTruthy();
+      expect(replacementClaim?.claim_token).not.toBe(originalClaim.claim_token);
+      await expect(continueProject(root, 'demo')).rejects.toThrow(/already sending/);
+      expect(typeLine).not.toHaveBeenCalled();
+
+      releaseReplacementWaiting();
+      await expect(replacement).resolves.toBe('%9');
+      expect(typeLine).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseOriginalWaiting();
+      releaseReplacementWaiting();
+      await Promise.allSettled(replacement ? [original, replacement] : [original]);
+    }
+    expect(await readPendingPane(root, 'demo')).toMatchObject({ typed: true, sending: false });
+  });
+
+  it('releases the claim on a dialog return so Continue can resume', async () => {
+    const { root } = await setupStart();
+    vi.mocked(waitIdle)
+      .mockResolvedValueOnce('dialog')
+      .mockImplementation(async () => 'idle' as const);
+
+    await expect(startProject(root, 'demo', 'demo-1')).resolves.toBe('%9');
+
+    expect(typeLine).not.toHaveBeenCalled();
+    expect(await readPendingPane(root, 'demo')).toMatchObject({ typed: false, sending: false, question: true });
+    await expect(continueProject(root, 'demo')).resolves.toBe('%9');
+    expect(typeLine).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases a failed original claim without overwriting fresh pending fields', async () => {
+    const { root } = await setupStart();
+    vi.mocked(waitIdle).mockImplementation(async () => 'idle' as const);
+    vi.mocked(typeLine)
+      .mockImplementationOnce(async () => {
+        const current = await readPendingPane(root, 'demo');
+        await writePendingPane(root, 'demo', { ...current!, question: true });
+        throw new Error('original type failed');
+      })
+      .mockImplementation(async () => {});
+
+    await expect(startProject(root, 'demo', 'demo-1')).rejects.toThrow('original type failed');
+
+    expect(await readPendingPane(root, 'demo')).toMatchObject({ typed: false, sending: false, question: true });
+    await expect(continueProject(root, 'demo')).resolves.toBe('%9');
+    expect(typeLine).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('wake racing a cascade kill', () => {
   // The exact timeline from the review: the wake's guard passes (entry
   // present, unstamped), the owner's Kill lands while the new pane comes up,
@@ -670,14 +910,14 @@ describe('orchestrator launch mode', () => {
     return { root, home };
   }
 
-  it('wakes with --auto when mode is ask and approvals is smart', async () => {
+  it('wakes an auto orchestrator with -y', async () => {
     const { root } = await setupOrchestrator();
-    await setProjectMode(root, 'demo', 'ask');
-    await setProjectApprovals(root, 'demo', 'smart');
+    await setProjectMode(root, 'demo', 'auto');
+    await setProjectApprovals(root, 'demo', 'manual');
     const pane = await wake(root, 'demo');
     expect(pane).toBe('%9');
     expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2])
-      .toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc --auto -m 'kimi-code/k3.1-pro'`);
+      .toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -y -m 'kimi-code/k3.1-pro'`);
   });
 
   it('wakes in ask when approvals is manual, so the human answers', async () => {
