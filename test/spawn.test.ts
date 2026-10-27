@@ -59,7 +59,7 @@ import { closeAgent, effectiveOrchestratorMode, launchCommand, respawnAgent, spa
 import { hubAdd, hubInit, hubTask, setProjectApprovals, setProjectMode } from '../src/hub.js';
 import { removeProject } from '../src/project.js';
 import { appendTaskEvent, hivePath, manifestRead, readDecisions, readProjects, readTeam, writeJson, writeProjects } from '../src/state.js';
-import { capturePane, killWindow, newWindow, paneIs, run, sendArrow, sendEnter } from '../src/tmux.js';
+import { capturePane, killWindow, newWindow, paneIs, run, sendArrow, sendEnter, sendLiteral } from '../src/tmux.js';
 
 async function setup(teamEntry: Record<string, unknown>) {
   const root = mkdtempSync(path.join(tmpdir(), 'hive-spawn-'));
@@ -619,11 +619,58 @@ describe('trust dialog at spawn', () => {
     }
   }, 20_000);
 
-  it('any other dialog still throws', async () => {
+  it('waits through a startup dialog in explicit auto mode, then types once', async () => {
     const { root } = await setup({ name: 'builder' });
+    await setProjectMode(root, 'demo', 'auto');
+    let calls = 0;
+    const typed = vi.mocked(sendLiteral).mock.calls.length;
+    vi.mocked(capturePane).mockImplementation(async () => (++calls === 1 ? PERMISSION : IDLE));
+    try {
+      await expect(spawnAgent(root, 'demo', { agent: 'builder2' })).resolves.toBe('%9');
+      expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(1);
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('answers the trust menu in explicit auto mode, then types once', async () => {
+    const { root } = await setup({ name: 'builder' });
+    await setProjectMode(root, 'demo', 'auto');
+    let calls = 0;
+    const typed = vi.mocked(sendLiteral).mock.calls.length;
+    const entered = vi.mocked(sendEnter).mock.calls.length;
+    vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? TRUST_MENU : IDLE));
+    try {
+      await expect(spawnAgent(root, 'demo', { agent: 'builder2' })).resolves.toBe('%9');
+      expect(vi.mocked(sendEnter).mock.calls.slice(entered)).toContainEqual(['%9']);
+      expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(1);
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('waits through a startup dialog on auto relaunch, then types once', async () => {
+    const { root } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    await setProjectMode(root, 'demo', 'auto');
+    let calls = 0;
+    const typed = vi.mocked(sendLiteral).mock.calls.length;
+    vi.mocked(capturePane).mockImplementation(async () => (++calls === 1 ? PERMISSION : IDLE));
+    try {
+      await expect(respawnAgent(root, 'demo', 'builder')).resolves.toBe('%9');
+      expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(1);
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('any other dialog still throws outside auto mode', async () => {
+    const { root } = await setup({ name: 'builder' });
+    await setProjectMode(root, 'demo', 'ask');
+    const typed = vi.mocked(sendLiteral).mock.calls.length;
     vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
     try {
       await expect(spawnAgent(root, 'demo', { agent: 'builder2' })).rejects.toThrow(/answer it in the pane, then respawn/);
+      expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(0);
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
     }

@@ -103,11 +103,23 @@ async function answerTrustMenu(pane: string): Promise<boolean> {
 }
 
 // waitIdle with one trust-menu answer in the middle; any other dialog surfaces as before.
-async function waitIdleTrust(pane: string): Promise<'idle' | 'dialog' | 'timeout'> {
-  const idle = await waitIdle(pane);
+async function waitIdleTrust(pane: string, deadline?: number): Promise<'idle' | 'dialog' | 'timeout'> {
+  const options = () => deadline === undefined ? {} : { maxMs: Math.max(0, deadline - Date.now()) };
+  const idle = await waitIdle(pane, options());
   if (idle !== 'dialog') return idle;
   if (!(await answerTrustMenu(pane))) return 'dialog';
-  return waitIdle(pane);
+  return waitIdle(pane, options());
+}
+
+async function waitIdleForMode(pane: string, mode: ProjectMode | 'supervised-auto'): Promise<'idle' | 'dialog' | 'timeout'> {
+  if (mode !== 'auto') return waitIdleTrust(pane);
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const idle = await waitIdleTrust(pane, deadline);
+    if (idle !== 'dialog') return idle;
+    await sleep(1000);
+  }
+  return 'timeout';
 }
 
 // The first Enter after a literal send is sometimes swallowed by the TUI; one retry, then give up.
@@ -380,7 +392,7 @@ async function spawnRegisteredAgent(
     throw e;
   }
 
-  const idle = await waitIdleTrust(pane);
+  const idle = await waitIdleForMode(pane, p.mode ?? 'ask');
   if (idle !== 'idle') {
     throw new Error(idle === 'dialog'
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
@@ -435,7 +447,7 @@ async function relaunchRegisteredAgent(
       model: old.model ?? DEFAULT_MODEL,
     });
   });
-  const idle = await waitIdleTrust(pane);
+  const idle = await waitIdleForMode(pane, p.mode ?? 'ask');
   if (idle !== 'idle') {
     throw new Error(idle === 'dialog'
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
