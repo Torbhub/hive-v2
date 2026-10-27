@@ -43,10 +43,11 @@ import {
   answerDialog, buildStatus, continueProject, hubAccept, hubAdd, hubInit, hubLog, hubProgress, hubTask, listTasks, menuKeys, planAnswer,
   readDialogFor, setProjectApprovals, setProjectMode, startProject, wake,
 } from '../src/hub.js';
-import { waitIdle } from '../src/spawn.js';
+import { preflight, waitIdle } from '../src/spawn.js';
 import { killAgent } from '../src/kill.js';
+import { removeProject } from '../src/project.js';
 import { lines, parseDialog } from '../src/screen.js';
-import { appendTaskEvent, hubPath, hivePath, readDecisions, readPendingPane, readTeam, writeJson, writePendingPane } from '../src/state.js';
+import { appendTaskEvent, hubPath, hivePath, readDecisions, readPendingPane, readProjects, readTeam, writeJson, writePendingPane, writeProjects } from '../src/state.js';
 import type { Checkpoint } from '../src/types.js';
 
 async function setup() {
@@ -505,6 +506,63 @@ describe('start after a cleanup stamp', () => {
     const team = await readTeam(home);
     expect(team.agents[0]).toMatchObject({ name: 'demo-orchestrator', pane: '%9' });
     expect(team.agents[0].closed_at).toBeUndefined();
+  });
+});
+
+describe('orchestrator launch registration locking', () => {
+  it('delete waits for a preflight launch and refuses its pending record', async () => {
+    const { root } = await setup();
+    await hubTask(root, 'demo', 'do it');
+    let markPreflight!: () => void;
+    let releasePreflight!: () => void;
+    const entered = new Promise<void>((resolve) => { markPreflight = resolve; });
+    const release = new Promise<void>((resolve) => { releasePreflight = resolve; });
+    vi.mocked(preflight).mockImplementationOnce(async () => {
+      markPreflight();
+      await release;
+    });
+    const starting = startProject(root, 'demo', 'demo-1');
+    let deleting!: ReturnType<typeof removeProject>;
+    try {
+      await entered;
+      deleting = removeProject(root, 'demo');
+      let deleteSettled = false;
+      void deleting.then(() => { deleteSettled = true; }, () => { deleteSettled = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(deleteSettled).toBe(false);
+      releasePreflight();
+      await starting;
+      await expect(deleting).rejects.toThrow(/launch is pending|team is not empty/);
+      expect((await readProjects(root)).projects.map((p) => p.name)).toEqual(['demo']);
+    } finally {
+      releasePreflight();
+      await Promise.allSettled([starting, deleting]);
+    }
+  });
+
+  it('does not register an orchestrator after the project leaves the registry', async () => {
+    const { root, home } = await setup();
+    await hubTask(root, 'demo', 'do it');
+    let markIdle!: () => void;
+    let releaseIdle!: () => void;
+    const entered = new Promise<void>((resolve) => { markIdle = resolve; });
+    const release = new Promise<void>((resolve) => { releaseIdle = resolve; });
+    vi.mocked(waitIdle).mockImplementationOnce(async () => {
+      markIdle();
+      await release;
+      return 'idle';
+    });
+    const starting = startProject(root, 'demo', 'demo-1');
+    try {
+      await entered;
+      await writeProjects(root, { projects: [] });
+      releaseIdle();
+      await expect(starting).rejects.toThrow(/unknown project/);
+      expect((await readTeam(home)).agents.some((a) => a.orchestrator)).toBe(false);
+    } finally {
+      releaseIdle();
+      await starting.catch(() => {});
+    }
   });
 });
 

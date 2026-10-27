@@ -584,7 +584,11 @@ A project card shows **Delete** below its new-task row only when the orchestrato
 
 The first click shows **Delete project?** and **Keep project**. It sends nothing. **Keep project** abandons the deletion. The second click POSTs `/api/project-delete` with `{project}`. The card shows cyan `deleting…` while the request runs. Success answers `{ok: true, name}` and shows `{project}: project deleted`. Success and failure both refresh the view. A refusal answers 400 `{ok: false, detail}` and shows a toast.
 
-The server validates the project name and checks that the project exists, no launch is pending, and `team.json` has no entries. The endpoint takes the shared registry chain first and the project action chain second. It checks the guards after it has both chains. All registry writers use the shared chain. Launches and other project actions use the project chain. This order prevents a launch or registry write from crossing the check and the registry write.
+The server validates the project name and checks that the project exists, no launch is pending, and `team.json` has no entries. The endpoint takes the shared registry chain first and the project action chain second. It checks the guards after it has both chains. All registry writers use the shared chain. Launches and other project actions use the `project:<name>` chain. The namespace keeps a project named `projects` off the registry key.
+
+For actions with timeouts, the timeout races the serialized action from outside. A timeout changes only the HTTP response. The action chain stays occupied until the action settles.
+
+Every CLI or web launch writes a unique claim under `.hive-hub/launches/` while holding `.hive-hub/lock`. This covers orchestrator start, wake, and continue, plus agent spawn, respawn, and wake. The filesystem lock is released during long startup waits. Every team registration revalidates the project under that lock. Deletion takes the same lock before it checks the registry, pending record, launch claims, and team. A claim is removed when its launch settles. A claim left by a crashed process fails closed and needs operator inspection before removal.
 
 Deletion removes only the project's entry from `projects.json`. It preserves tasks, decisions, handoffs, manifests, repositories, and team files. A refused deletion preserves the pending launch record and every other record.
 
