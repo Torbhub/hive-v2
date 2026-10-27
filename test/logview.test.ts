@@ -230,15 +230,25 @@ describe('readAgentLog', () => {
     expect(log.agents[0].entries.map((e) => e.kind)).toEqual(['prompt', 'text']);
   });
 
-  it('reads a named agent and orders main before the subagents', async () => {
-    const team = [ORCH, { name: 'fixer', session_id: 'session_abc', worktree: '/wt/a' }];
+  it('reads only the selected session main wire, never other sessions or internal agents', async () => {
+    const team = [ORCH, { name: 'fixer', session_id: 'session_worker', worktree: '/wt/a' }];
     const { root, home } = await setup(team, {
-      'agent-0': [textLine('subagent says')],
-      main: [textLine('main says')],
-    });
+      'agent-0': [textLine('worker internal agent')],
+      main: [textLine('worker main')],
+    }, 'session_worker');
+    const orchDir = path.join(
+      home, '.kimi-code', 'sessions', 'wd_demo_000000000000', 'session_abc', 'agents', 'main',
+    );
+    await fs.mkdir(orchDir, { recursive: true });
+    await fs.writeFile(path.join(orchDir, 'wire.jsonl'), `${textLine('orchestrator secret context')}\n`);
+
     const log = await readAgentLog(root, 'demo', 'fixer', home);
-    expect(log.agent).toBe('fixer');
-    expect(log.agents.map((a) => a.agentId)).toEqual(['main', 'agent-0']);
+
+    expect(log.session_id).toBe('session_worker');
+    expect(log.agents.map((a) => a.agentId)).toEqual(['main']);
+    expect(log.agents[0].entries.map((e) => e.text)).toEqual(['worker main']);
+    expect(JSON.stringify(log)).not.toContain('worker internal agent');
+    expect(JSON.stringify(log)).not.toContain('orchestrator secret context');
   });
 
   it('keeps the newest 100 entries per agent', async () => {

@@ -57,7 +57,8 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 
 import { closeAgent, effectiveOrchestratorMode, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
 import { hubAdd, hubInit, hubTask, setProjectApprovals, setProjectMode } from '../src/hub.js';
-import { appendTaskEvent, hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';
+import { removeProject } from '../src/project.js';
+import { appendTaskEvent, hivePath, manifestRead, readProjects, readTeam, writeJson, writeProjects } from '../src/state.js';
 import { capturePane, killWindow, newWindow, paneIs, run, sendArrow, sendEnter } from '../src/tmux.js';
 
 async function setup(teamEntry: Record<string, unknown>) {
@@ -258,6 +259,54 @@ describe('spawnAgent', () => {
     expect(forget?.[1]).toEqual(['-R', home, 'workspace', 'forget', 'lane']);
     expect(await fs.stat(wt).catch(() => null)).toBeNull();
     expect((await manifestRead(home)).filter((r) => r.kind === 'jj-workspace')).toHaveLength(0);
+  }, 20_000);
+
+  it('delete refuses an active worker launch claim', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    await writeJson(hivePath(home, 'team.json'), { agents: [] });
+    let markWindow!: () => void;
+    let releaseWindow!: () => void;
+    const entered = new Promise<void>((resolve) => { markWindow = resolve; });
+    const release = new Promise<void>((resolve) => { releaseWindow = resolve; });
+    vi.mocked(newWindow).mockImplementationOnce(async () => {
+      markWindow();
+      await release;
+      return '%9';
+    });
+    const spawning = spawnAgent(root, 'demo', { agent: 'builder2' });
+    try {
+      await entered;
+      await expect(removeProject(root, 'demo')).rejects.toThrow(/launch is pending/);
+      expect((await readProjects(root)).projects.map((p) => p.name)).toEqual(['demo']);
+    } finally {
+      releaseWindow();
+      await spawning;
+    }
+  }, 20_000);
+
+  it('does not register a worker after the project leaves the registry', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    await writeJson(hivePath(home, 'team.json'), { agents: [] });
+    let markWindow!: () => void;
+    let releaseWindow!: () => void;
+    const entered = new Promise<void>((resolve) => { markWindow = resolve; });
+    const release = new Promise<void>((resolve) => { releaseWindow = resolve; });
+    vi.mocked(newWindow).mockImplementationOnce(async () => {
+      markWindow();
+      await release;
+      return '%9';
+    });
+    const spawning = spawnAgent(root, 'demo', { agent: 'builder2' });
+    try {
+      await entered;
+      await writeProjects(root, { projects: [] });
+      releaseWindow();
+      await expect(spawning).rejects.toThrow(/unknown project/);
+      expect((await readTeam(home)).agents.some((a) => a.name === 'builder2')).toBe(false);
+    } finally {
+      releaseWindow();
+      await spawning.catch(() => {});
+    }
   }, 20_000);
 });
 

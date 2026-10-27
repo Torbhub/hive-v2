@@ -970,3 +970,122 @@ describe('operator question endpoints', () => {
     expect(view.questionsTotal).toBe(55);
   });
 });
+
+describe('POST /api/project-delete', () => {
+  let deleteRoot: string;
+  let deleteServer: Server;
+  let deleteBase: string;
+
+  beforeEach(async () => {
+    deleteRoot = mkdtempSync(path.join(tmpdir(), 'hive-web-delete-'));
+    const home = path.join(deleteRoot, 'demo');
+    await writeJson(hubPath(deleteRoot, 'projects.json'), {
+      projects: [{ name: 'demo', home, repos: [{ folder: home }] }],
+    });
+    await writeJson(hivePath(home, 'team.json'), { agents: [] });
+    const listening = await listenOn(deleteRoot);
+    deleteServer = listening.s;
+    deleteBase = listening.url;
+  });
+
+  afterEach(() => {
+    deleteServer.close();
+  });
+
+  const deletePost = (pathname: string, body: unknown) => fetch(deleteBase + pathname, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  it('unregisters an empty project and refuses unknown or invalid names', async () => {
+    const r = await deletePost('/api/project-delete', { project: 'demo' });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, name: 'demo' });
+    const view = await (await fetch(`${deleteBase}/api/view`)).json();
+    expect(view.projects).toEqual([]);
+    expect(JSON.parse(await fs.readFile(hivePath(path.join(deleteRoot, 'demo'), 'team.json'), 'utf8'))).toEqual({ agents: [] });
+
+    const again = await deletePost('/api/project-delete', { project: 'demo' });
+    expect(again.status).toBe(400);
+    expect((await again.json()).detail).toMatch(/unknown project/);
+    expect((await deletePost('/api/project-delete', { project: '../demo' })).status).toBe(400);
+  });
+
+  it('deletes a project named projects without deadlocking its registry chain', async () => {
+    const home = path.join(deleteRoot, 'projects');
+    await writeJson(hubPath(deleteRoot, 'projects.json'), {
+      projects: [{ name: 'projects', home, repos: [{ folder: home }] }],
+    });
+    await writeJson(hivePath(home, 'team.json'), { agents: [] });
+    const r = await deletePost('/api/project-delete', { project: 'projects' });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, name: 'projects' });
+  });
+
+  it('rechecks launch safety after waiting for the project action chain', async () => {
+    const { writePendingPane } = await import('../src/state.js');
+    let markStarted!: () => void;
+    let releaseStart!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseStart = resolve; });
+    vi.mocked(startProject).mockImplementation(async () => {
+      await writePendingPane(deleteRoot, 'demo', { pane: '%9', kind: 'start', at: '2026-10-27T00:00:00Z' });
+      markStarted();
+      await release;
+      return '%9';
+    });
+    try {
+      const starting = deletePost('/api/start', { project: 'demo', task: 'demo-1' });
+      await started;
+      const deleting = deletePost('/api/project-delete', { project: 'demo' });
+      releaseStart();
+      const [startResponse, deleteResponse] = await Promise.all([starting, deleting]);
+      expect(startResponse.status).toBe(200);
+      expect(deleteResponse.status).toBe(400);
+      expect((await deleteResponse.json()).detail).toMatch(/launch is pending/);
+      const view = await (await fetch(`${deleteBase}/api/view`)).json();
+      expect(view.projects.map((p: { name: string }) => p.name)).toEqual(['demo']);
+    } finally {
+      releaseStart();
+      vi.mocked(startProject).mockRestore();
+    }
+  });
+
+  it('keeps delete queued after start times out until the launch actually settles', async () => {
+    const { ACTION_TIMEOUT_MS } = await import('../src/view.js');
+    const { readProjects, writePendingPane } = await import('../src/state.js');
+    let markStarted!: () => void;
+    let releaseStart!: (pane: string) => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const release = new Promise<string>((resolve) => { releaseStart = resolve; });
+    vi.mocked(startProject).mockImplementation(async () => {
+      await writePendingPane(deleteRoot, 'demo', { pane: '%9', kind: 'start', at: '2026-10-27T00:00:00Z' });
+      markStarted();
+      return release;
+    });
+    vi.useFakeTimers();
+    try {
+      const starting = deletePost('/api/start', { project: 'demo', task: 'demo-1' });
+      await started;
+      const deleting = deletePost('/api/project-delete', { project: 'demo' });
+      let deleteSettled = false;
+      void deleting.then(() => { deleteSettled = true; });
+      await vi.advanceTimersByTimeAsync(ACTION_TIMEOUT_MS);
+      expect((await starting).status).toBe(500);
+      vi.useRealTimers();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(deleteSettled).toBe(false);
+      expect((await readProjects(deleteRoot)).projects.map((p) => p.name)).toEqual(['demo']);
+
+      releaseStart('%9');
+      const deleteResponse = await deleting;
+      expect(deleteResponse.status).toBe(400);
+      expect((await deleteResponse.json()).detail).toMatch(/launch is pending/);
+    } finally {
+      releaseStart('%9');
+      vi.useRealTimers();
+      vi.mocked(startProject).mockRestore();
+    }
+  });
+});

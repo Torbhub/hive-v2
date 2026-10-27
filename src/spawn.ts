@@ -12,6 +12,7 @@ import {
   removeTeamEntry, upsertTeamEntry, clearPendingPane, withTeamLock, writeJson, type ProjectsFile,
 } from './state.js';
 import type { Approvals, ProjectMode, TeamEntry } from './types.js';
+import { withLaunchClaim, withProjectLock } from './project.js';
 import { checkTaskScope } from './scope.js';
 import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 import { assertEntryAlive, killEntry, recordedIdentity } from './kill.js';
@@ -267,11 +268,19 @@ function envParent(self: string): string | undefined {
 }
 
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
-  const { agent, role = 'implementer' } = opts;
-  if (!AGENT_NAME_RE.test(agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${agent}`);
+  if (!AGENT_NAME_RE.test(opts.agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${opts.agent}`);
   checkModel(opts.model);
   await preflight();
-  const p = await projectEntry(root, project);
+  return withLaunchClaim(root, project, (p) => spawnRegisteredAgent(root, p, opts));
+}
+
+async function spawnRegisteredAgent(
+  root: string,
+  p: ProjectsFile['projects'][number],
+  opts: SpawnOptions,
+): Promise<string> {
+  const { agent, role = 'implementer' } = opts;
+  const project = p.name;
   const home = p.home;
   const team = await readTeam(home);
   if (team.agents.some((a) => a.name === agent)) {
@@ -348,7 +357,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
       worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task, model,
       parent: opts.parent ?? envParent(agent),
     };
-    await upsertTeamEntry(home, entry);
+    await withProjectLock(root, project, () => upsertTeamEntry(home, entry));
   } catch (e) {
     if (jjLane) {
       // A failed spawn must not strand a registered lane.
@@ -366,7 +375,7 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   }
   await typeLine(pane, pickupLine(project, agent), identity);
   const sid = await findLatestSession(worktree, agent);
-  if (sid) await upsertTeamEntry(home, { name: agent, session_id: sid });
+  if (sid) await withProjectLock(root, project, () => upsertTeamEntry(home, { name: agent, session_id: sid }));
   return pane;
 }
 
@@ -386,6 +395,15 @@ async function relaunchAgent(
   old: TeamEntry,
   sessionId: string | undefined,
 ): Promise<string> {
+  return withLaunchClaim(root, p.name, (registered) => relaunchRegisteredAgent(root, registered, old, sessionId));
+}
+
+async function relaunchRegisteredAgent(
+  root: string,
+  p: ProjectsFile['projects'][number],
+  old: TeamEntry,
+  sessionId: string | undefined,
+): Promise<string> {
   const home = p.home;
   const worktree = old.worktree ?? home;
   const mode = old.orchestrator ? effectiveOrchestratorMode(p.mode ?? 'ask', p.approvals) : p.mode ?? 'ask';
@@ -396,11 +414,13 @@ async function relaunchAgent(
   });
   // A cascade that landed mid-launch dropped the entry; never re-register it.
   // respawnAgent stamped the entry itself, so a stamp alone is not a kill.
-  await assertEntryAlive(home, old, { pane, identity }, { allowStamped: true });
-  await upsertTeamEntry(home, {
-    name: old.name, pane, pane_pid: identity.pid, pane_started: identity.started,
-    session_id: sessionId, closed_at: undefined, wedged_at: undefined,
-    model: old.model ?? DEFAULT_MODEL,
+  await withProjectLock(root, p.name, async () => {
+    await assertEntryAlive(home, old, { pane, identity }, { allowStamped: true });
+    await upsertTeamEntry(home, {
+      name: old.name, pane, pane_pid: identity.pid, pane_started: identity.started,
+      session_id: sessionId, closed_at: undefined, wedged_at: undefined,
+      model: old.model ?? DEFAULT_MODEL,
+    });
   });
   const idle = await waitIdleTrust(pane);
   if (idle !== 'idle') {
@@ -410,7 +430,7 @@ async function relaunchAgent(
   }
   await typeLine(pane, pickupLine(p.name, old.name), identity);
   const sid = await findLatestSession(worktree, old.name);
-  if (sid) await upsertTeamEntry(home, { name: old.name, session_id: sid });
+  if (sid) await withProjectLock(root, p.name, () => upsertTeamEntry(home, { name: old.name, session_id: sid }));
   return pane;
 }
 

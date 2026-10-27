@@ -7,10 +7,11 @@ import { interruptAgent } from '../src/interrupt.js';
 import { killAgent } from '../src/kill.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { checkName } from '../src/names.js';
-import { addProjectFromBody } from '../src/project.js';
+import { addProjectFromBody, removeProject } from '../src/project.js';
 import { HttpError } from './http-error.js';
 import { readAgentLog } from '../src/logview.js';
 import { recordStretchOpened } from './stretch.js';
+import { serialized } from './serialized.js';
 import { handleTaskAction } from './taskactions.js'; import { handleQuestionAction } from './questionactions.js';
 import {
   ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
@@ -92,29 +93,18 @@ function agentRefOf(body: Record<string, unknown>): string | undefined {
   return ref;
 }
 
-// projects.json writers share one key so their read-modify-write cannot race. Other actions serialize per project.
-const actionChains = new Map<string, Promise<void>>();
-
-function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const prev = actionChains.get(key) ?? Promise.resolve();
-  const run = prev.then(fn, fn);
-  const sweep = () => { if (actionChains.get(key) === tail) actionChains.delete(key); };
-  const tail = run.then(sweep, sweep);
-  actionChains.set(key, tail);
-  return run;
-}
-
 const TASK_TEXT_CAP = 4000;
 
 async function handlePost(root: string, pathname: string, body: Record<string, unknown>): Promise<unknown> {
   const questionAction = await handleQuestionAction(root, pathname, body); if (questionAction !== null) return questionAction;
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/task-resolve', '/api/progress'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/project-delete', '/api/task-resolve', '/api/progress'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
   if (pathname === '/api/project') return serialized('projects', () => addProjectFromBody(root, body));
   const project = projectName(body);
-  return serialized(['/api/mode', '/api/approvals'].includes(pathname) ? 'projects' : project, async () => {
+  if (pathname === '/api/project-delete') return serialized('projects', () => serialized(`project:${project}`, () => removeProject(root, project)));
+  const action = serialized(['/api/mode', '/api/approvals'].includes(pathname) ? 'projects' : `project:${project}`, async () => {
     if (pathname === '/api/mode') {
       return { ok: true, mode: await setProjectMode(root, project, String(body.mode ?? '')) };
     }
@@ -122,12 +112,10 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
       return { ok: true, approvals: await setProjectApprovals(root, project, String(body.approvals ?? '')) };
     }
     if (pathname === '/api/wake') {
-      const pane = await withTimeout(wake(root, project), ACTION_TIMEOUT_MS, 'wake');
-      return { ok: true, pane };
+      return { ok: true, pane: await wake(root, project) };
     }
     if (pathname === '/api/continue') {
-      const pane = await withTimeout(continueProject(root, project), ACTION_TIMEOUT_MS, 'continue');
-      return { ok: true, pane };
+      return { ok: true, pane: await continueProject(root, project) };
     }
     if (pathname === '/api/task') {
       // Task text only ever lands in tasks/<id>.md; the pickup line names the
@@ -140,48 +128,34 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
       return { ok: true, id: await hubTask(root, project, text) };
     }
     if (pathname === '/api/start') {
-      const pane = await withTimeout(
-        startProject(root, project, String(body.task ?? '')), ACTION_TIMEOUT_MS, 'start',
-      );
-      return { ok: true, pane };
+      return { ok: true, pane: await startProject(root, project, String(body.task ?? '')) };
     }
     if (pathname === '/api/message') {
-      const r = await withTimeout(
-        sendOwnerMessage(root, project, agentRefOf(body), String(body.text ?? '')), ACTION_TIMEOUT_MS, 'message',
-      );
+      const r = await sendOwnerMessage(root, project, agentRefOf(body), String(body.text ?? ''));
       return { ok: true, typed: r.typed };
     }
     if (pathname === '/api/interrupt') {
-      const r = await withTimeout(
-        interruptAgent(root, project, agentRefOf(body)), ACTION_TIMEOUT_MS, 'interrupt',
-      );
+      const r = await interruptAgent(root, project, agentRefOf(body));
       return { ok: true, target: r.target, pane: r.pane };
     }
     if (pathname === '/api/kill') {
-      const r = await withTimeout(
-        killAgent(root, project, agentRefOf(body)), ACTION_TIMEOUT_MS, 'kill',
-      );
+      const r = await killAgent(root, project, agentRefOf(body));
       return { ok: true, target: r.target, killed: r.killed, summary: r.summary };
     }
     if (pathname === '/api/plan-answer') {
-      const r = await withTimeout(
-        planAnswer(
-          root, project, String(body.task ?? ''), String(body.verdict ?? ''),
-          body.feedback === undefined ? undefined : String(body.feedback),
-        ),
-        ACTION_TIMEOUT_MS, 'plan-answer',
+      const r = await planAnswer(
+        root, project, String(body.task ?? ''), String(body.verdict ?? ''),
+        body.feedback === undefined ? undefined : String(body.feedback),
       );
       return { ok: true, typed: r.typed };
     }
     const taskAction = await handleTaskAction(root, project, pathname, body);
     if (taskAction !== null) return taskAction;
-    const r = await withTimeout(
-      answerDialog(root, project, agentRefOf(body), String(body.choice ?? ''), String(body.fingerprint ?? '')),
-      ANSWER_TIMEOUT_MS,
-      'answer',
-    );
+    const r = await answerDialog(root, project, agentRefOf(body), String(body.choice ?? ''), String(body.fingerprint ?? ''));
     return { ok: true, option: r.option, choice: r.choice, session: r.session, dialog_gone: r.dialog_gone };
   });
+  if (['/api/mode', '/api/approvals', '/api/task', '/api/task-resolve', '/api/progress'].includes(pathname)) return action;
+  return withTimeout(action, pathname === '/api/answer' ? ANSWER_TIMEOUT_MS : ACTION_TIMEOUT_MS, pathname.slice(5));
 }
 
 // Compiled this file lives in dist/web/, in tests in web/ — find web/dist from either.

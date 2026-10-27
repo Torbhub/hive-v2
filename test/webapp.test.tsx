@@ -406,7 +406,112 @@ describe('needs-ui', () => {
     expect(container.textContent).not.toContain('demo-4');
     expect(container.textContent).toContain('demo:demo-orchestrator');
     expect(container.textContent).toContain('demo:fixer');
-    expect(container.textContent).toContain('attach: tmux -L hive-v2 attach');
+    expect(container.textContent).toContain('attach: tmux -L hive-v2 attach -t hive:demo:demo-orchestrator');
+  });
+
+  it('a no-team project hides its checkpoint trail and keeps the generic attach hint', async () => {
+    mountWith({
+      ...VIEW,
+      projects: [{ ...VIEW.projects[0], orchestrator: { state: 'none', question: false } }],
+      tasks: [{
+        id: 'demo-8', project: 'demo', asked: iso(400), state: 'handed',
+        updated: iso(300), last_note: null, needs_owner: false,
+        checkpoints: Array.from({ length: 5 }, (_, i) => ({ id: `c${i}`, desc: 'work', etaMin: 5 })),
+        last_progress_at: iso(300),
+      }],
+    });
+    await repoll();
+    expect(container.textContent).not.toContain('0/5 checkpoints');
+    expect(container.textContent).not.toContain('Nudge');
+    const hints = [...container.querySelectorAll('div')].map((el) => el.textContent)
+      .filter((text) => text?.startsWith('attach: tmux'));
+    expect(hints).toEqual(['attach: tmux -L hive-v2 attach']);
+  });
+});
+
+describe('project delete button', () => {
+  const noTeamView: HubView = {
+    ...VIEW,
+    projects: [{ ...VIEW.projects[0], orchestrator: { state: 'none', question: false } }],
+  };
+  let current = noTeamView;
+
+  function mount(): void {
+    current = noTeamView;
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      if (String(input).endsWith('api/view')) {
+        return Promise.resolve(new Response(JSON.stringify(current), { status: 200 }));
+      }
+      return new Promise<Response>((resolve) => {
+        resolveAction = resolve;
+      });
+    });
+  }
+
+  async function repoll(): Promise<void> {
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
+    });
+  }
+
+  function button(text: string): HTMLButtonElement {
+    const btn = [...container.querySelectorAll('button')].find((b) => b.textContent === text);
+    if (!btn) throw new Error(`no "${text}" button rendered`);
+    return btn as HTMLButtonElement;
+  }
+
+  it('appears only for a no-team project with no agents and no pending launch', async () => {
+    mount();
+    await repoll();
+    button('Delete');
+
+    current = { ...noTeamView, projects: [{ ...noTeamView.projects[0], agents: [{ name: 'builder', state: 'stopped' }] }] };
+    await repoll();
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Delete')).toBe(false);
+
+    current = {
+      ...noTeamView,
+      projects: [{
+        ...noTeamView.projects[0],
+        orchestrator: { state: 'none', starting: { pane: '%9', kind: 'start', at: new Date().toISOString() } },
+      }],
+    };
+    await repoll();
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Delete')).toBe(false);
+
+    current = VIEW;
+    await repoll();
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Delete')).toBe(false);
+  });
+
+  it('requires confirmation, shows busy state, refreshes, and removes the card', async () => {
+    mount();
+    await repoll();
+    act(() => button('Delete').click());
+    expect(vi.mocked(fetch).mock.calls.some(([i]) => String(i).endsWith('api/project-delete'))).toBe(false);
+    act(() => button('Delete project?').click());
+    expect(container.textContent).toContain('deleting…');
+    const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/project-delete'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({ project: 'demo' });
+    current = { ...noTeamView, projects: [] };
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true, name: 'demo' }), { status: 200 }));
+    });
+    expect(container.textContent).toContain('demo: project deleted');
+    expect(container.textContent).toContain('No projects yet');
+  });
+
+  it('shows the server error and refreshes without removing the card', async () => {
+    mount();
+    await repoll();
+    act(() => button('Delete').click());
+    act(() => button('Delete project?').click());
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: false, detail: 'demo\'s team is not empty' }), { status: 400 }));
+    });
+    expect(container.textContent).toContain('demo: demo\'s team is not empty');
+    expect(container.textContent).toContain('none yet');
+    button('Delete');
   });
 });
 
