@@ -391,9 +391,10 @@ export async function watchCycle(
         continue;
       }
       const waiting = a.orchestrator
-        ? proj?.orchestrator.operator_question === true
-        : proj?.agents.some((x) => x.name === a.name && x.worktree === a.worktree && x.operator_question) === true;
+        ? proj?.orchestrator.operator_waiting === true
+        : proj?.agents.some((x) => x.name === a.name && x.worktree === a.worktree && x.operator_waiting) === true;
       if (waiting) {
+        stills.delete(`${a.pane}:${a.pane_pid}`);
         if (a.wedged_at) await clearWedged(root, p.home, p.name, a);
         continue;
       }
@@ -417,11 +418,11 @@ export async function watchCycle(
     if (p.mode !== 'auto' && approvals === 'manual') continue;
     if (!proj) continue;
     const targets: (string | undefined)[] = [];
-    if ((proj.orchestrator.question && !proj.orchestrator.operator_question) || proj.orchestrator.starting?.question) {
-      targets.push(undefined);
-    }
+    const orchDialog = proj.orchestrator.screen_question
+      ?? (proj.orchestrator.question === true && proj.orchestrator.operator_question !== true);
+    if (orchDialog || proj.orchestrator.starting?.question) targets.push(undefined);
     for (const a of proj.agents) {
-      if (a.question && !a.operator_question && a.ref) targets.push(a.ref);
+      if ((a.screen_question ?? (a.question && !a.operator_question)) && a.ref) targets.push(a.ref);
     }
     for (const ref of targets) {
       const dialog = await readDialogFor(root, p.name, ref).catch((e: unknown) => {

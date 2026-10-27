@@ -918,7 +918,7 @@ describe('operator question endpoints', () => {
     body: JSON.stringify(body),
   });
 
-  const openBatch = () => createQuestionBatch(questionRoot, { project: 'demo', agent: 'builder' }, {
+  const openBatch = (agent = 'builder') => createQuestionBatch(questionRoot, { project: 'demo', agent }, {
     context: 'Choose the launch setup.',
     questions: [{
       question: 'Which database should we use?',
@@ -1023,11 +1023,16 @@ describe('operator question endpoints', () => {
     expect(await r.json()).toMatchObject({ ok: true, batch: { status: 'answered' } });
   });
 
-  it('bounds the view to 50 open batches and reports the total', async () => {
-    for (let i = 0; i < 55; i++) await openBatch();
+  it('bounds the view to 50 open batches without truncating agent wait status', async () => {
+    const home = path.join(questionRoot, 'demo');
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: Array.from({ length: 55 }, (_, i) => ({ name: `worker-${i}` })),
+    });
+    for (let i = 0; i < 55; i++) await openBatch(`worker-${i}`);
     const view = await (await fetch(`${questionBase}/api/view`)).json();
     expect(view.questions).toHaveLength(50);
     expect(view.questionsTotal).toBe(55);
+    expect(view.projects[0].agents[54]).toMatchObject({ name: 'worker-54', operator_question: true, operator_waiting: true });
   });
 });
 

@@ -20,16 +20,17 @@ You are the orchestrator. The task text is in the file the hub handed you.
    A plan without checkpoints is refused and can never be approved. Wait
    for the owner's OK (`answered` event).
 3. Spawn the agents, each bound to the task:
-   `hive spawn <project> --agent <name> --task <id> [--role r] [--worktree wt]`.
-   A task worker spawns only after the plan is approved. Each agent comes
-   up with its role, the rules, and an empty handoff.
-4. Brief each agent: its slice, the paths that matter, how it reports back.
-5. Build → review (pick the review depth; see the reviewer role) → gate
+   `hive spawn <project> --agent <name> --task <id> --assignment <text> --deliverable <text> [--role r] [--worktree wt]`.
+   Assignment names the slice, paths, boundaries, and acceptance expectations.
+   Deliverable names the exact artifact and verification evidence required back.
+   A task worker spawns only after the plan is approved. Its handoff carries both
+   sections, and the worker starts from them without another briefing step.
+4. Build → review (pick the review depth; see the reviewer role) → gate
    (see the gate skill). Report each checkpoint as it moves:
    `hive hub progress <id> <checkpoint> <started|ok|fail|skip> [note]`.
    A skip needs a note that says why.
-6. Land on the owner's word only: `hive push <remote> <sha> <branch>`.
-7. Report DONE: `hive hub log <id> done "<summary>"`. Done is refused
+5. Land on the owner's word only: `hive push <remote> <sha> <branch>`.
+6. Report DONE: `hive hub log <id> done "<summary>"`. Done is refused
    until every checkpoint is terminal: ok, skip with a note, or a fail
    the owner accepted with `hive hub accept <id> <checkpoint>`.
 

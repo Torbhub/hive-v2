@@ -147,6 +147,18 @@ describe('buildNeeds', () => {
     expect(needs[0].dialogKey).toBeUndefined();
   });
 
+  it('keeps native dialog actions when a structured batch is also open', () => {
+    const needs = buildNeeds({
+      ...base,
+      projects: [{
+        name: 'demo', home: '/r/demo', repos: [], open_tasks: 0,
+        orchestrator: { state: 'running', question: true, operator_question: true, screen_question: true },
+        agents: [{ name: 'builder', state: 'running', question: true, operator_question: true, screen_question: true, ref: 'builder' }],
+      }],
+    }, NOW);
+    expect(needs.map((n) => n.key)).toEqual(['orch-demo', 'agent-demo-builder']);
+  });
+
   it('a plan task with no screen question offers the plan action and no dialog', () => {
     const needs = buildNeeds({
       ...base,

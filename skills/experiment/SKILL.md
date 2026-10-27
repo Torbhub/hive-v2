@@ -17,8 +17,9 @@ never.
    before anyone builds. A candidate that cannot shrink to that is not
    today's pick.
 3. Spawn an implementer in a jj workspace lane
-   (`hive spawn hivev2 --agent <name> --worktree <wt> --task <id>`) to
-   build the pick. It lands as a PR from that lane, gate green in CI.
+   (`hive spawn hivev2 --agent <name> --worktree <wt> --task <id> --assignment <text> --deliverable <text>`).
+   Assignment names the candidate and its lane boundary. Deliverable names the
+   PR and gate evidence. It lands as a PR from that lane, gate green in CI.
 4. Spawn the deslop-reviewer (role `deslop-reviewer`) on the PR. Only its
    CLEAN verdict earns the `deslop-clean` label, and only the label lets
    auto-merge land it. A SLOPPY verdict goes back to the implementer once.

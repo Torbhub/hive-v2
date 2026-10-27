@@ -29,6 +29,14 @@ import { spawnAgent } from '../src/spawn.js';
 import { hubAdd, hubInit, hubTask } from '../src/hub.js';
 import { appendTaskEvent, hivePath, hubPath, manifestRead, readTeam, writeJson } from '../src/state.js';
 
+function spawn(root: string, opts: Parameters<typeof spawnAgent>[2]): Promise<string> {
+  return spawnAgent(root, 'demo', {
+    assignment: 'Complete the bounded scope assignment in the requested files.',
+    deliverable: 'Return the named artifact and verification evidence to the orchestrator.',
+    ...opts,
+  });
+}
+
 function brief(scope: string | null): string {
   const fm = '---\ntitle: "x"\nstatus: ready\ndeps: []\nmax_diff_lines: 300\n---\n\n## Goal\nx\n';
   return fm + (scope === null ? '' : `\n## Files to touch\n${scope}\n`);
@@ -136,7 +144,7 @@ describe('spawnAgent --task', () => {
     await writeTask(root, 'demo-1', brief('- src/a.ts — x'));
     await writeTask(root, 'demo-2', brief('- src/a.ts — y\n- src/b.ts — z'));
     await seedAgent(home, 'impl-1', 'demo-1');
-    await expect(spawnAgent(root, 'demo', { agent: 'impl-2', task: 'demo-2' }))
+    await expect(spawn(root, { agent: 'impl-2', task: 'demo-2' }))
       .rejects.toThrow("demo-2 overlaps impl-1's task demo-1: src/a.ts");
     expect(await manifestRead(home)).toHaveLength(0);
   });
@@ -146,7 +154,7 @@ describe('spawnAgent --task', () => {
     await writeTask(root, 'demo-1', brief('- src/a.ts — x'));
     await writeTask(root, 'demo-3', brief('- src/c.ts — z'));
     await seedAgent(home, 'impl-1', 'demo-1');
-    await spawnAgent(root, 'demo', { agent: 'impl-2', task: 'demo-3' });
+    await spawn(root, { agent: 'impl-2', task: 'demo-3' });
     const team = await readTeam(home);
     expect(team.agents.find((a) => a.name === 'impl-2')?.task).toBe('demo-3');
   }, 20_000);
@@ -155,7 +163,7 @@ describe('spawnAgent --task', () => {
     const { root, home } = await setup();
     await writeTask(root, 'demo-1', brief('- src/a.ts — x'));
     await seedAgent(home, 'impl-1', 'demo-1');
-    await spawnAgent(root, 'demo', { agent: 'reviewer', task: 'demo-1' });
+    await spawn(root, { agent: 'reviewer', task: 'demo-1' });
     expect((await readTeam(home)).agents).toHaveLength(2);
   }, 20_000);
 
@@ -164,9 +172,9 @@ describe('spawnAgent --task', () => {
     await writeTask(root, 'demo-1', brief('- — no path here'));
     await writeTask(root, 'demo-2', brief('- src/b.ts — y'));
     await seedAgent(home, 'impl-1', 'demo-1');
-    await expect(spawnAgent(root, 'demo', { agent: 'impl-2', task: 'demo-2' }))
+    await expect(spawn(root, { agent: 'impl-2', task: 'demo-2' }))
       .rejects.toThrow(/does not parse/);
-    await expect(spawnAgent(root, 'demo', { agent: 'impl-3', task: 'demo-1' }))
+    await expect(spawn(root, { agent: 'impl-3', task: 'demo-1' }))
       .rejects.toThrow(/fix the brief/);
   });
 
@@ -175,15 +183,15 @@ describe('spawnAgent --task', () => {
     await writeTask(root, 'demo-1', brief('- src/a.ts — x'));
     await writeTask(root, 'demo-4', '# demo-4\n\nplain task, no claim\n');
     await seedAgent(home, 'impl-1', 'demo-1');
-    await spawnAgent(root, 'demo', { agent: 'impl-2', task: 'demo-4' });
+    await spawn(root, { agent: 'impl-2', task: 'demo-4' });
     expect((await readTeam(home)).agents).toHaveLength(2);
   }, 20_000);
 
   it('refuses an unknown or foreign task id', async () => {
     const { root } = await setup();
-    await expect(spawnAgent(root, 'demo', { agent: 'impl-2', task: '../../x' }))
+    await expect(spawn(root, { agent: 'impl-2', task: '../../x' }))
       .rejects.toThrow(/task id/);
-    await expect(spawnAgent(root, 'demo', { agent: 'impl-2', task: 'demo-99' }))
+    await expect(spawn(root, { agent: 'impl-2', task: 'demo-99' }))
       .rejects.toThrow(/no task file/);
   });
 
@@ -196,7 +204,7 @@ describe('spawnAgent --task', () => {
       seenAtLaunch = JSON.parse(await fs.readFile(hivePath(home, 'team.json'), 'utf8'));
       return '%9';
     });
-    await spawnAgent(root, 'demo', { agent: 'impl-1', task: 'demo-1' });
+    await spawn(root, { agent: 'impl-1', task: 'demo-1' });
     expect(seenAtLaunch!.agents).toContainEqual({ name: 'impl-1', task: 'demo-1' });
   }, 20_000);
 
@@ -205,8 +213,8 @@ describe('spawnAgent --task', () => {
     await writeTask(root, 'demo-1', brief('- src/a.ts — x'));
     await writeTask(root, 'demo-2', brief('- src/a.ts — y'));
     const results = await Promise.allSettled([
-      spawnAgent(root, 'demo', { agent: 'impl-1', task: 'demo-1' }),
-      spawnAgent(root, 'demo', { agent: 'impl-2', task: 'demo-2' }),
+      spawn(root, { agent: 'impl-1', task: 'demo-1' }),
+      spawn(root, { agent: 'impl-2', task: 'demo-2' }),
     ]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const rejected = results.find((r) => r.status === 'rejected');

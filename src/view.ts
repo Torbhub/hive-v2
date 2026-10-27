@@ -35,28 +35,29 @@ export function lastLine(e: unknown): string {
 // map, so the two can never drift. updatedAt 0 + error means the status read
 // itself failed; callers keep their previous projects/tasks in that case.
 export async function buildView(root: string): Promise<HubView> {
+  let questions: QuestionBatch[] = [];
+  let openBatches: QuestionBatch[] = [];
+  let questionsTotal = 0;
+  let error = '';
+  try {
+    await withTimeout(sweepQuestionBatches(root), READ_TIMEOUT_MS, 'questions-sweep');
+    openBatches = await withTimeout(listOpenQuestionBatches(root), READ_TIMEOUT_MS, 'questions');
+    questionsTotal = openBatches.length;
+    questions = openBatches.slice(0, VIEW_BATCH_CAP);
+  } catch (e) {
+    error = `questions not read: ${lastLine(e)}`;
+  }
   let status;
   try {
-    status = await withTimeout(buildStatus(root), READ_TIMEOUT_MS, 'status');
+    status = await withTimeout(buildStatus(root, openBatches), READ_TIMEOUT_MS, 'status');
   } catch (e) {
     return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], questionsTotal: 0, updatedAt: 0, error: lastLine(e) };
   }
   let tasks: HubTask[] = [];
-  let error = '';
   try {
     tasks = await withTimeout(listTasks(root), READ_TIMEOUT_MS, 'tasks');
   } catch (e) {
-    error = `tasks not read: ${lastLine(e)}`;
-  }
-  let questions: QuestionBatch[] = [];
-  let questionsTotal = 0;
-  try {
-    await withTimeout(sweepQuestionBatches(root), READ_TIMEOUT_MS, 'questions-sweep');
-    const open = await withTimeout(listOpenQuestionBatches(root), READ_TIMEOUT_MS, 'questions');
-    questionsTotal = open.length;
-    questions = open.slice(0, VIEW_BATCH_CAP);
-  } catch (e) {
-    error = [error, `questions not read: ${lastLine(e)}`].filter(Boolean).join(' · ');
+    error = [error, `tasks not read: ${lastLine(e)}`].filter(Boolean).join(' · ');
   }
   const dialogs = await readDialogs(root, status.projects);
   // Scan further back than the feed shows, so filtered noise cannot starve it.

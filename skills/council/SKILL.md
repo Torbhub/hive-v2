@@ -12,12 +12,11 @@ One artifact. Several lenses. No cross-talk. One synthesis.
 1. Pick the lenses. The standing lens roles live in `roles/council-*.md`.
    Take only the ones the artifact needs.
 2. Spawn K fresh agents per lens:
-   `hive spawn <project> --agent <name> --role council-<lens>`.
-   K is the fan-out per lens. Default K=1. Raise K only when a miss is
-   expensive and the budget allows.
-3. Brief each agent with the artifact and a report path under
-   `.hive/councils/<review-id>/`. Lens agents never see each other's
-   output. No shared handoff. No discussion between lenses.
+   `hive spawn <project> --agent <name> --role council-<lens> --assignment <text> --deliverable <text>`.
+   Assignment names the artifact and lens. Deliverable names the report path under
+   `.hive/councils/<review-id>/`. K is the fan-out per lens. Default K=1. Raise K
+   only when a miss is expensive and the budget allows. Lens agents never see
+   each other's output. No shared handoff. No discussion between lenses.
 4. Each lens agent writes its report to its own path. Every finding carries
    a verdict:
    - BLOCKING — must be fixed before the artifact ships.

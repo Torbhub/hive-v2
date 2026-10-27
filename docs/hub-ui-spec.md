@@ -580,6 +580,8 @@ The server closes the batch through `cancelQuestionBatch`. Success answers `{ok:
 
 The screen uses the main view's 20-second polling and post-action refresh. It has no second polling loop. The next view omits answered and cancelled batches. A failed status read keeps the previous batches.
 
+An open batch sets `operator_question: true` on its exact orchestrator or worker and contributes to the combined `question` flag. A recent MCP heartbeat sets `operator_waiting: true`. A native dialog sets `screen_question: true` independently. Structured-only waits use inline cards and do not absorb plans. Mixed states keep their native-dialog actions. The watchdog suppresses stale and wedge checks only during a live MCP wait, and resets stillness when that wait ends.
+
 ## 17. Project deletion (web UI only)
 
 A project card shows **Delete** below its new-task row only when the orchestrator state is `none`, the agents list is empty, and no `starting` record exists. A stopped orchestrator does not pass this guard. Any team entry also blocks deletion, including a stopped or closed entry.

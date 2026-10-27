@@ -140,12 +140,17 @@ async function projectStatus(
   const team = await readTeam(p.home);
   const pending = await readPendingPane(root, p.name);
   const orchEntry = team.agents.find((a) => a.orchestrator);
-  const waiting = new Set(batches.filter((b) => b.project === p.name).map((b) => b.agent));
+  const projectBatches = batches.filter((b) => b.project === p.name);
+  const waiting = new Set(projectBatches.map((b) => b.agent));
+  const liveWaiting = new Set(projectBatches.filter((b) =>
+    b.waitHeartbeatAt !== undefined && Date.now() - Date.parse(b.waitHeartbeatAt) < 30_000,
+  ).map((b) => b.agent));
 
   const orchestrator: HubOrchestrator = {
     state: 'none',
     question: orchEntry ? waiting.has(orchEntry.name) : waiting.has(orchestratorName(p.name)),
     operator_question: orchEntry ? waiting.has(orchEntry.name) : waiting.has(orchestratorName(p.name)),
+    operator_waiting: orchEntry ? liveWaiting.has(orchEntry.name) : liveWaiting.has(orchestratorName(p.name)),
   };
   if (orchEntry) {
     orchestrator.name = orchEntry.name;
@@ -156,6 +161,7 @@ async function projectStatus(
     if (snap.alive === 'running' && orchEntry.pane) orchestrator.pane = orchEntry.pane;
     if (snap.alive !== 'gone') {
       orchestrator.question = snap.dialog !== null || orchestrator.operator_question === true;
+      orchestrator.screen_question = snap.dialog !== null;
       if (snap.context !== null) {
         orchestrator.context = snap.context;
         orchestrator.context_assumed = false;
@@ -198,6 +204,8 @@ async function projectStatus(
         : snap.alive === 'unknown' ? 'unknown' : 'stopped',
       question: waiting.has(a.name) || (snap.alive !== 'gone' && snap.dialog !== null),
       operator_question: waiting.has(a.name),
+      operator_waiting: liveWaiting.has(a.name),
+      screen_question: snap.alive !== 'gone' && snap.dialog !== null,
       worktree: a.worktree,
       ref: agentRef(a.name, nameCounts, a.worktree),
     };
@@ -223,12 +231,12 @@ async function projectStatus(
   };
 }
 
-export async function buildStatus(root: string): Promise<HubStatus> {
+export async function buildStatus(root: string, batches?: QuestionBatch[]): Promise<HubStatus> {
   const hubJson = await readJson<{ name?: string }>(hubPath(root, 'hub.json'));
   const pf = await readProjects(root);
   const tasks = await listTasks(root);
-  const batches = await listOpenQuestionBatches(root);
-  const projects = await Promise.all(pf.projects.map((p) => projectStatus(root, p, tasks, batches)));
+  const openBatches = batches ?? await listOpenQuestionBatches(root);
+  const projects = await Promise.all(pf.projects.map((p) => projectStatus(root, p, tasks, openBatches)));
 
   return {
     hub: hubJson?.name ? { root, name: hubJson.name } : { root },

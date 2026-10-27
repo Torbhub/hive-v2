@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   OPEN_BATCH_CAP, answerQuestionBatch, cancelQuestionBatch, createQuestionBatch,
-  listOpenQuestionBatches, readQuestionBatch, validateAnswers, validateBatchInput,
+  heartbeatQuestionBatch, listOpenQuestionBatches, readQuestionBatch, validateAnswers, validateBatchInput,
 } from '../src/questions.js';
 import { hubPath, writeJson } from '../src/state.js';
 
@@ -39,6 +39,21 @@ function input(): unknown {
 async function root(): Promise<string> {
   return mkdtemp(path.join(tmpdir(), 'hive-questions-'));
 }
+
+describe('question wait heartbeat', () => {
+  it('stamps live waits and never resurrects a closed batch', async () => {
+    const r = await root();
+    const batch = await createQuestionBatch(r, meta, input());
+    expect(batch.waitHeartbeatAt).toBeTruthy();
+    await heartbeatQuestionBatch(r, batch.id);
+    const live = await readQuestionBatch(r, batch.id);
+    expect(Date.parse(live.waitHeartbeatAt!)).toBeGreaterThanOrEqual(Date.parse(batch.waitHeartbeatAt!));
+    await answerQuestionBatch(r, batch.id, [{ question: 'q1', choice: 'c2' }, { question: 'q2', choice: 'c1' }]);
+    const closedAt = (await readQuestionBatch(r, batch.id)).closedAt;
+    await heartbeatQuestionBatch(r, batch.id);
+    expect((await readQuestionBatch(r, batch.id)).closedAt).toBe(closedAt);
+  });
+});
 
 describe('validateBatchInput', () => {
   it('assigns question and choice ids and keeps the fields', () => {

@@ -123,6 +123,7 @@ export async function createQuestionBatch(
   const batch: QuestionBatch = {
     id: randomUUID(), project: meta.project, agent: meta.agent,
     context, questions, status: 'open', createdAt: new Date().toISOString(),
+    waitHeartbeatAt: new Date().toISOString(),
   };
   await withHubLock(root, async () => {
     const open = await listOpenQuestionBatches(root);
@@ -132,6 +133,14 @@ export async function createQuestionBatch(
     await writeBatch(root, batch.id, batch);
   });
   return batch;
+}
+
+export async function heartbeatQuestionBatch(root: string, id: string): Promise<void> {
+  await withHubLock(root, async () => {
+    const batch = await readQuestionBatch(root, id);
+    if (batch.status !== 'open') return;
+    await writeBatch(root, id, { ...batch, waitHeartbeatAt: new Date().toISOString() });
+  });
 }
 
 export async function readQuestionBatch(root: string, id: string): Promise<QuestionBatch> {

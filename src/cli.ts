@@ -185,7 +185,6 @@ async function spawnCommand(args: string[]): Promise<void> {
     : await spawnAgent(root, project, { agent, role: str(f.role), worktree: str(f.worktree), task: str(f.task), model: str(f.model), ...contract });
   console.log(pane);
 }
-
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const cmd = args[0] ?? fail('no command');

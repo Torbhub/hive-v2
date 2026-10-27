@@ -1,5 +1,5 @@
 import type { QuestionBatch } from './types.js';
-import { createQuestionBatch, readQuestionBatch } from './questions.js';
+import { createQuestionBatch, heartbeatQuestionBatch, readQuestionBatch } from './questions.js';
 
 const PROTOCOL = '2024-11-05';
 const DAY_MS = 24 * 60 * 60_000;
@@ -110,8 +110,13 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
       return;
     }
     const deadline = Date.now() + (opts.timeoutMs ?? 7 * DAY_MS);
+    let heartbeatAt = Date.now();
     try {
       for (;;) {
+        if (Date.now() - heartbeatAt >= 15_000) {
+          await heartbeatQuestionBatch(root, batch.id);
+          heartbeatAt = Date.now();
+        }
         const current = await readQuestionBatch(root, batch.id);
         if (current.status === 'answered') {
           toolText(id, JSON.stringify({ id: batch.id, status: 'answered', answers: current.answers }));

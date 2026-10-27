@@ -157,12 +157,15 @@ tmux -L hive-v2 attach
 ## Asking the operator
 
 An agent that needs decisions calls the `ask_operator` MCP tool
-(`mcp__hive-operator__ask_operator`). One call carries the whole batch: the
+(`mcp__hive-operator__ask_operator`). Hive's agent profile disables native
+`AskUserQuestion`, so these batches are the only structured question path.
+One call carries the whole batch: the
 overarching context, then each question with its own context, a priority,
 2-8 described choices, and one recommendation. The call waits for you.
 
-You answer on the web screen under `Questions N`. Batches read top to bottom:
-why this is being asked, who asks, then the questions in priority order.
+Open batches appear on the main web screen with their answer controls. The
+`Questions N` button opens the same cards in a full-screen view. Batches read
+top to bottom: why this is being asked, who asks, then the questions in priority order.
 Recommendations come pre-selected, so accepting them all is one Submit.
 Every question also takes Other with your own words. Submit answers the
 whole batch at once, and the waiting agent gets your choices as JSON.

@@ -116,6 +116,25 @@ describe('buildStatus structured questions', () => {
       expect.objectContaining({ name: 'other', question: false, operator_question: false }),
     ]);
   });
+
+  it('tracks a native dialog separately when a structured batch is also open', async () => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', worktree: '/wt/b' }],
+    });
+    await writeJson(hubPath(root, 'questions', '33333333-3333-4333-8333-333333333333.json'), {
+      id: '33333333-3333-4333-8333-333333333333', project: 'demo', agent: 'builder',
+      context: 'Choose.', status: 'open', createdAt: '2026-10-27T10:00:00Z',
+      waitHeartbeatAt: new Date().toISOString(),
+      questions: [{ id: 'q1', question: 'Continue?', context: 'Context.', priority: 1, recommended: 'c1', choices: [
+        { id: 'c1', label: 'Yes', description: 'Continue.' }, { id: 'c2', label: 'No', description: 'Stop.' },
+      ] }],
+    });
+    const status = await buildStatus(root);
+    expect(status.projects[0].agents[0]).toMatchObject({
+      question: true, operator_question: true, operator_waiting: true, screen_question: true,
+    });
+  });
 });
 
 describe('hubAdd', () => {

@@ -469,6 +469,130 @@ describe('wakeAgent', () => {
   });
 });
 
+describe('worker contract edge cases', () => {
+  const contract = {
+    assignment: 'Audit\nand keep the second line intact.',
+    deliverable: 'Write\nand include verification evidence.',
+  };
+
+  it('round-trips multiline contracts through respawn', async () => {
+    const { root } = await setup({ name: 'builder' });
+    await spawn(root, { agent: 'builder2', ...contract });
+    await expect(respawnAgent(root, 'demo', 'builder2')).resolves.toBe('%9');
+  }, 20_000);
+
+  it('repairs the recorded path without erasing progress or memory', async () => {
+    const { root, home } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b', worktree: '',
+    });
+    const handoff = path.join(root, 'custom-handoff.md');
+    await fs.writeFile(handoff, '# builder\n\n## START HERE\nWait for a message.\n\nProgress: keep this note.\n\n## Memory\n\n- keep this lesson\n');
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b', worktree: '', handoff }],
+    });
+    await respawnAgent(root, 'demo', 'builder', contract);
+    const text = await fs.readFile(handoff, 'utf8');
+    expect(text).toContain('Progress: keep this note.');
+    expect(text).toContain('## Memory\n\n- keep this lesson');
+    expect(text).toContain(contract.assignment);
+    const team = await readTeam(home);
+    team.agents[0].session_id = 'session_b';
+    await writeJson(hivePath(home, 'team.json'), team);
+    vi.mocked(paneIs).mockResolvedValueOnce(false);
+    await expect(wakeAgent(root, 'demo', 'builder')).resolves.toBe('%9');
+    expect(vi.mocked(sendLiteral).mock.calls.at(-1)?.[1]).toContain(handoff);
+  }, 20_000);
+
+  it('does not rewrite the handoff when preflight rejects respawn', async () => {
+    const { root, home } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', handoff: true,
+    });
+    const file = hivePath(home, 'handoffs', 'builder.md');
+    const original = '# builder\n\n## START HERE\nWait for a message.\n\n## Memory\n\n- keep this\n';
+    await fs.writeFile(file, original);
+    vi.mocked(run).mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'proxy down' });
+    await expect(respawnAgent(root, 'demo', 'builder', contract)).rejects.toThrow(/proxy is down/);
+    expect(await fs.readFile(file, 'utf8')).toBe(original);
+  });
+
+  it('refuses a handoff symlink instead of overwriting its target', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = path.join(home, 'lane');
+    const file = hivePath(worktree, 'handoffs', 'builder2.md');
+    const outside = path.join(root, 'outside.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(outside, 'do not overwrite\n');
+    await fs.symlink(outside, file);
+    await expect(spawn(root, { agent: 'builder2', worktree: 'lane', ...contract })).rejects.toThrow(/symlink|follow/);
+    expect(await fs.readFile(outside, 'utf8')).toBe('do not overwrite\n');
+  });
+
+  it('rejects headings inside contract values before launch', async () => {
+    const { root } = await setup({ name: 'builder' });
+    await expect(spawn(root, {
+      agent: 'builder2',
+      assignment: 'Do this\n\n### Notes\nContinue with the bounded implementation',
+      deliverable: 'Return the cited artifact and verification evidence.',
+    })).rejects.toThrow(/heading/);
+  });
+
+  it('refuses parent-directory symlinks before creating any agent files', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = path.join(home, 'lane');
+    const outside = path.join(root, 'outside');
+    await fs.mkdir(worktree, { recursive: true });
+    await fs.mkdir(outside);
+    await fs.symlink(outside, hivePath(worktree));
+    await expect(spawn(root, { agent: 'builder2', worktree: 'lane', ...contract })).rejects.toThrow(/symlink|follow/);
+    expect(await fs.readdir(outside)).toEqual([]);
+  });
+
+  it('leaves ambiguous legacy progress untouched instead of replacing it', async () => {
+    const { root, home } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', handoff: true,
+    });
+    const file = hivePath(home, 'handoffs', 'builder.md');
+    const original = '# builder\n\n## START HERE\n### Assignment\nOld assignment text.\n\n### Deliverable\nOld deliverable text.\n\nProgress: keep this note.\n';
+    await fs.writeFile(file, original);
+    await expect(respawnAgent(root, 'demo', 'builder', contract)).rejects.toThrow(/Progress/);
+    expect(await fs.readFile(file, 'utf8')).toBe(original);
+  });
+
+  it('leaves legacy progress after Assignment untouched too', async () => {
+    const { root, home } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', handoff: true,
+    });
+    const file = hivePath(home, 'handoffs', 'builder.md');
+    const original = '# builder\n\n## START HERE\n### Assignment\nOld assignment text.\n\nProgress: keep this note.\n\n### Deliverable\nOld deliverable text.\n';
+    await fs.writeFile(file, original);
+    await expect(respawnAgent(root, 'demo', 'builder', contract)).rejects.toThrow(/Progress/);
+    expect(await fs.readFile(file, 'utf8')).toBe(original);
+  });
+});
+
+describe('Hive agent question policy', () => {
+  it('writes a profile that denies native questions and launches fresh sessions with it', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    await spawn(root, { agent: 'builder2' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
+    const profile = hivePath(worktree, 'team', 'builder2', 'agent.md');
+    const text = await fs.readFile(profile, 'utf8');
+    expect(text).toContain('name: hive-builder2');
+    expect(text).toContain('  - AskUserQuestion');
+    expect(text).toContain('${base_prompt}');
+    expect(text).toContain('mcp__hive-operator__ask_operator');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toContain(`--agent-file '${profile}'`);
+  }, 20_000);
+
+  it('resumes the bound profile without incompatible agent-file flags', () => {
+    const fresh = launchCommand(undefined, 'ask', 'kimi-code/k3.1-pro', '/tmp/hive agent.md');
+    expect(fresh).toContain("--agent-file '/tmp/hive agent.md'");
+    const resumed = launchCommand('session_abc', 'ask', 'kimi-code/k3.1-pro', '/tmp/hive agent.md');
+    expect(resumed).not.toContain('--agent-file');
+    expect(launchCommand(undefined, 'ask')).not.toContain('--agent-file');
+  });
+});
+
 describe('launchCommand', () => {
   it('builds the teamkimi run line per mode, resume included, K3.1 Pro by default', () => {
     expect(launchCommand(undefined, 'ask')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'");
@@ -527,7 +651,7 @@ describe('orchestrator respawn mode', () => {
     await setProjectMode(root, 'demo', 'ask');
     await setProjectApprovals(root, 'demo', 'manual');
     await respawnAgent(root, 'demo', 'demo-orchestrator');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'`);
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --agent-file '${root}/demo/.hive/team/demo-orchestrator/agent.md' -m 'kimi-code/k3.1-pro'`);
   }, 20_000);
 
   it('leaves a yolo orchestrator on -y', async () => {
@@ -547,7 +671,7 @@ describe('orchestrator respawn mode', () => {
     await setProjectMode(root, 'demo', 'ask');
     await setProjectApprovals(root, 'demo', 'smart');
     await respawnAgent(root, 'demo', 'builder');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=builder HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'`);
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=builder HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --agent-file '${root}/demo/.hive/team/builder/agent.md' -m 'kimi-code/k3.1-pro'`);
   }, 20_000);
 
   it('relaunches a plain agent with -y in auto mode', async () => {
