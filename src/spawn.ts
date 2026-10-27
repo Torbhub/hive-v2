@@ -131,12 +131,14 @@ export async function typeLine(pane: string, text: string, identity: PaneIdentit
 // -S combines with -y/--auto/-m per kimi --help, so mode and model apply to resumes too.
 const MODEL_RE = /^[A-Za-z0-9._/[\]-]{1,64}$/;
 
+type LaunchMode = ProjectMode | 'supervised-auto';
+
 // In ask mode kimi blocks on its own prompt for every command and the watch
 // answers 5-17s later, stalling the lane. With approvals safe|smart the watch
-// is already the backstop, so launch the orchestrator in auto. Launch-time
-// only: the stored project mode is not rewritten, and manual keeps ask.
-export function effectiveOrchestratorMode(mode: ProjectMode, approvals?: Approvals): ProjectMode {
-  return mode === 'ask' && (approvals === 'safe' || approvals === 'smart') ? 'auto' : mode;
+// is already the backstop, so launch the orchestrator in supervised auto.
+// Launch-time only: the stored project mode is not rewritten, and manual keeps ask.
+export function effectiveOrchestratorMode(mode: ProjectMode, approvals?: Approvals): LaunchMode {
+  return mode === 'ask' && (approvals === 'safe' || approvals === 'smart') ? 'supervised-auto' : mode;
 }
 
 // Called before any side effect (worktree add, pane kill): a bad alias is a
@@ -151,11 +153,11 @@ function checkModel(model: string | undefined): void {
 // default_model a drifting config.toml happens to say.
 export const DEFAULT_MODEL = 'kimi-code/k3.1-pro';
 
-export function launchCommand(sessionId: string | undefined, mode: ProjectMode = 'ask', model: string = DEFAULT_MODEL): string {
+export function launchCommand(sessionId: string | undefined, mode: LaunchMode = 'ask', model: string = DEFAULT_MODEL): string {
   checkModel(model);
   const args = [
     sessionId ? `--session ${sessionId}` : '',
-    mode === 'yolo' ? '-y' : mode === 'auto' ? '--auto' : '',
+    mode === 'supervised-auto' ? '--auto' : mode === 'yolo' || mode === 'auto' ? '-y' : '',
     `-m '${model}'`,
   ].filter(Boolean);
   // No session lock: kimi's take-over repair prompt is interactive, and a hive lane is already one client per session.
@@ -168,7 +170,7 @@ export async function launchWindow(
   agent: string,
   cwd: string,
   sessionId?: string,
-  mode: ProjectMode = 'ask',
+  mode: LaunchMode = 'ask',
   model?: string,
 ): Promise<{ pane: string; identity: PaneIdentity }> {
   // HIVE_AGENT names the pane's own agent: a `hive spawn` run inside the pane

@@ -227,6 +227,31 @@ describe('instant click feedback', () => {
   });
 });
 
+const LIVE_PLAN = 'Plan: AUDIT with two read-only explorers: one maps citadel cleanup queues, conventions, tests, and dead-code candidates; one maps ops/minipipe plus existing cron/runner and agent-knowledge mechanisms. DESIGN: I will select the smallest evidence-backed first chunks and the thinnest recurring design, then record decisions. BUILD: separate implementers own the cleanup lanes and the recurring runner/skill lane in isolated worktrees. The loop will use bounded chunks, fresh-eyes review, exact-commit gates, and recorded accepted/rejected lessons so later runs improve without uncontrolled self-edits. REVIEW: independent reviewers check behavior preservation, austerity, readability, minimal tests, lore-comment removal, and performance neutrality; no optimization work. GATE: run each repo\'s standard checks on the exact deliverable commits and read gate-verify output. SCHEDULE: dry-run one cycle, then propose cadence and recurring model spend for owner decision. No push, PR, deploy, landing, or recurring paid run without the owner\'s separate word. The first pass will not declare the whole repos pristine; it establishes the verified loop and lands only approved slices.';
+
+const LIVE_PHASES = [
+  ['AUDIT', 'with two read-only explorers: one maps citadel cleanup queues, conventions, tests, and dead-code candidates; one maps ops/minipipe plus existing cron/runner and agent-knowledge mechanisms.'],
+  ['DESIGN', 'I will select the smallest evidence-backed first chunks and the thinnest recurring design, then record decisions.'],
+  ['BUILD', 'separate implementers own the cleanup lanes and the recurring runner/skill lane in isolated worktrees. The loop will use bounded chunks, fresh-eyes review, exact-commit gates, and recorded accepted/rejected lessons so later runs improve without uncontrolled self-edits.'],
+  ['REVIEW', 'independent reviewers check behavior preservation, austerity, readability, minimal tests, lore-comment removal, and performance neutrality; no optimization work.'],
+  ['GATE', "run each repo's standard checks on the exact deliverable commits and read gate-verify output."],
+  ['SCHEDULE', 'dry-run one cycle, then propose cadence and recurring model spend for owner decision.'],
+] as const;
+
+const LIVE_GUARDRAILS = [
+  "No push, PR, deploy, landing, or recurring paid run without the owner's separate word.",
+  'The first pass will not declare the whole repos pristine; it establishes the verified loop and lands only approved slices.',
+];
+
+const LIVE_CHECKPOINTS = [
+  { id: 'audit', desc: 'two read-only explorers map citadel cleanup queues and recurring mechanisms', etaMin: 15 },
+  { id: 'design', desc: 'select the smallest evidence-backed first chunks and thinnest recurring design', etaMin: 10 },
+  { id: 'build', desc: 'separate implementers own cleanup and recurring lanes in isolated worktrees', etaMin: 45 },
+  { id: 'review', desc: 'independent reviewers check behavior preservation, austerity, readability, and performance neutrality', etaMin: 20 },
+  { id: 'gate', desc: "run each repo's standard checks on exact deliverable commits and read gate-verify output", etaMin: 20 },
+  { id: 'schedule', desc: 'dry-run one cycle, then propose cadence and recurring model spend for owner decision', etaMin: 10 },
+];
+
 describe('needs-ui', () => {
   const iso = (minAgo: number) => new Date(Date.now() - minAgo * 60_000).toISOString();
 
@@ -349,10 +374,60 @@ describe('needs-ui', () => {
       }],
     });
     await repoll();
-    expect(container.textContent).toContain('a: write it (~5m)');
-    expect(container.textContent).toContain('b: ship it (~10m)');
-    button('Approve plan');
+    expect(container.querySelector('[data-plan-fallback] p')?.textContent).toBe('ship the docs');
+    const checkpoints = container.querySelector('[data-plan-checkpoints]');
+    expect(checkpoints?.querySelectorAll('li')).toHaveLength(2);
+    expect(checkpoints?.querySelector('[data-checkpoint-id="a"] [data-checkpoint-description]')?.textContent).toBe('write it');
+    expect(checkpoints?.querySelector('[data-checkpoint-id="b"] [data-checkpoint-estimate]')?.textContent).toBe('~10m');
+    expect(checkpoints!.compareDocumentPosition(button('Approve plan')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     button('Send back');
+  });
+
+  it('renders the live plan as complete headed sections and structured checkpoints', async () => {
+    mountWith({
+      ...VIEW,
+      tasks: [{
+        id: 'demo-2', project: 'demo', asked: iso(30), state: 'plan',
+        updated: iso(20), last_note: LIVE_PLAN, needs_owner: true, checkpoints: LIVE_CHECKPOINTS,
+      }],
+    });
+    await repoll();
+
+    const plan = container.querySelector('[data-plan]')!;
+    expect(container.textContent).not.toContain('Plan:');
+    for (const [heading, prose] of LIVE_PHASES) {
+      const section = plan.querySelector(`[data-plan-section="${heading}"]`);
+      expect(section?.querySelector('h3')?.textContent).toBe(heading);
+      expect(section?.querySelector('[data-plan-prose]')?.textContent).toBe(prose);
+    }
+    expect([...plan.querySelectorAll('[data-plan-guardrails] p')].map((p) => p.textContent)).toEqual(LIVE_GUARDRAILS);
+    expect(plan.querySelector('[data-plan-checkpoints] h3')?.textContent).toBe('Checkpoints');
+    const rows = [...plan.querySelectorAll('[data-plan-checkpoints] li')];
+    expect(rows).toHaveLength(6);
+    for (const [index, checkpoint] of LIVE_CHECKPOINTS.entries()) {
+      const row = rows[index];
+      expect(row.querySelector('[data-checkpoint-number]')?.textContent).toBe(`${index + 1}.`);
+      expect(row.querySelector('[data-checkpoint-number]')?.getAttribute('aria-hidden')).toBe('true');
+      expect(row.querySelector('[data-checkpoint-id]')?.textContent).toBe(checkpoint.id);
+      expect(row.querySelector('[data-checkpoint-description]')?.textContent).toBe(checkpoint.desc);
+      expect(row.querySelector('[data-checkpoint-estimate]')?.textContent).toBe(`~${checkpoint.etaMin}m`);
+    }
+    expect(plan.querySelector('.truncate')).toBeNull();
+  });
+
+  it('preserves an unpunctuated trailing fragment in its plan section', async () => {
+    mountWith({
+      ...VIEW,
+      tasks: [{
+        id: 'demo-2', project: 'demo', asked: iso(30), state: 'plan',
+        updated: iso(20), last_note: 'BUILD: Do work. Ship it', needs_owner: true,
+      }],
+    });
+    await repoll();
+
+    const section = container.querySelector('[data-plan-section="BUILD"]');
+    expect(section?.querySelector('h3')?.textContent).toBe('BUILD');
+    expect(section?.querySelector('[data-plan-prose]')?.textContent).toBe('Do work. Ship it');
   });
 
   it('a stale need is marked and its Nudge posts the status message', async () => {

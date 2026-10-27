@@ -400,10 +400,11 @@ describe('launchCommand', () => {
   it('builds the teamkimi run line per mode, resume included, K3.1 Pro by default', () => {
     expect(launchCommand(undefined, 'ask')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'");
     expect(launchCommand(undefined, 'yolo')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -y -m 'kimi-code/k3.1-pro'");
-    expect(launchCommand(undefined, 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --auto -m 'kimi-code/k3.1-pro'");
+    expect(launchCommand(undefined, 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -y -m 'kimi-code/k3.1-pro'");
+    expect(launchCommand(undefined, 'supervised-auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --auto -m 'kimi-code/k3.1-pro'");
     expect(launchCommand('session_abc', 'ask')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro'");
     expect(launchCommand('session_abc', 'yolo')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -y -m 'kimi-code/k3.1-pro'");
-    expect(launchCommand('session_abc', 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc --auto -m 'kimi-code/k3.1-pro'");
+    expect(launchCommand('session_abc', 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -y -m 'kimi-code/k3.1-pro'");
   });
 
   it('a per-agent model overrides the default, combined with session and mode', () => {
@@ -425,9 +426,9 @@ describe('launchCommand', () => {
 });
 
 describe('effectiveOrchestratorMode', () => {
-  it('upgrades ask to auto only when the watch answers dialogs', () => {
-    expect(effectiveOrchestratorMode('ask', 'smart')).toBe('auto');
-    expect(effectiveOrchestratorMode('ask', 'safe')).toBe('auto');
+  it('upgrades ask to supervised auto only when the watch answers dialogs', () => {
+    expect(effectiveOrchestratorMode('ask', 'smart')).toBe('supervised-auto');
+    expect(effectiveOrchestratorMode('ask', 'safe')).toBe('supervised-auto');
     expect(effectiveOrchestratorMode('ask', 'manual')).toBe('ask');
     expect(effectiveOrchestratorMode('ask', undefined)).toBe('ask');
     expect(effectiveOrchestratorMode('yolo', 'smart')).toBe('yolo');
@@ -436,7 +437,7 @@ describe('effectiveOrchestratorMode', () => {
 });
 
 describe('orchestrator respawn mode', () => {
-  it('relaunches the orchestrator with --auto when mode is ask and approvals smart', async () => {
+  it('keeps supervised --auto when mode is ask and approvals smart', async () => {
     const { root } = await setup({
       name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 111, pane_started: 'earlier',
     });
@@ -474,6 +475,15 @@ describe('orchestrator respawn mode', () => {
     await setProjectApprovals(root, 'demo', 'smart');
     await respawnAgent(root, 'demo', 'builder');
     expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=builder HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'`);
+  }, 20_000);
+
+  it('relaunches a plain agent with -y in auto mode', async () => {
+    const { root } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    await setProjectMode(root, 'demo', 'auto');
+    await respawnAgent(root, 'demo', 'builder');
+    const cmd = vi.mocked(newWindow).mock.calls.at(-1)?.[2];
+    expect(cmd).toContain('-y');
+    expect(cmd).not.toContain('--auto');
   }, 20_000);
 });
 

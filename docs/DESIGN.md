@@ -58,7 +58,7 @@ src/
   spawn.ts     — spawn/respawn/close of orchestrator + agent sessions
   gate.ts      — gate runner + gate-verify (log, commits)
   cleanup.ts   — manifest-driven cleanup, trash-not-delete
-  watch.ts     — watchdog (dead-pane log + wake) and the safe/smart auto-approver
+  watch.ts     — watchdog (dead-pane log + wake), safe/smart auto-approver, and direct Auto dialog answers
   ui/HubApp.tsx   — the hub screen (spec docs/hub-ui-spec.md)
   ui/look.ts      — the shared look: ago, look tables, needs-building (Ink and web both import it)
   ui/buttons.tsx  — keyboard-driven button (Tab focus, Enter press, hotkeys)
@@ -173,7 +173,9 @@ hive ui                                  — the hub screen
 - Launch, in a new tmux window named `<project>:<agent>`:
   `HIVE_AGENT=<agent> HIVE_PROJECT=<project> HIVE_HUB_ROOT='<root>' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- [--session <id>] [-y|--auto] -m '<model>'`
   — the project's `mode` in projects.json (`ask`/`yolo`/`auto`, default `ask`)
-  maps to no flag/`-y`/`--auto`, on fresh starts and resumes alike. The model
+  maps to no flag for `ask` and `-y` for `yolo` and `auto`, on fresh starts and
+  resumes alike. Derived `ask` plus `safe` or `smart` orchestrator launches use
+  supervised `--auto` instead. The model
   is the house default `kimi-code/k3.1-pro` unless the spawn passed `--model`,
   and the effective model is stamped into team.json. The HIVE_* variables name
   the agent and route its ask_operator MCP calls; the root is shell-quoted.

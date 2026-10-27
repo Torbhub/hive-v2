@@ -25,6 +25,7 @@ vi.mock('../src/hub.js', async (importOriginal) => {
   return {
     ...orig,
     buildStatus: vi.fn(async () => ({ hub: { root: '' }, projects: [] })),
+    continueProject: vi.fn(async () => '%1'),
     readDialogFor: vi.fn(async () => null),
     // A successful wake registers the new pane on the team entry, as the real
     // launchOrchestrator does; the watchdog checks before it logs resurrection.
@@ -66,12 +67,12 @@ vi.mock('../src/death-bundle.js', async (importOriginal) => {
   };
 });
 
-import { buildStatus, readDialogFor, answerDialog, wake } from '../src/hub.js';
+import { buildStatus, continueProject, readDialogFor, answerDialog, wake } from '../src/hub.js';
 import { wakeAgent } from '../src/spawn.js';
 import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
 import { capturePane, killWindow, paneExists, paneIs, run, sleep, tmux } from '../src/tmux.js';
 import { withTimeout } from '../src/view.js';
-import { hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, hivePath } from '../src/state.js';
+import { hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, writePendingPane, hivePath } from '../src/state.js';
 import { loadProcessedKeys } from '../src/watch-persist.js';
 import {
   extractCommand, neverApprove, tier1Approves, watch, watchCycle, WAKE_MAX_ATTEMPTS,
@@ -158,12 +159,16 @@ describe('the approval classifier', () => {
   });
 });
 
-async function setupProject(opts: { approvals?: string; agents?: Record<string, unknown>[] } = {}) {
+async function setupProject(opts: { approvals?: string; mode?: string; agents?: Record<string, unknown>[] } = {}) {
   const root = tmp();
   const home = path.join(root, 'demo');
   await fs.mkdir(hivePath(home), { recursive: true });
   await writeJson(hubPath(root, 'projects.json'), {
-    projects: [{ name: 'demo', home, repos: [], ...('approvals' in opts ? { approvals: opts.approvals } : {}) }],
+    projects: [{
+      name: 'demo', home, repos: [],
+      ...('approvals' in opts ? { approvals: opts.approvals } : {}),
+      ...('mode' in opts ? { mode: opts.mode } : {}),
+    }],
   });
   await writeJson(hivePath(home, 'team.json'), { agents: opts.agents ?? [] });
   return { root, home };
@@ -346,6 +351,97 @@ describe('watchCycle watchdog', () => {
     expect(log.match(/pane %1 died/g)).toHaveLength(1);
     expect(log).toContain('resurrected demo-orchestrator in pane %9 (wake attempt 1)');
     expect(await fs.readdir(hubPath(root, 'deaths'))).toHaveLength(1);
+  });
+});
+
+describe('watchCycle pending launch', () => {
+  const pending = {
+    pane: '%1', kind: 'start', at: new Date().toISOString(), typed: false, line: 'pick up the project',
+  };
+
+  function startingProject(name: string, starting: Record<string, unknown> = {}, question = false) {
+    return {
+      name, home: '', repos: [], open_tasks: 0,
+      orchestrator: {
+        state: 'none', question,
+        starting: { pane: '%1', kind: 'start', at: pending.at, typed: false, question: false, ...starting },
+      },
+      agents: [],
+    };
+  }
+
+  it('continues an untyped pending launch after its dialog clears', async () => {
+    const { root } = await setupProject();
+    await writePendingPane(root, 'demo', pending);
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' }, projects: [startingProject('demo')],
+    } as never);
+
+    await watchCycle(root);
+
+    expect(continueProject).toHaveBeenCalledTimes(1);
+    expect(continueProject).toHaveBeenCalledWith(root, 'demo');
+  });
+
+  it('continues an orphaned sending claim even when status still says sending', async () => {
+    const { root } = await setupProject();
+    const staleAt = new Date(Date.now() - 11 * 60_000).toISOString();
+    await writePendingPane(root, 'demo', { ...pending, at: staleAt, sending: true });
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' }, projects: [startingProject('demo', { at: staleAt, sending: true })],
+    } as never);
+
+    await watchCycle(root);
+
+    expect(continueProject).toHaveBeenCalledTimes(1);
+    expect(continueProject).toHaveBeenCalledWith(root, 'demo');
+  });
+
+  it.each([
+    { name: 'a starting dialog is present', starting: { question: true }, pending: 'pending', question: false },
+    { name: 'an orchestrator dialog is present', starting: {}, pending: 'pending', question: true },
+    { name: 'status says the first line was typed', starting: { typed: true }, pending: 'pending', question: false },
+    { name: 'the fresh pending record says the first line was typed', starting: {}, pending: 'typed', question: false },
+    { name: 'the fresh pending record has a recent sending claim', starting: { sending: true }, pending: 'sending', question: false },
+    { name: 'no pending launch exists', starting: {}, pending: 'missing', question: false },
+  ] as const)('does not continue when $name', async ({ starting, pending: pendingState, question }) => {
+    const { root } = await setupProject();
+    if (pendingState !== 'missing') {
+      await writePendingPane(root, 'demo', {
+        ...pending, at: new Date().toISOString(), typed: pendingState === 'typed', sending: pendingState === 'sending',
+      });
+    }
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' }, projects: [startingProject('demo', starting, question)],
+    } as never);
+
+    await watchCycle(root);
+
+    expect(continueProject).not.toHaveBeenCalled();
+  });
+
+  it('a failed continue does not skip another project', async () => {
+    const { root, home } = await setupProject();
+    const otherHome = path.join(root, 'other');
+    await writeJson(hivePath(otherHome, 'team.json'), { agents: [] });
+    await writeJson(hubPath(root, 'projects.json'), {
+      projects: [{ name: 'demo', home, repos: [] }, { name: 'other', home: otherHome, repos: [] }],
+    });
+    await writePendingPane(root, 'demo', pending);
+    await writePendingPane(root, 'other', pending);
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' }, projects: [startingProject('demo'), startingProject('other')],
+    } as never);
+    vi.mocked(continueProject).mockImplementation(async (_root, project) => {
+      if (project === 'demo') throw new Error('continue failed');
+      return '%1';
+    });
+
+    await expect(watchCycle(root)).resolves.toBeUndefined();
+
+    expect(continueProject).toHaveBeenCalledTimes(2);
+    expect(continueProject).toHaveBeenCalledWith(root, 'demo');
+    expect(continueProject).toHaveBeenCalledWith(root, 'other');
   });
 });
 
@@ -551,10 +647,60 @@ describe('watchCycle auto-approver', () => {
     expect(s.verdicts.has('python3 check_two.py')).toBe(false);
   });
 
-  it('manual mode never answers', async () => {
-    const { root } = await setupProject();
+  it.each([undefined, 'manual'] as const)('auto mode directly answers a command with %s stored approvals', async (approvals) => {
+    const { root } = await setupProject({ mode: 'auto', approvals });
     withQuestion();
-    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ ls') as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 auto_mode_probe.py') as never);
+    vi.mocked(run).mockImplementation(async (cmd) => {
+      if (cmd === 'kimi') throw new Error('Auto must not classify');
+      return { code: 0, stdout: '', stderr: '' };
+    });
+
+    await cycle(root, freshApprover());
+
+    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, '1', 'fp');
+  });
+
+  it('auto mode answers folder trust but not unrelated dialogs', async () => {
+    const { root } = await setupProject({ mode: 'auto', approvals: 'manual' });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue({
+      ...dialogWith('Trust this folder?'), kind: 'menu', cursor: 1,
+      options: [{ n: 1, label: 'Trust and continue', detail: '', offered: true, saves_rule: false }],
+    } as never);
+
+    await cycle(root, freshApprover());
+    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, '1', 'fp');
+
+    vi.mocked(answerDialog).mockClear();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Compact context?\nChoose how to compact') as never);
+    await cycle(root, freshApprover());
+    expect(answerDialog).not.toHaveBeenCalled();
+  });
+
+  it('auto mode uses an offered non-saving option', async () => {
+    const { root } = await setupProject({ mode: 'auto' });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue({
+      ...dialogWith('Run this command?\n  $ python3 auto_mode_probe.py'),
+      options: [
+        { n: 1, label: 'Always allow', detail: '', offered: true, saves_rule: true },
+        { n: 2, label: 'Approve once', detail: '', offered: true, saves_rule: false },
+      ],
+    } as never);
+
+    await cycle(root, freshApprover());
+
+    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, '2', 'fp');
+  });
+
+  it('non-auto mode with manual approvals never answers', async () => {
+    const { root } = await setupProject({ approvals: 'manual' });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 auto_mode_probe.py') as never);
+    vi.mocked(run).mockImplementation(async (cmd) => (
+      cmd === 'kimi' ? { code: 0, stdout: 'APPROVE ordinary command', stderr: '' } : { code: 0, stdout: '', stderr: '' }
+    ));
     await cycle(root, freshApprover());
     expect(answerDialog).not.toHaveBeenCalled();
   });

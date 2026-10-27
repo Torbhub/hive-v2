@@ -167,7 +167,7 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
       const question = raw !== null && parseDialog(lines(raw)).kind !== 'none';
       orchestrator.starting = {
         pane: pending.pane, kind: pending.kind, at: pending.at,
-        typed: Boolean(pending.typed), sending: false, question, task: pending.task,
+        typed: Boolean(pending.typed), sending: Boolean(pending.sending), question, task: pending.task,
       };
       if (question && !pending.question) {
         await writePendingPane(root, p.name, { ...pending, question: true });
@@ -250,12 +250,10 @@ export async function readDialogFor(
     if (!entry) throw new Refusal(`${project} has no agent named ${agentRefArg}`);
     session = name;
   } else {
-    entry = team.agents.find((a) => a.orchestrator);
     session = orchestratorName(project);
-    if (!entry?.pane) {
-      const pending = await readPendingPane(root, project);
-      if (pending) entry = { name: session, pane: pending.pane };
-    }
+    const pending = await readPendingPane(root, project);
+    if (pending && await paneExists(pending.pane)) entry = { name: session, pane: pending.pane };
+    else entry = team.agents.find((a) => a.orchestrator);
   }
   if (!entry?.pane || !(await paneExists(entry.pane))) return null;
   const raw = await capturePane(entry.pane);

@@ -2,10 +2,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { captureDeathBundle, wireLogMtime } from './death-bundle.js';
-import { answerDialog, buildStatus, readDialogFor, Refusal, wake } from './hub.js';
+import { answerDialog, buildStatus, continueProject, readDialogFor, Refusal, wake } from './hub.js';
 import { DEFAULT_MODEL, wakeAgent } from './spawn.js';
 import { classify, lines } from './screen.js';
-import { appendDecision, hivePath, hubPath, readProjects, readTeam, upsertTeamEntry, writeJson } from './state.js';
+import { appendDecision, hasLiveSendingClaim, hivePath, hubPath, readPendingPane, readProjects, readTeam, upsertTeamEntry, writeJson } from './state.js';
 import { capturePane, killWindow, paneExists, paneIs, run, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
 import { loadProcessedKeys, recordProcessedKey } from './watch-persist.js';
@@ -95,8 +95,23 @@ async function maybeAutoApprove(
   env: NodeJS.ProcessEnv,
   verdicts: Map<string, true>,
   marks: Set<string>,
+  auto = false,
 ): Promise<void> {
   const command = extractCommand(dialog.text);
+  if (auto) {
+    const trust = !command && dialog.text.includes('Trust this folder?');
+    if (!command && !trust) return;
+    const opt = dialog.options.find((o) => o.offered && !o.saves_rule && (
+      trust ? /^Trust\b/i.test(o.label) : /^(Approve|Allow)\b/i.test(o.label)
+    ));
+    if (!opt) return;
+    await answerDialog(root, project, agentRef, String(opt.n), dialog.fingerprint);
+    await appendDecision(root, {
+      project, by: 'watch',
+      summary: command ? `auto-approved "${opt.label}" for: $ ${command}` : `auto-approved "${opt.label}"`,
+    });
+    return;
+  }
   // neverApprove runs before every tier and before the cache, always.
   if (!command || neverApprove(dialog.text)) return;
   // Whitespace-collapsed key: `git  status` and `git status` share a verdict.
@@ -123,6 +138,20 @@ async function maybeAutoApprove(
   await appendDecision(root, {
     project, by: 'watch', summary: `auto-approved "${opt.label}" for: $ ${command}`,
   });
+}
+
+export async function handleCurrentOrchestratorDialog(root: string, project: string): Promise<void> {
+  const p = (await readProjects(root)).projects.find((x) => x.name === project);
+  if (!p) throw new Refusal(`unknown project: ${project}`);
+  const approvals = p.approvals ?? 'manual';
+  if (p.mode !== 'auto' && approvals === 'manual') return;
+  const dialog = await readDialogFor(root, project).catch((e: unknown) => {
+    if (!(e instanceof Refusal)) throw e;
+    return null;
+  });
+  if (!dialog) return;
+  const env: NodeJS.ProcessEnv = p.mode !== 'auto' && approvals === 'smart' ? await kimiEnv().catch(() => ({})) : {};
+  await maybeAutoApprove(root, project, undefined, dialog, approvals, env, approveCache, inFlightMarks, p.mode === 'auto');
 }
 
 export const WAKE_MAX_ATTEMPTS = 60;
@@ -364,9 +393,21 @@ export async function watchCycle(
       await judgeWedge(root, p.name, p.home, a, stills, wedgeStillMs);
     }
 
-    const approvals = p.approvals ?? 'manual';
-    if (approvals === 'manual') continue;
     const proj = status.projects.find((x) => x.name === p.name);
+    const starting = proj?.orchestrator.starting;
+    if (proj && starting?.typed === false && starting.question === false && !proj.orchestrator.question) {
+      const pending = await readPendingPane(root, p.name);
+      if (pending?.typed === false && !hasLiveSendingClaim(pending)) {
+        await continueProject(root, p.name).catch(async (e: unknown) => {
+          if (!(e instanceof Refusal)) {
+            await appendWatchLog(root, `${new Date().toISOString()} ${p.name} continue failed: ${lastLine(e)}`);
+          }
+        });
+      }
+    }
+
+    const approvals = p.approvals ?? 'manual';
+    if (p.mode !== 'auto' && approvals === 'manual') continue;
     if (!proj) continue;
     const targets: (string | undefined)[] = [];
     if (proj.orchestrator.question || proj.orchestrator.starting?.question) targets.push(undefined);
@@ -379,7 +420,7 @@ export async function watchCycle(
         return null;
       });
       if (!dialog) continue;
-      await maybeAutoApprove(root, p.name, ref, dialog, approvals, env, verdicts, marks);
+      await maybeAutoApprove(root, p.name, ref, dialog, approvals, env, verdicts, marks, p.mode === 'auto');
     }
   }
 }
