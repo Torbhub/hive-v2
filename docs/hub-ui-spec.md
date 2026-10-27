@@ -135,7 +135,7 @@ Card = column, `marginTop: 1`.
 **`folders` row** — one line per repo, white, `wrap: truncate-end`:
 `{folder}` + (when `changed` truthy) `  {changed} changed`. (`branch` and `kind` are **not** shown on screen.)
 
-**Attach hint** (web only): the card ends with one gray mono line. When the orchestrator has a `name`, the line is `attach: tmux -L hive-v2 attach -t hive:{project}:{name}`. Without a name, the line is `attach: tmux -L hive-v2 attach`.
+**Attach hint** (web only): the card ends with one gray mono line. When the orchestrator state is `running` and status carries a `pane`, the line is `attach: tmux -L hive-v2 attach -t hive \; select-window -t {pane} \; select-pane -t {pane}`. Status sets `pane` only after the pane and its recorded process identity match. `attach-session` takes the `hive` session, `select-window` selects the pane's window, then `select-pane` selects the verified pane in that window. Otherwise the line is `attach: tmux -L hive-v2 attach`. The hint never derives a target from the project and orchestrator names.
 
 **Resume row** (`paddingLeft: 15`), shown only when `canResume = (state is 'stopped' or 'resumable') && session_id && !starting`:
 - while busy with this project: cyan `resuming…`
@@ -218,7 +218,7 @@ type HubOrchestrator = {
   question?: boolean
   name?: string
   pid?: number              // unregistered sessions
-  pane?: string             // unregistered sessions, e.g. "%12"
+  pane?: string             // verified live pane, or an unregistered session, e.g. "%12"
   session_id?: string
   children?: number         // team entries whose parent names this orchestrator (the cascade kill size)
   context?: number
@@ -370,7 +370,7 @@ Field notes:
 - `hub.away_refused` optional string (first refusal reason).
 - `hub.last_away` optional; stays after away ends.
 - `folder` is stored relative to the hub root when it sits under it, else absolute. `kind` ∈ `repo | worktree | folder | missing` (the parent repo path is stripped). `branch`/`changed` only for repo/worktree kinds; `changed` is a count of dirty paths.
-- `orchestrator.state` ∈ the six states above. `question` is **always** present (boolean). `pid`/`pane` only for `unregistered`. `starting` only when a hub-started pane is pending. Context fields per §5.
+- `orchestrator.state` ∈ the six states above. `question` is **always** present (boolean). `pane` is present for a verified live orchestrator or an `unregistered` session. `pid` is only for `unregistered`. `starting` only when a hub-started pane is pending. Context fields per §5.
 - Agent entries always include `name`, `state`, `worktree`, `question`, `ref`; context fields optional.
 - `held` (boolean) is emitted but **not used by the screen** (the text-mode status shows `  (held: the hub starts and wakes nothing here)`).
 

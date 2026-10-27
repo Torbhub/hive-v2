@@ -151,6 +151,7 @@ async function projectStatus(root: string, p: ProjectEntry, tasks: HubTask[]): P
     if (orchEntry.session_id) orchestrator.session_id = orchEntry.session_id;
     const snap = await snapshot(orchEntry);
     orchestrator.state = snap.alive === 'running' ? 'running' : snap.alive === 'unknown' ? 'unknown' : 'stopped';
+    if (snap.alive === 'running' && orchEntry.pane) orchestrator.pane = orchEntry.pane;
     if (snap.alive !== 'gone') {
       orchestrator.question = snap.dialog !== null;
       if (snap.context !== null) {

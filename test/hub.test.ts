@@ -69,7 +69,19 @@ describe('buildStatus pane identity', () => {
     vi.mocked(paneIs).mockResolvedValueOnce(false);
     const status = await buildStatus(root);
     expect(status.projects[0].orchestrator.state).toBe('unknown');
+    expect(status.projects[0].orchestrator.pane).toBeUndefined();
     expect(paneIs).toHaveBeenCalledWith('%1', { pid: 11, started: 'old' });
+  });
+
+  it('exposes the pane only when its recorded process identity matches', async () => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'citadel-orchestrator', orchestrator: true, pane: '%15', pane_pid: 11, pane_started: 'fresh' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(paneIs).mockResolvedValueOnce(true);
+    const status = await buildStatus(root);
+    expect(status.projects[0].orchestrator).toMatchObject({ state: 'running', pane: '%15' });
   });
 });
 

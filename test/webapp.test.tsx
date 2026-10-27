@@ -406,7 +406,39 @@ describe('needs-ui', () => {
     expect(container.textContent).not.toContain('demo-4');
     expect(container.textContent).toContain('demo:demo-orchestrator');
     expect(container.textContent).toContain('demo:fixer');
-    expect(container.textContent).toContain('attach: tmux -L hive-v2 attach -t hive:demo:demo-orchestrator');
+    expect(container.textContent).toContain('attach: tmux -L hive-v2 attach');
+    expect(container.textContent).not.toContain('select-pane');
+  });
+
+  it('attaches to the verified live pane for an aliased project', async () => {
+    mountWith({
+      ...VIEW,
+      projects: [{
+        ...VIEW.projects[0],
+        name: 'simplification-agent',
+        orchestrator: { state: 'running', question: false, name: 'citadel-orchestrator', pane: '%15' },
+      }],
+    });
+    await repoll();
+    const hints = [...container.querySelectorAll('div')].map((el) => el.textContent)
+      .filter((text) => text?.startsWith('attach: tmux'));
+    expect(hints).toEqual(['attach: tmux -L hive-v2 attach -t hive \\; select-window -t %15 \\; select-pane -t %15']);
+    expect(container.textContent).not.toContain('hive:simplification-agent:citadel-orchestrator');
+  });
+
+  it.each(['unknown', 'stopped'] as const)('uses the generic attach hint for a %s pane', async (state) => {
+    mountWith({
+      ...VIEW,
+      projects: [{
+        ...VIEW.projects[0],
+        orchestrator: { state, question: false, name: 'citadel-orchestrator', pane: '%15' },
+      }],
+    });
+    await repoll();
+    const hints = [...container.querySelectorAll('div')].map((el) => el.textContent)
+      .filter((text) => text?.startsWith('attach: tmux'));
+    expect(hints).toEqual(['attach: tmux -L hive-v2 attach']);
+    expect(container.textContent).not.toContain('select-pane');
   });
 
   it('a no-team project hides its checkpoint trail and keeps the generic attach hint', async () => {
