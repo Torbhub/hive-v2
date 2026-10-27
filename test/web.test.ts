@@ -459,12 +459,26 @@ describe('POST /api/project', () => {
     await fs.mkdir(path.join(home, '.git'), { recursive: true });
     const r = await post('/api/project', { name: 'newproj', path: home, mode: 'yolo', approvals: 'safe' });
     expect(r.status).toBe(200);
-    expect(await r.json()).toEqual({ ok: true, name: 'newproj' });
+    expect(await r.json()).toEqual({ ok: true, name: 'newproj', home });
     const view = await (await fetch(`${base}/api/view`)).json();
     const p = view.projects.find((x: { name: string }) => x.name === 'newproj');
     expect(p.home).toBe(home);
     expect(p.mode).toBe('yolo');
     expect(p.approvals).toBe('safe');
+  });
+
+  it('accepts a missing path and returns the allocated home', async () => {
+    const r = await post('/api/project', { name: 'autoapi' });
+    expect(r.status).toBe(200);
+    const home = path.join(root, 'autoapi');
+    expect(await r.json()).toEqual({ ok: true, name: 'autoapi', home });
+    expect((await fs.stat(path.join(home, '.git'))).isDirectory()).toBe(true);
+  });
+
+  it('refuses a source together with an explicit path', async () => {
+    const r = await post('/api/project', { name: 'badcombo', path: root, source: root });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/source.*path|path.*source/);
   });
 
   it('a worktree (a .git file, not a directory) registers too, with default mode and approvals', async () => {

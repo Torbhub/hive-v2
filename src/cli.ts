@@ -25,7 +25,7 @@ function validAgentRef(value: string): string {
 }
 
 const USAGE = `usage:
-  hive hub init|add <name> <path>|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note] [--checkpoints <json>]|progress <task> <cp> <started|ok|fail|skip> [note]|accept <task> <cp>
+  hive hub init|add <name> [path] [--source <path>]|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note] [--checkpoints <json>]|progress <task> <cp> <started|ok|fail|skip> [note]|accept <task> <cp>
   hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
   hive hub wake <project> | start <project> <task-id> | continue <project>
   hive spawn <project> --agent <name> [--role r] [--worktree wt] [--task id] [--model m] | respawn | close
@@ -80,10 +80,10 @@ async function hubCommand(args: string[]): Promise<void> {
       return;
     }
     case 'add': {
-      const [name, folder] = [args[1], args[2]];
-      if (!name || !folder) throw new UsageError('usage: hive hub add <name> <path>');
-      await hubAdd(root, validName('project', name), folder);
-      console.log(`hive: project ${name} added (${folder})`);
+      const { flags: f, pos } = parseFlags(args.slice(1), ['source']);
+      const [name, folder = ''] = pos;
+      if (!name || pos.length > 2 || (folder && f.source !== undefined)) throw new UsageError('usage: hive hub add <name> [path] [--source <path>]');
+      console.log(`hive: project ${name} added (${(await hubAdd(root, validName('project', name), folder, str(f.source))).home})`);
       return;
     }
     case 'status': {

@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -20,9 +22,9 @@ describe('checkName', () => {
 });
 
 describe('cli boundary', () => {
-  function cli(args: string[]) {
+  function cli(args: string[], cwd = root) {
     const tsx = path.join(root, 'node_modules', '.bin', 'tsx');
-    return spawnSync(tsx, [path.join(root, 'src', 'cli.ts'), ...args], { encoding: 'utf8', cwd: root });
+    return spawnSync(tsx, [path.join(root, 'src', 'cli.ts'), ...args], { encoding: 'utf8', cwd });
   }
 
   it('rejects a bad project name before doing anything', () => {
@@ -47,5 +49,19 @@ describe('cli boundary', () => {
     const r = cli(['hub', 'answer', 'demo', '--choice', '--seen', 'x']);
     expect(r.status).toBe(64);
     expect(r.stderr).toMatch(/--choice needs a value/);
+  });
+
+  it('adds a name-only project and prints its actual home', () => {
+    const hub = mkdtempSync(path.join(tmpdir(), 'hive-cli-add-'));
+    const r = cli(['hub', 'add', 'fresh'], hub);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(`hive: project fresh added (${path.join(hub, 'fresh')})`);
+  });
+
+  it('rejects --source with an explicit path', () => {
+    const hub = mkdtempSync(path.join(tmpdir(), 'hive-cli-add-bad-'));
+    const r = cli(['hub', 'add', 'fresh', hub, '--source', hub], hub);
+    expect(r.status).toBe(64);
+    expect(r.stderr).toMatch(/source.*path|path.*source/);
   });
 });

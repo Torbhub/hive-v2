@@ -32,6 +32,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: jj-cli
       - run: npm test
       - run: npm run build
       - name: Discipline ratchet — god-file line counts

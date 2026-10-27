@@ -20,13 +20,23 @@ Needs: Node 20+, tmux, git, the kimi CLI, and a running teamkimi proxy
 
 ```bash
 hive hub init                     # record this folder as your hub root
-hive hub add demo ~/src/demo      # a project = a name + a folder with a git repo
+hive hub add demo ~/src/demo      # register an existing folder
+hive hub add fresh                # create an empty Git repo at ./fresh
+hive hub add copy --source demo   # create a workspace from a local source
 hive hub task demo "add a /health endpoint"
 hive ui                           # the hub screen: what waits on you
 hive hub start demo demo-1        # bring the orchestrator up on a task
 hive doctor                       # preflight: is this box ready for a task
 hive gate --log g.log -- build "npm run build" test "npm test"
 ```
+
+A name-only add creates `<hub-root>/<name>`. If that path exists, hive adds an
+8-character hex suffix. A source can be a JJ repository or a plain Git
+repository. JJ sources create a workspace from `main@origin`, `main`, or `@`.
+Plain Git sources create a detached worktree from `HEAD`. The new home does
+not inherit `.hive` state. `--source` requires a blank path. Every add prints
+the actual home. Explicit paths cannot name a canonical home that is already
+registered.
 
 Everything else (`wake`, `continue`, `dialog`, `answer`, `spawn`, `cleanup`,
 `push`, `gate-verify`) is one `--help`-less usage line away: run `hive` with

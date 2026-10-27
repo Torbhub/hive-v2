@@ -9,12 +9,12 @@ import {
   capturePane, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep,
 } from './tmux.js';
 import { lines, parseDialog, scrapeContext } from './screen.js';
-import { PROJECT_NAME_RE } from './names.js';
 import {
   appendDecision, appendTaskEvent, clearPendingPane, extractCommand, foldTasks, hivePath, hubPath,
   nextTaskId, readPendingPane, readProjects, readTaskEvents, readTeam, Refusal, withHubLock, writePendingPane,
   writeProjects, writeJson, readJson, type ProjectsFile,
 } from './state.js';
+import { addProject } from './project.js';
 import { orchestratorName, typeLine } from './spawn.js';
 import { planVerdict } from './taskgate.js';
 import { taskScope } from './scope.js';
@@ -32,17 +32,10 @@ export async function hubInit(root: string, name = 'hub'): Promise<void> {
   await writeProjects(root, pf);
 }
 
-export async function hubAdd(root: string, name: string, folder: string): Promise<void> {
-  if (!PROJECT_NAME_RE.test(name)) {
-    throw new Error(`a project name is lowercase letters, digits, '-': ${name}`);
-  }
-  const home = path.resolve(root, folder);
-  const st = await fs.stat(home).catch(() => null);
-  if (!st?.isDirectory()) throw new Error(`not a folder: ${home}`);
-  const pf = await readProjects(root);
-  if (pf.projects.some((p) => p.name === name)) throw new Error(`a project named ${name} exists`);
-  pf.projects.push({ name, home, repos: [{ folder: home }] });
-  await writeProjects(root, pf);
+export async function hubAdd(
+  root: string, name: string, folder = '', source?: string,
+): Promise<{ ok: true; name: string; home: string }> {
+  return addProject(root, name, folder, { legacy: true, source });
 }
 
 export async function setProjectMode(root: string, project: string, mode: string): Promise<ProjectMode> {

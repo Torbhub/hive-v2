@@ -461,6 +461,93 @@ describe('needs-ui', () => {
   });
 });
 
+describe('add project row', () => {
+  const repoView: HubView = {
+    ...VIEW,
+    projects: [{
+      ...VIEW.projects[0],
+      repos: [
+        { folder: '/r/demo', kind: 'repo' },
+        { folder: '/r/demo-lane', kind: 'worktree' },
+        { folder: '/r/plain', kind: 'folder' },
+      ],
+    }],
+  };
+
+  function button(text: string): HTMLButtonElement {
+    return [...container.querySelectorAll('button')].find((b) => b.textContent === text) as HTMLButtonElement;
+  }
+
+  function typeInto(input: HTMLInputElement, text: string): void {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+    act(() => {
+      setter.call(input, text);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  beforeEach(async () => {
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      if (String(input).endsWith('api/view')) {
+        return Promise.resolve(new Response(JSON.stringify(repoView), { status: 200 }));
+      }
+      return new Promise<Response>((resolve) => { resolveAction = resolve; });
+    });
+    await act(async () => {
+      button('refresh').click();
+    });
+  });
+
+  it('offers registered repositories and submits a name with an empty source by default', async () => {
+    const source = container.querySelector('select[aria-label="new project source"]') as HTMLSelectElement;
+    expect([...source.options].map((o) => o.textContent)).toEqual([
+      'empty Git repository', '/r/demo', '/r/demo-lane',
+    ]);
+    expect(source.value).toBe('');
+    typeInto(container.querySelector('input[aria-label="new project name"]') as HTMLInputElement, 'fresh');
+    expect(button('Add project').disabled).toBe(false);
+    act(() => button('Add project').click());
+    const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/project'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({ name: 'fresh', path: '', source: '' });
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true, name: 'fresh', home: '/r/fresh' }), { status: 200 }));
+    });
+    expect(container.textContent).toContain('fresh: project added (/r/fresh)');
+    expect((container.querySelector('input[aria-label="new project name"]') as HTMLInputElement).value).toBe('');
+  });
+
+  it('keeps explicit-path submission unchanged and hides the source selector', async () => {
+    typeInto(container.querySelector('input[aria-label="new project name"]') as HTMLInputElement, 'existing');
+    typeInto(container.querySelector('input[aria-label="new project path"]') as HTMLInputElement, '/r/existing');
+    expect(container.querySelector('select[aria-label="new project source"]')).toBeNull();
+    act(() => button('Add project').click());
+    const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/project'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({ name: 'existing', path: '/r/existing' });
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true, name: 'existing', home: '/r/existing' }), { status: 200 }));
+    });
+  });
+
+  it('keeps the name, path, and source draft after an error', async () => {
+    const name = container.querySelector('input[aria-label="new project name"]') as HTMLInputElement;
+    const folder = container.querySelector('input[aria-label="new project path"]') as HTMLInputElement;
+    const source = container.querySelector('select[aria-label="new project source"]') as HTMLSelectElement;
+    typeInto(name, 'fresh');
+    act(() => {
+      source.value = '/r/demo-lane';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    act(() => button('Add project').click());
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: false, detail: 'workspace failed' }), { status: 400 }));
+    });
+    expect(name.value).toBe('fresh');
+    expect(folder.value).toBe('');
+    expect(source.value).toBe('/r/demo-lane');
+    expect(container.textContent).toContain('workspace failed');
+  });
+});
+
 describe('project delete button', () => {
   const noTeamView: HubView = {
     ...VIEW,

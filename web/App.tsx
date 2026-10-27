@@ -184,10 +184,11 @@ export function App() {
     });
   }, [act]);
 
-  const onAddProject = useCallback(async (name: string, folder: string): Promise<boolean> => {
+  const onAddProject = useCallback(async (name: string, folder: string, source: string): Promise<boolean> => {
     return act('add-project', name, 'adding', name, async () => {
-      await post('api/project', { name, path: folder });
-      return `${name}: project added`;
+      const body = folder ? { name, path: folder } : { name, path: '', source };
+      const j = await post('api/project', body);
+      return `${name}: project added (${String(j.home)})`;
     });
   }, [act]);
 
@@ -243,6 +244,9 @@ export function App() {
   const where = homeTilde(view.root, '');
   const clock = view.updatedAt ? new Date(view.updatedAt).toTimeString().slice(0, 5) : 'reading…';
   const needs = buildNeeds(view, now);
+  const sources = [...new Set(view.projects.flatMap((p) =>
+    p.repos.filter((r) => r.kind === 'repo' || r.kind === 'worktree').map((r) => r.folder),
+  ))];
 
   return (
     <ActionContext.Provider value={{ acting, pressed }}>
@@ -333,7 +337,7 @@ export function App() {
             />
           ))}
 
-          <AddProjectRow onAddProject={onAddProject} />
+          <AddProjectRow sources={sources} onAddProject={onAddProject} />
 
           <footer className="flex items-center justify-between pt-1">
             <span className="flex items-center gap-3 text-xs text-zinc-500">

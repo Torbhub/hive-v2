@@ -85,6 +85,26 @@ describe('buildStatus pane identity', () => {
   });
 });
 
+describe('hubAdd', () => {
+  it('keeps legacy explicit folders and returns the resolved home', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hive-hub-add-'));
+    const home = path.join(root, 'plain');
+    await fs.mkdir(home, { recursive: true });
+    await hubInit(root);
+    const result = await hubAdd(root, 'plain', 'plain');
+    expect(result).toEqual({ ok: true, name: 'plain', home });
+    await expect(hubAdd(root, 'alias', path.join(root, '.', 'plain'))).rejects.toThrow(/already registered/);
+  });
+
+  it('allocates an empty repository for a name-only add', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hive-hub-add-auto-'));
+    await hubInit(root);
+    const result = await hubAdd(root, 'fresh');
+    expect(result.home).toBe(path.join(root, 'fresh'));
+    expect((await fs.stat(path.join(result.home, '.git'))).isDirectory()).toBe(true);
+  });
+});
+
 describe('hubTask', () => {
   it('allocates distinct ids under a concurrent storm', async () => {
     const { root } = await setup();
