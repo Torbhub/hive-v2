@@ -83,19 +83,22 @@ export function MessageRow({
 }
 
 export function AddProjectRow({
-  onAddProject,
+  sources, onAddProject,
 }: {
-  onAddProject: (name: string, path: string) => Promise<boolean>;
+  sources: string[];
+  onAddProject: (name: string, path: string, source: string) => Promise<boolean>;
 }) {
   const [name, setName] = useState('');
   const [folder, setFolder] = useState('');
+  const [source, setSource] = useState('');
   const submit = async () => {
     const n = name.trim();
     const p = folder.trim();
-    if (!n || !p) return;
-    if (await onAddProject(n, p)) {
+    if (!n) return;
+    if (await onAddProject(n, p, p ? '' : source)) {
       setName('');
       setFolder('');
+      setSource('');
     }
   };
   const onEnter = (e: React.KeyboardEvent) => {
@@ -105,7 +108,7 @@ export function AddProjectRow({
     }
   };
   return (
-    <div className="mt-2 flex gap-2 border-t border-zinc-800 pt-2.5">
+    <div className="mt-2 flex flex-wrap gap-2 border-t border-zinc-800 pt-2.5">
       <Input
         className="w-36 font-mono text-xs"
         value={name}
@@ -117,15 +120,26 @@ export function AddProjectRow({
       <Input
         className="flex-1 font-mono text-xs"
         value={folder}
-        placeholder="/absolute/path"
+        placeholder="/absolute/path or blank"
         aria-label="new project path"
         onChange={(e) => setFolder(e.target.value)}
         onKeyDown={onEnter}
       />
+      {!folder.trim() && (
+        <select
+          className="flex-1 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-xs text-zinc-100"
+          value={source}
+          aria-label="new project source"
+          onChange={(e) => setSource(e.target.value)}
+        >
+          <option value="">empty Git repository</option>
+          {sources.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      )}
       <Btn
         id="add-project"
         variant="primary"
-        disabled={!name.trim() || !folder.trim()}
+        disabled={!name.trim()}
         onPress={() => void submit()}
       >
         Add project

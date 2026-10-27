@@ -90,6 +90,17 @@ Work folder (hub root), holds `.hive-hub/`:
   watch auto-approvals/wakes, orchestrator `decided` events.
 - `hub.json` — the hub's own name (written by `hive hub init`).
 
+Registration runs under the hub lock. An explicit path registers its canonical
+folder and refuses a duplicate canonical home. Hive checks the folder identity
+again before the registry write. A blank path allocates `<root>/<name>` or
+`<name>-<8 hex>` without reusing an existing or registered path. A source must
+be the canonical root of its repository. With no source, hive creates an empty
+Git repository. A JJ source creates a workspace from `main@origin`, `main`, or
+`@`. A plain Git source creates a detached worktree from `HEAD`. New homes do
+not inherit `.hive` state. Every Git and JJ child process has a 30-second
+timeout. A failed create deregisters and removes only newly allocated state.
+Cleanup checks directory identity and leaves a changed path in place.
+
 Per project, `<project>/.hive/`:
 
 - `team.json` — one entry per agent: name, tmux target, pane pid +
@@ -105,7 +116,7 @@ Per project, `<project>/.hive/`:
 ## Commands (the whole surface)
 
 ```
-hive hub init|add <name> <path>|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note]
+hive hub init|add <name> [path] [--source <path>]|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note]
 hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
 hive hub plan-answer <project> <task-id> <approve|sendback> [feedback]
 hive hub wake <project> | start <project> <task-id> | continue <project>

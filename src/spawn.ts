@@ -228,7 +228,7 @@ export async function findLatestSession(cwd: string, agent?: string): Promise<st
 async function projectEntry(root: string, project: string): Promise<ProjectsFile['projects'][number]> {
   const pf = await readProjects(root);
   const p = pf.projects.find((x) => x.name === project);
-  if (!p) throw new Error(`unknown project: ${project} (add it with: hive hub add ${project} <path>)`);
+  if (!p) throw new Error(`unknown project: ${project} (add it with: hive hub add ${project} [path])`);
   return p;
 }
 
