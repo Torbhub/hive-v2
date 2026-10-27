@@ -61,13 +61,29 @@ import { removeProject } from '../src/project.js';
 import { appendTaskEvent, hivePath, manifestRead, readDecisions, readProjects, readTeam, writeJson, writeProjects } from '../src/state.js';
 import { capturePane, killWindow, newWindow, paneIs, run, sendArrow, sendEnter, sendLiteral } from '../src/tmux.js';
 
+function spawn(root: string, opts: Parameters<typeof spawnAgent>[2]): Promise<string> {
+  return spawnAgent(root, 'demo', {
+    assignment: 'Complete the bounded test assignment in the requested files.',
+    deliverable: 'Return the named artifact and its verification evidence to the orchestrator.',
+    ...opts,
+  });
+}
+
 async function setup(teamEntry: Record<string, unknown>) {
   const root = mkdtempSync(path.join(tmpdir(), 'hive-spawn-'));
   const home = path.join(root, 'demo');
   await fs.mkdir(home, { recursive: true });
   await hubInit(root);
   await hubAdd(root, 'demo', home);
-  await writeJson(hivePath(home, 'team.json'), { agents: [teamEntry] });
+  const entry = { ...teamEntry };
+  if (!entry.orchestrator) {
+    entry.handoff = entry.handoff === true || entry.handoff === undefined
+      ? hivePath(home, 'handoffs', `${String(entry.name)}.md`)
+      : entry.handoff;
+    await fs.mkdir(path.dirname(String(entry.handoff)), { recursive: true });
+    await fs.writeFile(String(entry.handoff), '# worker handoff\n\n## START HERE\n### Assignment\nComplete the bounded test assignment in the requested files.\n\n### Deliverable\nReturn the named artifact and verification evidence to the orchestrator.\n');
+  }
+  await writeJson(hivePath(home, 'team.json'), { agents: [entry] });
   return { root, home };
 }
 
@@ -121,7 +137,7 @@ describe('respawnAgent', () => {
 describe('spawnAgent', () => {
   it('types the absolute hub decisions path into the worker pickup', async () => {
     const { root } = await setup({ name: 'builder' });
-    await spawnAgent(root, 'demo', { agent: 'builder2' });
+    await spawn(root, { agent: 'builder2' });
     const typed = vi.mocked(sendLiteral).mock.calls.at(-1)?.[1];
     expect(typed).toContain(`Decisions so far: read ${path.join(root, '.hive-hub', 'decisions.jsonl')} — they are permanent.`);
     expect(typed).not.toContain('read .hive-hub/decisions.jsonl');
@@ -130,14 +146,14 @@ describe('spawnAgent', () => {
   it('rejects a bad --model before any side effect', async () => {
     const { root } = await setup({ name: 'builder' });
     const runs = vi.mocked(run).mock.calls.length;
-    await expect(spawnAgent(root, 'demo', { agent: 'builder2', model: 'bad model' })).rejects.toThrow(/model alias/);
+    await expect(spawn(root, { agent: 'builder2', model: 'bad model' })).rejects.toThrow(/model alias/);
     expect(vi.mocked(run).mock.calls).toHaveLength(runs);
   }, 20_000);
 
   it('places a default jj lane under .hive/lanes instead of the repo root', async () => {
     const { root, home } = await setup({ name: 'builder' });
     const wt = hivePath(home, 'lanes', 'builder2');
-    await spawnAgent(root, 'demo', { agent: 'builder2' });
+    await spawn(root, { agent: 'builder2' });
     const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[2] === home && c[1].includes('add'));
     expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', wt, '-r', 'main@origin']);
     const recs = (await manifestRead(home)).filter((r) => r.kind === 'jj-workspace');
@@ -155,7 +171,7 @@ describe('spawnAgent', () => {
       ? { code: 1, stdout: '', stderr: 'fatal: not a git repository' }
       : { code: 0, stdout: '', stderr: '' });
     try {
-      await expect(spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' })).resolves.toBe('%9');
+      await expect(spawn(root, { agent: 'builder2', worktree: 'lane' })).resolves.toBe('%9');
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
@@ -180,7 +196,7 @@ describe('spawnAgent', () => {
       ? { code: 1, stdout: '', stderr: 'fatal: not a git repository' }
       : { code: 0, stdout: '', stderr: '' });
     try {
-      await expect(spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' })).resolves.toBe('%9');
+      await expect(spawn(root, { agent: 'builder2', worktree: 'lane' })).resolves.toBe('%9');
       expect(error).toHaveBeenCalledWith(expect.stringContaining('hive: the decision was not logged:'));
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
@@ -199,7 +215,7 @@ describe('spawnAgent', () => {
       ? { code: 1, stdout: '', stderr: 'no jj here' }
       : { code: 0, stdout: '', stderr: '' });
     try {
-      await spawnAgent(root, 'demo', { agent: 'builder2' });
+      await spawn(root, { agent: 'builder2' });
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
@@ -215,7 +231,7 @@ describe('spawnAgent', () => {
       ? { code: 1, stdout: '', stderr: 'no repository here' }
       : { code: 0, stdout: '', stderr: '' });
     try {
-      await spawnAgent(root, 'demo', { agent: 'builder2' });
+      await spawn(root, { agent: 'builder2' });
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
@@ -229,7 +245,7 @@ describe('spawnAgent', () => {
   it('preserves an absolute --worktree path', async () => {
     const { root, home } = await setup({ name: 'builder' });
     const wt = path.join(root, 'absolute-lane');
-    await spawnAgent(root, 'demo', { agent: 'builder2', worktree: wt });
+    await spawn(root, { agent: 'builder2', worktree: wt });
     const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[2] === home && c[1].includes('add'));
     expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', wt, '-r', 'main@origin']);
     expect((await readTeam(home)).agents.find((a) => a.name === 'builder2')?.worktree).toBe(wt);
@@ -237,7 +253,7 @@ describe('spawnAgent', () => {
 
   it('lanes into a jj workspace when jj root answers in the project home', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    await spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' });
+    await spawn(root, { agent: 'builder2', worktree: 'lane' });
     const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[2] === home && c[1].includes('add'));
     expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', path.join(home, 'lane'), '-r', 'main@origin']);
     const recs = (await manifestRead(home)).filter((r) => r.kind === 'jj-workspace');
@@ -253,7 +269,7 @@ describe('spawnAgent', () => {
       ? { code: 1, stdout: '', stderr: 'no jj here' }
       : { code: 0, stdout: '', stderr: '' });
     try {
-      await spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' });
+      await spawn(root, { agent: 'builder2', worktree: 'lane' });
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
@@ -274,7 +290,7 @@ describe('spawnAgent', () => {
       return { code: 0, stdout: '', stderr: '' };
     });
     try {
-      await spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lanes/chunk-1' });
+      await spawn(root, { agent: 'builder2', worktree: 'lanes/chunk-1' });
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
@@ -288,7 +304,7 @@ describe('spawnAgent', () => {
   it('forgets the jj workspace when the launch fails after it was made', async () => {
     const { root, home } = await setup({ name: 'builder' });
     vi.mocked(newWindow).mockRejectedValueOnce(new Error('tmux down'));
-    await expect(spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' })).rejects.toThrow('tmux down');
+    await expect(spawn(root, { agent: 'builder2', worktree: 'lane' })).rejects.toThrow('tmux down');
     const forget = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1].includes('forget'));
     expect(forget?.[1]).toEqual(['-R', home, 'workspace', 'forget', 'lane']);
     expect(await fs.stat(path.join(home, 'lane')).catch(() => null)).toBeNull();
@@ -305,7 +321,7 @@ describe('spawnAgent', () => {
       return { code: 0, stdout: '', stderr: '' };
     });
     try {
-      await expect(spawnAgent(root, 'demo', { agent: 'builder2', worktree: 'lane' })).rejects.toThrow(/jj workspace add failed/);
+      await expect(spawn(root, { agent: 'builder2', worktree: 'lane' })).rejects.toThrow(/jj workspace add failed/);
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
@@ -327,7 +343,7 @@ describe('spawnAgent', () => {
       await release;
       return '%9';
     });
-    const spawning = spawnAgent(root, 'demo', { agent: 'builder2' });
+    const spawning = spawn(root, { agent: 'builder2' });
     try {
       await entered;
       await expect(removeProject(root, 'demo')).rejects.toThrow(/launch is pending/);
@@ -350,7 +366,7 @@ describe('spawnAgent', () => {
       await release;
       return '%9';
     });
-    const spawning = spawnAgent(root, 'demo', { agent: 'builder2' });
+    const spawning = spawn(root, { agent: 'builder2' });
     try {
       await entered;
       await writeProjects(root, { projects: [] });
@@ -420,8 +436,11 @@ describe('wakeAgent', () => {
     await fs.mkdir(home, { recursive: true });
     await hubInit(root);
     await hubAdd(root, 'demo', home);
+    const handoff = hivePath(home, 'handoffs', 'builder.md');
+    await fs.mkdir(path.dirname(handoff), { recursive: true });
+    await fs.writeFile(handoff, '# worker handoff\n\n## START HERE\n### Assignment\nComplete the bounded test assignment in the requested files.\n\n### Deliverable\nReturn the named artifact and verification evidence to the orchestrator.\n');
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b' }],
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b', handoff }],
     });
     vi.mocked(paneIs).mockResolvedValueOnce(false);
     await wakeAgent(root, 'demo', 'builder');
@@ -551,12 +570,75 @@ async function approvePlan(root: string, id: string): Promise<void> {
   });
 }
 
+describe('worker output contracts', () => {
+  const contract = {
+    assignment: 'Audit cleanup queues and dead-code candidates in the citadel repo.',
+    deliverable: 'Write .hive/citadel-audit.md with cited findings and report it to the orchestrator.',
+  };
+
+  it('rejects a missing contract before preflight, registration, worktrees, or panes', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const runs = vi.mocked(run).mock.calls.length;
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    await expect(spawnAgent(root, 'demo', { agent: 'builder2' })).rejects.toThrow(/assignment and deliverable/);
+    expect(vi.mocked(run).mock.calls).toHaveLength(runs);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+    expect((await readTeam(home)).agents.some((a) => a.name === 'builder2')).toBe(false);
+    expect(existsSync(hivePath(home, 'lanes', 'builder2'))).toBe(false);
+  });
+
+  it('persists the contract and starts the worker from it instead of waiting for a brief', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    await spawn(root, { agent: 'builder2', ...contract });
+    const handoff = await fs.readFile(hivePath(hivePath(home, 'lanes', 'builder2'), 'handoffs', 'builder2.md'), 'utf8');
+    expect(handoff).toContain(`### Assignment\n${contract.assignment}`);
+    expect(handoff).toContain(`### Deliverable\n${contract.deliverable}`);
+    const typed = vi.mocked(sendLiteral).mock.calls.at(-1)?.[1];
+    expect(typed).toContain('Start with the Assignment and Deliverable');
+    expect(typed).not.toContain('wait for its first message');
+  }, 20_000);
+
+  it('refuses to respawn a generic legacy handoff before killing the pane', async () => {
+    const { root, home } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier',
+      handoff: true,
+    });
+    await fs.writeFile(hivePath(home, 'handoffs', 'builder.md'), '# builder handoff\n\n## START HERE\nYou were just spawned. Wait for the first message.\n');
+    const kills = vi.mocked(killWindow).mock.calls.length;
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow(/Assignment and Deliverable/);
+    expect(vi.mocked(killWindow).mock.calls).toHaveLength(kills);
+  });
+
+  it('repairs a legacy handoff on explicit respawn and retains it for later wakes', async () => {
+    const { root, home } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier',
+      handoff: true, session_id: 'session_b',
+    });
+    await fs.writeFile(hivePath(home, 'handoffs', 'builder.md'), '# builder handoff\n\n## START HERE\nWait for a message.\n');
+    await respawnAgent(root, 'demo', 'builder', contract);
+    const handoff = await fs.readFile(hivePath(home, 'handoffs', 'builder.md'), 'utf8');
+    expect(handoff).toContain(`### Assignment\n${contract.assignment}`);
+    expect(handoff).toContain(`### Deliverable\n${contract.deliverable}`);
+  }, 20_000);
+
+  it('refuses to wake a worker whose persisted contract is invalid', async () => {
+    const { root, home } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b',
+      handoff: true,
+    });
+    await fs.writeFile(hivePath(home, 'handoffs', 'builder.md'), '# builder handoff\n\n## START HERE\nWait for a message.\n');
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/Assignment and Deliverable/);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+  });
+});
+
 describe('spawn gate', () => {
   it('refuses a worker spawn on a task with no approved plan, before any side effect', async () => {
     const { root, home } = await setup({ name: 'builder' });
     const id = await hubTask(root, 'demo', 'do it');
     const windows = vi.mocked(newWindow).mock.calls.length;
-    await expect(spawnAgent(root, 'demo', { agent: 'worker1', task: id })).rejects.toThrow(/no approved plan/);
+    await expect(spawn(root, { agent: 'worker1', task: id })).rejects.toThrow(/no approved plan/);
     expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
     expect((await readTeam(home)).agents.some((a) => a.name === 'worker1')).toBe(false);
   });
@@ -565,7 +647,7 @@ describe('spawn gate', () => {
     const { root } = await setup({ name: 'builder' });
     const id = await hubTask(root, 'demo', 'do it');
     await approvePlan(root, id);
-    const pane = await spawnAgent(root, 'demo', { agent: 'worker1', task: id });
+    const pane = await spawn(root, { agent: 'worker1', task: id });
     expect(pane).toBe('%9');
   }, 20_000);
 
@@ -584,14 +666,14 @@ describe('spawn gate', () => {
 describe('spawn parent', () => {
   it('stamps opts.parent, else the pane env, else nothing', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    await spawnAgent(root, 'demo', { agent: 'w1', parent: 'demo-orchestrator' });
+    await spawn(root, { agent: 'w1', parent: 'demo-orchestrator' });
     vi.stubEnv('HIVE_AGENT', 'demo-orchestrator');
     try {
-      await spawnAgent(root, 'demo', { agent: 'w2' });
+      await spawn(root, { agent: 'w2' });
     } finally {
       vi.unstubAllEnvs();
     }
-    await spawnAgent(root, 'demo', { agent: 'w3' });
+    await spawn(root, { agent: 'w3' });
     const team = await readTeam(home);
     expect(team.agents.find((a) => a.name === 'w1')?.parent).toBe('demo-orchestrator');
     expect(team.agents.find((a) => a.name === 'w2')?.parent).toBe('demo-orchestrator');
@@ -605,7 +687,7 @@ describe('trust dialog at spawn', () => {
     let calls = 0;
     vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? TRUST_MENU : IDLE));
     try {
-      const pane = await spawnAgent(root, 'demo', { agent: 'builder2' });
+      const pane = await spawn(root, { agent: 'builder2' });
       expect(pane).toBe('%9');
       expect(vi.mocked(sendArrow).mock.calls).toEqual([]);
       expect(vi.mocked(sendEnter).mock.calls.length).toBeGreaterThanOrEqual(1);
@@ -620,7 +702,7 @@ describe('trust dialog at spawn', () => {
     vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? TRUST_MENU_2 : IDLE));
     vi.mocked(sendArrow).mockClear();
     try {
-      await spawnAgent(root, 'demo', { agent: 'builder2' });
+      await spawn(root, { agent: 'builder2' });
       expect(vi.mocked(sendArrow).mock.calls).toEqual([['%9', 'Down']]);
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
@@ -634,7 +716,7 @@ describe('trust dialog at spawn', () => {
     const typed = vi.mocked(sendLiteral).mock.calls.length;
     vi.mocked(capturePane).mockImplementation(async () => (++calls === 1 ? PERMISSION : IDLE));
     try {
-      await expect(spawnAgent(root, 'demo', { agent: 'builder2' })).resolves.toBe('%9');
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
       expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(1);
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
@@ -649,7 +731,7 @@ describe('trust dialog at spawn', () => {
     const entered = vi.mocked(sendEnter).mock.calls.length;
     vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? TRUST_MENU : IDLE));
     try {
-      await expect(spawnAgent(root, 'demo', { agent: 'builder2' })).resolves.toBe('%9');
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
       expect(vi.mocked(sendEnter).mock.calls.slice(entered)).toContainEqual(['%9']);
       expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(1);
     } finally {
@@ -677,7 +759,7 @@ describe('trust dialog at spawn', () => {
     const typed = vi.mocked(sendLiteral).mock.calls.length;
     vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
     try {
-      await expect(spawnAgent(root, 'demo', { agent: 'builder2' })).rejects.toThrow(/answer it in the pane, then respawn/);
+      await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow(/answer it in the pane, then respawn/);
       expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(0);
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);

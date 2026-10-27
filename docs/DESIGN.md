@@ -107,8 +107,11 @@ Per project, `<project>/.hive/`:
   starttime (identity is pid+starttime, never the bare `%N`), worktree,
   session resume info, handoff path. Orchestrator included.
 - `team/<agent>/role.md`, `team/<agent>/RULES.md` — copies made at spawn.
-- `handoffs/<agent>.md` — the agent's persistent memory; the agent updates
-  its START HERE block. Rotation and restarts work because of this file.
+- `handoffs/<agent>.md` — the agent's persistent memory. Worker START HERE
+  blocks carry Assignment and Deliverable sections. Fresh launch validates and
+  writes them before any side effect. Respawn and wake validate them before
+  killing or creating a pane. Explicit respawn can repair both fields. The
+  agent updates progress without removing those sections.
 - `manifest.jsonl` — typed records of what hive-v2 created (`worktree`,
   `tmux`, `process`). Cleanup acts only on the manifest and trashes instead
   of deleting.
@@ -120,7 +123,7 @@ hive hub init|add <name> [path] [--source <path>]|status [--json]|tasks [--json]
 hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
 hive hub plan-answer <project> <task-id> <approve|sendback> [feedback]
 hive hub wake <project> | start <project> <task-id> | continue <project>
-hive spawn <project> --agent <name> [--role r] [--worktree wt] | respawn | close
+hive spawn <project> --agent <name> --assignment <text> --deliverable <text> [--role r] [--worktree wt] | respawn [--assignment <text> --deliverable <text>] | close
 hive gate --log <path> -- <name> <cmd>... | gate-verify log <path> [--commit sha] | gate-verify commits <base>..<tip>
 hive push <remote> <sha> <branch>        — fast-forward only, by full hash
 hive cleanup <project> [--dry-run]

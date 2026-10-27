@@ -137,7 +137,11 @@ yourself:
 ```bash
 tmux -L hive-v2 attach
 ```
-3. The orchestrator plans, asks, and spawns agents (`hive spawn`). With
+3. The orchestrator plans, asks, and spawns agents (`hive spawn`). Every
+   worker needs `--assignment <text>` and `--deliverable <text>`. These name
+   its concrete slice and the artifact required back. hive persists both in
+   the handoff before launch and refuses a launch or relaunch without them.
+   Explicit respawn can repair a legacy handoff with both options. With
    `--task <id>` the spawn binds the agent to a task whose brief claims a
    file scope. hive refuses the spawn when the scope overlaps another live
    agent's task scope, and when either brief's scope does not parse. Two

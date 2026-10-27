@@ -44,7 +44,7 @@ export function pickupLine(root: string, project: string, agent: string): string
   if (agent === orchestratorName(project)) {
     return `You are ${agent}, the orchestrator of project ${project}. Read .hive/handoffs/${agent}.md from the top: its START HERE block is your prompt. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. The owner talks to you only through the hub: report plans, questions, blockers and finished work to it.${decisions}`;
   }
-  return `You are ${agent} of project ${project}. Read .hive/handoffs/${agent}.md from the top: its START HERE block is your prompt. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. Report to the orchestrator; wait for its first message.${decisions}`;
+  return `You are ${agent} of project ${project}. Read .hive/handoffs/${agent}.md from the top. Start with the Assignment and Deliverable in START HERE. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. Report the required deliverable to the orchestrator.${decisions}`;
 }
 
 export async function ensureAgentFiles(projectHome: string, agent: string, role: string): Promise<void> {
@@ -254,7 +254,53 @@ async function requireApprovedPlan(root: string, task: string): Promise<void> {
   }
 }
 
-export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string; model?: string; parent?: string };
+export type WorkerContract = { assignment: string; deliverable: string };
+export type SpawnOptions = {
+  agent: string;
+  role?: string;
+  worktree?: string;
+  task?: string;
+  model?: string;
+  parent?: string;
+  assignment?: string;
+  deliverable?: string;
+};
+
+function checkWorkerContract(contract: Partial<WorkerContract>): asserts contract is WorkerContract {
+  for (const field of ['assignment', 'deliverable'] as const) {
+    const value = contract[field];
+    if (typeof value !== 'string' || value.trim().length < 12 || value.length > 8000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)) {
+      throw new Error('a worker needs an assignment and deliverable (12-8000 characters each, no control characters)');
+    }
+    if (/you were just spawned|wait for (?:the |its )?first message/i.test(value)) {
+      throw new Error('a worker assignment and deliverable must name concrete work, not a request for another brief');
+    }
+  }
+}
+
+function handoffText(contract: WorkerContract): string {
+  return `### Assignment\n${contract.assignment.trim()}\n\n### Deliverable\n${contract.deliverable.trim()}\n\nReport the deliverable to the orchestrator. Do not ask the owner for a missing assignment.`;
+}
+
+async function writeWorkerContract(worktree: string, agent: string, contract: WorkerContract): Promise<string> {
+  checkWorkerContract(contract);
+  const file = hivePath(worktree, 'handoffs', `${agent}.md`);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, `# ${agent} handoff\n\n## START HERE\n${handoffText(contract)}\n`);
+  return file;
+}
+
+async function requireWorkerContract(old: TeamEntry, home: string): Promise<void> {
+  const file = old.handoff ?? hivePath(old.worktree ?? home, 'handoffs', `${old.name}.md`);
+  const text = await fs.readFile(file, 'utf8').catch(() => '');
+  const assignment = text.match(/^### Assignment\s*\n([\s\S]*?)(?=^### |\s*$)/m)?.[1];
+  const deliverable = text.match(/^### Deliverable\s*\n([\s\S]*?)(?=^### |\s*$)/m)?.[1];
+  try {
+    checkWorkerContract({ assignment, deliverable });
+  } catch {
+    throw new Error(`${old.name} needs Assignment and Deliverable sections in ${file}; repair them with explicit respawn options`);
+  }
+}
 
 // Prefer the remote tip; the fallbacks keep offline and master-based repos lane-able.
 async function jjBaseRev(home: string): Promise<string> {
@@ -283,6 +329,7 @@ function envParent(self: string): string | undefined {
 
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
   if (!AGENT_NAME_RE.test(opts.agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${opts.agent}`);
+  checkWorkerContract(opts);
   checkModel(opts.model);
   await preflight();
   return withLaunchClaim(root, project, (p) => spawnRegisteredAgent(root, p, opts));
@@ -356,6 +403,7 @@ async function spawnRegisteredAgent(
     worktree = wt;
 
     await ensureAgentFiles(worktree, agent, role);
+    await writeWorkerContract(worktree, agent, opts);
     if (task) {
       // Recall never blocks a spawn: memoryBlockFor fails open in 3s.
       const block = await memoryBlockFor(root, project, task);
@@ -459,12 +507,22 @@ async function relaunchRegisteredAgent(
   return pane;
 }
 
-export async function respawnAgent(root: string, project: string, agent: string): Promise<string> {
+export async function respawnAgent(
+  root: string, project: string, agent: string, options: Partial<WorkerContract> = {},
+): Promise<string> {
   const p = await projectEntry(root, project);
   const home = p.home;
   const team = await readTeam(home);
   const old = team.agents.find((a) => a.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
+  if (!old.orchestrator) {
+    if (options.assignment !== undefined || options.deliverable !== undefined) {
+      checkWorkerContract(options);
+      await writeWorkerContract(old.worktree ?? home, agent, options);
+    } else {
+      await requireWorkerContract(old, home);
+    }
+  }
   checkModel(old.model);
   await preflight();
   if (old.task && !old.orchestrator) await requireApprovedPlan(root, old.task);
@@ -490,6 +548,7 @@ export async function wakeAgent(root: string, project: string, agent: string): P
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   if (old.closed_at) throw new Error(`${agent} was closed on purpose at ${old.closed_at}; not waking it`);
   if (!old.session_id) throw new Error(`${agent} has no recorded session to resume; respawn it instead`);
+  if (!old.orchestrator) await requireWorkerContract(old, p.home);
   checkModel(old.model);
   await preflight();
   if (old.task && !old.orchestrator) await requireApprovedPlan(root, old.task);
