@@ -8,7 +8,7 @@ import {
 } from './tmux.js';
 import { classify, lines, parseDialog } from './screen.js';
 import {
-  appendDecision, foldTasks, hivePath, manifestAdd, readProjects, readTaskEvents, readTeam,
+  appendDecision, foldTasks, hivePath, hubPath, manifestAdd, readProjects, readTaskEvents, readTeam,
   removeTeamEntry, upsertTeamEntry, clearPendingPane, withTeamLock, writeJson, type ProjectsFile,
 } from './state.js';
 import type { Approvals, ProjectMode, TeamEntry } from './types.js';
@@ -39,8 +39,8 @@ export async function preflight(): Promise<void> {
   }
 }
 
-export function pickupLine(project: string, agent: string): string {
-  const decisions = ' Decisions so far: read .hive-hub/decisions.jsonl — they are permanent.';
+export function pickupLine(root: string, project: string, agent: string): string {
+  const decisions = ` Decisions so far: read ${hubPath(root, 'decisions.jsonl')} — they are permanent.`;
   if (agent === orchestratorName(project)) {
     return `You are ${agent}, the orchestrator of project ${project}. Read .hive/handoffs/${agent}.md from the top: its START HERE block is your prompt. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. The owner talks to you only through the hub: report plans, questions, blockers and finished work to it.${decisions}`;
   }
@@ -398,7 +398,7 @@ async function spawnRegisteredAgent(
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
       : `${pane} never went idle; nothing was typed`);
   }
-  await typeLine(pane, pickupLine(project, agent), identity);
+  await typeLine(pane, pickupLine(root, project, agent), identity);
   const sid = await findLatestSession(worktree, agent);
   if (sid) await withProjectLock(root, project, () => upsertTeamEntry(home, { name: agent, session_id: sid }));
   return pane;
@@ -453,7 +453,7 @@ async function relaunchRegisteredAgent(
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
       : `${pane} never went idle; nothing was typed`);
   }
-  await typeLine(pane, pickupLine(p.name, old.name), identity);
+  await typeLine(pane, pickupLine(root, p.name, old.name), identity);
   const sid = await findLatestSession(worktree, old.name);
   if (sid) await withProjectLock(root, p.name, () => upsertTeamEntry(home, { name: old.name, session_id: sid }));
   return pane;
