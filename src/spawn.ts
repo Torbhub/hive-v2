@@ -1,6 +1,7 @@
 import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { writeNoFollow } from './safe-write.js';
 import { fileURLToPath } from 'node:url';
 import {
   killWindow, newWindow, paneIdentity, paneIs, capturePane,
@@ -39,27 +40,27 @@ export async function preflight(): Promise<void> {
   }
 }
 
-export function pickupLine(root: string, project: string, agent: string): string {
+export function pickupLine(root: string, project: string, agent: string, handoff?: string): string {
   const decisions = ` Decisions so far: read ${hubPath(root, 'decisions.jsonl')} — they are permanent.`;
   if (agent === orchestratorName(project)) {
     return `You are ${agent}, the orchestrator of project ${project}. Read .hive/handoffs/${agent}.md from the top: its START HERE block is your prompt. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. The owner talks to you only through the hub: report plans, questions, blockers and finished work to it.${decisions}`;
   }
-  return `You are ${agent} of project ${project}. Read .hive/handoffs/${agent}.md from the top: its START HERE block is your prompt. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. Report to the orchestrator; wait for its first message.${decisions}`;
+  return `You are ${agent} of project ${project}. Read ${handoff ?? `.hive/handoffs/${agent}.md`} from the top. Start with the Assignment and Deliverable in START HERE. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. Report the required deliverable to the orchestrator.${decisions}`;
 }
 
 export async function ensureAgentFiles(projectHome: string, agent: string, role: string): Promise<void> {
   const root = packageRoot();
   const dir = hivePath(projectHome, 'team', agent);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.mkdir(hivePath(projectHome, 'handoffs'), { recursive: true });
   const roleSrc = path.join(root, 'roles', `${role}.md`);
-  await fs.copyFile(roleSrc, path.join(dir, 'role.md'));
-  await fs.copyFile(path.join(root, 'rules', 'RULES.md'), path.join(dir, 'RULES.md'));
+  await writeNoFollow(path.join(dir, 'role.md'), await fs.readFile(roleSrc, 'utf8'), projectHome);
+  await writeNoFollow(
+    path.join(dir, 'RULES.md'),
+    await fs.readFile(path.join(root, 'rules', 'RULES.md'), 'utf8'),
+    projectHome,
+  );
   const handoff = hivePath(projectHome, 'handoffs', `${agent}.md`);
-  try {
-    await fs.access(handoff);
-  } catch {
-    await fs.writeFile(handoff, `# ${agent} handoff\n\n## START HERE\nYou were just spawned. Wait for the first message, then do what it asks. Before any rotation, rewrite this block: what you are doing, what is done, what is next, which paths matter.\n`);
+  if (!existsSync(handoff)) {
+    await writeNoFollow(handoff, `# ${agent} handoff\n\n## START HERE\nYou were just spawned. Wait for the first message, then do what it asks. Before any rotation, rewrite this block: what you are doing, what is done, what is next, which paths matter.\n`, projectHome);
   }
 }
 
@@ -165,15 +166,28 @@ function checkModel(model: string | undefined): void {
 // default_model a drifting config.toml happens to say.
 export const DEFAULT_MODEL = 'kimi-code/k3.1-pro';
 
-export function launchCommand(sessionId: string | undefined, mode: LaunchMode = 'ask', model: string = DEFAULT_MODEL): string {
+export function launchCommand(
+  sessionId: string | undefined,
+  mode: LaunchMode = 'ask',
+  model: string = DEFAULT_MODEL,
+  profile?: string,
+): string {
   checkModel(model);
+  const quote = (v: string): string => `'${v.replaceAll("'", `'\\''`)}'`;
   const args = [
     sessionId ? `--session ${sessionId}` : '',
+    !sessionId && profile ? `--agent-file ${quote(profile)}` : '',
     mode === 'supervised-auto' ? '--auto' : mode === 'yolo' || mode === 'auto' ? '-y' : '',
     `-m '${model}'`,
   ].filter(Boolean);
   // No session lock: kimi's take-over repair prompt is interactive, and a hive lane is already one client per session.
   return `KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run${args.length ? ` -- ${args.join(' ')}` : ''}`;
+}
+
+async function ensureAgentProfile(cwd: string, agent: string): Promise<string> {
+  const file = hivePath(cwd, 'team', agent, 'agent.md');
+  await writeNoFollow(file, `---\nname: hive-${agent}\ndescription: Hive-managed agent with structured operator questions\ndisallowedTools:\n  - AskUserQuestion\n---\n\n\${base_prompt}\n\nYou are a Hive agent. Do not use AskUserQuestion. Use mcp__hive-operator__ask_operator for every operator decision. Harness faults are Hive-owned errors to repair or degrade. Do not turn them into owner questions.\n`, cwd);
+  return file;
 }
 
 export async function launchWindow(
@@ -189,10 +203,11 @@ export async function launchWindow(
   // reads it to record its parent, and the memory CLI already reports with it.
   // HIVE_PROJECT + HIVE_HUB_ROOT route the agent's ask_operator MCP calls.
   const quote = (v: string): string => `'${v.replaceAll("'", `'\\''`)}'`;
+  const profile = await ensureAgentProfile(cwd, agent);
   const pane = await newWindow(
     windowName(project, agent),
     cwd,
-    `HIVE_AGENT=${agent} HIVE_PROJECT=${project} HIVE_HUB_ROOT=${quote(path.resolve(root))} ${launchCommand(sessionId, mode, model)}`,
+    `HIVE_AGENT=${agent} HIVE_PROJECT=${project} HIVE_HUB_ROOT=${quote(path.resolve(root))} ${launchCommand(sessionId, mode, model, profile)}`,
   );
   const deadline = Date.now() + 15_000;
   let identity: PaneIdentity | null = null;
@@ -254,7 +269,82 @@ async function requireApprovedPlan(root: string, task: string): Promise<void> {
   }
 }
 
-export type SpawnOptions = { agent: string; role?: string; worktree?: string; task?: string; model?: string; parent?: string };
+export type WorkerContract = { assignment: string; deliverable: string };
+export type SpawnOptions = {
+  agent: string;
+  role?: string;
+  worktree?: string;
+  task?: string;
+  model?: string;
+  parent?: string;
+  assignment?: string;
+  deliverable?: string;
+};
+
+function checkWorkerContract(contract: Partial<WorkerContract>): asserts contract is WorkerContract {
+  for (const field of ['assignment', 'deliverable'] as const) {
+    const value = contract[field];
+    if (typeof value !== 'string' || value.trim().length < 12 || value.length > 8000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)) {
+      throw new Error('a worker needs an assignment and deliverable (12-8000 characters each, no control characters)');
+    }
+    if (/you were just spawned|wait for (?:the |its )?first message/i.test(value)) {
+      throw new Error('a worker assignment and deliverable must name concrete work, not a request for another brief');
+    }
+    if (/^#{1,6} /m.test(value)) {
+      throw new Error('a worker assignment and deliverable must not contain Markdown heading lines');
+    }
+  }
+}
+
+function contractSection(text: string, field: string): string | undefined {
+  return text.match(new RegExp(`^### ${field}\\s*\\n([\\s\\S]*?)(?=^#{1,6} |(?![\\s\\S]))`, 'm'))?.[1];
+}
+
+function replaceContractSection(text: string, field: string, value: string): string {
+  const progress = field === 'Deliverable' && contractSection(text, 'Progress') === undefined
+    ? '### Progress\n\n'
+    : '';
+  const section = `### ${field}\n${value.trim()}\n\n${progress}`;
+  const pattern = new RegExp(`^### ${field}\\s*\\n[\\s\\S]*?(?=^#{1,6} |(?![\\s\\S]))`, 'm');
+  if (pattern.test(text)) return text.replace(pattern, section);
+  const marker = '## START HERE\n';
+  return text.includes(marker) ? text.replace(marker, marker + section) : `${text.trimEnd()}\n\n${section}`;
+}
+
+async function writeWorkerContract(
+  worktree: string, agent: string, contract: Partial<WorkerContract>, recordedFile?: string,
+): Promise<string> {
+  checkWorkerContract(contract);
+  const file = recordedFile ?? hivePath(worktree, 'handoffs', `${agent}.md`);
+  let text = await fs.readFile(file, 'utf8').catch((e: unknown) => {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return '';
+    throw e;
+  });
+  if (!text) text = `# ${agent} handoff\n\n## START HERE\n`;
+  const oldSections = [contractSection(text, 'Assignment'), contractSection(text, 'Deliverable')];
+  if (oldSections.some((value) => value && /^\s*Progress:/m.test(value)) && contractSection(text, 'Progress') === undefined) {
+    throw new Error(`hive: move legacy Progress under its own heading in ${file} before respawn`);
+  }
+  text = replaceContractSection(text, 'Assignment', contract.assignment);
+  text = replaceContractSection(text, 'Deliverable', contract.deliverable);
+  text = text.replace(/^You were just spawned\. Wait for the first message.*\n?/m, '');
+  text = text.replace(/^Wait for (?:the first message|a message)\.\n?/m, '');
+  await writeNoFollow(file, text.endsWith('\n') ? text : `${text}\n`, recordedFile ? path.dirname(file) : worktree);
+  return file;
+}
+
+async function requireWorkerContract(old: TeamEntry, home: string): Promise<void> {
+  const file = old.handoff ?? hivePath(old.worktree || home, 'handoffs', `${old.name}.md`);
+  const text = await fs.readFile(file, 'utf8').catch(() => '');
+  try {
+    checkWorkerContract({
+      assignment: contractSection(text, 'Assignment'),
+      deliverable: contractSection(text, 'Deliverable'),
+    });
+  } catch {
+    throw new Error(`${old.name} needs Assignment and Deliverable sections in ${file}; repair them with explicit respawn options`);
+  }
+}
 
 // Prefer the remote tip; the fallbacks keep offline and master-based repos lane-able.
 async function jjBaseRev(home: string): Promise<string> {
@@ -283,6 +373,7 @@ function envParent(self: string): string | undefined {
 
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
   if (!AGENT_NAME_RE.test(opts.agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${opts.agent}`);
+  checkWorkerContract(opts);
   checkModel(opts.model);
   await preflight();
   return withLaunchClaim(root, project, (p) => spawnRegisteredAgent(root, p, opts));
@@ -356,6 +447,7 @@ async function spawnRegisteredAgent(
     worktree = wt;
 
     await ensureAgentFiles(worktree, agent, role);
+    await writeWorkerContract(worktree, agent, opts);
     if (task) {
       // Recall never blocks a spawn: memoryBlockFor fails open in 3s.
       const block = await memoryBlockFor(root, project, task);
@@ -430,7 +522,7 @@ async function relaunchRegisteredAgent(
   sessionId: string | undefined,
 ): Promise<string> {
   const home = p.home;
-  const worktree = old.worktree ?? home;
+  const worktree = old.worktree || home;
   const mode = old.orchestrator ? effectiveOrchestratorMode(p.mode ?? 'ask', p.approvals) : p.mode ?? 'ask';
   const { pane, identity } = await launchWindow(root, p.name, old.name, worktree, sessionId, mode, old.model);
   await manifestAdd(home, {
@@ -453,21 +545,27 @@ async function relaunchRegisteredAgent(
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
       : `${pane} never went idle; nothing was typed`);
   }
-  await typeLine(pane, pickupLine(root, p.name, old.name), identity);
+  await typeLine(pane, pickupLine(root, p.name, old.name, old.handoff), identity);
   const sid = await findLatestSession(worktree, old.name);
   if (sid) await withProjectLock(root, p.name, () => upsertTeamEntry(home, { name: old.name, session_id: sid }));
   return pane;
 }
 
-export async function respawnAgent(root: string, project: string, agent: string): Promise<string> {
+export async function respawnAgent(
+  root: string, project: string, agent: string, options: Partial<WorkerContract> = {},
+): Promise<string> {
   const p = await projectEntry(root, project);
   const home = p.home;
   const team = await readTeam(home);
   const old = team.agents.find((a) => a.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
+  const repair = !old.orchestrator && (options.assignment !== undefined || options.deliverable !== undefined);
+  if (repair) checkWorkerContract(options);
+  if (!old.orchestrator && !repair) await requireWorkerContract(old, home);
   checkModel(old.model);
   await preflight();
   if (old.task && !old.orchestrator) await requireApprovedPlan(root, old.task);
+  if (repair) await writeWorkerContract(old.worktree || home, agent, options, old.handoff);
   await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
   try {
     if (old.pane) await killWindow(old.pane, recordedIdentity(old));
@@ -490,6 +588,7 @@ export async function wakeAgent(root: string, project: string, agent: string): P
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   if (old.closed_at) throw new Error(`${agent} was closed on purpose at ${old.closed_at}; not waking it`);
   if (!old.session_id) throw new Error(`${agent} has no recorded session to resume; respawn it instead`);
+  if (!old.orchestrator) await requireWorkerContract(old, p.home);
   checkModel(old.model);
   await preflight();
   if (old.task && !old.orchestrator) await requireApprovedPlan(root, old.task);

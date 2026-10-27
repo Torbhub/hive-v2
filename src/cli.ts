@@ -28,7 +28,7 @@ const USAGE = `usage:
   hive hub init|add <name> [path] [--source <path>]|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note] [--checkpoints <json>]|progress <task> <cp> <started|ok|fail|skip> [note]|accept <task> <cp>
   hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
   hive hub wake <project> | start <project> <task-id> | continue <project>
-  hive spawn <project> --agent <name> [--role r] [--worktree wt] [--task id] [--model m] | respawn | close
+  hive spawn <project> --agent <name> --assignment <text> --deliverable <text> [--role r] [--worktree wt] [--task id] [--model m] | respawn [--assignment <text> --deliverable <text>] | close
   hive gate --log <path> -- <name> <cmd>...
   hive gate-verify log <path> [--expect a,b] [--commit sha] | gate-verify commits <base>..<tip> --max-files <n> --style conventional|free --attribution allow|deny [--no-body]
   hive push <remote> <sha> <branch>
@@ -164,11 +164,11 @@ async function spawnCommand(args: string[]): Promise<void> {
     sub = args[0];
     rest = args.slice(1);
   }
-  const { flags: f, pos } = parseFlags(rest, ['agent', 'role', 'worktree', 'task', 'model']);
+  const { flags: f, pos } = parseFlags(rest, ['agent', 'role', 'worktree', 'task', 'model', 'assignment', 'deliverable']);
   const project = pos[0] && validName('project', pos[0]);
   const agent = typeof f.agent === 'string' ? validName('agent', f.agent) : f.agent;
   if (!project || typeof agent !== 'string') {
-    throw new UsageError('usage: hive spawn [respawn|close] <project> --agent <name> [--role r] [--worktree wt] [--task id] [--model m]');
+    throw new UsageError('usage: hive spawn [respawn|close] <project> --agent <name> --assignment <text> --deliverable <text> [--role r] [--worktree wt] [--task id] [--model m]');
   }
   if (sub !== 'spawn' && f.task !== undefined) throw new UsageError('--task only applies to spawn');
   if (sub === 'close') {
@@ -179,12 +179,12 @@ async function spawnCommand(args: string[]): Promise<void> {
   if (sub === 'respawn' && f.model !== undefined) {
     throw new UsageError('respawn reuses the model recorded in team.json; change it with close + spawn or by editing team.json');
   }
+  const contract = { assignment: str(f.assignment), deliverable: str(f.deliverable) };
   const pane = sub === 'respawn'
-    ? await respawnAgent(root, project, agent)
-    : await spawnAgent(root, project, { agent, role: str(f.role), worktree: str(f.worktree), task: str(f.task), model: str(f.model) });
+    ? await respawnAgent(root, project, agent, contract)
+    : await spawnAgent(root, project, { agent, role: str(f.role), worktree: str(f.worktree), task: str(f.task), model: str(f.model), ...contract });
   console.log(pane);
 }
-
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const cmd = args[0] ?? fail('no command');

@@ -382,6 +382,7 @@ export async function watchCycle(
   const pf = await readProjects(root);
   const status = await buildStatus(root);
   for (const p of pf.projects) {
+    const proj = status.projects.find((x) => x.name === p.name);
     const team = await readTeam(p.home);
     for (const a of team.agents) {
       if (!a.pane || a.closed_at) continue;
@@ -389,11 +390,18 @@ export async function watchCycle(
         await handleDeath(root, p.name, p.home, a, deaths, wakes);
         continue;
       }
+      const waiting = a.orchestrator
+        ? proj?.orchestrator.operator_waiting === true
+        : proj?.agents.some((x) => x.name === a.name && x.worktree === a.worktree && x.operator_waiting) === true;
+      if (waiting) {
+        stills.delete(`${a.pane}:${a.pane_pid}`);
+        if (a.wedged_at) await clearWedged(root, p.home, p.name, a);
+        continue;
+      }
       await flagStale(root, p.name, a, deaths);
       await judgeWedge(root, p.name, p.home, a, stills, wedgeStillMs);
     }
 
-    const proj = status.projects.find((x) => x.name === p.name);
     const starting = proj?.orchestrator.starting;
     if (proj && starting?.typed === false && starting.question === false && !proj.orchestrator.question) {
       const pending = await readPendingPane(root, p.name);
@@ -410,9 +418,11 @@ export async function watchCycle(
     if (p.mode !== 'auto' && approvals === 'manual') continue;
     if (!proj) continue;
     const targets: (string | undefined)[] = [];
-    if (proj.orchestrator.question || proj.orchestrator.starting?.question) targets.push(undefined);
+    const orchDialog = proj.orchestrator.screen_question
+      ?? (proj.orchestrator.question === true && proj.orchestrator.operator_question !== true);
+    if (orchDialog || proj.orchestrator.starting?.question) targets.push(undefined);
     for (const a of proj.agents) {
-      if (a.question && a.ref) targets.push(a.ref);
+      if ((a.screen_question ?? (a.question && !a.operator_question)) && a.ref) targets.push(a.ref);
     }
     for (const ref of targets) {
       const dialog = await readDialogFor(root, p.name, ref).catch((e: unknown) => {

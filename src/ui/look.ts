@@ -152,7 +152,9 @@ export function buildNeeds(view: HubView, now: number): Need[] {
   for (const t of actionableTasks) {
     const look = waitLook(t.state);
     const p = view.projects.find((x) => x.name === t.project);
-    const absorb = t.state === 'plan' && p?.orchestrator.question === true && !absorbed.has(t.project);
+    const dialog = p?.orchestrator.screen_question
+      ?? (p?.orchestrator.question === true && p.orchestrator.operator_question !== true);
+    const absorb = t.state === 'plan' && dialog === true && !absorbed.has(t.project);
     if (absorb) absorbed.add(t.project);
     needs.push({
       key: `task-${t.id}`, glyph: look.glyph, color: look.color, who: t.id,
@@ -167,13 +169,15 @@ export function buildNeeds(view: HubView, now: number): Need[] {
     });
   }
   for (const p of view.projects) {
-    if (p.orchestrator.question && !planProjects.has(p.name)) {
+    const orchDialog = p.orchestrator.screen_question
+      ?? (p.orchestrator.question === true && p.orchestrator.operator_question !== true);
+    if (orchDialog && !planProjects.has(p.name)) {
       needs.push({
         key: `orch-${p.name}`, glyph: '?', color: 'yellow', who: p.name,
         words: 'its orchestrator has a question on its screen', when: '', dialogKey: p.name,
       });
     }
-    for (const a of p.agents.filter((a) => a.question)) {
+    for (const a of p.agents.filter((a) => a.screen_question ?? (a.question && !a.operator_question))) {
       needs.push({
         key: `agent-${p.name}-${a.ref}`, glyph: '?', color: 'yellow',
         who: `${p.name} · ${agentRef(a)}`, words: 'a question on its screen', when: '',

@@ -4,6 +4,8 @@
 // The default URL is the auth relay, which holds the instance key; the
 // caller only ever holds the scoped user key.
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { writeNoFollow } from './safe-write.js';
 import { hubPath } from './state.js';
 
 const TIMEOUT_MS = 3000;
@@ -160,7 +162,8 @@ export async function applyMemoryBlock(handoffFile: string, block: string): Prom
     const current = await fs.readFile(handoffFile, 'utf8');
     const cut = current.indexOf(MEMORY_HEADING);
     const base = (cut === -1 ? current : current.slice(0, cut)).trimEnd();
-    await fs.writeFile(handoffFile, `${base}\n\n${block}`);
+    const worktree = path.dirname(path.dirname(path.dirname(handoffFile)));
+    await writeNoFollow(handoffFile, `${base}\n\n${block}`, worktree);
   } catch {
     // A handoff that cannot be read or written must not fail a spawn.
   }

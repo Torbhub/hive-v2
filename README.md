@@ -137,7 +137,11 @@ yourself:
 ```bash
 tmux -L hive-v2 attach
 ```
-3. The orchestrator plans, asks, and spawns agents (`hive spawn`). With
+3. The orchestrator plans, asks, and spawns agents (`hive spawn`). Every
+   worker needs `--assignment <text>` and `--deliverable <text>`. These name
+   its concrete slice and the artifact required back. hive persists both in
+   the handoff before launch and refuses a launch or relaunch without them.
+   Explicit respawn can repair a legacy handoff with both options. With
    `--task <id>` the spawn binds the agent to a task whose brief claims a
    file scope. hive refuses the spawn when the scope overlaps another live
    agent's task scope, and when either brief's scope does not parse. Two
@@ -153,12 +157,15 @@ tmux -L hive-v2 attach
 ## Asking the operator
 
 An agent that needs decisions calls the `ask_operator` MCP tool
-(`mcp__hive-operator__ask_operator`). One call carries the whole batch: the
+(`mcp__hive-operator__ask_operator`). Hive's agent profile disables native
+`AskUserQuestion`, so these batches are the only structured question path.
+One call carries the whole batch: the
 overarching context, then each question with its own context, a priority,
 2-8 described choices, and one recommendation. The call waits for you.
 
-You answer on the web screen under `Questions N`. Batches read top to bottom:
-why this is being asked, who asks, then the questions in priority order.
+Open batches appear on the main web screen with their answer controls. The
+`Questions N` button opens the same cards in a full-screen view. Batches read
+top to bottom: why this is being asked, who asks, then the questions in priority order.
 Recommendations come pre-selected, so accepting them all is one Submit.
 Every question also takes Other with your own words. Submit answers the
 whole batch at once, and the waiting agent gets your choices as JSON.

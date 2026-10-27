@@ -12,6 +12,9 @@ export type HubAgent = {
   name: string;
   state: HubAgentState;
   question?: boolean;
+  operator_question?: boolean;
+  operator_waiting?: boolean;
+  screen_question?: boolean;
   context?: number;
   context_assumed?: boolean;
   context_unknown?: boolean;
@@ -24,6 +27,9 @@ export type HubAgent = {
 export type HubOrchestrator = {
   state: HubOrchestratorState;
   question?: boolean;
+  operator_question?: boolean;
+  operator_waiting?: boolean;
+  screen_question?: boolean;
   name?: string;
   pid?: number;
   pane?: string;
@@ -130,6 +136,7 @@ export type QuestionBatch = {
   questions: OperatorQuestion[];
   status: 'open' | 'answered' | 'cancelled';
   createdAt: string;
+  waitHeartbeatAt?: string;
   closedAt?: string;
   answers?: QuestionAnswer[];
 };

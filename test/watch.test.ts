@@ -504,6 +504,37 @@ describe('watchCycle wedge detection', () => {
     expect(await fs.readdir(hivePath(home, 'wedges'))).toHaveLength(1);
   });
 
+  it('suppresses only a live MCP wait and resets stillness when the wait ends', async () => {
+    const { root, home } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    const statusWithWait = (waiting: boolean) => ({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 0,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: waiting, operator_question: waiting, operator_waiting: waiting, ref: 'builder' }],
+      }],
+    });
+    vi.mocked(buildStatus).mockResolvedValue(statusWithWait(true));
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(WORKING);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 60 * 60_000);
+    vi.mocked(run).mockResolvedValue({ code: 0, stdout: '  22     1 100\n', stderr: '' });
+    const stills = new Map([['%2:22', { content: WORKING, since: Date.now() - 60 * 60_000, cpu: 100 }]]);
+
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    expect((await readTeam(home)).agents[0].wedged_at).toBeUndefined();
+    expect(await readDecisions(root)).toEqual([]);
+    expect(stills.has('%2:22')).toBe(false);
+
+    vi.mocked(buildStatus).mockResolvedValue(statusWithWait(false));
+    await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
+    expect((await readTeam(home)).agents[0].wedged_at).toBeUndefined();
+    expect(killWindow).not.toHaveBeenCalled();
+    expect((await readDecisions(root)).map((d) => d.summary)).toEqual(['stale: demo/builder no output for 60m']);
+  });
+
   it('a frozen screen with an advancing CPU tree is working, not wedged', async () => {
     const { root, home } = await setupProject({
       agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],

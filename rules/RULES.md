@@ -24,7 +24,9 @@
   tool (any agent): one batch with the overarching context, each question's
   context and priority, described choices, and a recommendation. The call
   waits for the owner's answers. Never park a decision in a free-text
-  question the owner has no way to answer.
+  question the owner has no way to answer. Native `AskUserQuestion` is disabled
+  in Hive sessions. Use `mcp__hive-operator__ask_operator` instead. Harness
+  faults are Hive-owned errors to repair or degrade, not owner decisions.
 
 ## Handoffs
 

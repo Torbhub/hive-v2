@@ -107,8 +107,13 @@ Per project, `<project>/.hive/`:
   starttime (identity is pid+starttime, never the bare `%N`), worktree,
   session resume info, handoff path. Orchestrator included.
 - `team/<agent>/role.md`, `team/<agent>/RULES.md` — copies made at spawn.
-- `handoffs/<agent>.md` — the agent's persistent memory; the agent updates
-  its START HERE block. Rotation and restarts work because of this file.
+- `handoffs/<agent>.md` — the agent's persistent memory. Worker START HERE
+  blocks carry Assignment and Deliverable sections. Fresh launch validates and
+  writes them before any side effect. Respawn and wake validate them before
+  killing or creating a pane. Explicit respawn repairs both fields at the
+  recorded path after preflight and plan checks. Repair preserves progress and
+  Memory sections. Writes refuse symlinks. New handoffs include a Progress
+  heading. The agent updates that section without removing the contract.
 - `manifest.jsonl` — typed records of what hive-v2 created (`worktree`,
   `tmux`, `process`). Cleanup acts only on the manifest and trashes instead
   of deleting.
@@ -120,7 +125,7 @@ hive hub init|add <name> [path] [--source <path>]|status [--json]|tasks [--json]
 hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
 hive hub plan-answer <project> <task-id> <approve|sendback> [feedback]
 hive hub wake <project> | start <project> <task-id> | continue <project>
-hive spawn <project> --agent <name> [--role r] [--worktree wt] | respawn | close
+hive spawn <project> --agent <name> --assignment <text> --deliverable <text> [--role r] [--worktree wt] | respawn [--assignment <text> --deliverable <text>] | close
 hive gate --log <path> -- <name> <cmd>... | gate-verify log <path> [--commit sha] | gate-verify commits <base>..<tip>
 hive push <remote> <sha> <branch>        — fast-forward only, by full hash
 hive cleanup <project> [--dry-run]
@@ -161,8 +166,11 @@ hive ui                                  — the hub screen
   the server re-validates everything the UI checked. The answer route takes
   bodies up to 512KiB so twenty full-length Other answers fit. The MCP call
   then returns `{id, status, answers}` as JSON text, or a tool error on cancel.
+- A live wait refreshes `waitHeartbeatAt` every 15 seconds. The watchdog
+  suppresses stale and wedge checks only while that heartbeat is recent.
 - A dead MCP child never closes its batch: an orphaned batch stays open and
-  the owner can cancel it. There is no idempotent resume by design. A lazy
+  the owner can cancel it. Its heartbeat expires, so normal watchdog recovery
+  resumes. There is no idempotent resume by design. A lazy
   sweep (driven by the hub view) cancels open batches older than 7 days with
   an `expired` audit note, and prunes closed history to the newest 200.
   `/api/view` carries the oldest 50 open batches and `questionsTotal` counts
@@ -171,8 +179,12 @@ hive ui                                  — the hub screen
 ## Kimi session mechanics (the part that replaces hh-spawn)
 
 - Launch, in a new tmux window named `<project>:<agent>`:
-  `HIVE_AGENT=<agent> HIVE_PROJECT=<project> HIVE_HUB_ROOT='<root>' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- [--session <id>] [-y|--auto] -m '<model>'`
-  — the project's `mode` in projects.json (`ask`/`yolo`/`auto`, default `ask`)
+  `HIVE_AGENT=<agent> HIVE_PROJECT=<project> HIVE_HUB_ROOT='<root>' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- [--session <id>] [--agent-file <profile>] [-y|--auto] -m '<model>'`
+  — fresh sessions bind `.hive/team/<agent>/agent.md`. Its `disallowedTools`
+  contains `AskUserQuestion`, its body keeps `${base_prompt}`, and it directs
+  decisions to `mcp__hive-operator__ask_operator`. Resume restores that bound
+  profile without the flag. Non-Hive Kimi sessions keep their own tool policy.
+  The project's `mode` in projects.json (`ask`/`yolo`/`auto`, default `ask`)
   maps to no flag for `ask` and `-y` for `yolo` and `auto`, on fresh starts and
   resumes alike. Derived `ask` plus `safe` or `smart` orchestrator launches use
   supervised `--auto` instead. The model
@@ -182,10 +194,9 @@ hive ui                                  — the hub screen
   `exec` so
   the pane process IS the CLI (identity check). Pre-flight: `teamkimi status`
   must succeed, else refuse.
-- Pickup line (typed once the pane is idle):
-  `You are <agent> of project <project>. Read .hive/handoffs/<agent>.md from
-  the top: its START HERE block is your prompt. Your role: .hive/team/<agent>/role.md.
-  The rules: .hive/team/<agent>/RULES.md. Report to the orchestrator; wait for its first message.`
+- Worker pickup starts from the persisted Assignment and Deliverable. It does
+  not wait for another brief. The worker returns the named artifact to the
+  orchestrator.
 - Pane reading (`screen.ts`) is calibrated against the real Kimi Code 2.1.x
   TUI on this box — capture actual screens during development, do not guess:
   - idle: screen unchanged ~3s AND the bottom input box is an empty prompt

@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { promises as fs, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import {
-  listCandidates, memoryEnabled, promoteCandidate, proposeMemory, searchMemory,
+  applyMemoryBlock, listCandidates, memoryEnabled, promoteCandidate, proposeMemory, searchMemory,
 } from '../src/memory.js';
 
 const ok = (data: unknown) => new Response(JSON.stringify({ code: 0, message: '', request_id: 'r', data }), { status: 200 });
@@ -171,5 +174,18 @@ describe('promoteCandidate', () => {
   it('reports memory down', async () => {
     fetchMock.mockRejectedValue(new Error('down'));
     expect(await promoteCandidate('demo', 'm-1')).toEqual({ kind: 'unavailable' });
+  });
+});
+
+describe('applyMemoryBlock', () => {
+  it('fails open without writing through a handoff symlink', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hive-memory-write-'));
+    const handoff = path.join(root, '.hive', 'handoffs', 'builder.md');
+    const outside = path.join(root, 'outside.md');
+    await fs.mkdir(path.dirname(handoff), { recursive: true });
+    await fs.writeFile(outside, 'do not overwrite\n');
+    await fs.symlink(outside, handoff);
+    await applyMemoryBlock(handoff, '## Memory\n\n- lesson\n');
+    expect(await fs.readFile(outside, 'utf8')).toBe('do not overwrite\n');
   });
 });

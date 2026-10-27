@@ -37,6 +37,14 @@ import { spawnAgent } from '../src/spawn.js';
 import { hubAdd, hubInit, hubTask } from '../src/hub.js';
 import { appendTaskEvent, hivePath, writeJson } from '../src/state.js';
 
+function spawn(root: string, opts: Parameters<typeof spawnAgent>[2]): Promise<string> {
+  return spawnAgent(root, 'demo', {
+    assignment: 'Complete the bounded memory assignment in the requested files.',
+    deliverable: 'Return the named artifact and verification evidence to the orchestrator.',
+    ...opts,
+  });
+}
+
 async function setup() {
   const root = mkdtempSync(path.join(tmpdir(), 'hive-spawn-mem-'));
   const home = path.join(root, 'demo');
@@ -69,7 +77,7 @@ describe('spawn memory recall', () => {
     const { root, home } = await setup();
     const task = await approvedTask(root, 'wire the recall lane');
     blockFor.mockResolvedValue('## Memory\n\n- the gate needs a green run\n');
-    await spawnAgent(root, 'demo', { agent: 'worker1', task });
+    await spawn(root, { agent: 'worker1', task });
     const handoff = await fs.readFile(hivePath(hivePath(home, 'lanes', 'worker1'), 'handoffs', 'worker1.md'), 'utf8');
     expect(handoff).toContain('## Memory\n\n- the gate needs a green run');
     expect(vi.mocked(blockFor).mock.calls[0].slice(0, 3)).toEqual([root, 'demo', task]);
@@ -78,7 +86,7 @@ describe('spawn memory recall', () => {
   it('spawns clean when memory has nothing or is down', async () => {
     const { root, home } = await setup();
     const task = await approvedTask(root, 'wire the recall lane');
-    const pane = await spawnAgent(root, 'demo', { agent: 'worker1', task });
+    const pane = await spawn(root, { agent: 'worker1', task });
     expect(pane).toBe('%9');
     const handoff = await fs.readFile(hivePath(hivePath(home, 'lanes', 'worker1'), 'handoffs', 'worker1.md'), 'utf8');
     expect(handoff).not.toContain('## Memory');
@@ -86,7 +94,7 @@ describe('spawn memory recall', () => {
 
   it('does not touch memory for a spawn without a task', async () => {
     const { root } = await setup();
-    await spawnAgent(root, 'demo', { agent: 'worker1' });
+    await spawn(root, { agent: 'worker1' });
     expect(blockFor).not.toHaveBeenCalled();
   }, 20_000);
 });
