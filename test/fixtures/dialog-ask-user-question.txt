@@ -1,0 +1,13 @@
+  question
+
+   UI probe    Submit
+
+  ? This is the assigned one-call Hive native-question policy probe. Which test response should I record?
+
+   → [1] Probe completed
+         Record that the native question interface returned a response.
+     [2] No response
+         Record that the native question interface did not produce a usable response.
+     [3] Other
+
+   ↑↓ select  1-3 / ↵ choose  ←/→/tab switch  esc cancel

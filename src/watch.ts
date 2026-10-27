@@ -3,10 +3,10 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { captureDeathBundle, wireLogMtime } from './death-bundle.js';
 import { answerDialog, buildStatus, continueProject, readDialogFor, Refusal, wake } from './hub.js';
-import { DEFAULT_MODEL, wakeAgent } from './spawn.js';
-import { classify, lines } from './screen.js';
+import { DEFAULT_MODEL, typeLine, wakeAgent } from './spawn.js';
+import { classify, isNativeQuestion, lines } from './screen.js';
 import { appendDecision, hasLiveSendingClaim, hivePath, hubPath, readPendingPane, readProjects, readTeam, upsertTeamEntry, writeJson } from './state.js';
-import { capturePane, killWindow, paneExists, paneIs, run, sleep } from './tmux.js';
+import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
 import { loadProcessedKeys, recordProcessedKey } from './watch-persist.js';
 import type { Approvals, TeamEntry } from './types.js';
@@ -80,6 +80,7 @@ export async function classifyWithKimi(
 const approveCache = new Map<string, true>();
 // Fingerprints with a classifier running right now; abandoned cycles skip them.
 const inFlightMarks = new Set<string>();
+const nativeQuestionMarks = new Map<string, string>();
 
 async function appendWatchLog(root: string, line: string): Promise<void> {
   await fs.mkdir(hubPath(root), { recursive: true });
@@ -369,14 +370,44 @@ async function judgeWedge(
   // The death path re-wakes it on the next tick.
 }
 
+async function redirectNativeQuestion(
+  root: string, project: string, a: TeamEntry, seen: Map<string, string>,
+): Promise<boolean> {
+  if (!a.pane) return false;
+  const key = `${a.pane}:${a.pane_pid}`;
+  const raw = await capturePane(a.pane);
+  if (raw === null || !isNativeQuestion(lines(raw))) {
+    seen.delete(key);
+    return false;
+  }
+  if (seen.get(key) === raw) return true;
+  const identity = { pid: a.pane_pid ?? 0, started: a.pane_started ?? '' };
+  await sendEscape(a.pane, identity);
+  await sleep(250);
+  await typeLine(a.pane, 'Hive blocked native AskUserQuestion. Use mcp__hive-operator__ask_operator for every operator decision.', identity);
+  const after = await capturePane(a.pane);
+  if (after === null || isNativeQuestion(lines(after))) {
+    throw new Error(`native AskUserQuestion dismissal is not confirmed on ${a.pane}`);
+  }
+  seen.set(key, raw);
+  await appendDecision(root, {
+    project, by: 'watch',
+    summary: `blocked native AskUserQuestion for ${project}/${a.name}; redirected to mcp__hive-operator__ask_operator`,
+  });
+  return true;
+}
+
 export async function watchCycle(
   root: string,
   env: NodeJS.ProcessEnv = {},
   deaths: Set<string> = new Set(),
   wakes: WakeState = new Map(),
   stills: Stillness = new Map(),
-  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache, marks = inFlightMarks }: {
-    wedgeStillMs?: number; verdicts?: Map<string, true>; marks?: Set<string>;
+  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache, marks = inFlightMarks, nativeQuestions = nativeQuestionMarks }: {
+    wedgeStillMs?: number;
+    verdicts?: Map<string, true>;
+    marks?: Set<string>;
+    nativeQuestions?: Map<string, string>;
   } = {},
 ): Promise<void> {
   const pf = await readProjects(root);
@@ -390,6 +421,10 @@ export async function watchCycle(
         await handleDeath(root, p.name, p.home, a, deaths, wakes);
         continue;
       }
+      if (await redirectNativeQuestion(root, p.name, a, nativeQuestions).catch(async (e: unknown) => {
+        await appendWatchLog(root, `${new Date().toISOString()} ${p.name} native question redirect failed for ${a.name}: ${lastLine(e)}`);
+        return true;
+      })) continue;
       const waiting = a.orchestrator
         ? proj?.orchestrator.operator_waiting === true
         : proj?.agents.some((x) => x.name === a.name && x.worktree === a.worktree && x.operator_waiting) === true;

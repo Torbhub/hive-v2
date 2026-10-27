@@ -29,9 +29,14 @@ before routing, so `/hive/api/view` and `/api/view` are the same endpoint.
   config, installs docker, and pulls the pinned memory images. It installs
   the pinned nexus-push client without registering it. It also merges the
   `hive-operator` MCP server into `/home/ubuntu/.kimi-code/mcp.json`
-  (`infra/merge-mcp.mjs`), preserving every other server. Bump the client
-  commit and sha256 pins together to upgrade. The memory stack itself is
-  documented in `docs/memory.md`.
+  (`infra/merge-mcp.mjs`), preserving every other server. It also installs a
+  conditional `PreToolUse` hook that blocks `AskUserQuestion` only when
+  `HIVE_AGENT` is set. Non-Hive sessions keep that tool. The watchdog also
+  dismisses any native dialog the hook misses and redirects the agent to MCP.
+  The config merge is idempotent, validates its output, and preserves all other
+  settings. Bump the client commit and
+  sha256 pins together to upgrade. The memory stack itself is documented in
+  `docs/memory.md`.
 - `deploy-box.sh` — what the workflow runs on the box over SSM: fetch, reset
   to the merged commit, `npm ci`, build, provision, health-check.
 - `.github/workflows/deploy.yml` — gate job (test, build, lint) then deploy.
