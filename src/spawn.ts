@@ -440,7 +440,14 @@ async function spawnRegisteredAgent(
       await fs.mkdir(wt, { recursive: true });
     } else {
       const branch = `${project}/${agent}`;
-      const made = await run('git', ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD'], home);
+      const head = await run('git', ['rev-parse', '--verify', '-q', 'HEAD'], home);
+      if (head.code !== 0 && head.code !== 1) {
+        throw new Error(`git HEAD lookup failed: ${head.stderr.trim() || `exit ${head.code}`}`);
+      }
+      const add = head.code === 0
+        ? ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD']
+        : ['worktree', 'add', '-q', '--orphan', '-b', branch, wt];
+      const made = await run('git', add, home);
       if (made.code !== 0) throw new Error(`git worktree add failed: ${made.stderr.trim()}`);
       await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: wt, branch });
     }

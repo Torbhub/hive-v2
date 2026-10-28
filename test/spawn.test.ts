@@ -224,6 +224,43 @@ describe('spawnAgent', () => {
     expect((await readTeam(home)).agents.find((a) => a.name === 'builder2')?.worktree).toBe(wt);
   }, 20_000);
 
+  it('creates an orphan worktree when a git repository has no commits', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const wt = hivePath(home, 'lanes', 'builder2');
+    vi.mocked(run).mockImplementation(async (cmd, args) => {
+      if (cmd === 'jj') return { code: 1, stdout: '', stderr: 'no jj here' };
+      if (cmd === 'git' && args[0] === 'rev-parse' && args[1] === '--verify') {
+        return { code: 1, stdout: '', stderr: 'unknown revision' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    try {
+      await spawn(root, { agent: 'builder2' });
+    } finally {
+      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
+    }
+    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'git' && c[2] === home && c[1][0] === 'worktree');
+    expect(add?.[1]).toEqual(['worktree', 'add', '-q', '--orphan', '-b', 'demo/builder2', wt]);
+    expect((await readTeam(home)).agents.find((a) => a.name === 'builder2')?.worktree).toBe(wt);
+  }, 20_000);
+
+  it('refuses a fatal HEAD lookup instead of treating it as an empty repository', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    vi.mocked(run).mockImplementation(async (cmd, args) => {
+      if (cmd === 'jj') return { code: 1, stdout: '', stderr: 'no jj here' };
+      if (cmd === 'git' && args[0] === 'rev-parse' && args[1] === '--verify') {
+        return { code: 128, stdout: '', stderr: 'corrupt metadata' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    try {
+      await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow('HEAD lookup failed: corrupt metadata');
+    } finally {
+      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
+    }
+    expect(vi.mocked(run).mock.calls.some((c) => c[0] === 'git' && c[2] === home && c[1][0] === 'worktree')).toBe(false);
+  }, 20_000);
+
   it('launches a plain default lane when neither VCS probe finds a repo', async () => {
     const { root, home } = await setup({ name: 'builder' });
     const wt = hivePath(home, 'lanes', 'builder2');
