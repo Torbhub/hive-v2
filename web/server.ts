@@ -3,6 +3,7 @@ import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Refusal, answerDialog, continueProject, hubTask, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
+import { hubPath } from '../src/state.js';
 import { interruptAgent } from '../src/interrupt.js';
 import { killAgent } from '../src/kill.js';
 import { sendOwnerMessage } from '../src/message.js';
@@ -133,7 +134,17 @@ async function handlePost(root: string, pathname: string, body: Record<string, u
       return { ok: true, id: await hubTask(root, project, text) };
     }
     if (pathname === '/api/start') {
-      return { ok: true, pane: await startProject(root, project, String(body.task ?? '')) };
+      const task = String(body.task ?? '');
+      try {
+        return { ok: true, pane: await startProject(root, project, task) };
+      } catch (e) {
+        if (!(e instanceof Refusal) || e.message !== `${project}'s orchestrator is already running`) throw e;
+        const r = await sendOwnerMessage(
+          root, project, undefined,
+          `New task ${task}: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`,
+        );
+        return { ok: true, typed: r.typed };
+      }
     }
     if (pathname === '/api/message') {
       const r = await sendOwnerMessage(root, project, agentRefOf(body), String(body.text ?? ''));

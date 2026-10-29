@@ -86,10 +86,13 @@ async function allocateHome(root: string, name: string, registered: Set<string>)
 
 async function explicitHome(root: string, folder: string, legacy: boolean): Promise<Allocation> {
   const requested = path.resolve(root, folder);
-  const home = await fs.realpath(requested).catch(() => null);
+  let home = await fs.realpath(requested).catch(() => null);
+  if (!home && !legacy) {
+    await fs.mkdir(requested, { recursive: true });
+    home = await fs.realpath(requested).catch(() => null);
+  }
   const identity = home ? await directoryIdentity(home) : null;
   if (!home || !identity) throw new Refusal(`not a folder: ${legacy ? requested : folder}`);
-  if (!legacy && !(await looksLikeGit(home))) throw new Refusal(`not a git repo: ${folder}`);
   return { home, identity };
 }
 
@@ -203,6 +206,11 @@ export async function addProject(
         await createRepository(allocation, source);
         await assertIdentity(allocation);
         await fs.rm(path.join(allocation.home, '.hive'), { recursive: true, force: true });
+      } else if (!opts.legacy && !(await looksLikeGit(allocation.home))) {
+        if (await fs.lstat(path.join(allocation.home, '.git')).catch(() => null)) {
+          throw new Refusal(`not a git repo: ${folder}`);
+        }
+        await createRepository(allocation);
       }
       await assertIdentity(allocation);
       const project: ProjectsFile['projects'][number] = {

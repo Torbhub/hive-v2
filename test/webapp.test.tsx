@@ -181,6 +181,28 @@ describe('instant click feedback', () => {
     expect(container.textContent).toContain('coming up on demo-1');
   });
 
+  it('a task sent to a running orchestrator clears the draft and registers once', async () => {
+    const input = container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+    act(() => {
+      setter.call(input, 'write the docs');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      ([...container.querySelectorAll('button')].find((b) => b.textContent === 'Start task') as HTMLButtonElement).click();
+    });
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true, id: 'demo-1' }), { status: 200 }));
+    });
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true, typed: true }), { status: 200 }));
+    });
+    expect(container.textContent).toContain('demo-1 was sent to its running orchestrator');
+    expect((container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement).value).toBe('');
+    expect(vi.mocked(fetch).mock.calls.filter(([i]) => String(i).endsWith('api/task'))).toHaveLength(1);
+    expect(vi.mocked(fetch).mock.calls.filter(([i]) => String(i).endsWith('api/start'))).toHaveLength(1);
+  });
+
   it('a dialog answer shows cyan answering… immediately', async () => {
     const dialogView: HubView = {
       ...VIEW,
