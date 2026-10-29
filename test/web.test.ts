@@ -59,7 +59,7 @@ import { sendOwnerMessage } from '../src/message.js';
 import { typeLine } from '../src/spawn.js';
 import { capturePane, paneExists, paneIs, run, sendLiteral, sleep } from '../src/tmux.js';
 import { createServer } from '../web/server.js';
-import { appendTaskEvent, hivePath, hubPath, readProjects, writeJson } from '../src/state.js';
+import { appendTaskEvent, hivePath, hubPath, readProjects, Refusal, writeJson } from '../src/state.js';
 
 let server: Server;
 let base: string;
@@ -367,6 +367,13 @@ describe('POST /api/task', () => {
 });
 
 describe('POST /api/start', () => {
+  const realStart = vi.mocked(startProject).getMockImplementation()!;
+  const realMessage = vi.mocked(sendOwnerMessage).getMockImplementation()!;
+  afterEach(() => {
+    vi.mocked(startProject).mockReset().mockImplementation(realStart);
+    vi.mocked(sendOwnerMessage).mockReset().mockImplementation(realMessage);
+  });
+
   it('a malformed or missing task id is a clean 400 Refusal, no internals leak', async () => {
     const bad = await post('/api/start', { project: 'demo', task: '../../etc' });
     expect(bad.status).toBe(400);
@@ -374,6 +381,30 @@ describe('POST /api/start', () => {
     const missing = await post('/api/start', { project: 'demo', task: 'demo-99' });
     expect(missing.status).toBe(400);
     expect((await missing.json()).detail).toMatch(/no task file/);
+  });
+
+  it('delivers a registered task to an orchestrator that is already running', async () => {
+    vi.mocked(startProject).mockClear();
+    vi.mocked(sendOwnerMessage).mockClear();
+    vi.mocked(startProject).mockRejectedValueOnce(new Refusal("demo's orchestrator is already running"));
+    vi.mocked(sendOwnerMessage).mockResolvedValueOnce({ typed: 'Owner: task' });
+    const r = await post('/api/start', { project: 'demo', task: 'demo-1' });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, typed: 'Owner: task' });
+    expect(startProject).toHaveBeenCalledTimes(1);
+    expect(sendOwnerMessage).toHaveBeenCalledWith(
+      root, 'demo', undefined,
+      `New task demo-1: read ${hubPath(root, 'tasks', 'demo-1.md')} and take it from there.`,
+    );
+  });
+
+  it('does not turn unrelated start refusals into messages', async () => {
+    vi.mocked(sendOwnerMessage).mockClear();
+    vi.mocked(startProject).mockRejectedValueOnce(new Refusal('no task file for demo-1'));
+    const r = await post('/api/start', { project: 'demo', task: 'demo-1' });
+    expect(r.status).toBe(400);
+    expect((await r.json()).detail).toMatch(/no task file/);
+    expect(sendOwnerMessage).not.toHaveBeenCalled();
   });
 });
 
@@ -553,20 +584,25 @@ describe('POST /api/project', () => {
     }
   });
 
-  it('a relative path, a missing folder, and a folder without git are all 400s', async () => {
+  it('refuses a relative path and creates missing or plain explicit directories', async () => {
     const relative = await post('/api/project', { name: 'relproj', path: 'some/where' });
     expect(relative.status).toBe(400);
     expect((await relative.json()).detail).toMatch(/must be absolute/);
 
-    const missing = await post('/api/project', { name: 'goneproj', path: path.join(root, 'not-there') });
-    expect(missing.status).toBe(400);
-    expect((await missing.json()).detail).toMatch(/not a folder/);
+    const missingHome = path.join(root, 'not-there');
+    const missing = await post('/api/project', { name: 'goneproj', path: missingHome });
+    expect(missing.status).toBe(200);
+    expect(await missing.json()).toEqual({ ok: true, name: 'goneproj', home: missingHome });
+    expect((await fs.stat(path.join(missingHome, '.git'))).isDirectory()).toBe(true);
 
     const plain = path.join(root, 'plainproj');
     await fs.mkdir(plain, { recursive: true });
+    await fs.writeFile(path.join(plain, 'keep.txt'), 'keep\n');
     const noGit = await post('/api/project', { name: 'plainproj', path: plain });
-    expect(noGit.status).toBe(400);
-    expect((await noGit.json()).detail).toMatch(/not a git repo/);
+    expect(noGit.status).toBe(200);
+    expect(await noGit.json()).toEqual({ ok: true, name: 'plainproj', home: plain });
+    expect((await fs.stat(path.join(plain, '.git'))).isDirectory()).toBe(true);
+    expect(await fs.readFile(path.join(plain, 'keep.txt'), 'utf8')).toBe('keep\n');
   });
 
   it('a bad mode or approvals value is a 400 and writes nothing', async () => {

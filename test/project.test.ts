@@ -145,6 +145,30 @@ describe('addProjectFromBody', () => {
     expectBoundedProcesses();
   });
 
+  it('creates a missing explicit directory as an empty Git repository', async () => {
+    const root = await emptyHub();
+    const home = path.join(root, 'nested', 'fresh');
+    const result = await addProjectFromBody(root, { name: 'fresh', path: home });
+    expect(result).toEqual({ ok: true, name: 'fresh', home });
+    expect(git(result.home, 'rev-parse', '--is-inside-work-tree')).toBe('true');
+    expect((await readProjects(root)).projects[0].home).toBe(home);
+    expectBoundedProcesses();
+  });
+
+  it('initializes an existing plain directory without removing its content', async () => {
+    const root = await emptyHub();
+    const home = path.join(root, 'plain');
+    await fs.mkdir(hivePath(home), { recursive: true });
+    await fs.writeFile(path.join(home, 'keep.txt'), 'keep\n');
+    await fs.writeFile(hivePath(home, 'team.json'), '{"agents":[]}\n');
+    const result = await addProjectFromBody(root, { name: 'plain', path: home });
+    expect(result).toEqual({ ok: true, name: 'plain', home });
+    expect(git(result.home, 'rev-parse', '--is-inside-work-tree')).toBe('true');
+    expect(await fs.readFile(path.join(home, 'keep.txt'), 'utf8')).toBe('keep\n');
+    expect(await fs.readFile(hivePath(home, 'team.json'), 'utf8')).toBe('{"agents":[]}\n');
+    expectBoundedProcesses();
+  });
+
   it('uses a random suffix on collision and preserves the existing path', async () => {
     const root = await emptyHub();
     const marker = path.join(root, 'fresh', 'keep.txt');
