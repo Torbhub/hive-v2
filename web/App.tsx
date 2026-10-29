@@ -123,6 +123,7 @@ export function App() {
     return act(`start-${project}`, project, 'starting', project, async () => {
       const t = await post('api/task', { project, text });
       const j = await post('api/start', { project, task: t.id });
+      if (j.typed) return `${project}: ${t.id} was sent to its running orchestrator`;
       return `${project}: its orchestrator is coming up on ${t.id}; it reports back when its team is up (pane ${j.pane})`;
     });
   }, [act]);

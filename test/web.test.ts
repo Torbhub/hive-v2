@@ -384,8 +384,6 @@ describe('POST /api/start', () => {
   });
 
   it('delivers a registered task to an orchestrator that is already running', async () => {
-    vi.mocked(startProject).mockClear();
-    vi.mocked(sendOwnerMessage).mockClear();
     vi.mocked(startProject).mockRejectedValueOnce(new Refusal("demo's orchestrator is already running"));
     vi.mocked(sendOwnerMessage).mockResolvedValueOnce({ typed: 'Owner: task' });
     const r = await post('/api/start', { project: 'demo', task: 'demo-1' });
@@ -399,7 +397,6 @@ describe('POST /api/start', () => {
   });
 
   it('does not turn unrelated start refusals into messages', async () => {
-    vi.mocked(sendOwnerMessage).mockClear();
     vi.mocked(startProject).mockRejectedValueOnce(new Refusal('no task file for demo-1'));
     const r = await post('/api/start', { project: 'demo', task: 'demo-1' });
     expect(r.status).toBe(400);
@@ -598,9 +595,9 @@ describe('POST /api/project', () => {
     const plain = path.join(root, 'plainproj');
     await fs.mkdir(plain, { recursive: true });
     await fs.writeFile(path.join(plain, 'keep.txt'), 'keep\n');
-    const noGit = await post('/api/project', { name: 'plainproj', path: plain });
-    expect(noGit.status).toBe(200);
-    expect(await noGit.json()).toEqual({ ok: true, name: 'plainproj', home: plain });
+    const initialized = await post('/api/project', { name: 'plainproj', path: plain });
+    expect(initialized.status).toBe(200);
+    expect(await initialized.json()).toEqual({ ok: true, name: 'plainproj', home: plain });
     expect((await fs.stat(path.join(plain, '.git'))).isDirectory()).toBe(true);
     expect(await fs.readFile(path.join(plain, 'keep.txt'), 'utf8')).toBe('keep\n');
   });
