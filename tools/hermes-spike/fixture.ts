@@ -18,11 +18,51 @@ export type CanonicalState =
   | 'cancelled';
 
 type NativeEvent = {
-  type: string;
+  type: 'system' | 'text' | 'tool_use' | 'tool_result' | 'result';
   text?: string;
   exit_code?: number;
   tokens?: Record<string, number>;
 };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0;
+const isOptionalString = (value: unknown): boolean => value === undefined || typeof value === 'string';
+const isOptionalBoolean = (value: unknown): boolean => value === undefined || typeof value === 'boolean';
+const isNonNegativeNumber = (value: unknown): boolean =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const isTokenCount = (value: unknown): boolean =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0;
+
+function isTokens(value: unknown): boolean {
+  return isRecord(value) && ['input', 'output', 'total', 'cache_read', 'cache_write']
+    .every((key) => isTokenCount(value[key]));
+}
+
+function isNativeEvent(value: unknown): value is NativeEvent {
+  if (!isRecord(value) || !isNonNegativeNumber(value.timestamp)) return false;
+  switch (value.type) {
+    case 'system':
+      return value.subtype === 'init' && isNonEmptyString(value.session_id) && isNonEmptyString(value.model);
+    case 'text':
+      return typeof value.text === 'string';
+    case 'tool_use':
+      return isNonEmptyString(value.name) && isOptionalString(value.tool_call_id)
+        && (value.input === undefined || isRecord(value.input));
+    case 'tool_result':
+      return isNonEmptyString(value.name) && typeof value.output === 'string'
+        && isOptionalString(value.tool_call_id) && isNonNegativeNumber(value.duration_ms)
+        && typeof value.is_error === 'boolean';
+    case 'result':
+      return isNonEmptyString(value.session_id) && isTokenCount(value.exit_code)
+        && typeof value.text === 'string' && isTokens(value.tokens)
+        && isNonNegativeNumber(value.duration_ms) && isOptionalString(value.error)
+        && isOptionalBoolean(value.replay_gap);
+    default:
+      return false;
+  }
+}
 
 export type FixtureOutcome = {
   state: CanonicalState;
@@ -55,6 +95,7 @@ class FixtureRun {
   private usage?: Record<string, number>;
   private terminalTransitions = 0;
   private fenced = false;
+  private interruptedReceipt = false;
 
   run(observations: FixtureObservation[]): FixtureOutcome {
     for (const observation of observations) this.onObservation(observation);
@@ -73,7 +114,7 @@ class FixtureRun {
   }
 
   private transition(next: CanonicalState) {
-    if (this.state === next) return;
+    if (this.state === next || (this.fenced && next !== 'unknown')) return;
     this.state = next;
     if (['succeeded', 'failed', 'unknown', 'cancelled'].includes(next)) this.terminalTransitions += 1;
   }
@@ -86,18 +127,21 @@ class FixtureRun {
   }
 
   private complete() {
-    if (this.fenced) {
-      this.transition('unknown');
+    if (this.fenced) return;
+    if (this.interruptedReceipt && this.nativeResult && this.nativeResult.exit_code !== 130) {
+      this.fence();
       return;
     }
     if (!this.nativeResult || !this.sawEof || this.exitCode === undefined) return;
     if (this.nativeResult.exit_code !== this.exitCode) {
       this.fence();
+    } else if (this.exitCode === 130) {
+      if (this.interruptedReceipt) this.transition('cancelled');
     } else if (this.exitCode === 0) {
       this.finalText = this.nativeResult.text;
       this.usage = this.nativeResult.tokens;
       this.transition('succeeded');
-    } else if (this.exitCode !== 130) {
+    } else {
       this.transition('failed');
     }
   }
@@ -110,7 +154,7 @@ class FixtureRun {
         if (this.nativeResult) this.lateText.push(event.text);
         else this.partialText += event.text;
       }
-      if (!this.nativeResult && !this.fenced) this.transition('running');
+      if (this.state === 'queued') this.transition('running');
     }
     this.trace.push({ kind: event.type, state: this.state });
   }
@@ -134,7 +178,7 @@ class FixtureRun {
 
   private parseLine(line: Uint8Array, offset: number, atEof: boolean) {
     let raw: string;
-    let event: NativeEvent;
+    let value: unknown;
     try {
       raw = this.decoder.decode(line);
     } catch {
@@ -142,12 +186,16 @@ class FixtureRun {
       return;
     }
     try {
-      event = JSON.parse(raw) as NativeEvent;
+      value = JSON.parse(raw);
     } catch {
       this.parserError(atEof ? 'truncated-json' : 'malformed-json', offset);
       return;
     }
-    this.onNative(event, raw);
+    if (!isNativeEvent(value)) {
+      this.parserError('invalid-schema', offset);
+      return;
+    }
+    this.onNative(value, raw);
   }
 
   private onBytes(bytes: Uint8Array) {
@@ -161,6 +209,16 @@ class FixtureRun {
       this.pendingOffset += newline + 1;
       newline = this.pending.indexOf(10);
     }
+  }
+
+  private onReceipt(status: 'interrupted' | 'running' | 'missing' | 'conflicting') {
+    if (status !== 'interrupted') {
+      this.fence();
+      return;
+    }
+    this.interruptedReceipt = true;
+    this.complete();
+    if (!this.nativeResult && !this.fenced) this.transition('cleanup-pending');
   }
 
   private onObservation(observation: FixtureObservation) {
@@ -183,10 +241,7 @@ class FixtureRun {
     } else if (observation.type === 'forced-stop') {
       this.fence();
     } else if (observation.type === 'receipt') {
-      if (observation.status !== 'interrupted') this.fence();
-      else if (this.nativeResult?.exit_code === 130 && this.sawEof && this.exitCode === 130) {
-        this.transition('cancelled');
-      } else this.transition('cleanup-pending');
+      this.onReceipt(observation.status);
     }
     this.trace.push({ kind: observation.type, state: this.state });
   }
