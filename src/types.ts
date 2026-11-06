@@ -62,6 +62,7 @@ export type Decision = {
   task?: string;
   by: 'owner' | 'watch' | 'orchestrator';
   summary: string;
+  watch_key?: string;
 };
 
 export type HubFolder = { folder: string; kind: string; branch?: string; changed?: number };

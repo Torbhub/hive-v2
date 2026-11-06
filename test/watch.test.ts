@@ -69,13 +69,18 @@ vi.mock('../src/death-bundle.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/state.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/state.js')>();
+  return { ...orig, appendDecision: vi.fn(orig.appendDecision) };
+});
+
 import { buildStatus, continueProject, readDialogFor, answerDialog, wake } from '../src/hub.js';
 import { typeLine, wakeAgent } from '../src/spawn.js';
 import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
 import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep, tmux } from '../src/tmux.js';
 import { withTimeout } from '../src/view.js';
-import { hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, writePendingPane, hivePath } from '../src/state.js';
-import { loadProcessedKeys } from '../src/watch-persist.js';
+import { appendDecision, hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, writePendingPane, hivePath } from '../src/state.js';
+import { loadProcessedKeys, recordProcessedKey } from '../src/watch-persist.js';
 import {
   extractCommand, neverApprove, tier1Approves, watch, watchCycle, WAKE_MAX_ATTEMPTS,
 } from '../src/watch.js';
@@ -972,19 +977,175 @@ describe('watchCycle stale-lane heartbeat', () => {
     expect(decisions).toHaveLength(1);
   });
 
-  it('the stale record survives a restart: same hour still silent', async () => {
+  it('unchanged silence stays deduplicated across hours and a restart', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime('2026-11-06T10:00:00Z');
+      const { root } = await setupProject({
+        agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+      });
+      vi.mocked(paneExists).mockResolvedValue(true);
+      vi.mocked(capturePane).mockResolvedValue(idlePane);
+      vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 20 * 60_000);
+      const seen = new Set<string>();
+      await watchCycle(root, {}, seen);
+      expect(await readDecisions(root)).toHaveLength(1);
+
+      vi.setSystemTime('2026-11-06T12:00:00Z');
+      await watchCycle(root, {}, seen);
+      expect(await readDecisions(root)).toHaveLength(1);
+
+      const restored = await loadProcessedKeys(root);
+      await watchCycle(root, {}, restored);
+      expect(await readDecisions(root)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fresh output followed by silence starts a new stale episode', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(idlePane);
+    let wireAt = Date.now() - 20 * 60_000;
+    vi.mocked(wireLogMtime).mockImplementation(async () => wireAt);
+    const seen = new Set<string>();
+    await watchCycle(root, {}, seen);
+    expect(await readDecisions(root)).toHaveLength(1);
+
+    wireAt = Date.now();
+    await watchCycle(root, {}, seen);
+    expect(await readDecisions(root)).toHaveLength(1);
+
+    wireAt = Date.now() - 20 * 60_000;
+    await watchCycle(root, {}, seen);
+    expect(await readDecisions(root)).toHaveLength(2);
+  });
+
+  it('a different session on a reused pane starts a new stale episode', async () => {
+    const { root, home } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(idlePane);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 20 * 60_000);
+    const seen = new Set<string>();
+    await watchCycle(root, {}, seen);
+    expect(await readDecisions(root)).toHaveLength(1);
+
+    await upsertTeamEntry(home, { name: 'builder', session_id: 'session_c' });
+    await watchCycle(root, {}, seen);
+    expect(await readDecisions(root)).toHaveLength(2);
+  });
+
+  it('reserves a stale key while an overlapping cycle waits on its decision append', async () => {
     const { root } = await setupProject({
       agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
     });
     vi.mocked(paneExists).mockResolvedValue(true);
     vi.mocked(capturePane).mockResolvedValue(idlePane);
     vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 20 * 60_000);
-    await watchCycle(root, {}, new Set());
-    expect(await readDecisions(root)).toHaveLength(1);
+    const realAppend = vi.mocked(appendDecision).getMockImplementation();
+    if (!realAppend) throw new Error('appendDecision mock has no implementation');
+    let markStarted = () => {};
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let releaseAppend = () => {};
+    const blocked = new Promise<void>((resolve) => { releaseAppend = resolve; });
+    vi.mocked(appendDecision).mockImplementationOnce(async (...args) => {
+      markStarted();
+      await blocked;
+      return realAppend(...args);
+    });
+    try {
+      const seen = new Set<string>();
+      const first = watchCycle(root, {}, seen);
+      await started;
+      const second = watchCycle(root, {}, seen);
+      await second;
+      releaseAppend();
+      await first;
+      expect(appendDecision).toHaveBeenCalledTimes(1);
+      expect(await readDecisions(root)).toHaveLength(1);
+    } finally {
+      releaseAppend();
+      vi.mocked(appendDecision).mockImplementation(realAppend);
+    }
+  });
 
-    const restored = await loadProcessedKeys(root);
-    await watchCycle(root, {}, restored);
-    expect(await readDecisions(root)).toHaveLength(1);
+  it('releases a stale reservation only after its decision append rejects', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(capturePane).mockResolvedValue(idlePane);
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 20 * 60_000);
+    const realAppend = vi.mocked(appendDecision).getMockImplementation();
+    if (!realAppend) throw new Error('appendDecision mock has no implementation');
+    let markStarted = () => {};
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let releaseAppend = () => {};
+    const blocked = new Promise<void>((resolve) => { releaseAppend = resolve; });
+    vi.mocked(appendDecision).mockImplementationOnce(async () => {
+      markStarted();
+      await blocked;
+      throw new Error('decision write failed');
+    });
+    try {
+      const seen = new Set<string>();
+      const first = watchCycle(root, {}, seen);
+      await started;
+      const second = watchCycle(root, {}, seen);
+      await second;
+      releaseAppend();
+      await expect(first).rejects.toThrow('decision write failed');
+      expect(appendDecision).toHaveBeenCalledTimes(1);
+
+      await watchCycle(root, {}, seen);
+      expect(appendDecision).toHaveBeenCalledTimes(2);
+      expect(await readDecisions(root)).toHaveLength(1);
+    } finally {
+      releaseAppend();
+      vi.mocked(appendDecision).mockImplementation(realAppend);
+    }
+  });
+
+  it('migrates an active legacy episode without masking a new session or fresh output', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime('2026-11-06T10:00:00Z');
+      const { root, home } = await setupProject({
+        agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+      });
+      const wireAt = Date.parse('2026-11-06T09:40:00Z');
+      await recordProcessedKey(root, `stale:%2:${Math.floor(Date.now() / 3_600_000)}`);
+      await appendDecision(root, {
+        project: 'demo', by: 'watch', summary: 'stale: demo/builder no output for 20m',
+        at: '2026-11-06T10:01:00.100Z',
+      });
+      vi.mocked(paneExists).mockResolvedValue(true);
+      vi.mocked(capturePane).mockResolvedValue(idlePane);
+      vi.mocked(wireLogMtime).mockResolvedValue(wireAt);
+
+      vi.setSystemTime('2026-11-06T12:00:00Z');
+      const restored = await loadProcessedKeys(root);
+      await watchCycle(root, {}, restored);
+      expect(await readDecisions(root)).toHaveLength(1);
+      const migrated = await loadProcessedKeys(root);
+      expect(migrated.has(`stale:session_b:%2:${wireAt}`)).toBe(true);
+
+      await upsertTeamEntry(home, { name: 'builder', session_id: 'session_c' });
+      await watchCycle(root, {}, migrated);
+      expect(await readDecisions(root)).toHaveLength(2);
+
+      vi.setSystemTime('2026-11-06T12:05:00Z');
+      vi.mocked(wireLogMtime).mockResolvedValue(Date.parse('2026-11-06T11:45:00Z'));
+      await watchCycle(root, {}, migrated);
+      expect(await readDecisions(root)).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a fresh wire log raises no stale flag', async () => {

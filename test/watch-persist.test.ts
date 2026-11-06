@@ -2,7 +2,7 @@ import { promises as fs, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { hubPath } from '../src/state.js';
+import { appendDecision, hubPath } from '../src/state.js';
 import { loadProcessedKeys, recordProcessedKey } from '../src/watch-persist.js';
 
 function tmp(): string {
@@ -14,11 +14,19 @@ describe('watch-persist', () => {
     expect(await loadProcessedKeys(tmp())).toEqual(new Set());
   });
 
-  it('recorded keys round-trip through a load', async () => {
+  it('recorded death keys round-trip through a load', async () => {
     const root = tmp();
     await recordProcessedKey(root, '%1:11');
-    await recordProcessedKey(root, 'stale:%2:489000');
-    expect(await loadProcessedKeys(root)).toEqual(new Set(['%1:11', 'stale:%2:489000']));
+    expect(await loadProcessedKeys(root)).toEqual(new Set(['%1:11']));
+  });
+
+  it('a stale decision restores its key without a processed-key file', async () => {
+    const root = tmp();
+    const staleKey = 'stale:session_b:%2:1762400000000';
+    await appendDecision(root, {
+      project: 'demo', by: 'watch', summary: 'stale: demo/builder no output for 20m', watch_key: staleKey,
+    });
+    expect(await loadProcessedKeys(root)).toEqual(new Set([staleKey]));
   });
 
   it('a torn last line is dropped, not fatal', async () => {
