@@ -54,7 +54,7 @@ def status_value():
         ],
         'probe': {
             'enabled': True,
-            'lastRunFinishedAt': '2027-01-14T23:59:00.000Z',
+            'lastRunFinishedAt': '2027-01-15T07:59:00.000Z',
             'accounts': [
                 {'name': 'private-a', 'status': 'ok', 'error': None},
                 {'name': 'private-b', 'status': 'error', 'error': 'private'},
