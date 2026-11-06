@@ -624,18 +624,22 @@ Every new-task, owner-message, rebrief, and plan-feedback input has a **Dictate*
 
 The first **Dictate** click without a pairing token shows a password input labeled `Handy pairing token for {input label}` and a **Connect and dictate** button. The token stays in page memory and clears on reload. The token field never submits the surrounding composer. A token needs at least 32 characters. The browser checks the local Handy bridge before it requests microphone permission.
 
-An active start shows **Cancel dictation**. Recording adds **Stop**. Every dictation button has `type="button"` and an input-specific accessible label. The shared action gate disables every dictation button while another Hub action runs. A polite live status region carries `data-dictation-state` and one of these exact states and messages:
+An active start shows **Cancel dictation**. Recording adds **Stop**. Every dictation button has `type="button"` and an input-specific accessible label. The shared action gate disables only **Dictate** and **Connect and dictate**. **Stop** and **Cancel dictation** stay available when another Hub action runs. A polite live status region carries `data-dictation-state` and one of these exact states and messages:
 
 - `starting`: `Requesting microphone permission.`
 - `recording`: `Recording. Stop when you finish. The limit is 60 seconds.`
 - `transcribing`: `Transcribing locally with Handy.`
+- `cancelling`: `Cancelling transcription. Wait before starting again.`
 - `success`: `Dictation added. Review and edit it before sending.`
 - `cancelled`: `Dictation cancelled. No text was added.`
 - `permission-denied`: `Microphone permission was denied. Allow it in the browser or keep typing.`
+- `authentication`: `Pairing failed. Enter the token from your Handy bridge.`
 - `unavailable`: `Handy is unavailable, or no microphone is available. Start the local bridge or keep typing.`
 - `failure`: `Dictation failed. Check Handy and the pairing token, then try again.`
 
-Recording starts only after the explicit gesture and browser permission. **Stop** ends recording and starts local transcription. **Cancel dictation** discards recording or transcription and ignores every late result. Stopping the page also stops the microphone. The recording lasts at most 60 seconds and its encoded browser audio is capped at 8 MiB.
+Recording starts only after the explicit gesture and browser permission. **Stop** ends recording and starts local transcription. **Cancel dictation** stops microphone tracks immediately and ignores every late result. During transcription it also waits for the bridge to terminate Handy and delete the per-job directory. The `cancelling` state offers no new start. A failed cancellation confirmation keeps new starts disabled. Stopping the page also stops the microphone. The recording lasts at most 60 seconds and its encoded browser audio is capped at 8 MiB.
+
+A 401 response clears the failed in-memory token and restores an empty editable pairing-token prompt. A corrected token starts dictation without a reload.
 
 Success trims the transcript and inserts it at the current input selection. It adds one adjacent space only when the surrounding text has no whitespace. It then places the cursor after the insertion. The input remains enabled during every state. The operator can review and edit the draft. Dictation never calls a task, message, rebrief, plan, approval, or question submit callback. Existing Enter, Send, choice, and approval behavior stays unchanged. Unsupported browsers, denied permission, and an absent bridge leave normal typing usable.
 

@@ -10,7 +10,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc && npm run build:web",
+    "build": "tsc && tsc -p web/tsconfig.json && npm run build:web",
     "build:web": "vite build",
     "test": "vitest run",
     "dev": "tsx src/cli.ts"
@@ -29,6 +29,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^22.10.0",
     "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",
     "jsdom": "^30.1.2",
     "react-dom": "^19.1.0",

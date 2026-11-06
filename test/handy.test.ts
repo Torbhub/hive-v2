@@ -197,7 +197,10 @@ describe('Handy CLI adapter', () => {
       expect(args).toEqual(['--transcribe-file', audioPath, '--json']);
       expect((await fs.readFile(audioPath)).equals(wav())).toBe(true);
       expect(options.env.PATH).toBe('/usr/bin');
-      expect(options.env.HOME).toBe('/home/operator');
+      expect(options.env.HOME).not.toBe('/home/operator');
+      expect(options.env.RUST_LOG).toBe('off');
+      expect(options.env.HANDY_TRANSCRIBE_WORKER_LOG).toBe('off');
+      expect(options.env.XDG_CONFIG_HOME).toContain('hive-handy-');
       expect(options.env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
       expect(options.env.HIVE_WEB_SECRET).toBeUndefined();
       expect(options.env.NEXUS_PUSH_TOKEN).toBeUndefined();

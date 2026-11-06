@@ -23,19 +23,20 @@ const ENV_ALLOWLIST = [
 export type HandyRunner = (
   command: string,
   args: string[],
-  options: { env: NodeJS.ProcessEnv; timeout: number; maxBuffer: number },
+  options: { env: NodeJS.ProcessEnv; timeout: number; maxBuffer: number; signal?: AbortSignal },
 ) => Promise<string>;
 
 type HandyOptions = {
   handyPath?: string;
   env?: NodeJS.ProcessEnv;
   runner?: HandyRunner;
+  tempRoot?: string;
 };
 
 type HandyServerOptions = HandyOptions & {
   origin: string;
   token: string;
-  transcribe?: (audio: Buffer) => Promise<string>;
+  transcribe?: (audio: Buffer, signal: AbortSignal) => Promise<string>;
   check?: () => Promise<void>;
 };
 
@@ -56,6 +57,7 @@ function runProcess(command: string, args: string[], options: {
   env: NodeJS.ProcessEnv;
   timeout: number;
   maxBuffer: number;
+  signal?: AbortSignal;
 }): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(command, args, { ...options, shell: false, windowsHide: true }, (error, stdout) => {
@@ -63,6 +65,54 @@ function runProcess(command: string, args: string[], options: {
       else resolve(stdout);
     });
   });
+}
+
+type HandySandbox = { directory: string; env: NodeJS.ProcessEnv };
+
+async function createHandySandbox(options: HandyOptions): Promise<HandySandbox> {
+  const sourceEnv = options.env ?? process.env;
+  const sourceHome = sourceEnv.HOME ?? '';
+  const directory = await fs.mkdtemp(path.join(options.tempRoot ?? tmpdir(), 'hive-handy-'));
+  const home = path.join(directory, 'home');
+  const directories: { actual: string; temporary: string; variable?: string }[] = [];
+  if (process.platform === 'win32') {
+    directories.push(
+      { actual: sourceEnv.APPDATA ?? path.join(sourceHome, 'AppData', 'Roaming'), temporary: path.join(directory, 'roaming'), variable: 'APPDATA' },
+      { actual: sourceEnv.LOCALAPPDATA ?? path.join(sourceHome, 'AppData', 'Local'), temporary: path.join(directory, 'local'), variable: 'LOCALAPPDATA' },
+    );
+  } else if (process.platform === 'darwin') {
+    directories.push({ actual: path.join(sourceHome, 'Library', 'Application Support'), temporary: path.join(home, 'Library', 'Application Support') });
+  } else {
+    directories.push(
+      { actual: sourceEnv.XDG_CONFIG_HOME ?? path.join(sourceHome, '.config'), temporary: path.join(directory, 'config'), variable: 'XDG_CONFIG_HOME' },
+      { actual: sourceEnv.XDG_DATA_HOME ?? path.join(sourceHome, '.local', 'share'), temporary: path.join(directory, 'data'), variable: 'XDG_DATA_HOME' },
+    );
+  }
+  const env = cleanEnvironment(sourceEnv);
+  env.HOME = home;
+  env.RUST_LOG = 'off';
+  env.HANDY_TRANSCRIBE_WORKER_LOG = 'off';
+  env.TEMP = directory;
+  env.TMP = directory;
+  env.TMPDIR = directory;
+  for (const item of directories) {
+    if (item.variable) env[item.variable] = item.temporary;
+    const actualApp = path.join(item.actual, 'com.pais.handy');
+    const temporaryApp = path.join(item.temporary, 'com.pais.handy');
+    await fs.mkdir(temporaryApp, { recursive: true });
+    const models = path.join(actualApp, 'models');
+    if (await fs.stat(models).then((stat) => stat.isDirectory()).catch(() => false)) {
+      await fs.symlink(models, path.join(temporaryApp, 'models'), process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    const settings = path.join(actualApp, 'settings_store.json');
+    if (await fs.stat(settings).then((stat) => stat.isFile()).catch(() => false)) {
+      await fs.copyFile(settings, path.join(temporaryApp, 'settings_store.json'));
+      await fs.chmod(path.join(temporaryApp, 'settings_store.json'), 0o600);
+    }
+  }
+  if (process.platform === 'linux') env.XDG_CACHE_HOME = path.join(directory, 'cache');
+  await fs.mkdir(home, { recursive: true });
+  return { directory, env };
 }
 
 function validateWav(audio: Buffer): void {
@@ -96,19 +146,20 @@ function validateWav(audio: Buffer): void {
 }
 
 export async function transcribeWithHandy(audio: Buffer, options: HandyOptions & {
-  tempRoot?: string;
+  signal?: AbortSignal;
 } = {}): Promise<string> {
   validateWav(audio);
-  const directory = await fs.mkdtemp(path.join(options.tempRoot ?? tmpdir(), 'hive-handy-'));
-  const audioPath = path.join(directory, 'recording.wav');
+  const sandbox = await createHandySandbox(options);
+  const audioPath = path.join(sandbox.directory, 'recording.wav');
   try {
-    await fs.chmod(directory, 0o700);
+    await fs.chmod(sandbox.directory, 0o700);
     await fs.writeFile(audioPath, audio, { mode: 0o600, flag: 'wx' });
     const runner = options.runner ?? runProcess;
     const stdout = await runner(options.handyPath ?? 'handy', ['--transcribe-file', audioPath, '--json'], {
-      env: cleanEnvironment(options.env ?? process.env),
+      env: sandbox.env,
       timeout: HANDY_TIMEOUT_MS,
       maxBuffer: HANDY_OUTPUT_CAP,
+      signal: options.signal,
     });
     let result: unknown;
     try {
@@ -122,15 +173,16 @@ export async function transcribeWithHandy(audio: Buffer, options: HandyOptions &
   } catch {
     throw new Error('Handy transcription failed');
   } finally {
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(sandbox.directory, { recursive: true, force: true });
   }
 }
 
 async function checkHandy(options: HandyOptions = {}): Promise<void> {
+  const sandbox = await createHandySandbox(options);
   try {
     const runner = options.runner ?? runProcess;
     const stdout = await runner(options.handyPath ?? 'handy', ['--list-models', '--json'], {
-      env: cleanEnvironment(options.env ?? process.env),
+      env: sandbox.env,
       timeout: 15_000,
       maxBuffer: HANDY_OUTPUT_CAP,
     });
@@ -138,6 +190,8 @@ async function checkHandy(options: HandyOptions = {}): Promise<void> {
     if (!Array.isArray(models) || !models.some((model) => model.is_downloaded === true)) throw new Error('no model');
   } catch {
     throw new Error('Handy is unavailable');
+  } finally {
+    await fs.rm(sandbox.directory, { recursive: true, force: true });
   }
 }
 
@@ -159,6 +213,7 @@ function responseHeaders(origin: string): Record<string, string> {
 }
 
 function send(res: http.ServerResponse, status: number, value: unknown, origin?: string): void {
+  if (res.destroyed || res.writableEnded) return;
   res.writeHead(status, origin ? responseHeaders(origin) : {
     'cache-control': 'no-store',
     'content-type': 'application/json; charset=utf-8',
@@ -167,7 +222,6 @@ function send(res: http.ServerResponse, status: number, value: unknown, origin?:
 }
 
 function checkRequest(req: http.IncomingMessage, server: http.Server, origin: string): void {
-  if (req.headers['sec-fetch-site'] === 'cross-site') throw new BridgeError(403, 'cross-origin request');
   if (req.headers.origin !== origin) throw new BridgeError(403, 'cross-origin request');
   const address = server.address();
   if (address === null || typeof address === 'string') throw new BridgeError(503, 'bridge is not listening');
@@ -193,21 +247,35 @@ async function readAudio(req: http.IncomingMessage): Promise<Buffer> {
   return audio;
 }
 
+function watchDisconnect(req: http.IncomingMessage, res: http.ServerResponse, controller: AbortController): () => void {
+  let finished = false;
+  const abort = () => { if (!finished) controller.abort(); };
+  const finish = () => { finished = true; };
+  req.once('aborted', abort);
+  res.once('finish', finish);
+  res.once('close', abort);
+  return () => {
+    req.removeListener('aborted', abort);
+    res.removeListener('finish', finish);
+    res.removeListener('close', abort);
+  };
+}
+
 export function createHandyServer(options: HandyServerOptions): http.Server {
   const parsedOrigin = new URL(options.origin);
   if (!['http:', 'https:'].includes(parsedOrigin.protocol) || parsedOrigin.origin !== options.origin) {
     throw new Error('Handy bridge origin must be an exact HTTP origin without a path');
   }
   if (options.token.length < 32) throw new Error('Handy bridge token must contain at least 32 characters');
-  const transcribe = options.transcribe ?? ((audio: Buffer) => transcribeWithHandy(audio, options));
+  const transcribe = options.transcribe ?? ((audio: Buffer, signal: AbortSignal) => transcribeWithHandy(audio, { ...options, signal }));
   const check = options.check ?? (() => checkHandy(options));
-  let busy = false;
+  let activeJob: { controller: AbortController; done: Promise<void> } | null = null;
   const server = http.createServer((req, res) => {
     void (async () => {
       checkRequest(req, server, options.origin);
       const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
       if (req.method === 'OPTIONS') {
-        if (!['/health', '/transcribe'].includes(pathname)) throw new BridgeError(404, 'not found');
+        if (!['/health', '/transcribe', '/cancel'].includes(pathname)) throw new BridgeError(404, 'not found');
         res.writeHead(204, {
           ...responseHeaders(options.origin),
           'access-control-allow-headers': 'authorization, content-type',
@@ -225,20 +293,36 @@ export function createHandyServer(options: HandyServerOptions): http.Server {
         send(res, 200, { ok: true }, options.origin);
         return;
       }
+      if (pathname === '/cancel' && req.method === 'POST') {
+        const job = activeJob;
+        if (job) {
+          job.controller.abort();
+          await job.done;
+        }
+        send(res, 200, { ok: true }, options.origin);
+        return;
+      }
       if (pathname !== '/transcribe') throw new BridgeError(404, 'not found');
       if (req.method !== 'POST') throw new BridgeError(405, 'POST only');
-      if (busy) throw new BridgeError(429, 'another transcription is running');
+      if (activeJob) throw new BridgeError(429, 'another transcription is running');
       if (req.headers['content-type']?.split(';')[0].trim() !== 'audio/wav') {
         throw new BridgeError(415, 'audio/wav is required');
       }
-      busy = true;
+      const controller = new AbortController();
+      let finishJob!: () => void;
+      const done = new Promise<void>((resolve) => { finishJob = resolve; });
+      const job = { controller, done };
+      activeJob = job;
+      const stopWatching = watchDisconnect(req, res, controller);
       try {
         const audio = await readAudio(req);
-        const text = await transcribe(audio);
+        const text = await transcribe(audio, controller.signal);
         if (text.length > TRANSCRIPT_CAP) throw new Error('transcript too long');
         send(res, 200, { ok: true, text }, options.origin);
       } finally {
-        busy = false;
+        stopWatching();
+        if (activeJob === job) activeJob = null;
+        finishJob();
       }
     })().catch((error: unknown) => {
       if (error instanceof BridgeError) {

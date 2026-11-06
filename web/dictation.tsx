@@ -7,8 +7,8 @@ const MAX_RECORDING_MS = 60_000;
 const MAX_ENCODED_BYTES = 8 * 1024 * 1024;
 const MAX_SAMPLES = 60 * 16_000;
 
-type FailureKind = 'permission-denied' | 'unavailable' | 'failure';
-type Phase = 'idle' | 'starting' | 'recording' | 'transcribing' | 'success' | 'cancelled' | FailureKind;
+type FailureKind = 'permission-denied' | 'unavailable' | 'authentication' | 'failure';
+type Phase = 'idle' | 'starting' | 'recording' | 'transcribing' | 'cancelling' | 'success' | 'cancelled' | FailureKind;
 
 export class DictationError extends Error {
   constructor(readonly kind: FailureKind, message: string) {
@@ -18,7 +18,7 @@ export class DictationError extends Error {
 
 export type DictationRecording = {
   stop: () => Promise<string>;
-  cancel: () => void;
+  cancel: () => Promise<void>;
 };
 
 export type DictationEngine = {
@@ -84,6 +84,7 @@ class BrowserRecording implements DictationRecording {
   private size = 0;
   private cancelled = false;
   private limitError: DictationError | null = null;
+  private transcriptionStarted = false;
   private rejectAudio: ((error: Error) => void) | null = null;
 
   constructor(
@@ -141,6 +142,7 @@ class BrowserRecording implements DictationRecording {
     if (chunks.length === 0) throw new DictationError('failure', 'empty recording');
     const wav = await recordingWav(chunks, this.recorder.mimeType);
     let response: Response;
+    this.transcriptionStarted = true;
     try {
       response = await fetch(`${BRIDGE_URL}/transcribe`, {
         method: 'POST',
@@ -154,6 +156,7 @@ class BrowserRecording implements DictationRecording {
     } catch {
       throw new DictationError('unavailable', 'bridge connection failed');
     }
+    if (response.status === 401) throw new DictationError('authentication', 'pairing failed');
     if (response.status === 503) throw new DictationError('unavailable', 'engine unavailable');
     if (!response.ok) throw new DictationError('failure', 'transcription request failed');
     const result = await response.json() as { text?: unknown };
@@ -161,7 +164,7 @@ class BrowserRecording implements DictationRecording {
     return result.text;
   }
 
-  cancel(): void {
+  async cancel(): Promise<void> {
     if (this.cancelled) return;
     this.cancelled = true;
     this.controller.abort();
@@ -171,10 +174,22 @@ class BrowserRecording implements DictationRecording {
     this.recorder.onstop = null;
     this.recorder.onerror = null;
     if (this.recorder.state !== 'inactive') this.recorder.stop();
+    if (!this.transcriptionStarted) return;
+    let response: Response;
+    try {
+      response = await fetch(`${BRIDGE_URL}/cancel`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${pairingToken}` },
+        cache: 'no-store',
+      });
+    } catch {
+      throw new DictationError('unavailable', 'cancellation was not confirmed');
+    }
+    if (!response.ok) throw new DictationError('failure', 'cancellation was not confirmed');
   }
 }
 
-function browserEngine(): DictationEngine {
+export function browserEngine(): DictationEngine {
   return {
     async start(onTimeLimit, suppliedController) {
       if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined'
@@ -192,10 +207,8 @@ function browserEngine(): DictationEngine {
       } catch {
         throw new DictationError('unavailable', 'bridge connection failed');
       }
-      if (health.status === 503 || !health.ok && health.status !== 401) {
-        throw new DictationError('unavailable', 'engine unavailable');
-      }
-      if (!health.ok) throw new DictationError('failure', 'pairing failed');
+      if (health.status === 401) throw new DictationError('authentication', 'pairing failed');
+      if (!health.ok) throw new DictationError('unavailable', 'engine unavailable');
       if (controller.signal.aborted) throw new DictationError('failure', 'cancelled');
       let stream: MediaStream;
       try {
@@ -222,9 +235,11 @@ const STATUS: Record<Exclude<Phase, 'idle'>, string> = {
   starting: 'Requesting microphone permission.',
   recording: 'Recording. Stop when you finish. The limit is 60 seconds.',
   transcribing: 'Transcribing locally with Handy.',
+  cancelling: 'Cancelling transcription. Wait before starting again.',
   success: 'Dictation added. Review and edit it before sending.',
   cancelled: 'Dictation cancelled. No text was added.',
   'permission-denied': 'Microphone permission was denied. Allow it in the browser or keep typing.',
+  authentication: 'Pairing failed. Enter the token from your Handy bridge.',
   unavailable: 'Handy is unavailable, or no microphone is available. Start the local bridge or keep typing.',
   failure: 'Dictation failed. Check Handy and the pairing token, then try again.',
 };
@@ -242,6 +257,7 @@ export function DictationControl({
   const [phase, setPhase] = useState<Phase>('idle');
   const [needsToken, setNeedsToken] = useState(false);
   const [tokenDraft, setTokenDraft] = useState('');
+  const [cancelUnconfirmed, setCancelUnconfirmed] = useState(false);
   const session = useRef<DictationRecording | null>(null);
   const startup = useRef<AbortController | null>(null);
   const operation = useRef(0);
@@ -251,8 +267,18 @@ export function DictationControl({
   useEffect(() => () => {
     operation.current += 1;
     startup.current?.abort();
-    session.current?.cancel();
+    void Promise.resolve(session.current?.cancel()).catch(() => {});
   }, []);
+
+  const showError = (error: unknown) => {
+    const kind = failureKind(error);
+    if (kind === 'authentication') {
+      pairingToken = '';
+      setTokenDraft('');
+      setNeedsToken(true);
+    }
+    setPhase(kind);
+  };
 
   const finish = async () => {
     const current = session.current;
@@ -284,7 +310,7 @@ export function DictationControl({
       if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(placeCaret);
       else window.setTimeout(placeCaret, 0);
     } catch (error) {
-      if (operation.current === ownOperation) setPhase(failureKind(error));
+      if (operation.current === ownOperation) showError(error);
     } finally {
       if (operation.current === ownOperation) {
         session.current = null;
@@ -294,7 +320,7 @@ export function DictationControl({
   };
 
   const start = async (token?: string) => {
-    if (acting || starting.current || session.current) return;
+    if (acting || cancelUnconfirmed || starting.current || session.current) return;
     if (!dictationEngine && !(token ?? pairingToken)) {
       setNeedsToken(true);
       setPhase('unavailable');
@@ -311,13 +337,13 @@ export function DictationControl({
       const engine = dictationEngine ?? browserEngine();
       const next = await engine.start(() => void finish(), controller);
       if (operation.current !== ownOperation) {
-        next.cancel();
+        void Promise.resolve(next.cancel()).catch(() => {});
         return;
       }
       session.current = next;
       setPhase('recording');
     } catch (error) {
-      if (operation.current === ownOperation) setPhase(failureKind(error));
+      if (operation.current === ownOperation) showError(error);
     } finally {
       if (operation.current === ownOperation) {
         startup.current = null;
@@ -326,15 +352,22 @@ export function DictationControl({
     }
   };
 
-  const cancel = () => {
+  const cancel = async () => {
     if (!['starting', 'recording', 'transcribing'].includes(phase)) return;
     operation.current += 1;
     startup.current?.abort();
-    session.current?.cancel();
+    const current = session.current;
     session.current = null;
     starting.current = false;
     finishing.current = false;
-    setPhase('cancelled');
+    setPhase(phase === 'transcribing' ? 'cancelling' : 'cancelled');
+    try {
+      await current?.cancel();
+      if (phase === 'transcribing') setPhase('cancelled');
+    } catch (error) {
+      setCancelUnconfirmed(true);
+      showError(error);
+    }
   };
 
   const connect = () => {
@@ -348,19 +381,19 @@ export function DictationControl({
 
   return (
     <>
-      {['starting', 'recording', 'transcribing'].includes(phase) ? (
+      {['starting', 'recording', 'transcribing', 'cancelling'].includes(phase) ? (
         <>
           {phase === 'recording' && (
-            <Button type="button" variant="outline" size="sm" disabled={acting} aria-label={`Stop dictation for ${label}`} onClick={() => void finish()}>
+            <Button type="button" variant="outline" size="sm" aria-label={`Stop dictation for ${label}`} onClick={() => void finish()}>
               Stop
             </Button>
           )}
-          <Button type="button" variant="ghost" size="sm" disabled={acting} aria-label={`Cancel dictation for ${label}`} onClick={cancel}>
+          <Button type="button" variant="ghost" size="sm" disabled={phase === 'cancelling'} aria-label={`Cancel dictation for ${label}`} onClick={() => void cancel()}>
             Cancel dictation
           </Button>
         </>
       ) : (
-        <Button type="button" variant="ghost" size="sm" disabled={acting} aria-label={`Start dictation for ${label}`} onClick={() => void start()}>
+        <Button type="button" variant="ghost" size="sm" disabled={acting || cancelUnconfirmed} aria-label={`Start dictation for ${label}`} onClick={() => void start()}>
           Dictate
         </Button>
       )}
