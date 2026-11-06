@@ -1,6 +1,16 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: hive-v2 deploy infrastructure — GitHub OIDC deploy role
 
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    ref:
+      - at: infra/README.md
+        has: hub deployment roles and disposable T01 role ownership
+      - at: infra/t01-smoke/RUNBOOK.md
+        has: protected environment and scoped T01 stack lifecycle
+
 Parameters:
   GithubOidcProviderArn:
     Type: String
@@ -149,6 +159,7 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:ref: refs/heads/main
                 token.actions.githubusercontent.com:sub: !Sub '${GithubSubjectPrefix}:environment:t01-smoke'
       Policies:
         - PolicyName: hive-v2-t01-smoke

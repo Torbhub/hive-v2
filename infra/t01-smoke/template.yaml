@@ -1,18 +1,32 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Disposable Hermes T01 preflight instance with no ingress and a bounded lifetime
 
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    ref:
+      - at: infra/t01-smoke/RUNBOOK.md
+        has: credential boundary, no-spend workflow, evidence review, and deletion procedure
+    must:
+      - No paid model endpoint or automatic activation
+      - Terminate the instance and delete its root volume at the bounded deadline
+
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
   SubnetId:
     Type: AWS::EC2::Subnet::Id
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: Reviewed Amazon Linux 2023 x86_64 image for this bounded run.
   TeamKimiUrl:
     Type: String
     AllowedPattern: '^https://[A-Za-z0-9.-]+(?::443)?$'
     Description: Approved TeamKimi origin. No path, credentials, query, or alternate port.
   TeamKimiSecretArn:
     Type: String
-    AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+    AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:hive-v2-t01-smoke-[A-Za-z0-9/_+=.@-]+$'
   TeamKimiSecretKey:
     Type: String
     Default: apiKey
@@ -115,12 +129,14 @@ Resources:
   Instance:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      ImageId: !Ref AmiId
       InstanceType: t3.large
-      SubnetId: !Ref SubnetId
-      SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetId
+          GroupSet: [!GetAtt SecurityGroup.GroupId]
       IamInstanceProfile: !Ref InstanceProfile
-      AssociatePublicIpAddress: true
       InstanceInitiatedShutdownBehavior: terminate
       MetadataOptions:
         HttpEndpoint: enabled
@@ -168,10 +184,14 @@ Resources:
 
 Outputs:
   InstanceId:
+    Description: Disposable instance used by the evidence collector and cleanup step.
     Value: !Ref Instance
   BrokerSecretArn:
+    Description: Reference to the broker-only TeamKimi account secret. The value is never exposed.
     Value: !Ref TeamKimiSecretArn
   BrokerEndpoint:
+    Description: Loopback-only no-model endpoint available to Hermes during preflight.
     Value: http://127.0.0.1:8765/v1
   HermesCommit:
+    Description: Exact Hermes source commit installed by the verified provisioning script.
     Value: f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab

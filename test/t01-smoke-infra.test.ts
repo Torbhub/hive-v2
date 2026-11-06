@@ -79,8 +79,10 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision).toContain('f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab');
     expect(provision).toContain('551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae2efa81');
     expect(provision).toContain('v0.22.6');
+    expect(provision).toContain('"baseVersion":"0.22.6"');
     expect(provision).toContain('uv.lock');
-    expect(provision).toMatch(/pm\.build_env[\s\S]*--sealed/);
+    expect(provision).toContain('dnf install -y');
+    expect(provision).toMatch(/pm\.build_env[\s\S]*--extra mcp[\s\S]*--sealed/);
     expect(provision).toContain('allow_lazy_installs: false');
     expect(provision).toContain('UV_OFFLINE=1');
     expect(provision).toContain('UV_FROZEN=1');
@@ -97,6 +99,7 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision).toContain('Environment=HERMES_HOME=/var/lib/t01/hermes');
     expect(provision).toContain('TEAMKIMI_OPENAI_COMPATIBLE_URL=http://127.0.0.1:8765/v1');
     expect(provision).toContain('ReadOnlyPaths=/opt/t01/fixtures');
+    expect(provision).toContain('ReadOnlyPaths=/var/lib/t01/hermes/config.yaml');
     expect(provision).toContain('ProtectSystem=strict');
     expect(provision).toContain('chmod 0400 /etc/t01/broker/teamkimi.json');
     expect(provision).not.toContain('/v1/chat/completions');
@@ -114,7 +117,7 @@ describe('T01 disposable smoke infrastructure', () => {
       '--dport 53', 'expect_denied direct_ip', 'expect_denied unapproved_dns',
       'expect_denied redirect', 'expect_denied ipv6', 'expect_denied alternate_port',
       'expect_denied metadata', 'expect_denied container_credentials',
-      'expect_allowed teamkimi_no_model', 'TEAMKIMI_IP',
+      'expect_allowed teamkimi_no_model', 'TEAMKIMI_IP', '6|7|28|124',
     ]) {
       expect(provision).toContain(control);
     }
@@ -124,6 +127,8 @@ describe('T01 disposable smoke infrastructure', () => {
 
   it('creates an isolated encrypted instance with no ingress or broad instance role', () => {
     const template = read('template');
+    expect(template).toContain('ImageId: !Ref AmiId');
+    expect(template).not.toContain('{{resolve:ssm:');
     expect(template).toContain('InstanceInitiatedShutdownBehavior: terminate');
     expect(template).toContain('DeleteOnTermination: true');
     expect(template).toContain('Encrypted: true');
@@ -134,7 +139,9 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(template).not.toContain('AdministratorAccess');
     expect(template).not.toContain("Action: '*'");
     expect(template).toContain('TeamKimiSecretArn');
+    expect(template).toContain('secret:hive-v2-t01-smoke-');
     expect(template).toContain('ProvisionScriptSha256');
+    expect(template).toContain('aws-cloudformation@3');
   });
 
   it('uses a separate environment-scoped workflow role and the fleet mutex', () => {
@@ -143,6 +150,7 @@ describe('T01 disposable smoke infrastructure', () => {
     const script = read('workflowScript');
     expect(trust).toContain('T01SmokeRole:');
     expect(trust).toContain(':environment:t01-smoke');
+    expect(trust).toContain('token.actions.githubusercontent.com:ref: refs/heads/main');
     expect(trust).toContain('T01SmokeRoleArn:');
     expect(workflow).toContain('environment: t01-smoke');
     expect(workflow).toContain('HIVE_T01_SMOKE_ROLE_ARN');
@@ -160,7 +168,10 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision).toContain('shutdown -h +');
     expect(provision).toContain('umask 077');
     expect(provision).toContain('chmod 0600 /var/lib/t01/evidence/preflight.jsonl');
+    expect(provision).toContain('publish_evidence');
     expect(read('workflowScript')).toContain('T01_EVIDENCE ');
+    expect(read('workflowScript')).toContain('"AmiId=$AMI_ID"');
+    expect(read('runbook')).toContain('T01_AMI_ID');
   });
 
   it('documents live-only operation and validates both CloudFormation templates', () => {

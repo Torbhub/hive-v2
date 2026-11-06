@@ -95,6 +95,7 @@ jobs:
         env:
           VPC_ID: ${{ vars.T01_VPC_ID }}
           SUBNET_ID: ${{ vars.T01_SUBNET_ID }}
+          AMI_ID: ${{ vars.T01_AMI_ID }}
           TEAMKIMI_URL: ${{ vars.T01_TEAMKIMI_URL }}
           TEAMKIMI_SECRET_ARN: ${{ vars.T01_TEAMKIMI_SECRET_ARN }}
           TEAMKIMI_SECRET_KEY: ${{ vars.T01_TEAMKIMI_SECRET_KEY || 'apiKey' }}

@@ -17,8 +17,14 @@ shutdown -h +"${LIFETIME_MINUTES}"
 emit() {
   local check="$1" status="$2" record
   record="{\"check\":\"$check\",\"status\":\"$status\"}"
-  printf '%s\n' "$record" | tee -a "$EVIDENCE"
-  printf 'T01_EVIDENCE %s\n' "$record" > /dev/console
+  printf '%s\n' "$record" >> "$EVIDENCE"
+}
+
+publish_evidence() {
+  local record
+  while IFS= read -r record; do
+    printf 'T01_EVIDENCE %s\n' "$record" > /dev/console
+  done < "$EVIDENCE"
 }
 
 lock_down() {
@@ -58,6 +64,7 @@ on_error() {
   lock_down
   emit provisioning failed
   emit complete failed
+  publish_evidence
   exit 1
 }
 trap on_error ERR
@@ -76,6 +83,7 @@ done
 [ "$MATRIX" = none ]
 [ "$MAX_PAID_ADMISSIONS" = 0 ]
 
+dnf install -y gcc gcc-c++ make cmake python3-devel libffi-devel libatomic git xz ca-certificates iptables
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --max-redirs 0 --connect-timeout 10 --max-time 180 \
   "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/$HERMES_COMMIT" \
@@ -83,7 +91,7 @@ curl --fail --silent --show-error --location --proto '=https' --proto-redir '=ht
 printf '%s  %s\n' "$HERMES_ARCHIVE_SHA256" /opt/t01/hermes.tar.gz | sha256sum -c -
 tar -xzf /opt/t01/hermes.tar.gz -C /opt/t01/source --strip-components=1
 rm -f /opt/t01/hermes.tar.gz
-printf '{"schemaVersion":2,"commit":"%s","distribution":"source","source":"t01","updateMechanism":"external"}\n' \
+printf '{"schemaVersion":2,"baseVersion":"0.22.6","commit":"%s","distribution":"source","source":"t01","updateMechanism":"external"}\n' \
   "$HERMES_COMMIT" > /opt/t01/source/install-stamp.json
 emit "hermes_${HERMES_VERSION}_${HERMES_COMMIT}" passed
 emit "source_sha256_${HERMES_ARCHIVE_SHA256}" passed
@@ -99,6 +107,7 @@ python3 -m pm.build_env \
   --python "$PYTHON" \
   --cache /opt/t01/uv-cache \
   --out /opt/t01/hermes \
+  --extra mcp \
   --sealed
 export UV_OFFLINE=1
 [ -f /opt/t01/source/uv.lock ]
@@ -167,7 +176,6 @@ chmod 0444 /etc/t01/broker/config.json
 cat > /opt/t01/broker.py <<'PY'
 import http.client
 import json
-import os
 import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -280,6 +288,7 @@ PrivateTmp=yes
 PrivateDevices=yes
 ReadOnlyPaths=/opt/t01/fixtures /opt/t01/hermes /opt/t01/source
 ReadWritePaths=/var/lib/t01/hermes
+ReadOnlyPaths=/var/lib/t01/hermes/config.yaml
 IPAddressDeny=any
 IPAddressAllow=127.0.0.0/8
 IPAddressAllow=::1/128
@@ -295,6 +304,7 @@ emit default_deny_lockdown passed
 systemctl start t01-broker.service
 systemctl start t01-hermes-check.service
 emit hermes_version_invocation passed
+command -v curl runuser timeout >/dev/null
 
 as_hermes() {
   runuser -u t01hermes -- env -i \
@@ -306,13 +316,16 @@ as_hermes() {
 }
 
 expect_denied() {
-  local name="$1"
+  local name="$1" rc=0
   shift
-  if as_hermes timeout 12 "$@" >/dev/null 2>&1; then
-    emit "$name" failed
-    return 1
-  fi
-  emit "$name" passed
+  as_hermes timeout 12 "$@" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    6|7|28|124) emit "$name" passed ;;
+    *)
+      emit "$name" failed
+      return 1
+      ;;
+  esac
 }
 
 expect_allowed() {
@@ -336,3 +349,4 @@ expect_allowed teamkimi_no_model curl -4 --fail --silent http://127.0.0.1:8765/h
 systemctl stop t01-broker.service
 emit paid_admission_disabled passed
 emit complete passed
+publish_evidence

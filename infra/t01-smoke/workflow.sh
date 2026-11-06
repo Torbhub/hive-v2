@@ -56,7 +56,7 @@ acquire_mutex() {
 
 deploy_stack() {
   local name
-  for name in VPC_ID SUBNET_ID TEAMKIMI_URL TEAMKIMI_SECRET_ARN TEAMKIMI_SECRET_KEY TEAMKIMI_CONNECTIVITY_PATH GITHUB_REPOSITORY GITHUB_SHA; do
+  for name in VPC_ID SUBNET_ID AMI_ID TEAMKIMI_URL TEAMKIMI_SECRET_ARN TEAMKIMI_SECRET_KEY TEAMKIMI_CONNECTIVITY_PATH GITHUB_REPOSITORY GITHUB_SHA; do
     require_env "$name"
   done
   local script_sha
@@ -68,6 +68,7 @@ deploy_stack() {
     --parameter-overrides \
       "VpcId=$VPC_ID" \
       "SubnetId=$SUBNET_ID" \
+      "AmiId=$AMI_ID" \
       "TeamKimiUrl=$TEAMKIMI_URL" \
       "TeamKimiSecretArn=$TEAMKIMI_SECRET_ARN" \
       "TeamKimiSecretKey=$TEAMKIMI_SECRET_KEY" \
