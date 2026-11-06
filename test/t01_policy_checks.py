@@ -85,19 +85,40 @@ assert allows(
 ), 'CloudFormation must remove the default egress from its own security group'
 MUTEX_TABLE = 'arn:aws:dynamodb:us-east-1:594552273052:table/citadel-deploy-mutex'
 assert allows('dynamodb:UpdateItem', MUTEX_TABLE), 'owner-only renewal requires UpdateItem'
+BROKER_STACK = 'arn:aws:cloudformation:us-east-1:594552273052:stack/hive-v2-t01-broker/*'
+HEALTH_FUNCTION = 'arn:aws:lambda:us-east-1:594552273052:function:hive-v2-t01-broker-health'
+HEALTH_SECRET = 'arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-123-AbCdEf'
+BROKER_ROLE = 'arn:aws:iam::594552273052:role/hive-v2-t01-broker-health'
+assert allows('cloudformation:DeleteStack', BROKER_STACK)
+assert allows('lambda:CreateFunction', HEALTH_FUNCTION)
+assert not allows('lambda:CreateFunction', HEALTH_FUNCTION + '-other')
+assert allows('secretsmanager:CreateSecret', HEALTH_SECRET)
+assert allows('secretsmanager:DeleteSecret', HEALTH_SECRET)
+assert not allows('secretsmanager:DeleteSecret', HEALTH_SECRET.replace('health-', 'other-'))
+assert allows('iam:PassRole', BROKER_ROLE, **{'iam:PassedToService': 'lambda.amazonaws.com'})
+assert not allows('iam:PassRole', BROKER_ROLE, **{'iam:PassedToService': 'ec2.amazonaws.com'})
 
 SMOKE_PATH = ROOT / 'infra/t01-smoke/template.yaml'
+BROKER_PATH = ROOT / 'infra/t01-smoke/broker_template.yaml'
 SMOKE_TEMPLATE = yaml.load(SMOKE_PATH.read_text(), CloudFormationLoader)
-for template in (TEMPLATE, SMOKE_TEMPLATE):
+BROKER_TEMPLATE = yaml.load(BROKER_PATH.read_text(), CloudFormationLoader)
+for template in (TEMPLATE, SMOKE_TEMPLATE, BROKER_TEMPLATE):
     metadata = template['Metadata']
     assert metadata['AWSToolsMetrics']['AWSAgentToolkit'] == 'aws-cloudformation@3'
     assert metadata['com.aws.cloudformation.Context']
-for path in (ROOT / 'infra/template.yaml', SMOKE_PATH):
+for path in (ROOT / 'infra/template.yaml', SMOKE_PATH, BROKER_PATH):
     assert path.stat().st_size < 51_200, f'{path} exceeds the inline template limit'
 for resource_name in ('InstanceRole', 'InstanceProfile', 'SecurityGroup', 'Instance'):
     context = SMOKE_TEMPLATE['Resources'][resource_name]['Metadata']['com.aws.cloudformation.Context']
     assert context['why'].strip(), resource_name
     assert context['must'], resource_name
+for resource_name in ('HealthRole', 'HealthFunction', 'HealthUrl', 'HealthUrlPermission'):
+    context = BROKER_TEMPLATE['Resources'][resource_name]['Metadata']['com.aws.cloudformation.Context']
+    assert context['why'].strip(), resource_name
+    assert context['must'], resource_name
+health_policy = BROKER_TEMPLATE['Resources']['HealthRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
+assert health_policy[0]['Action'] == 'secretsmanager:GetSecretValue'
+assert health_policy[0]['Resource'] == {'Ref': 'SecretArn'}
 role_context = TEMPLATE['Resources']['T01SmokeRole']['Metadata']['com.aws.cloudformation.Context']
 assert role_context['why'].strip()
 assert role_context['must']

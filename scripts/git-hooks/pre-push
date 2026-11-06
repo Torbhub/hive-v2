@@ -43,4 +43,8 @@ done
 npm test
 npm run build
 node scripts/discipline-gate.mjs
-cfn-lint infra/template.yaml infra/t01-smoke/template.yaml
+python3 test/t01_policy_checks.py
+python3 test/t01_runtime_checks.py
+python3 test/t01_workflow_checks.py
+python3 test/t01_health_broker_checks.py
+cfn-lint infra/template.yaml infra/t01-smoke/template.yaml infra/t01-smoke/broker_template.yaml

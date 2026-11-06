@@ -3,6 +3,8 @@ set -euo pipefail
 umask 077
 
 STACK_NAME=hive-v2-t01-smoke
+BROKER_STACK_NAME=hive-v2-t01-broker
+HEALTH_SECRET_NAME="hive-v2-t01-smoke-health-${GITHUB_RUN_ID:-manual}"
 OWNER="hive-v2-t01-smoke/${GITHUB_RUN_ID:-manual}"
 
 require_env() {
@@ -54,12 +56,47 @@ acquire_mutex() {
   bash infra/deploy-mutex.sh acquire aws-acts "$OWNER"
 }
 
+issue_health_credential() {
+  require_env GITHUB_RUN_ID
+  require_env T01_HEALTH_ATTESTATION
+  require_env LIFETIME_MINUTES
+  python3 infra/t01-smoke/health_credential.py
+}
+
+health_secret_arn() {
+  aws secretsmanager describe-secret --secret-id "$HEALTH_SECRET_NAME" --query ARN --output text
+}
+
+broker_teamkimi_url() {
+  local url
+  url="$(aws cloudformation describe-stacks --stack-name "$BROKER_STACK_NAME" \
+    --query 'Stacks[0].Outputs[?OutputKey==`HealthUrl`].OutputValue | [0]' --output text)"
+  url="${url%/}"
+  [[ "$url" == https://*.on.aws ]] || { echo "broker returned an invalid HTTPS origin" >&2; exit 1; }
+  printf '%s\n' "$url"
+}
+
+deploy_broker() {
+  require_env GITHUB_RUN_ID
+  local secret_arn
+  secret_arn="$(health_secret_arn)"
+  aws cloudformation deploy \
+    --stack-name "$BROKER_STACK_NAME" \
+    --template-file infra/t01-smoke/broker_template.yaml \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --parameter-overrides \
+      "SecretArn=$secret_arn" \
+      "RunId=$GITHUB_RUN_ID"
+}
+
 deploy_stack() {
   local name
-  for name in VPC_ID SUBNET_ID AMI_ID TEAMKIMI_URL TEAMKIMI_SECRET_ARN TEAMKIMI_SECRET_KEY TEAMKIMI_CONNECTIVITY_PATH GITHUB_REPOSITORY GITHUB_SHA; do
+  for name in VPC_ID SUBNET_ID AMI_ID TEAMKIMI_SECRET_KEY TEAMKIMI_CONNECTIVITY_PATH GITHUB_REPOSITORY GITHUB_SHA; do
     require_env "$name"
   done
   local script_sha runtime_sha
+  TEAMKIMI_URL="$(broker_teamkimi_url)"
+  TEAMKIMI_SECRET_ARN="$(health_secret_arn)"
   script_sha="$(sha256sum infra/t01-smoke/provision.sh | cut -d' ' -f1)"
   runtime_sha="$(sha256sum infra/t01-smoke/runtime.py | cut -d' ' -f1)"
   aws cloudformation deploy \
@@ -133,36 +170,67 @@ collect_evidence() {
   exit 1
 }
 
-cleanup() {
-  local status=0 describe_rc release_rc=0 confirmed_absent=false describe_output describe_error
-  describe_output="$(mktemp)"
-  describe_error="$(mktemp)"
-  trap "rm -f $describe_output $describe_error" EXIT
-  if aws cloudformation describe-stacks --stack-name "$STACK_NAME" >"$describe_output" 2>"$describe_error"; then
-    if grep -q '"StackStatus": "DELETE_COMPLETE"' "$describe_output"; then
-      confirmed_absent=true
-    elif aws cloudformation delete-stack --stack-name "$STACK_NAME"; then
-      if aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"; then
-        confirmed_absent=true
-      else
-        status=$?
-      fi
+delete_stack() {
+  local stack_name="$1" describe_rc
+  if aws cloudformation describe-stacks --stack-name "$stack_name" >"$CLEANUP_OUTPUT" 2>"$CLEANUP_ERROR"; then
+    if grep -q '"StackStatus": "DELETE_COMPLETE"' "$CLEANUP_OUTPUT"; then
+      return 0
+    fi
+    aws cloudformation delete-stack --stack-name "$stack_name" || return $?
+    aws cloudformation wait stack-delete-complete --stack-name "$stack_name" || return $?
+    return 0
+  else
+    describe_rc=$?
+  fi
+  if grep -q ValidationError "$CLEANUP_ERROR" && grep -q 'does not exist' "$CLEANUP_ERROR"; then
+    return 0
+  fi
+  return "$describe_rc"
+}
+
+delete_health_secret() {
+  local describe_rc
+  if aws secretsmanager describe-secret --secret-id "$HEALTH_SECRET_NAME" >"$CLEANUP_OUTPUT" 2>"$CLEANUP_ERROR"; then
+    aws secretsmanager delete-secret --secret-id "$HEALTH_SECRET_NAME" --force-delete-without-recovery \
+      --query '{Name:Name,VersionId:VersionId,DeletionDate:DeletionDate}' --output json || return $?
+    if aws secretsmanager describe-secret --secret-id "$HEALTH_SECRET_NAME" >"$CLEANUP_OUTPUT" 2>"$CLEANUP_ERROR"; then
+      echo "health secret still exists after deletion" >&2
+      return 1
     else
-      status=$?
+      describe_rc=$?
     fi
   else
     describe_rc=$?
-    if grep -q ValidationError "$describe_error" && grep -q 'does not exist' "$describe_error"; then
-      confirmed_absent=true
-    else
-      status=$describe_rc
+  fi
+  if grep -q ResourceNotFoundException "$CLEANUP_ERROR"; then
+    return 0
+  fi
+  return "$describe_rc"
+}
+
+cleanup() {
+  local status=0 rc=0
+  CLEANUP_OUTPUT="$(mktemp)"
+  CLEANUP_ERROR="$(mktemp)"
+  trap "rm -f $CLEANUP_OUTPUT $CLEANUP_ERROR" EXIT
+  delete_stack "$STACK_NAME" || rc=$?
+  if (( rc != 0 )); then
+    status=$rc
+  fi
+  rc=0
+  delete_stack "$BROKER_STACK_NAME" || rc=$?
+  if (( status == 0 && rc != 0 )); then
+    status=$rc
+  fi
+  if (( status == 0 )); then
+    rc=0
+    delete_health_secret || rc=$?
+    if (( rc != 0 )); then
+      status=$rc
     fi
   fi
-  if [ "$confirmed_absent" = true ]; then
-    bash infra/deploy-mutex.sh release aws-acts "$OWNER" || release_rc=$?
-    if (( status == 0 && release_rc != 0 )); then
-      status=$release_rc
-    fi
+  if (( status == 0 )); then
+    bash infra/deploy-mutex.sh release aws-acts "$OWNER" || status=$?
   fi
   return "$status"
 }
@@ -170,8 +238,10 @@ cleanup() {
 case "${1:-}" in
   validate-inputs) validate_inputs ;;
   acquire) acquire_mutex ;;
+  issue-health-credential) issue_health_credential ;;
+  deploy-broker) deploy_broker ;;
   deploy) deploy_stack ;;
   collect) collect_evidence ;;
   cleanup) cleanup ;;
-  *) echo "usage: $0 validate-inputs|acquire|deploy|collect|cleanup" >&2; exit 2 ;;
+  *) echo "usage: $0 validate-inputs|acquire|issue-health-credential|deploy-broker|deploy|collect|cleanup" >&2; exit 2 ;;
 esac

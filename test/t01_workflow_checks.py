@@ -66,7 +66,11 @@ def mock_aws(root, content):
     write_executable(root / 'bin/aws', content)
 
 
-def cleanup_case(describe_rc, describe_error, expected_rc, delete_rc=0, wait_rc=0, release_rc=0, release_expected=False):
+def cleanup_case(
+    describe_rc, describe_error, expected_rc, delete_rc=0, wait_rc=0,
+    release_rc=0, release_expected=False, secret_describe_rc=0,
+    secret_delete_rc=0, secret_confirm_rc=254,
+):
     temporary, root = workspace()
     with temporary:
         mock_aws(root, f'''#!/usr/bin/env bash
@@ -78,6 +82,21 @@ case "$1 $2" in
     ;;
   'cloudformation delete-stack') exit {delete_rc} ;;
   'cloudformation wait') exit {wait_rc} ;;
+  'secretsmanager describe-secret')
+    describe_count=$(grep -c '^secretsmanager describe-secret' "$MOCK_CALLS" || true)
+    if [ "$describe_count" -gt 1 ]; then
+      rc={secret_confirm_rc}
+    else
+      rc={secret_describe_rc}
+    fi
+    if [ "$rc" -eq 254 ]; then
+      printf 'ResourceNotFoundException: secret not found\n' >&2
+    elif [ "$rc" -ne 0 ]; then
+      printf 'AccessDenied: not authorized\n' >&2
+    fi
+    exit "$rc"
+    ;;
+  'secretsmanager delete-secret') exit {secret_delete_rc} ;;
 esac
 exit 99
 ''')
@@ -91,10 +110,11 @@ exit 99
         return calls
 
 
-calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 0, release_expected=True)
-assert 'delete-stack' not in calls, calls
+calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 0, release_expected=True, secret_describe_rc=254)
+assert 'delete-stack' not in calls and 'delete-secret' not in calls, calls
 calls = cleanup_case(0, '', 0, release_expected=True)
 assert 'wait stack-delete-complete' in calls, calls
+assert 'delete-secret --secret-id hive-v2-t01-smoke-health-123 --force-delete-without-recovery' in calls, calls
 calls = cleanup_case(254, 'AccessDenied: not authorized', 254)
 assert 'delete-stack' not in calls, calls
 calls = cleanup_case(254, 'ThrottlingException: rate exceeded', 254)
@@ -106,6 +126,12 @@ assert 'delete-stack' in calls and 'wait stack-delete-complete' not in calls, ca
 calls = cleanup_case(0, '', 19, wait_rc=19)
 assert 'wait stack-delete-complete' in calls, calls
 cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 23, release_rc=23, release_expected=True)
+calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 12, secret_delete_rc=12)
+assert 'delete-secret' in calls and 'release aws-acts' not in calls, calls
+calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 13, secret_describe_rc=13)
+assert 'delete-secret' not in calls and 'release aws-acts' not in calls, calls
+calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 14, secret_confirm_rc=14)
+assert 'delete-secret' in calls and 'release aws-acts' not in calls, calls
 
 
 def release_case(error, aws_rc, expected_rc):
