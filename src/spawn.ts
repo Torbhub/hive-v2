@@ -17,7 +17,7 @@ import { withLaunchClaim, withProjectLock } from './project.js';
 import { checkTaskScope } from './scope.js';
 import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 import { assertEntryAlive, killEntry, recordedIdentity } from './kill.js';
-import { enrollAgentCredential } from './collaboration-credentials.js';
+import { requireAgentCredential } from './collaboration-credentials.js';
 export { assertEntryAlive } from './kill.js';
 
 export function orchestratorName(project: string): string {
@@ -212,7 +212,7 @@ export async function launchWindow(
   // HIVE_PROJECT + HIVE_HUB_ROOT route the agent's ask_operator MCP calls.
   const quote = (v: string): string => `'${v.replaceAll("'", `'\\''`)}'`;
   const profile = await ensureAgentProfile(cwd, agent);
-  await enrollAgentCredential(cwd, project, agent);
+  await requireAgentCredential(cwd, project, agent);
   const credentialFile = process.env.HIVE_COLLABORATION_ENABLED === '1'
     ? `HIVE_AGENT_CREDENTIAL= HIVE_AGENT_CREDENTIAL_FILE=${quote(hivePath(cwd, 'team', agent, 'credential.env'))} ` : '';
   const pane = await newWindow(
