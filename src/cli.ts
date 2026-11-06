@@ -4,10 +4,12 @@ import {
   listTasks, planAnswer, readDialogFor, startProject, wake,
 } from './hub.js';
 import { closeAgent, respawnAgent, spawnAgent } from './spawn.js';
-import { landPr, parseSteps, pushByHash, runGate, verifyCommits, verifyLog } from './gate.js';
+import { landPr, parseSteps, runGate, verifyCommits, verifyLog } from './gate.js';
 import { cleanupProject } from './cleanup.js';
 import { memoryCommand } from './memory-cli.js';
 import { checkName } from './names.js';
+import { runPushCommand } from './push-cli.js';
+import { UsageError } from './usage.js';
 
 function validName(kind: string, value: string): string {
   try {
@@ -38,9 +40,6 @@ const USAGE = `usage:
   hive doctor | ui | watch
   hive web [--port N] | handy-bridge [--origin URL] | mcp
   hive memory propose <project> <text...> | ls <project> | promote <project> <id>`;
-
-class UsageError extends Error {}
-
 const VALUELESS_FLAGS = new Set(['json', 'dry-run', 'no-body']);
 
 function parseFlags(args: string[], names: string[]): { flags: Record<string, string | true>; pos: string[] } {
@@ -227,13 +226,14 @@ async function main(): Promise<void> {
       throw new UsageError(`unknown gate-verify subcommand: ${sub}`);
     }
     case 'push': {
-      const [, remote, sha, branch] = args;
-      if (!remote || !sha || !branch) throw new UsageError('usage: hive push <remote> <sha> <branch>');
-      await pushByHash(remote, sha, branch, process.cwd());
-      console.log(`hive: pushed ${sha} to ${remote}/${branch}`);
+      const { flags: f, pos } = parseFlags(args.slice(1), ['approval']);
+      const [remote, sha, branch] = pos;
+      if (!remote || !sha || !branch) throw new UsageError('usage: hive push <remote> <sha> <branch> --approval <batch>/<question>');
+      await runPushCommand(remote, sha, branch, str(f.approval), process.cwd(), process.env);
       return;
     }
     case 'land': {
+      throw new UsageError('push and pull request creation need separate structured approvals');
       const { flags: f, pos } = parseFlags(args.slice(1), ['title', 'body', 'bookmark']);
       const [remote, sha, branch] = pos;
       if (f.bookmark !== undefined ? pos.length > 0 : !remote || !sha || !branch) {

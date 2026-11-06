@@ -1,3 +1,5 @@
+import type { DecisionCard } from './decisions.js';
+
 export type HubOrchestratorState =
   | 'running'
   | 'stopped'
@@ -129,9 +131,27 @@ export type OperatorQuestion = {
   priority: number;
   choices: QuestionChoice[];
   recommended: string;
+  decision?: DecisionCard;
 };
 
-export type QuestionAnswer = { question: string; choice: string; text?: string };
+export type DecisionGrant = {
+  batch: string;
+  question: string;
+  project: string;
+  fingerprint: string;
+  expiresAt: string;
+  executionAuthority: 'push' | 'none';
+  consumedAt?: string;
+};
+
+export type DecisionAnswer = {
+  action: DecisionCard['action'];
+  outcome: 'refresh' | 'approve' | 'cancel' | 'details' | 'other';
+  facts: DecisionCard['facts'];
+  grant?: DecisionGrant;
+};
+
+export type QuestionAnswer = { question: string; choice: string; text?: string; decision?: DecisionAnswer };
 
 export type QuestionBatch = {
   id: string;

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { run } from './tmux.js';
+import { consumePushApproval } from './questions.js';
 
 const STEP_NAME_RE = /^(?!.*\.\.)[A-Za-z0-9_.-]+$/;
 const HEADER_RE = /^# hive-gate steps: ([,A-Za-z0-9_.-]+) head=([0-9a-f]{40}|none) dirty=([01])$/;
@@ -266,7 +267,13 @@ export async function verifyCommits(
   return { green: !bad, out };
 }
 
-export async function pushByHash(remote: string, sha: string, branch: string, cwd: string): Promise<void> {
+export async function pushByHash(
+  remote: string,
+  sha: string,
+  branch: string,
+  cwd: string,
+  approval: { root: string; project: string; batch: string; question: string },
+): Promise<void> {
   if (remote.startsWith('-')) throw new Error(`a remote may not start with '-': ${remote}`);
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`push is by full 40-char hash: ${sha}`);
   if (branch.startsWith('-')) throw new Error(`a branch may not start with '-': ${branch}`);
@@ -277,48 +284,15 @@ export async function pushByHash(remote: string, sha: string, branch: string, cw
     const anc = await run('git', ['merge-base', '--is-ancestor', remoteTip.stdout.trim(), sha], cwd);
     if (anc.code !== 0) throw new Error(`${remote}/${branch} is not an ancestor of ${sha}; a push would not be fast-forward`);
   }
-  const pushed = await run('git', ['push', remote, `${sha}:refs/heads/${branch}`], cwd);
-  if (pushed.code !== 0) throw new Error(pushed.stderr.trim() || 'git push failed');
+  const pushUrl = await consumePushApproval(approval.root, approval, remote, sha, branch, cwd);
+  const pushed = await run('git', ['push', '--', pushUrl, `${sha}:refs/heads/${branch}`], cwd);
+  if (pushed.code !== 0) throw new Error('git push failed');
 }
-
-const BOOKMARK_RE = /^(?!.*\.\.)[A-Za-z0-9_.-]+$/;
 
 export type LandArgs = {
   remote?: string; sha?: string; branch?: string; bookmark?: string; title?: string; body?: string;
 };
 
-// jj push is the repo-local gated alias — jj git push fires no hooks.
-export async function landPr(args: LandArgs, cwd: string): Promise<string> {
-  const gh = await run('gh', ['--version'], cwd);
-  if (gh.code !== 0) throw new Error('gh is not on PATH. Install the GitHub CLI, then run hive land again');
-
-  if (args.body && !args.title) throw new Error('--body needs --title');
-
-  let head: string;
-  if ((await run('jj', ['root'], cwd)).code === 0) {
-    if ((await run('jj', ['git', 'root'], cwd)).code !== 0) {
-      throw new Error('this repo is jj-native, not colocated. hive land pushes a bookmark only when a git remote exists');
-    }
-    const bookmark = args.bookmark ?? '';
-    if (!bookmark) throw new Error('this repo is jj-colocated. Land with --bookmark <name>');
-    if (bookmark.startsWith('-')) throw new Error(`a bookmark may not start with '-': ${bookmark}`);
-    if (!BOOKMARK_RE.test(bookmark)) throw new Error(`a bookmark is letters, digits, '-', '_' and '.': ${bookmark}`);
-    const pushed = await run('jj', ['push', '--bookmark', bookmark], cwd);
-    if (pushed.code !== 0) throw new Error(pushed.stderr.trim() || 'jj push failed');
-    head = bookmark;
-  } else {
-    const { remote, sha, branch } = args;
-    if (!remote || !sha || !branch) throw new Error('this repo is plain git. Land with <remote> <sha> <branch>');
-    await pushByHash(remote, sha, branch, cwd);
-    head = branch;
-  }
-
-  const prArgs = ['pr', 'create', '--head', head];
-  if (args.title) prArgs.push('--title', args.title, '--body', args.body ?? '');
-  else prArgs.push('--fill');
-  const pr = await run('gh', prArgs, cwd);
-  if (pr.code !== 0) {
-    throw new Error(`${head} is pushed, but gh pr create failed: ${pr.stderr.trim() || 'no output from gh'}`);
-  }
-  return pr.stdout.trim();
+export async function landPr(_args: LandArgs, _cwd: string): Promise<string> {
+  throw new Error('push and pull request creation need separate structured approvals');
 }
