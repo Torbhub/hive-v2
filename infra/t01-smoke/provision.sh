@@ -107,7 +107,10 @@ export HERMES_HOME=/opt/t01/pm-home
 export HERMES_RUNTIME_DIR=/opt/t01/tools
 export UV_FROZEN=1
 cd /opt/t01/source
-python3 -c 'from pm import ensure; ensure("uv", explicit=True); ensure("python", explicit=True)'
+python3 -c 'from pm import ensure; ensure("uv", explicit=True)'
+emit uv_install passed
+python3 -c 'from pm import ensure; ensure("python", explicit=True)'
+emit python_install passed
 PYTHON="$(python3 -c 'from pm import installed_package; print(installed_package("python").binary)')"
 python3 -m pm.build_env \
   --source /opt/t01/source \
