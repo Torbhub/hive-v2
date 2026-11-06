@@ -11,7 +11,7 @@ import { decisionFingerprint, repositoryFingerprint, verifyDecisionFacts, verify
 import { credentialFromEnvironment } from './collaboration-credentials.js';
 import { storedAgentTask } from './agent-target.js';
 import { registryFromEnv } from './registry.js';
-import { authenticateBearer, authorize, currentGrant } from './security.js';
+import { authenticateBearer, authorize } from './security.js';
 
 export const QUESTION_LIMITS = {
   questions: 20, choices: 8, context: 4000, question: 1000,
@@ -277,19 +277,25 @@ async function authorizePushConsumption(root: string, batch: QuestionBatch,
     throw new Refusal('agent profile ACL epoch is stale');
   }
   if (!grant.approverSubject) throw new Refusal('approver identity is required');
-  const approver = await currentGrant(registry, batch.project, grant.approverSubject, task);
-  if (!approver || approver.grantId !== grant.approverGrantId
+  if (!grant.approverSubject.startsWith('user:')) {
+    throw new Refusal('execution approvals require a human approver');
+  }
+  const pk = `ACL#${batch.project}#${task ?? '*'}#*`;
+  const sk = `PRINCIPAL#${grant.approverSubject}`;
+  const [approver, ledger] = await Promise.all([
+    registry.get(pk, sk), registry.get(`REVOCATION#${pk}`, sk),
+  ]);
+  if (!approver || ledger || approver.revokedAt !== null && approver.revokedAt !== undefined
+    || approver.grantId !== grant.approverGrantId
     || Number(approver.aclEpoch) !== grant.approverAclEpoch) {
     throw new Refusal('approver authorization changed');
   }
-  if (grant.approverSubject.startsWith('user:')) {
-    const account = await registry.delegatedApprovalAccount(principal.agentId, credential, {
-      project: batch.project, task, consumerGrantId: grant.grantId ?? '',
-      approverSubject: grant.approverSubject, approverGrantId: grant.approverGrantId ?? '',
-    });
-    if (!account || account.accountStatus !== 'active') {
-      throw new Refusal('approver account is not active');
-    }
+  const account = await registry.delegatedApprovalAccount(principal.agentId, credential, {
+    project: batch.project, task, consumerGrantId: grant.grantId ?? '',
+    approverSubject: grant.approverSubject, approverGrantId: grant.approverGrantId ?? '',
+  });
+  if (!account || account.accountStatus !== 'active') {
+    throw new Refusal('approver account is not active');
   }
 }
 

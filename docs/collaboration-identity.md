@@ -34,7 +34,7 @@ Each agent has monotonic ACL and credential epochs. `GET /api/agent/identity` re
 
 Wake subscriptions require the agent owner or a principal with an explicit execution grant. Each subscription records that grant. Use `POST /api/wake-subscriptions`, `GET /api/wake-subscriptions?agentId=<id>`, and `POST /api/wake-subscriptions/revoke`. The Nexus broker checks the registered project and performs conditional writes. Revoked subscriptions remain tombstoned.
 
-Execution approvals require a human approver. Agent principals cannot create them. Push consumption uses the delegated-approval proof at `/api/hive/broker/delegated-approval`. The broker authenticates the consuming agent and validates its exact execute grant and task plus the recorded approver subject and execute grant identity. Only then does it return the approver's current account status, epoch, and expiry. It never substitutes the consumer owner's account. Invalid scopes, revoked or substituted grants, and disabled accounts fail closed.
+Execution approvals require a human approver. Agent principals cannot create them. Consumption also rejects persisted approvals with agent approvers. A supplied task requires exact task-scoped delegated grants. Project-wide grants do not authorize delegated approval. Push consumption uses the delegated-approval proof at `/api/hive/broker/delegated-approval`. The broker authenticates the consuming agent and validates its exact execute grant and task plus the recorded approver subject and execute grant identity. Only then does it return the approver's current account status, epoch, and expiry. It never substitutes the consumer owner's account. Invalid scopes, revoked or substituted grants, and disabled accounts fail closed.
 
 ## Configuration and restore
 
