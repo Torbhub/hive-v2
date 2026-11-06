@@ -86,6 +86,8 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision).toContain('"baseVersion":"0.22.6"');
     expect(provision).toContain('uv.lock');
     expect(provision).toContain('dnf install -y');
+    expect(provision).toContain('python3.11 python3.11-devel');
+    expect(provision).toContain('python3.11 -m pm.build_env');
     expect(provision).toMatch(/pm\.build_env[\s\S]*--extra mcp[\s\S]*--sealed/);
     expect(provision).toContain('allow_lazy_installs: false');
     expect(provision).toContain('UV_OFFLINE=1');
