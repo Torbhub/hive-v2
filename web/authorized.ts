@@ -5,8 +5,8 @@ import { readAgentLog, resolveLogTarget } from '../src/logview.js';
 import { RegistryUnavailable, type Registry, type RegistryRow } from '../src/registry.js';
 import { Refusal } from '../src/state.js';
 import {
-  AuthenticationError, AuthorizationError, authorize, bearerFromRequest, createWakeSubscription,
-  currentGrant, publicAgentIdentity, revoked, revokeWakeSubscription, type Principal,
+  AuthenticationError, AuthorizationError, authorize, authorizeExact, bearerFromRequest, createWakeSubscription,
+  exactGrant, publicAgentIdentity, revoked, revokeWakeSubscription, type Principal,
 } from '../src/security.js';
 import { buildView, lastLine } from '../src/view.js';
 import { BODY_CAP, checkBrowserHeaders, handlePost, postAction, postScope, readBody, storedAgentTask } from './actions.js';
@@ -186,7 +186,7 @@ async function approvalAuthorization(context: RequestContext, principal: Princip
     || typeof approverGrant.grantId !== 'string') {
     throw new AuthorizationError('not found');
   }
-  const consumer = await currentGrant(context.registry, batch.project, `agent:${agentId}`, task);
+  const consumer = await exactGrant(context.registry, batch.project, `agent:${agentId}`, task);
   if (!consumer || typeof consumer.grantId !== 'string'
     || !Array.isArray(consumer.actions) || !consumer.actions.includes('execute')) {
     throw new AuthorizationError('not found');
@@ -240,12 +240,14 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   if (pathname === '/api/message' && principal.kind === 'agent') throw new AuthorizationError('not found');
   const scope = await postScope(context.root, pathname, body, principal);
   const action = await requiredAction(context.root, pathname, body);
-  const approvalGrant = await authorize(principal, context.registry, action, scope);
-  const authorization = pathname === '/api/questions/answer' && action === 'execute'
+  const executionApproval = pathname === '/api/questions/answer' && action === 'execute';
+  const authorizeAction = executionApproval ? authorizeExact : authorize;
+  const approvalGrant = await authorizeAction(principal, context.registry, action, scope);
+  const authorization = executionApproval
     ? await approvalAuthorization(context, principal, body, scope, approvalGrant) : undefined;
   const result = await handlePost(context.root, pathname, body, principal, authorization);
   const current = await context.authenticate();
-  await authorize(current, context.registry, action, scope);
+  await authorizeAction(current, context.registry, action, scope);
   sendJson(res, 200, result);
 }
 

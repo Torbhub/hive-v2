@@ -283,7 +283,7 @@ describe('authenticated push consumption', () => {
     await expect(consumePushApproval(
       root, { project: 'demo', batch: batch.id, question: 'q1' },
       'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
-    )).rejects.toThrow(/approver authorization changed/);
+    )).rejects.toThrow(/not found/);
   });
 
   it('rejects a consumer project-only grant before the delegated proof call', async () => {
