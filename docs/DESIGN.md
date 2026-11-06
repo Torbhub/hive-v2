@@ -132,7 +132,7 @@ hive hub plan-answer <project> <task-id> <approve|sendback> [feedback]
 hive hub wake <project> | start <project> <task-id> | continue <project>
 hive spawn <project> --agent <name> --assignment <text> --deliverable <text> [--role r] [--worktree wt] | respawn [--assignment <text> --deliverable <text>] | close
 hive gate --log <path> -- <name> <cmd>... | gate-verify log <path> [--commit sha] | gate-verify commits <base>..<tip>
-hive push <remote> <sha> <branch>        — fast-forward only, by full hash
+hive push <remote> <40-char sha> <branch> [--approval <batch>/<question>] — fast-forward only, one-time grant for agents
 hive cleanup <project> [--dry-run]
 hive compact <project> [agent] on|off
 hive handy-bridge [--origin URL]         — local Handy transcription bridge
@@ -150,12 +150,35 @@ hive ui                                  — the hub screen
   (infra/merge-mcp.mjs). `toolTimeoutMs` is 7 days because a batch waits for
   a human. Outside a hive session the tool returns an env error.
 - The tool input is strict (src/questions.ts): an overarching `context` and
-  1-20 questions. Each question carries `question`, `context` (why it is
-  asked), `priority` (1 decides first), 2-8 choices with `label` +
-  `description`, and a required `recommended` choice. Ids are server-made:
-  q1..qn for questions, c1..cn for choices in their given order. A violation
-  comes back as a tool error naming the exact field, so the agent fixes the
-  call instead of guessing.
+  1-20 questions. General questions keep context, choices, and recommendation
+  but carry no approval authority. A decision names exactly one action. Legacy
+  approval-shaped requests and internal output become safe detail cards.
+  Every owner-visible field passes the internal-content boundary.
+- `src/decision-verification.ts` resolves only the registered project and
+  recorded worktree. Repository, branch, full 40-character commit, diff summary,
+  files, and destination come from Git. Agent repository claims are discarded.
+  Verification failures remove approval. Non-repository actions have no
+  execution authority and use fixed action-specific destinations. Every agent
+  field is normalized before security-instruction checks.
+- `src/decisions.ts` owns fixed card wording and choices. Push, pull request
+  creation, merge, deploy, paid work, deletion, and credential grants stay
+  separate. A fresh complete request offers Refresh, one approval, and Cancel.
+  Refresh is recommended. Mixed batches preserve safe overarching context and
+  show the no-auto-approval notice separately.
+- Verification older than 15 minutes is stale. The UI disables stale approval
+  and resets a selected stale approval to Refresh with an announced explanation.
+  Submit checks current choice validity. `validateAnswers` checks freshness
+  again at answer time. Other remains non-authoritative.
+- A structured answer adds `decision: {action, outcome, facts, grant?}`. Grants
+  bind batch, question, project, verified-fact fingerprint, expiry, and explicit
+  execution authority. `consumePushApproval` rechecks current facts under the
+  hub lock and consumes once. `hive push --approval <batch>/<question>` uses it.
+  Cross-project, action, commit, branch, remote, and replay substitution fail.
+- An optional injected `DecisionRewriter` receives a defensive copy of sanitized
+  facts and an abort signal. Model text never supplies the security overview.
+  Cards always keep deterministic wording, so model claims cannot create
+  approval, cost, or factual assertions. No model integration or paid call is
+  enabled by default.
 - A call creates `.hive-hub/questions/<uuid>.json` (status open) and waits,
   polling the file every 2s without the hub lock. The read loop stays live:
   ping and client cancellation work mid-wait, and a cancelled wait leaves the
@@ -165,7 +188,9 @@ hive ui                                  — the hub screen
   process cannot both close a batch. On a close the file moves to
   `questions/closed/`, so the open listing never scans history. Batch files
   are 0600. An answered or cancelled batch appends one owner decision to
-  `decisions.jsonl`.
+  `decisions.jsonl`. A terminal batch left at the open path is renamed before
+  authorization. Exact unconsumed duplicates are deduplicated. Any consumed or
+  conflicting duplicate fails closed, so only one push authorization is possible.
 - The hub web screen (`web/questions.tsx`) lists open batches from
   `/api/view`. The owner answers with `POST /api/questions/answer`
   (`{id, answers: [{question, choice, text?}]}`) or cancels with

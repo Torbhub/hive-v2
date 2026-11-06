@@ -1029,7 +1029,7 @@ describe('operator questions', () => {
     expect(radio('q1', 'c1').checked).toBe(true);
     expect(radio('q2', 'c2').checked).toBe(true);
     expect(radio('q3', 'c1').checked).toBe(true);
-    expect([...container.querySelectorAll('span')].filter((s) => s.textContent === 'recommended')).toHaveLength(3);
+    expect([...container.querySelectorAll('span')].filter((s) => s.textContent === 'Recommended')).toHaveLength(3);
   });
 
   it('requires Other text only while Other is selected', async () => {
