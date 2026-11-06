@@ -11,7 +11,7 @@ import { decisionFingerprint, repositoryFingerprint, verifyDecisionFacts, verify
 import { credentialFromEnvironment } from './collaboration-credentials.js';
 import { storedAgentTask } from './agent-target.js';
 import { registryFromEnv } from './registry.js';
-import { authenticateBearer, authorize } from './security.js';
+import { authenticateBearer, authorize, currentGrant } from './security.js';
 
 export const QUESTION_LIMITS = {
   questions: 20, choices: 8, context: 4000, question: 1000,
@@ -92,7 +92,14 @@ export function validateBatchInput(raw: unknown, now = Date.now()): { context: s
   return { context, questions };
 }
 
-export type ApprovalAuthorization = { task?: string; aclEpoch?: number };
+export type ApprovalAuthorization = {
+  task?: string;
+  consumerGrantId?: string;
+  consumerAclEpoch?: number;
+  approverSubject?: string;
+  approverGrantId?: string;
+  approverAclEpoch?: number;
+};
 
 function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, answer: QuestionAnswer,
   authorization?: ApprovalAuthorization): QuestionAnswer {
@@ -108,7 +115,11 @@ function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, an
     batch: batch.id, question: question.id, project: batch.project,
     fingerprint: decisionFingerprint(facts), expiresAt: facts.validUntil!,
     executionAuthority: card.action === 'push' ? 'push' as const : 'none' as const,
-    agent: batch.agent, task: authorization?.task, aclEpoch: authorization?.aclEpoch,
+    agent: batch.agent, task: authorization?.task,
+    grantId: authorization?.consumerGrantId, profileAclEpoch: authorization?.consumerAclEpoch,
+    approverSubject: authorization?.approverSubject,
+    approverGrantId: authorization?.approverGrantId,
+    approverAclEpoch: authorization?.approverAclEpoch,
   } : undefined;
   return { ...answer, decision: { action: card.action, outcome, facts, grant } };
 }
@@ -239,7 +250,10 @@ export async function readQuestionBatch(root: string, id: string): Promise<Quest
 }
 
 async function authorizePushConsumption(root: string, batch: QuestionBatch,
-  grant: { agent?: string; task?: string; aclEpoch?: number }, env: NodeJS.ProcessEnv): Promise<void> {
+  grant: {
+    agent?: string; task?: string; grantId?: string; profileAclEpoch?: number;
+    approverSubject?: string; approverGrantId?: string; approverAclEpoch?: number;
+  }, env: NodeJS.ProcessEnv): Promise<void> {
   if (env.HIVE_COLLABORATION_ENABLED !== '1') return;
   const credential = await credentialFromEnvironment(env);
   if (!credential) throw new Refusal('consuming agent credential required');
@@ -253,8 +267,16 @@ async function authorizePushConsumption(root: string, batch: QuestionBatch,
   const task = await storedAgentTask(root, batch.project, agentRef);
   if (grant.task !== task) throw new Refusal('approval task does not match');
   const current = await authorize(principal, registry, 'execute', { project: batch.project, task });
-  if (grant.aclEpoch === undefined || Number(current.aclEpoch) !== grant.aclEpoch) {
-    throw new Refusal('approval authorization epoch is stale');
+  if (grant.grantId !== current.grantId) throw new Refusal('execute grant identity does not match');
+  const profile = await registry.get(`AGENT#${principal.agentId}`, 'PROFILE');
+  if (!profile || Number(profile.aclEpoch) !== grant.profileAclEpoch) {
+    throw new Refusal('agent profile ACL epoch is stale');
+  }
+  if (!grant.approverSubject) throw new Refusal('approver identity is required');
+  const approver = await currentGrant(registry, batch.project, grant.approverSubject, task);
+  if (!approver || approver.grantId !== grant.approverGrantId
+    || Number(approver.aclEpoch) !== grant.approverAclEpoch) {
+    throw new Refusal('approver authorization changed');
   }
 }
 

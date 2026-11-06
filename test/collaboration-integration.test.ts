@@ -146,7 +146,9 @@ describe('integration authorization and revocation', () => {
     expect(approved.status).toBe(200);
     const body = await approved.json();
     expect(body.batch.answers[0].decision.grant).toMatchObject({
-      executionAuthority: 'push', agent: 'builder@one', task: 'demo-1', aclEpoch: 1,
+      executionAuthority: 'push', agent: 'builder@one', task: 'demo-1',
+      grantId: 'agent-grant', profileAclEpoch: 1,
+      approverSubject: 'agent:builder', approverGrantId: 'agent-grant', approverAclEpoch: 1,
     });
     expect(JSON.stringify(body)).not.toContain(AGENT_CREDENTIAL);
   });
@@ -177,10 +179,10 @@ describe('integration authorization and revocation', () => {
     });
     await replaceRows(root, values);
     const view = await (await fetch(`${base}/api/view`, { headers: agentHeaders() })).json();
-    expect(view.tasks.map((task: { id: string }) => task.id).sort()).toEqual(['demo-1', 'demo-2']);
+    expect(view.tasks.map((task: { id: string }) => task.id)).toEqual(['demo-2']);
     expect(view.projects[0].home).toBe('');
     expect(view.projects[0].repos).toEqual([]);
     expect(view.projects[0].agents.map((agent: { name: string }) => agent.name)).toEqual(['other']);
-    expect(view.projects[0].open_tasks).toBe(2);
+    expect(view.projects[0].open_tasks).toBe(1);
   });
 });

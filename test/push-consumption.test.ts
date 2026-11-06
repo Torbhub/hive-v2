@@ -39,7 +39,9 @@ async function setup() {
     agents: [{ name: 'builder', worktree: home, task: 'demo-1' }],
   });
   await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
-  await writeSecurity(root);
+  const values = registryItems();
+  values.find((row) => row.sk === 'PRINCIPAL#user:alice')!.aclEpoch = 2;
+  await writeSecurity(root, values);
   configureSecurity(root);
   await writeFile(path.join(root, 'credential.env'), `HIVE_AGENT_CREDENTIAL='${AGENT_CREDENTIAL}'\n`, { mode: 0o600 });
   return { root, remote, home, commit };
@@ -56,8 +58,10 @@ async function approved(root: string, commit: string): Promise<QuestionBatch> {
       },
     }],
   });
-  return answerQuestionBatch(
-    root, batch.id, [{ question: 'q1', choice: 'c2' }], { task: 'demo-1', aclEpoch: 1 });
+  return answerQuestionBatch(root, batch.id, [{ question: 'q1', choice: 'c2' }], {
+    task: 'demo-1', consumerGrantId: 'agent-grant', consumerAclEpoch: 1,
+    approverSubject: 'user:alice', approverGrantId: 'human-grant', approverAclEpoch: 2,
+  });
 }
 
 function environment(root: string, home: string): NodeJS.ProcessEnv {
@@ -84,7 +88,8 @@ describe('authenticated push consumption', () => {
     const { root, remote, home, commit } = await setup();
     const batch = await approved(root, commit);
     expect(batch.answers![0].decision?.grant).toMatchObject({
-      agent: `builder@${home}`, task: 'demo-1', aclEpoch: 1,
+      agent: `builder@${home}`, task: 'demo-1', grantId: 'agent-grant', profileAclEpoch: 1,
+      approverSubject: 'user:alice', approverGrantId: 'human-grant', approverAclEpoch: 2,
     });
     const url = await consumePushApproval(
       root, { project: 'demo', batch: batch.id, question: 'q1' },
@@ -138,5 +143,57 @@ describe('authenticated push consumption', () => {
       root, { project: 'demo', batch: batch.id, question: 'q1' },
       'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
     )).rejects.toThrow(/task/);
+  });
+
+  it('rejects a project grant replaced by a task grant with the same row-local epoch', async () => {
+    const { root, home, commit } = await setup();
+    const batch = await approved(root, commit);
+    const values = await rows(root);
+    const index = values.findIndex((row) => row.sk === 'PRINCIPAL#agent:builder');
+    values.splice(index, 1, {
+      pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#agent:builder', project: 'demo', task: 'demo-1',
+      principal: 'agent:builder', grantId: 'task-grant', actions: ['execute'], aclEpoch: 1, revokedAt: null,
+    });
+    await replaceRows(root, values);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+    )).rejects.toThrow(/grant identity/);
+  });
+
+  it('rejects an agent ACL change that advances the profile epoch', async () => {
+    const { root, home, commit } = await setup();
+    const batch = await approved(root, commit);
+    const values = await rows(root);
+    values.find((row) => row.pk === 'AGENT#builder' && row.sk === 'PROFILE')!.aclEpoch = 2;
+    await replaceRows(root, values);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+    )).rejects.toThrow(/profile ACL epoch/);
+  });
+
+  it('rejects a substituted execute grant identity', async () => {
+    const { root, home, commit } = await setup();
+    const batch = await approved(root, commit);
+    const values = await rows(root);
+    values.find((row) => row.sk === 'PRINCIPAL#agent:builder')!.grantId = 'different-grant';
+    await replaceRows(root, values);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+    )).rejects.toThrow(/grant identity/);
+  });
+
+  it('rejects a revoked human approver grant', async () => {
+    const { root, home, commit } = await setup();
+    const batch = await approved(root, commit);
+    const values = await rows(root);
+    values.find((row) => row.sk === 'PRINCIPAL#user:alice')!.revokedAt = 1;
+    await replaceRows(root, values);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+    )).rejects.toThrow(/approver|not found/);
   });
 });
