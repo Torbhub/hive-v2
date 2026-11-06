@@ -57,6 +57,13 @@ resume included. In `auto` mode, the watchdog immediately answers command and
 folder-trust dialogs with an offered non-saving option, regardless of stored
 approvals. It leaves other dialogs alone.
 
+## Handy dictation
+
+The web composers can insert local Handy transcripts at the cursor. Run
+`hive handy-bridge` on the operator computer, then use **Dictate** in the browser.
+Dictation never submits a prompt or approval. Normal typing works without Handy.
+See [Handy dictation](docs/handy-dictation.md) for setup, privacy, and limits.
+
 ## Interrupt vs kill
 
 `hive interrupt demo [agent]` — or the Interrupt buttons on the web screen —

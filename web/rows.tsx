@@ -1,15 +1,18 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Btn } from './action';
 import { Input } from './components/ui/input';
+import { DictationControl, type DictationEngine } from './dictation';
 
 export function NewTaskRow({
-  project, busy, onStartTask,
+  project, busy, onStartTask, dictationEngine,
 }: {
   project: string;
   busy: { project: string; what: string } | null;
   onStartTask: (project: string, text: string) => Promise<boolean>;
+  dictationEngine?: DictationEngine;
 }) {
   const [text, setText] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
   if (busy?.project === project && busy.what === 'starting') {
     return (
       <div className="mt-2 border-t border-zinc-800 pt-2.5 text-xs text-sky-400">starting…</div>
@@ -21,8 +24,9 @@ export function NewTaskRow({
     if (await onStartTask(project, t)) setText('');
   };
   return (
-    <div className="mt-2 flex gap-2 border-t border-zinc-800 pt-2.5">
+    <div className="mt-2 flex flex-wrap gap-2 border-t border-zinc-800 pt-2.5">
       <Input
+        ref={inputRef}
         className="font-mono text-xs"
         value={text}
         placeholder="describe the task…"
@@ -35,6 +39,10 @@ export function NewTaskRow({
           }
         }}
       />
+      <DictationControl
+        inputRef={inputRef} value={text} onChange={setText} label={`new task for ${project}`}
+        dictationEngine={dictationEngine}
+      />
       <Btn id={`start-${project}`} variant="primary" disabled={!text.trim()} onPress={() => void submit()}>
         Start task
       </Btn>
@@ -43,13 +51,15 @@ export function NewTaskRow({
 }
 
 export function MessageRow({
-  project, busy, onMessage,
+  project, busy, onMessage, dictationEngine,
 }: {
   project: string;
   busy: { project: string; what: string } | null;
   onMessage: (project: string, text: string) => Promise<boolean>;
+  dictationEngine?: DictationEngine;
 }) {
   const [text, setText] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
   if (busy?.project === project && busy.what === 'messaging') {
     return (
       <div className="mt-2 border-t border-zinc-800 pt-2.5 text-xs text-sky-400">sending…</div>
@@ -61,8 +71,9 @@ export function MessageRow({
     if (await onMessage(project, t)) setText('');
   };
   return (
-    <div className="mt-2 flex gap-2 border-t border-zinc-800 pt-2.5">
+    <div className="mt-2 flex flex-wrap gap-2 border-t border-zinc-800 pt-2.5">
       <Input
+        ref={inputRef}
         className="font-mono text-xs"
         value={text}
         placeholder="message the orchestrator…"
@@ -74,6 +85,10 @@ export function MessageRow({
             void submit();
           }
         }}
+      />
+      <DictationControl
+        inputRef={inputRef} value={text} onChange={setText} label={`message for ${project}`}
+        dictationEngine={dictationEngine}
       />
       <Btn id={`message-${project}`} disabled={!text.trim()} onPress={() => void submit()}>
         Send
