@@ -47,7 +47,8 @@ async function setup() {
   return { root, remote, home, commit };
 }
 
-async function approved(root: string, commit: string): Promise<QuestionBatch> {
+async function approved(root: string, commit: string,
+  approverSubject = 'user:alice', approverGrantId = 'human-grant'): Promise<QuestionBatch> {
   const batch = await createQuestionBatch(root, { project: 'demo', agent: `builder@${path.join(root, 'work')}` }, {
     context: 'Publish the reviewed change.',
     questions: [{
@@ -60,7 +61,7 @@ async function approved(root: string, commit: string): Promise<QuestionBatch> {
   });
   return answerQuestionBatch(root, batch.id, [{ question: 'q1', choice: 'c2' }], {
     task: 'demo-1', consumerGrantId: 'agent-grant', consumerAclEpoch: 1,
-    approverSubject: 'user:alice', approverGrantId: 'human-grant', approverAclEpoch: 2,
+    approverSubject, approverGrantId, approverAclEpoch: 2,
   });
 }
 
@@ -208,5 +209,63 @@ describe('authenticated push consumption', () => {
       root, { project: 'demo', batch: batch.id, question: 'q1' },
       'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
     )).rejects.toThrow(/approver account/);
+  });
+
+  it('allows a different authorized human approver without returning the agent owner account', async () => {
+    const { root, remote, home, commit } = await setup();
+    const values = await rows(root);
+    values.push({
+      pk: 'ACL#demo#*#*', sk: 'PRINCIPAL#user:bob', project: 'demo', principal: 'user:bob',
+      grantId: 'bob-grant', actions: ['execute'], aclEpoch: 2, revokedAt: null,
+    });
+    await replaceRows(root, values);
+    const batch = await approved(root, commit, 'user:bob', 'bob-grant');
+    const url = await consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home));
+    expect(url).toBe(remote);
+  });
+
+  it('rejects a disabled different human approver', async () => {
+    const { root, home, commit } = await setup();
+    const values = await rows(root);
+    values.push({
+      pk: 'ACL#demo#*#*', sk: 'PRINCIPAL#user:bob', project: 'demo', principal: 'user:bob',
+      grantId: 'bob-grant', actions: ['execute'], aclEpoch: 2, revokedAt: null,
+    });
+    await replaceRows(root, values);
+    const batch = await approved(root, commit, 'user:bob', 'bob-grant');
+    values.find((row) => row.pk === 'SUBJECT#user:bob')!.accountStatus = 'disabled';
+    await replaceRows(root, values);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+    )).rejects.toThrow(/approver account/);
+  });
+
+  it('rejects an arbitrary approver subject', async () => {
+    const { root, home, commit } = await setup();
+    const batch = await approved(root, commit, 'user:charlie', 'charlie-grant');
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+    )).rejects.toThrow(/approver|not found/);
+  });
+
+  it('rejects an approver grant from the wrong task', async () => {
+    const { root, home, commit } = await setup();
+    const values = await rows(root);
+    values.push({
+      pk: 'ACL#demo#*#*', sk: 'PRINCIPAL#user:bob', project: 'demo', principal: 'user:bob',
+      grantId: 'bob-grant', actions: ['execute'], aclEpoch: 2, revokedAt: null,
+    });
+    await replaceRows(root, values);
+    const batch = await approved(root, commit, 'user:bob', 'bob-grant');
+    values.find((row) => row.sk === 'PRINCIPAL#user:bob')!.task = 'demo-2';
+    await replaceRows(root, values);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+    )).rejects.toThrow(/not found/);
   });
 });
