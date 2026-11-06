@@ -1,6 +1,6 @@
 import type http from 'node:http';
 import type { HubView } from '../src/types.js';
-import { listOpenQuestionBatches } from '../src/questions.js';
+import { listOpenQuestionBatches, readQuestionBatch } from '../src/questions.js';
 import { readAgentLog, resolveLogTarget } from '../src/logview.js';
 import { RegistryUnavailable, type Registry } from '../src/registry.js';
 import { Refusal } from '../src/state.js';
@@ -25,6 +25,7 @@ async function filteredView(root: string, view: HubView, principal: Principal, r
   allOpen: HubView['questions']): Promise<HubView> {
   const visibleProjects = new Set<string>();
   const fullReadProjects = new Set<string>();
+  const redactedProjects = new Set<string>();
   const allowed = async (project: string, task?: string): Promise<boolean> => {
     try {
       await authorize(principal, registry, 'read', { project, task });
@@ -40,6 +41,9 @@ async function filteredView(root: string, view: HubView, principal: Principal, r
   const tasks = [];
   for (const task of view.tasks) {
     if (await allowed(task.project, task.id)) tasks.push(task);
+    const narrower = await registry.get(
+      `ACL#${task.project}#${task.id}#*`, `PRINCIPAL#${principal.subject}`);
+    if (narrower && await revoked(registry, narrower)) redactedProjects.add(task.project);
   }
   const agentTask = async (project: string, agent: unknown): Promise<string | null | undefined> => {
     try {
@@ -68,7 +72,7 @@ async function filteredView(root: string, view: HubView, principal: Principal, r
   const projects = [];
   for (const project of view.projects) {
     if (!visibleProjects.has(project.name)) continue;
-    if (fullReadProjects.has(project.name)) {
+    if (fullReadProjects.has(project.name) && !redactedProjects.has(project.name)) {
       projects.push(project);
       continue;
     }
@@ -153,10 +157,24 @@ async function wakeListResponse(context: RequestContext, principal: Principal): 
     await authorize(principal, context.registry, 'execute', { project: String(profile.project) });
   }
   const rows = await context.registry.query(`AGENT#${id}`, 'WAKE#');
-  sendJson(context.res, 200, rows.map((row) => ({
+  const active = [];
+  for (const row of rows) {
+    if (!await revoked(context.registry, row)) active.push(row);
+  }
+  sendJson(context.res, 200, active.map((row) => ({
     subscriptionId: row.subscriptionId, agentId: row.agentId, executionGrantId: row.executionGrantId,
     createdBy: row.createdBy, createdAt: row.createdAt, revokedAt: row.revokedAt, aclEpoch: row.aclEpoch,
   })));
+}
+
+async function requiredAction(root: string, pathname: string, body: Record<string, unknown>): Promise<string> {
+  if (pathname !== '/api/questions/answer' || !Array.isArray(body.answers)) return postAction(pathname);
+  const batch = await readQuestionBatch(root, String(body.id ?? ''));
+  const execution = body.answers.some((answer) => {
+    const question = batch.questions.find((candidate) => candidate.id === answer?.question);
+    return question?.decision?.action === 'push' && question.choices.length === 3 && answer?.choice === 'c2';
+  });
+  return execution ? 'execute' : 'write';
 }
 
 async function postResponse(context: RequestContext, principal: Principal): Promise<void> {
@@ -190,7 +208,7 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   }
   if (pathname === '/api/message' && principal.kind === 'agent') throw new AuthorizationError('not found');
   const scope = await postScope(context.root, pathname, body, principal);
-  const action = postAction(pathname);
+  const action = await requiredAction(context.root, pathname, body);
   await authorize(principal, context.registry, action, scope);
   const result = await handlePost(context.root, pathname, body, principal);
   const current = await context.authenticate();

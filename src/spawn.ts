@@ -214,7 +214,7 @@ export async function launchWindow(
   const profile = await ensureAgentProfile(cwd, agent);
   await requireAgentCredential(cwd, project, agent);
   const credentialFile = process.env.HIVE_COLLABORATION_ENABLED === '1'
-    ? `HIVE_AGENT_CREDENTIAL= HIVE_AGENT_CREDENTIAL_FILE=${quote(hivePath(cwd, 'team', agent, 'credential.env'))} ` : '';
+    ? `HIVE_COLLABORATION_ENABLED=1 HIVE_AGENT_REF=${quote(`${agent}@${cwd}`)} HIVE_AGENT_CREDENTIAL= HIVE_AGENT_CREDENTIAL_FILE=${quote(hivePath(cwd, 'team', agent, 'credential.env'))} ` : '';
   const pane = await newWindow(
     windowName(project, agent),
     cwd,

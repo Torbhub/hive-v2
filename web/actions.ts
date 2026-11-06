@@ -1,6 +1,8 @@
 import type http from 'node:http';
 import { Refusal, answerDialog, continueProject, hubTask, listTasks, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
-import { hubPath, readProjects, readTeam } from '../src/state.js';
+import { hubPath } from '../src/state.js';
+export { storedAgentTask } from '../src/agent-target.js';
+import { storedAgentTask } from '../src/agent-target.js';
 import { interruptAgent } from '../src/interrupt.js';
 import { killAgent } from '../src/kill.js';
 import { sendOwnerMessage } from '../src/message.js';
@@ -175,22 +177,6 @@ async function storedTask(root: string, project: string, taskId: unknown): Promi
   const task = tasks.find((candidate) => candidate.id === taskId && candidate.project === project);
   if (!task) throw new AuthorizationError('not found');
   return task.id;
-}
-
-export async function storedAgentTask(root: string, project: string, agentRef: unknown): Promise<string | undefined> {
-  const registration = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
-  if (!registration) throw new AuthorizationError('not found');
-  const team = await readTeam(registration.home);
-  const ref = agentRef === undefined || agentRef === '' ? undefined : String(agentRef);
-  const [name, worktree] = ref?.split('@') ?? [];
-  const candidates = name
-    ? team.agents.filter((agent) => !agent.orchestrator && agent.name === name)
-    : team.agents.filter((agent) => agent.orchestrator);
-  const entry = worktree
-    ? candidates.find((agent) => agent.worktree === worktree)
-    : candidates.length === 1 ? candidates[0] : undefined;
-  if (!entry) throw new AuthorizationError('not found');
-  return entry.task;
 }
 
 export async function postScope(root: string, pathname: string,

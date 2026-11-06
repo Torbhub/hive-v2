@@ -1,12 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PassThrough, Writable } from 'node:stream';
 import { getEventListeners } from 'node:events';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { serveMcp, sleep } from '../src/mcp.js';
+import * as questionModule from '../src/questions.js';
 import { answerQuestionBatch, cancelQuestionBatch, listOpenQuestionBatches } from '../src/questions.js';
-import { agentEnv, configureSecurity, writeSecurity } from './security-fixture.js';
+import { appendTaskEvent, hivePath, writeJson, writeProjects } from '../src/state.js';
+import { AGENT_CREDENTIAL, agentEnv, configureSecurity, writeSecurity } from './security-fixture.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  delete process.env.HIVE_COLLABORATION_ENABLED;
+  delete process.env.HIVE_REGISTRY_FILE;
+  delete process.env.HIVE_ASSERTION_KEYS_JSON;
+});
 
 const GOOD_BATCH = {
   context: 'Choosing a database for the hub.',
@@ -287,4 +296,76 @@ describe('ask_operator lifecycle', () => {
     expect((await listOpenQuestionBatches(r))).toHaveLength(1);
     c.close();
   });
+});
+
+describe('authenticated MCP integration', () => {
+  it('returns tool errors for missing malformed and insecure credential files', async () => {
+    const r = await root();
+    const malformed = path.join(r, 'malformed.env');
+    const insecure = path.join(r, 'insecure.env');
+    await writeFile(malformed, 'not a credential\n', { mode: 0o600 });
+    await writeFile(insecure, `HIVE_AGENT_CREDENTIAL='${AGENT_CREDENTIAL}'\n`, { mode: 0o644 });
+    const env = {
+      HIVE_HUB_ROOT: r, HIVE_COLLABORATION_ENABLED: '1',
+      HIVE_AGENT_CREDENTIAL_FILE: path.join(r, 'missing.env'),
+    };
+    const c = connect(env);
+    for (const [id, file] of [[1, env.HIVE_AGENT_CREDENTIAL_FILE], [2, malformed], [3, insecure]] as const) {
+      env.HIVE_AGENT_CREDENTIAL_FILE = file;
+      c.send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
+      await c.waitFor(() => c.messages().length === id);
+      const result = c.messages()[id - 1].result as { isError: boolean; content: { text: string }[] };
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('authorization failed');
+    }
+    c.close();
+  });
+
+  it('creates a batch for the exact same-named agent worktree', async () => {
+    const r = await root();
+    const home = path.join(r, 'demo');
+    const one = path.join(home, 'one');
+    const two = path.join(home, 'two');
+    await writeProjects(r, { projects: [{ name: 'demo', home, repos: [] }] });
+    await writeJson(hivePath(home, 'team.json'), { agents: [
+      { name: 'builder', worktree: one, task: 'demo-1' },
+      { name: 'builder', worktree: two, task: 'demo-2' },
+    ] });
+    await appendTaskEvent(r, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
+    await appendTaskEvent(r, { id: 'demo-2', project: 'demo', event: 'asked', at: new Date().toISOString() });
+    const file = path.join(r, 'credential.env');
+    await writeFile(file, `HIVE_AGENT_CREDENTIAL='${AGENT_CREDENTIAL}'\n`, { mode: 0o600 });
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    const c = connect({
+      HIVE_HUB_ROOT: r, HIVE_COLLABORATION_ENABLED: '1',
+      HIVE_AGENT_CREDENTIAL_FILE: file, HIVE_AGENT_REF: `builder@${two}`,
+    });
+    c.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
+    await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 1);
+    const [batch] = await listOpenQuestionBatches(r);
+    expect(batch.agent).toBe(`builder@${two}`);
+    await cancelQuestionBatch(r, batch.id);
+    await c.waitFor(() => c.messages().length === 1);
+    c.close();
+  });
+
+  for (const rejected of [false, true]) {
+    it(`suppresses a delayed timeout ${rejected ? 'failure' : 'answer'} after cancellation`, async () => {
+      const r = await root();
+      const original = questionModule.readQuestionBatch;
+      const read = vi.spyOn(questionModule, 'readQuestionBatch').mockImplementation(async (root, id) => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        if (rejected) throw new Error('late read failure');
+        return original(root, id);
+      });
+      const c = connect(envFor(r), { timeoutMs: 10 });
+      c.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
+      await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 1);
+      await c.waitFor(() => read.mock.calls.length > 0);
+      c.send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(c.messages()).toEqual([]);
+      c.close();
+    });
+  }
 });
