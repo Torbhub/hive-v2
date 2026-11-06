@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -5,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / 'infra/t01-smoke/workflow.sh'
@@ -168,19 +170,25 @@ release_case('network unreachable', 1, 1)
 release_case('unexpected DynamoDB failure', 1, 1)
 
 
-def validate_evidence(records, expected_rc):
+def validate_evidence(records, expected_rc, cli=False):
     temporary, root = workspace()
     with temporary:
         artifact = root / 'evidence.jsonl'
         artifact.write_text(''.join(json.dumps(record, separators=(',', ':')) + '\n' for record in records))
-        result = subprocess.run(
-            ['python3', 'infra/t01-smoke/runtime.py', 'validate-evidence', str(artifact)],
-            cwd=root, capture_output=True, text=True,
-        )
+        if cli:
+            result = subprocess.run(
+                ['python3', 'infra/t01-smoke/runtime.py', 'validate-evidence', str(artifact)],
+                cwd=root, capture_output=True, text=True,
+            )
+        else:
+            spec = importlib.util.spec_from_file_location('t01_runtime', root / 'infra/t01-smoke/runtime.py')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            result = SimpleNamespace(returncode=module.validate_evidence(str(artifact)), stdout='', stderr='')
         assert result.returncode == expected_rc, (records, result.stdout, result.stderr)
 
 
-validate_evidence(evidence_records(), 0)
+validate_evidence(evidence_records(), 0, cli=True)
 validate_evidence([{'check': 'complete', 'status': 'passed'}], 1)
 validate_evidence([record for record in evidence_records() if record['check'] != 'lazy_install_disabled'], 1)
 wrong_version = evidence_records()
