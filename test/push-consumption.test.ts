@@ -266,6 +266,6 @@ describe('authenticated push consumption', () => {
     await expect(consumePushApproval(
       root, { project: 'demo', batch: batch.id, question: 'q1' },
       'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
-    )).rejects.toThrow(/not found/);
+    )).rejects.toThrow(/approver authorization changed/);
   });
 });
