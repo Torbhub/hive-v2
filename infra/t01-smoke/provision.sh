@@ -96,7 +96,7 @@ done
 [ "$MATRIX" = none ]
 [ "$MAX_PAID_ADMISSIONS" = 0 ]
 
-dnf install -y gcc gcc-c++ make cmake python3-devel libffi-devel libatomic git xz ca-certificates iptables
+dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --max-redirs 0 --connect-timeout 10 --max-time 60 \
   "$RUNTIME_SCRIPT_URL" --output /opt/t01/runtime.py
@@ -118,7 +118,7 @@ export HERMES_RUNTIME_DIR=/opt/t01/tools
 export UV_FROZEN=1
 cd /opt/t01/source
 ensure_package() {
-  python3 - "$1" <<'PY'
+  python3.11 - "$1" <<'PY'
 from pathlib import Path
 import sys
 import traceback
@@ -137,8 +137,8 @@ ensure_package uv
 emit uv_install passed
 ensure_package python
 emit python_install passed
-PYTHON="$(python3 -c 'from pm import installed_package; print(installed_package("python").binary)')"
-python3 -m pm.build_env \
+PYTHON="$(python3.11 -c 'from pm import installed_package; print(installed_package("python").binary)')"
+python3.11 -m pm.build_env \
   --source /opt/t01/source \
   --python "$PYTHON" \
   --cache /opt/t01/uv-cache \

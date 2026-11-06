@@ -70,7 +70,7 @@ GitHub deletes the evidence artifact after seven days. Delete the artifact soone
 
 Static tests cannot prove these results. The first reviewed run must confirm them before any later smoke proposal:
 
-- The selected AMI contains the required `iptables`, `systemd`, and Python runtime controls.
+- The selected AMI contains the required `iptables`, `systemd`, and Python 3.11 bootstrap controls.
 - The frozen Hermes build completes from the pinned source and `uv.lock` hashes.
 - The health-only Lambda accepts the current run credential, rejects other requests, and validates fresh no-model TeamKimi probe evidence.
 - The host firewall and service address rules deny every negative destination.
