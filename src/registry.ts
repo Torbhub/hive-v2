@@ -64,13 +64,19 @@ export class FileRegistry implements Registry {
     request: DelegatedApprovalRequest): Promise<RegistryRow | undefined> {
     const rows = await this.read();
     const allowed = (principal: string, grantId: string): boolean => {
-      const pk = `ACL#${request.project}#${request.task ?? '*'}#*`;
-      const row = rows.find((candidate) => candidate.pk === pk && candidate.sk === `PRINCIPAL#${principal}`);
-      if (!row || row.revokedAt !== null && row.revokedAt !== undefined
-        || rows.some((candidate) => candidate.pk === `REVOCATION#${pk}` && candidate.sk === row.sk)) {
-        return false;
+      for (const task of [request.task, undefined]) {
+        const pk = `ACL#${request.project}#${task ?? '*'}#*`;
+        const sk = `PRINCIPAL#${principal}`;
+        const row = rows.find((candidate) => candidate.pk === pk && candidate.sk === sk);
+        if (!row) continue;
+        if (row.revokedAt !== null && row.revokedAt !== undefined
+          || rows.some((candidate) => candidate.pk === `REVOCATION#${pk}` && candidate.sk === sk
+            || (task !== undefined && row.task !== task)) {
+          return false;
+        }
+        return row.grantId === grantId && Array.isArray(row.actions) && row.actions.includes('execute');
       }
-      return row.grantId === grantId && Array.isArray(row.actions) && row.actions.includes('execute');
+      return false;
     };
     if (!allowed(`agent:${agentId}`, request.consumerGrantId)
       || !allowed(request.approverSubject, request.approverGrantId)) {
