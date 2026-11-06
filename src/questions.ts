@@ -110,6 +110,10 @@ function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, an
   else if (answer.choice === 'c1') outcome = card.action === 'unknown' || card.missing.length ? 'details' : 'refresh';
   else if (answer.choice === 'c2' && question.choices.length === 3) outcome = 'approve';
   else outcome = 'cancel';
+  if (outcome === 'approve' && card.action === 'push' && authorization
+    && !authorization.approverSubject?.startsWith('user:')) {
+    throw new Refusal('execution approvals require a human approver');
+  }
   const facts = structuredClone(card.facts);
   const grant = outcome === 'approve' ? {
     batch: batch.id, question: question.id, project: batch.project,

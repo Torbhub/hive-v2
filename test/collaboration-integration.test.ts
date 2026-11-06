@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildDecision } from '../src/decisions.js';
-import { createQuestionBatch } from '../src/questions.js';
+import { createQuestionBatch, readQuestionBatch } from '../src/questions.js';
 import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
 import type { QuestionBatch } from '../src/types.js';
 import { createServer } from '../web/server.js';
