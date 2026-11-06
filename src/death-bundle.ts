@@ -85,6 +85,46 @@ export async function wireLogMtime(home: string, sessionId: string): Promise<num
   }
 }
 
+const ACTIVITY_EVENTS = new Set(['turn.ended', 'agent.turn.ended', 'full_compaction.complete']);
+const WIRE_ACTIVITY_CHUNK_BYTES = 64 * 1024;
+
+// Kimi refreshes its cache after model round-trips, not local state writes.
+export async function wireActivityAt(home: string, sessionId: string): Promise<number | null> {
+  try {
+    const file = await findWireLog(await findSessionDir(home, sessionId));
+    const stat = await fs.stat(file);
+    const handle = await fs.open(file, 'r');
+    try {
+      let end = stat.size;
+      let carry = '';
+      while (end > 0) {
+        const start = Math.max(0, end - WIRE_ACTIVITY_CHUNK_BYTES);
+        const buffer = Buffer.alloc(end - start);
+        await handle.read(buffer, 0, buffer.length, start);
+        const parts = (buffer.toString('utf8') + carry).split('\n');
+        carry = parts[0];
+        const complete = start === 0 ? parts : parts.slice(1);
+        for (let i = complete.length - 1; i >= 0; i--) {
+          if (!complete[i].trim()) continue;
+          try {
+            const event = JSON.parse(complete[i]) as { type?: unknown; time?: unknown };
+            if (typeof event.type === 'string' && ACTIVITY_EVENTS.has(event.type)
+              && typeof event.time === 'number' && Number.isFinite(event.time)) return event.time;
+          } catch {
+            continue;
+          }
+        }
+        end = start;
+      }
+      return null;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
 // Only type and timestamp leave this function; payloads never enter the bundle.
 async function wireTail(home: string, sessionId: string): Promise<string> {
   const file = await findWireLog(await findSessionDir(home, sessionId));

@@ -123,19 +123,26 @@ async function waitIdleForMode(pane: string, mode: ProjectMode | 'supervised-aut
   return 'timeout';
 }
 
+export class PreInputError extends Error {}
+
 // The first Enter after a literal send is sometimes swallowed by the TUI; one retry, then give up.
-export async function typeLine(pane: string, text: string, identity: PaneIdentity): Promise<void> {
-  if (!(await paneIs(pane, identity))) throw new Error(`pane ${pane} is no longer the session it was`);
+export async function typeLine(
+  pane: string, text: string, identity: PaneIdentity, screenGuard?: (raw?: string) => Promise<void>,
+): Promise<void> {
+  if (!(await paneIs(pane, identity))) throw new PreInputError(`pane ${pane} is no longer the session it was`);
   await sendLiteral(pane, text, identity);
   await sleep(500);
+  if (screenGuard) await screenGuard();
   await sendEnter(pane, identity);
   for (let i = 0; i < 6; i++) {
     await sleep(1000);
     const raw = await capturePane(pane);
     if (raw === null) throw new Error(`pane ${pane} died while typing`);
+    if (screenGuard) await screenGuard(raw);
     const ls = lines(raw);
     const promptLine = [...ls].reverse().find((l) => /^\s*│\s*>/.test(l));
     if (!promptLine || !promptLine.includes(text.slice(0, 40))) return;
+    if (screenGuard) await screenGuard();
     await sendEnter(pane, identity);
   }
   throw new Error(`the line stayed in the prompt of ${pane}; not typed`);

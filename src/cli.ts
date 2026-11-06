@@ -34,7 +34,7 @@ const USAGE = `usage:
   hive push <remote> <sha> <branch>
   hive land <remote> <sha> <branch> [--title t] [--body b] | --bookmark <name> [--title t] [--body b]
   hive cleanup <project> [--dry-run]
-  hive interrupt <project> [agent] | hive kill <project> [agent]
+  hive interrupt <project> [agent] | hive kill <project> [agent] | hive compact <project> [agent] on|off
   hive doctor | ui | watch
   hive web [--port N] | mcp
   hive memory propose <project> <text...> | ls <project> | promote <project> <id>`;
@@ -251,10 +251,7 @@ async function main(): Promise<void> {
       for (const a of actions) console.log(`${dryRun ? 'would ' : ''}${a.action}`);
       return;
     }
-    case 'doctor': {
-      const { doctor } = await import('./doctor.js');
-      process.exit(await doctor(process.cwd()));
-    }
+    case 'doctor': process.exit(await (await import('./doctor.js')).doctor(process.cwd()));
     case 'ui': {
       const { render } = await import('ink');
       const { createElement } = await import('react');
@@ -271,6 +268,7 @@ async function main(): Promise<void> {
       console.log(await fn(process.cwd(), validName('project', args[1]), args[2] && validAgentRef(args[2])));
       return;
     }
+    case 'compact': return (await import('./compact.js')).compactCommand(process.cwd(), args.slice(1));
     case 'watch': {
       const { watch } = await import('./watch.js');
       console.log(`hive: watching ${process.cwd()} (deaths + approvals per projects.json)`);
