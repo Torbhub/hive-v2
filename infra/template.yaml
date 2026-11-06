@@ -101,6 +101,12 @@ Resources:
                   - iam:TagRole
                   - iam:UntagRole
                 Resource: arn:aws:iam::594552273052:role/hive-v2-*
+              - Sid: UpdateHiveRoleDescriptions
+                Effect: Allow
+                Action: iam:UpdateRoleDescription
+                Resource:
+                  - arn:aws:iam::594552273052:role/hive-v2-gh-deploy
+                  - arn:aws:iam::594552273052:role/hive-v2-gh-t01-smoke
               - Sid: ManageHiveBoundaryPolicies
                 Effect: Allow
                 Action:
@@ -111,6 +117,7 @@ Resources:
                   - iam:ListPolicyVersions
                   - iam:CreatePolicyVersion
                   - iam:DeletePolicyVersion
+                  - iam:SetDefaultPolicyVersion
                 Resource:
                   - arn:aws:iam::594552273052:policy/hive-v2-t01-smoke-health-boundary
                   - arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary
@@ -164,6 +171,7 @@ Resources:
         why: root-owned immutable boundary for the disposable instance role
         must:
           - Allow only run-scoped health secret reads
+    DependsOn: DeployRole
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: hive-v2-t01-smoke-health-boundary
@@ -180,6 +188,7 @@ Resources:
         why: root-owned immutable boundary for the disposable health role
         must:
           - Allow only run-scoped health secret reads
+    DependsOn: DeployRole
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: hive-v2-t01-broker-health-boundary
@@ -199,6 +208,7 @@ Resources:
           - Operate on existing resources only when they carry the T01 role tag
           - Limit health resources and credentials to their exact run-scoped names
           - Renew and release only the same owner's fleet mutex
+    DependsOn: DeployRole
     Type: AWS::IAM::Role
     Properties:
       RoleName: hive-v2-gh-t01-smoke
