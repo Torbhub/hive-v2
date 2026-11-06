@@ -62,10 +62,15 @@ lock_down() {
 }
 
 on_error() {
+  local status=$?
   trap - ERR
   set +e
   lock_down
   local category=unknown origin=unknown:0
+  if [[ "$status" =~ ^(124|137)$ ]] && [ -n "${BOOTSTRAP_STAGE:-}" ]; then
+    category="timeout:$BOOTSTRAP_STAGE"
+    origin="$BOOTSTRAP_STAGE:$status"
+  fi
   if [ -f /var/lib/t01/evidence/bootstrap-category ]; then
     category="$(cat /var/lib/t01/evidence/bootstrap-category)"
   fi
@@ -118,7 +123,8 @@ export HERMES_RUNTIME_DIR=/opt/t01/tools
 export UV_FROZEN=1
 cd /opt/t01/source
 ensure_package() {
-  python3.11 - "$1" <<'PY'
+  BOOTSTRAP_STAGE="$1"
+  timeout --signal=TERM --kill-after=30s 600 python3.11 - "$1" <<'PY'
 from pathlib import Path
 import sys
 import traceback
@@ -138,7 +144,8 @@ emit uv_install passed
 ensure_package python
 emit python_install passed
 PYTHON="$(python3.11 -c 'from pm import installed_package; print(installed_package("python").binary)')"
-python3.11 -m pm.build_env \
+BOOTSTRAP_STAGE=pm-build
+timeout --signal=TERM --kill-after=30s 1800 python3.11 -m pm.build_env \
   --source /opt/t01/source \
   --python "$PYTHON" \
   --cache /opt/t01/uv-cache \
