@@ -50,7 +50,10 @@ exactly like the Ink screen — same view assembly, same fingerprint-checked
 dialog answers, one action at a time. It is a plain foreground process, so a
 systemd unit is one `ExecStart=/path/to/hive web` line away. Set
 `HIVE_WEB_SECRET` to require that value in an `x-hive-auth` header on every
-request (unset = open on loopback, for development). The screen also creates
+request. This is only the nginx transport check. With collaboration disabled
+by default, the legacy behavior is unchanged. With collaboration enabled,
+every request also needs a Nexus assertion or an individual agent credential.
+See `docs/collaboration-identity.md`. The screen also creates
 tasks, starts teams, and sets a project's permission mode (`ask`/`yolo`/`auto`).
 `ask` passes no flag to kimi. `yolo` and `auto` pass `-y` on the next launch,
 resume included. In `auto` mode, the watchdog immediately answers command and
@@ -227,9 +230,9 @@ A batch left open for more than 7 days expires the next time the hub view runs
 its sweep. Closed history keeps only the newest 200. The screen shows the
 oldest 50 open batches and tells you when more are waiting behind them.
 
-The tool is registered for every kimi session by provision. Agents launched
-before that registration need a respawn to see it and to get the HIVE_*
-environment that routes their batches to the right project.
+The tool is registered for every kimi session by provision. Each agent also
+needs its own enrolled `HIVE_AGENT_CREDENTIAL`. The credential routes the batch
+to the right owner, agent, and project. Environment-only identity is refused.
 5. Before anything lands: the gate. `hive gate` runs the steps and logs every
    exit code; `hive gate-verify log --commit <tip>` is GREEN only when the log
    vouches for exactly that commit on a clean tree.
