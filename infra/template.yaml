@@ -238,6 +238,15 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:ResourceTag/Role: hive-v2-t01-smoke
+              - Sid: T01SmokeManageSecurityGroupEgress
+                Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupEgress
+                Resource: arn:aws:ec2:us-east-1:594552273052:security-group/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Role: hive-v2-t01-smoke
               - Sid: T01SmokeReadEc2
                 Effect: Allow
                 Action: ec2:Describe*
@@ -272,6 +281,7 @@ Resources:
                 Action:
                   - dynamodb:GetItem
                   - dynamodb:PutItem
+                  - dynamodb:UpdateItem
                   - dynamodb:DeleteItem
                 Resource: arn:aws:dynamodb:us-east-1:594552273052:table/citadel-deploy-mutex
 

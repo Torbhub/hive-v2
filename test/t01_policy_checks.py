@@ -78,3 +78,26 @@ assert allows(
     'ec2:TerminateInstances', INSTANCE,
     **{'aws:ResourceTag/Role': 'hive-v2-t01-smoke'},
 ), 'the disposable instance must remain terminable'
+assert not allows('ec2:RevokeSecurityGroupEgress', SECURITY_GROUP)
+assert allows(
+    'ec2:RevokeSecurityGroupEgress', SECURITY_GROUP,
+    **{'aws:ResourceTag/Role': 'hive-v2-t01-smoke'},
+), 'CloudFormation must remove the default egress from its own security group'
+MUTEX_TABLE = 'arn:aws:dynamodb:us-east-1:594552273052:table/citadel-deploy-mutex'
+assert allows('dynamodb:UpdateItem', MUTEX_TABLE), 'owner-only renewal requires UpdateItem'
+
+SMOKE_PATH = ROOT / 'infra/t01-smoke/template.yaml'
+SMOKE_TEMPLATE = yaml.load(SMOKE_PATH.read_text(), CloudFormationLoader)
+for template in (TEMPLATE, SMOKE_TEMPLATE):
+    metadata = template['Metadata']
+    assert metadata['AWSToolsMetrics']['AWSAgentToolkit'] == 'aws-cloudformation@3'
+    assert metadata['com.aws.cloudformation.Context']
+for path in (ROOT / 'infra/template.yaml', SMOKE_PATH):
+    assert path.stat().st_size < 51_200, f'{path} exceeds the inline template limit'
+for resource_name in ('InstanceRole', 'InstanceProfile', 'SecurityGroup', 'Instance'):
+    context = SMOKE_TEMPLATE['Resources'][resource_name]['Metadata']['com.aws.cloudformation.Context']
+    assert context['why'].strip(), resource_name
+    assert context['must'], resource_name
+role_context = TEMPLATE['Resources']['T01SmokeRole']['Metadata']['com.aws.cloudformation.Context']
+assert role_context['why'].strip()
+assert role_context['must']

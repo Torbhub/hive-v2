@@ -72,6 +72,33 @@ with tempfile.TemporaryDirectory() as directory:
     process.wait()
     assert status == 502, f'unreadable broker secret returned {status}'
 
+    port = free_port()
+    readiness_env = {
+        'PATH': os.environ['PATH'],
+        'T01_BROKER_PORT': str(port),
+        'T01_BROKER_READINESS_ATTEMPTS': '20',
+        'T01_BROKER_READINESS_DELAY': '0.05',
+    }
+    readiness = subprocess.Popen(
+        ['python3', str(RUNTIME), 'wait-for-broker'], env=readiness_env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.15)
+    broker_process, status = start_broker(config, secret, port)
+    assert readiness.wait(timeout=5) == 0, 'initial refusal did not become ready'
+    assert status == 200
+    broker_process.kill()
+    broker_process.wait()
+
+    readiness_env['T01_BROKER_PORT'] = str(free_port())
+    readiness_env['T01_BROKER_READINESS_ATTEMPTS'] = '3'
+    readiness_env['T01_BROKER_READINESS_DELAY'] = '0.01'
+    permanent = subprocess.run(
+        ['python3', str(RUNTIME), 'wait-for-broker'], env=readiness_env,
+        capture_output=True, text=True, timeout=5,
+    )
+    assert permanent.returncode == 1, 'permanent refusal was accepted'
+
 
 def fake_hermes(root, version='0.22.6', lazy='false', lazy_rc=1):
     executable = root / 'hermes'
@@ -117,5 +144,7 @@ assert json.loads(output) == {
 }
 result, _ = hermes_check(version='0.0.0')
 assert result.returncode != 0, 'placeholder runtime version was accepted'
+result, _ = hermes_check(version='0.22.60')
+assert result.returncode != 0, 'a version with the expected prefix was accepted'
 result, _ = hermes_check(lazy='true', lazy_rc=0)
 assert result.returncode != 0, 'enabled lazy installs were accepted'

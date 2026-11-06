@@ -66,7 +66,7 @@ def mock_aws(root, content):
     write_executable(root / 'bin/aws', content)
 
 
-def cleanup_case(describe_rc, describe_error, expected_rc, delete_rc=0, wait_rc=0, release_rc=0):
+def cleanup_case(describe_rc, describe_error, expected_rc, delete_rc=0, wait_rc=0, release_rc=0, release_expected=False):
     temporary, root = workspace()
     with temporary:
         mock_aws(root, f'''#!/usr/bin/env bash
@@ -84,12 +84,17 @@ exit 99
         result = run(root, 'cleanup', {'MOCK_MUTEX_RC': str(release_rc)})
         assert result.returncode == expected_rc, (result.returncode, result.stdout, result.stderr)
         calls = (root / 'calls').read_text()
-        assert 'release aws-acts hive-v2-t01-smoke/123' in calls, calls
+        if release_expected:
+            assert 'release aws-acts hive-v2-t01-smoke/123' in calls, calls
+        else:
+            assert 'release aws-acts' not in calls, calls
         return calls
 
 
-calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 0)
+calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 0, release_expected=True)
 assert 'delete-stack' not in calls, calls
+calls = cleanup_case(0, '', 0, release_expected=True)
+assert 'wait stack-delete-complete' in calls, calls
 calls = cleanup_case(254, 'AccessDenied: not authorized', 254)
 assert 'delete-stack' not in calls, calls
 calls = cleanup_case(254, 'ThrottlingException: rate exceeded', 254)
@@ -100,7 +105,33 @@ calls = cleanup_case(0, '', 17, delete_rc=17)
 assert 'delete-stack' in calls and 'wait stack-delete-complete' not in calls, calls
 calls = cleanup_case(0, '', 19, wait_rc=19)
 assert 'wait stack-delete-complete' in calls, calls
-cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 23, release_rc=23)
+cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 23, release_rc=23, release_expected=True)
+
+
+def release_case(error, aws_rc, expected_rc):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / 'bin').mkdir()
+        shutil.copy(ROOT / 'infra/deploy-mutex.sh', root / 'deploy-mutex.sh')
+        write_executable(root / 'bin/aws', f'''#!/usr/bin/env bash
+printf '%s\n' '{error}' >&2
+exit {aws_rc}
+''')
+        result = subprocess.run(
+            ['bash', 'deploy-mutex.sh', 'release', 'aws-acts', 'test-owner'],
+            cwd=root, env={'PATH': f'{root}/bin:{os.environ["PATH"]}'},
+            capture_output=True, text=True,
+        )
+        assert result.returncode == expected_rc, (error, result.returncode, result.stderr)
+        if expected_rc:
+            assert error in result.stderr, result.stderr
+
+
+release_case('ConditionalCheckFailedException: owner mismatch', 1, 0)
+release_case('AccessDenied: not authorized', 1, 1)
+release_case('ThrottlingException: rate exceeded', 1, 1)
+release_case('network unreachable', 1, 1)
+release_case('unexpected DynamoDB failure', 1, 1)
 
 
 def validate_evidence(records, expected_rc):

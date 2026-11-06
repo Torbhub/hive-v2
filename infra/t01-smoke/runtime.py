@@ -101,7 +101,12 @@ def hermes_check():
     output_path = os.environ.get('T01_RUNTIME_CHECK_OUT', '/var/lib/t01/hermes/runtime-check.json')
     result = run_process([executable, '--version'], 45)
     output = f'{result.stdout}\n{result.stderr}'
-    if result.returncode != 0 or VERSION not in output:
+    version_line = f'Hermes Agent v{VERSION}'
+    matching_lines = [line.strip() for line in output.splitlines() if line.strip().startswith(version_line)]
+    if result.returncode != 0 or not any(
+        line == version_line or line[len(version_line):].startswith((' ', '('))
+        for line in matching_lines
+    ):
         raise RuntimeError('runtime version check failed')
     stamp = read_json(stamp_path)
     if stamp.get('baseVersion') != VERSION or stamp.get('commit') != COMMIT:
