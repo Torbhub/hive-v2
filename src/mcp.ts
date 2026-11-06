@@ -3,6 +3,7 @@ import { cancelQuestionBatch, createQuestionBatch, heartbeatQuestionBatch, readQ
 import { registryFromEnv, type Registry } from './registry.js';
 import { authenticateBearer, authorize } from './security.js';
 import { credentialFromEnvironment } from './collaboration-credentials.js';
+import { storedAgentTask } from './agent-target.js';
 
 const PROTOCOL = '2024-11-05';
 const DAY_MS = 24 * 60 * 60_000;
@@ -122,12 +123,22 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
     const environment = { ...process.env, ...opts.env };
     const { HIVE_HUB_ROOT: root } = environment;
     const collaboration = environment.HIVE_COLLABORATION_ENABLED === '1';
-    const credential = collaboration ? await credentialFromEnvironment(environment) : undefined;
-    if (!root || collaboration && !credential) {
-      const message = collaboration
-        ? 'ask_operator requires HIVE_HUB_ROOT and an individual HIVE_AGENT_CREDENTIAL.'
-        : 'ask_operator only works inside a hive-spawned session: HIVE_HUB_ROOT, HIVE_PROJECT, and HIVE_AGENT must be set.';
-      toolText(id, message, true);
+    const abort = (): void => {
+      if (signal.aborted) throw new Error('aborted');
+    };
+    let credential: string | undefined;
+    try {
+      credential = collaboration ? await credentialFromEnvironment(environment) : undefined;
+      abort();
+      if (!root || collaboration && !credential) {
+        const message = collaboration
+          ? 'ask_operator requires HIVE_HUB_ROOT and an individual HIVE_AGENT_CREDENTIAL.'
+          : 'ask_operator only works inside a hive-spawned session: HIVE_HUB_ROOT, HIVE_PROJECT, and HIVE_AGENT must be set.';
+        toolText(id, message, true);
+        return;
+      }
+    } catch {
+      if (!signal.aborted) toolText(id, 'authorization failed for this agent credential', true);
       return;
     }
     const registry = opts.registry ?? registryFromEnv(environment);
@@ -136,16 +147,18 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
         const project = environment.HIVE_PROJECT;
         const agentId = environment.HIVE_AGENT;
         if (!project || !agentId) throw new Error('legacy session is not configured');
-        return { principal: { kind: 'agent' as const, subject: `agent:${agentId}`, agentId, project, aclEpoch: 0 }, project, agentId };
+        return {
+          principal: { kind: 'agent' as const, subject: `agent:${agentId}`, agentId, project, aclEpoch: 0 },
+          project, agentRef: agentId,
+        };
       }
       const principal = await authenticateBearer(credential!, registry, environment);
       const { project, agentId } = principal;
       if (principal.kind !== 'agent' || !project || !agentId) throw new Error('authorization failed');
-      await authorize(principal, registry, 'write', { project });
-      return { principal, project, agentId };
-    };
-    const abort = (): void => {
-      if (signal.aborted) throw new Error('aborted');
+      const agentRef = environment.HIVE_AGENT_REF ?? agentId;
+      const task = await storedAgentTask(root, project, agentRef);
+      await authorize(principal, registry, 'write', { project, task });
+      return { principal, project, agentRef };
     };
     let identity: Awaited<ReturnType<typeof authenticate>>;
     try {
@@ -157,7 +170,7 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
     }
     let batch: QuestionBatch;
     try {
-      batch = await createQuestionBatch(root, { project: identity.project, agent: identity.agentId }, args);
+      batch = await createQuestionBatch(root, { project: identity.project, agent: identity.agentRef }, args);
       if (signal.aborted) {
         await cancelQuestionBatch(root, batch.id);
         return;
@@ -171,6 +184,7 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
     const deadline = Date.now() + (opts.timeoutMs ?? 7 * DAY_MS);
     let heartbeatAt = Date.now();
     const reportTerminal = (current: QuestionBatch): boolean => {
+      if (signal.aborted) return true;
       if (current.status === 'answered') {
         toolText(id, JSON.stringify({
           id: batch.id, status: 'answered', answers: current.answers,
@@ -202,10 +216,14 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
         if (Date.now() > deadline) {
           try {
             const latest = await readQuestionBatch(root, batch.id);
+            abort();
             if (reportTerminal(latest)) return;
+            abort();
             toolText(id, `question batch ${batch.id} is ${latest.status === 'open' ? 'still open' : latest.status} after the wait limit; it stays on the operator's Questions screen`, true);
           } catch (e) {
-            toolText(id, `question batch ${batch.id} state is unknown after the wait limit: ${e instanceof Error ? e.message : e}`, true);
+            if (!signal.aborted) {
+              toolText(id, `question batch ${batch.id} state is unknown after the wait limit: ${e instanceof Error ? e.message : e}`, true);
+            }
           }
           return;
         }

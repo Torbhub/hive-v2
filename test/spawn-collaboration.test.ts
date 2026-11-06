@@ -40,6 +40,8 @@ describe('enabled spawn credential files', () => {
     await launchWindow(root, 'demo', 'builder', cwd);
 
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(command).toContain('HIVE_COLLABORATION_ENABLED=1');
+    expect(command).toContain(`HIVE_AGENT_REF='builder@${cwd}'`);
     expect(command).toContain('HIVE_AGENT_CREDENTIAL= HIVE_AGENT_CREDENTIAL_FILE=');
     expect(command).not.toContain(AGENT_CREDENTIAL);
     expect(command).not.toContain(replacement);
@@ -78,9 +80,15 @@ describe('enabled spawn credential files', () => {
     await fs.mkdir(cwd, { recursive: true });
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
-    vi.spyOn(tmux, 'newWindow').mockResolvedValue({ pane: '%1', identity: { pid: 1, started: 'now' } });
+    let command = '';
+    vi.spyOn(tmux, 'newWindow').mockImplementation(async (_name, _cwd, shellCommand) => {
+      command = shellCommand;
+      return { pane: '%1', identity: { pid: 1, started: 'now' } };
+    });
     vi.spyOn(tmux, 'paneIdentity').mockResolvedValue({ pid: 1, started: 'now' });
     await launchWindow(root, 'demo', 'builder', cwd);
+    expect(command).not.toContain('HIVE_COLLABORATION_ENABLED');
+    expect(command).not.toContain('HIVE_AGENT_CREDENTIAL_FILE');
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await fs.stat(path.join(cwd, '.hive', 'team', 'builder', 'credential.env')).catch(() => null)).toBeNull();
   });
