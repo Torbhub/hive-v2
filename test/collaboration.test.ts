@@ -194,6 +194,12 @@ describe('MCP identity and revocation', () => {
 
   it('derives batch identity from the credential and terminates an active wait on revocation', async () => {
     const { root } = await fixture();
+    const { appendTaskEvent, hivePath } = await import('../src/state.js');
+    const home = path.join(root, 'demo');
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', worktree: home, task: 'demo-1' }],
+    });
+    await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
     const client = connect(root);
     client.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask_operator', arguments: batch } });
     const deadline = Date.now() + 3000;
