@@ -1,8 +1,8 @@
 import { existsSync, promises as fs, mkdtempSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const IDLE = readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'idle-empty-prompt.txt'),
@@ -37,6 +37,12 @@ const TRUST_MENU_2 = [
   '',
 ].join('\n');
 
+vi.mock('node:os', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('node:os')>();
+  const homedir = vi.fn(() => '/tmp/hive-spawn-test-empty-home');
+  return { ...orig, default: { ...orig.default, homedir }, homedir };
+});
+
 vi.mock('../src/tmux.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/tmux.js')>();
   return {
@@ -51,11 +57,14 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     sendEnter: vi.fn(async () => {}),
     sendArrow: vi.fn(async () => {}),
     killWindow: vi.fn(async () => {}),
-    sleep: vi.fn(async () => {}),
+    sleep: vi.fn((ms: number) => vi.advanceTimersByTimeAsync(ms)),
   };
 });
 
-import { closeAgent, effectiveOrchestratorMode, launchCommand, respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
+beforeEach(() => { vi.useFakeTimers(); });
+afterEach(() => { vi.useRealTimers(); });
+
+import { closeAgent, effectiveOrchestratorMode, findLatestSession, launchCommand, respawnAgent, spawnAgent, waitIdle, wakeAgent } from '../src/spawn.js';
 import { hubAdd, hubInit, hubTask, setProjectApprovals, setProjectMode } from '../src/hub.js';
 import { removeProject } from '../src/project.js';
 import { appendTaskEvent, hivePath, manifestRead, readDecisions, readProjects, readTeam, writeJson, writeProjects } from '../src/state.js';
@@ -86,6 +95,35 @@ async function setup(teamEntry: Record<string, unknown>) {
   await writeJson(hivePath(home, 'team.json'), { agents: [entry] });
   return { root, home };
 }
+
+describe('findLatestSession', () => {
+  it('uses an isolated session home', async () => {
+    const defaultHome = os.homedir();
+    const testHome = mkdtempSync(path.join(tmpdir(), 'hive-spawn-test-home-'));
+    vi.mocked(os.homedir).mockReturnValue(testHome);
+    try {
+      const dir = path.join(testHome, '.kimi-code', 'sessions', 'wd_controlled', 'session_controlled');
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'state.json'), JSON.stringify({ cwd: '/controlled-worktree', updatedAt: 1 }));
+      expect(await findLatestSession('/controlled-worktree')).toBe('session_controlled');
+    } finally {
+      vi.mocked(os.homedir).mockReturnValue(defaultHome);
+    }
+  });
+});
+
+describe('waitIdle', () => {
+  it('yields to the event loop while waiting for a still pane', async () => {
+    let ticks = 0;
+    const timer = setInterval(() => { ticks += 1; }, 1);
+    try {
+      await waitIdle('%1', { stillMs: 50 });
+    } finally {
+      clearInterval(timer);
+    }
+    expect(ticks).toBeGreaterThan(0);
+  });
+});
 
 describe('respawnAgent', () => {
   it('records the new window on the manifest with its identity', async () => {
