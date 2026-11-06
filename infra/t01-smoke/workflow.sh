@@ -56,6 +56,77 @@ acquire_mutex() {
   bash infra/deploy-mutex.sh acquire aws-acts "$OWNER"
 }
 
+mutex_renewer() {
+  trap 'status=$?; printf "%s\n" "$status" > "$RENEWAL_STATUS_FILE.tmp"; mv "$RENEWAL_STATUS_FILE.tmp" "$RENEWAL_STATUS_FILE"' EXIT
+  while [ ! -e "$RENEWAL_STOP_FILE" ]; do
+    bash infra/deploy-mutex.sh renew aws-acts "$OWNER" || return $?
+    sleep 600
+  done
+}
+
+stop_mutex_renewal() {
+  local rc=0
+  if [ -z "${MUTEX_RENEWER_PID:-}" ]; then
+    return 0
+  fi
+  if mkdir "$RENEWAL_DIR/stop-complete" 2>/dev/null; then
+    : > "$RENEWAL_STOP_FILE"
+    kill -TERM -- "-$MUTEX_RENEWER_PID" 2>/dev/null || true
+  fi
+  wait "$MUTEX_RENEWER_PID" 2>/dev/null || rc=$?
+  while [ ! -f "$RENEWAL_STATUS_FILE" ]; do
+    sleep 0.01
+  done
+  rc="$(cat "$RENEWAL_STATUS_FILE")"
+  case "$rc" in
+    0|143) rc=0 ;;
+  esac
+  unset MUTEX_RENEWER_PID
+  return "$rc"
+}
+
+with_mutex_renewal() {
+  local command="$1" command_rc=0 renewal_rc=0 command_pid
+  shift
+  RENEWAL_DIR="$(mktemp -d)"
+  RENEWAL_STOP_FILE="$RENEWAL_DIR/stop"
+  RENEWAL_STATUS_FILE="$RENEWAL_DIR/status"
+  set -m
+  mutex_renewer &
+  MUTEX_RENEWER_PID=$!
+  export RENEWAL_STOP_FILE RENEWAL_STATUS_FILE RENEWAL_DIR MUTEX_RENEWER_PID
+  ( "$command" "$@" ) &
+  command_pid=$!
+  set +m
+  while true; do
+    wait -n "$command_pid" "$MUTEX_RENEWER_PID" || true
+    if ! jobs -p | grep -q "^$command_pid$"; then
+      wait "$command_pid" || command_rc=$?
+      stop_mutex_renewal || renewal_rc=$?
+      break
+    fi
+    if ! jobs -p | grep -q "^$MUTEX_RENEWER_PID$"; then
+      wait "$MUTEX_RENEWER_PID" || renewal_rc=$?
+      if [ -f "$RENEWAL_STATUS_FILE" ]; then
+        renewal_rc="$(cat "$RENEWAL_STATUS_FILE")"
+      fi
+      if [ -e "$RENEWAL_STOP_FILE" ] && [ "$renewal_rc" -eq 143 ]; then
+        renewal_rc=0
+      fi
+      if [ "$renewal_rc" -ne 0 ]; then
+        kill -TERM -- "-$command_pid" 2>/dev/null || true
+      fi
+      wait "$command_pid" || command_rc=$?
+      break
+    fi
+  done
+  rm -rf "$RENEWAL_DIR"
+  if (( renewal_rc != 0 )); then
+    return "$renewal_rc"
+  fi
+  return "$command_rc"
+}
+
 issue_health_credential() {
   require_env GITHUB_RUN_ID
   require_env T01_HEALTH_ATTESTATION
@@ -91,7 +162,7 @@ deploy_broker() {
 
 deploy_stack() {
   local name
-  for name in VPC_ID SUBNET_ID AMI_ID TEAMKIMI_SECRET_KEY TEAMKIMI_CONNECTIVITY_PATH GITHUB_REPOSITORY GITHUB_SHA; do
+  for name in VPC_ID SUBNET_ID RESOLVER_IP AMI_ID TEAMKIMI_SECRET_KEY TEAMKIMI_CONNECTIVITY_PATH GITHUB_REPOSITORY GITHUB_SHA; do
     require_env "$name"
   done
   local script_sha runtime_sha
@@ -106,6 +177,7 @@ deploy_stack() {
     --parameter-overrides \
       "VpcId=$VPC_ID" \
       "SubnetId=$SUBNET_ID" \
+      "ResolverIp=$RESOLVER_IP" \
       "AmiId=$AMI_ID" \
       "TeamKimiUrl=$TEAMKIMI_URL" \
       "TeamKimiSecretArn=$TEAMKIMI_SECRET_ARN" \
@@ -128,41 +200,59 @@ deploy_stack() {
       "RunId=${GITHUB_RUN_ID:-0}"
 }
 
+handle_evidence_candidate() {
+  local console="$1" candidate="$2" evidence_dir="$3" line
+  : > "$candidate"
+  while IFS= read -r line; do
+    case "$line" in
+      T01_EVIDENCE\ *) printf '%s\n' "${line#T01_EVIDENCE }" >> "$candidate" ;;
+    esac
+  done < "$console"
+  if ! python3 infra/t01-smoke/runtime.py sanitize-evidence "$candidate"; then
+    echo "console produced rejected evidence; it was not copied to the artifact" >&2
+    exit 1
+  fi
+  if grep -q '"check":"complete"' "$candidate"; then
+    if python3 infra/t01-smoke/runtime.py validate-evidence "$candidate"; then
+      cp "$candidate" "$evidence_dir/preflight.jsonl"
+      exit 0
+    fi
+    if grep -qE '"check":"complete"[^}]*"status":"failed"|"status":"failed"[^}]*"check":"complete"' "$candidate"; then
+      cp "$candidate" "$evidence_dir/preflight.jsonl"
+      echo "preflight failed; review only the sanitized artifact" >&2
+    else
+      echo "complete evidence failed strict validation; it was not copied to the artifact" >&2
+    fi
+    exit 1
+  fi
+  if [ -s "$candidate" ]; then
+    cp "$candidate" "$evidence_dir/preflight.jsonl"
+  fi
+}
+
 collect_evidence() {
   require_env LIFETIME_MINUTES
-  local instance_id console candidate evidence_dir now next_renewal=0
+  local instance_id console console_error candidate evidence_dir rc
   instance_id="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
     --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue | [0]' --output text)"
   [ -n "$instance_id" ] && [ "$instance_id" != None ] || { echo "stack has no instance output" >&2; exit 1; }
   evidence_dir="${EVIDENCE_DIR:-$PWD/t01-evidence}"
   mkdir -p -m 0700 "$evidence_dir"
   console="$(mktemp)"
+  console_error="$(mktemp)"
   candidate="$(mktemp)"
-  trap "rm -f $console $candidate" EXIT
-  : > "$evidence_dir/preflight.jsonl"
+  trap "rm -f $console $console_error $candidate" EXIT
   for ((poll = 0; poll < LIFETIME_MINUTES * 2; poll++)); do
-    now="$(date +%s)"
-    if (( now >= next_renewal )); then
-      bash infra/deploy-mutex.sh renew aws-acts "$OWNER" || exit $?
-      next_renewal=$(( now + 600 ))
-    fi
-    if aws ec2 get-console-output --instance-id "$instance_id" --query Output --output text > "$console"; then
-      : > "$candidate"
-      while IFS= read -r line; do
-        case "$line" in
-          T01_EVIDENCE\ *) printf '%s\n' "${line#T01_EVIDENCE }" >> "$candidate" ;;
-        esac
-      done < "$console"
-      if [ -s "$candidate" ]; then
-        cp "$candidate" "$evidence_dir/preflight.jsonl"
+    if aws ec2 get-console-output --instance-id "$instance_id" --query Output --output text > "$console" 2>"$console_error"; then
+      handle_evidence_candidate "$console" "$candidate" "$evidence_dir"
+    else
+      rc=$?
+      if grep -qE 'ThrottlingException|RequestLimitExceeded|ServiceUnavailable|InternalError|RequestTimeout' "$console_error"; then
+        sleep 30
+        continue
       fi
-      if grep -q '"check":"complete"' "$candidate"; then
-        if python3 infra/t01-smoke/runtime.py validate-evidence "$candidate"; then
-          exit 0
-        fi
-        echo "preflight failed or mandatory evidence is missing; review only the sanitized artifact" >&2
-        exit 1
-      fi
+      echo "get-console-output failed with an unrecoverable error" >&2
+      exit "$rc"
     fi
     sleep 30
   done
@@ -237,6 +327,9 @@ cleanup() {
     fi
   fi
   if (( status == 0 )); then
+    stop_mutex_renewal || status=$?
+  fi
+  if (( status == 0 )); then
     bash infra/deploy-mutex.sh release aws-acts "$OWNER" || status=$?
   fi
   return "$status"
@@ -245,10 +338,10 @@ cleanup() {
 case "${1:-}" in
   validate-inputs) validate_inputs ;;
   acquire) acquire_mutex ;;
-  issue-health-credential) issue_health_credential ;;
-  deploy-broker) deploy_broker ;;
-  deploy) deploy_stack ;;
-  collect) collect_evidence ;;
-  cleanup) cleanup ;;
+  issue-health-credential) with_mutex_renewal issue_health_credential ;;
+  deploy-broker) with_mutex_renewal deploy_broker ;;
+  deploy) with_mutex_renewal deploy_stack ;;
+  collect) with_mutex_renewal collect_evidence ;;
+  cleanup) with_mutex_renewal cleanup ;;
   *) echo "usage: $0 validate-inputs|acquire|issue-health-credential|deploy-broker|deploy|collect|cleanup" >&2; exit 2 ;;
 esac

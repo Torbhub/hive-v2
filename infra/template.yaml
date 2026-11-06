@@ -93,7 +93,6 @@ Resources:
                 Action:
                   - iam:CreateRole
                   - iam:UpdateRole
-                  - iam:UpdateRoleDescription
                   - iam:DeleteRole
                   - iam:PutRolePolicy
                   - iam:DeleteRolePolicy
@@ -102,6 +101,19 @@ Resources:
                   - iam:TagRole
                   - iam:UntagRole
                 Resource: arn:aws:iam::594552273052:role/hive-v2-*
+              - Sid: ManageHiveBoundaryPolicies
+                Effect: Allow
+                Action:
+                  - iam:CreatePolicy
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                Resource:
+                  - arn:aws:iam::594552273052:policy/hive-v2-t01-smoke-health-boundary
+                  - arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary
               # The fleet-wide deploy mutex lives in citadel's nexus stack;
               # the workflow acquires it before the SSM box deploy.
               - Sid: DeployMutex
@@ -146,6 +158,38 @@ Resources:
                 Action: ssm:StartSession
                 Resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession
 
+  T01SmokeHealthBoundary:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: root-owned immutable boundary for the disposable instance role
+        must:
+          - Allow only run-scoped health secret reads
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: hive-v2-t01-smoke-health-boundary
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-*
+
+  T01BrokerHealthBoundary:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: root-owned immutable boundary for the disposable health role
+        must:
+          - Allow only run-scoped health secret reads
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: hive-v2-t01-broker-health-boundary
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-*
+
   T01SmokeRole:
     Metadata:
       com.aws.cloudformation.Context:
@@ -159,6 +203,7 @@ Resources:
     Properties:
       RoleName: hive-v2-gh-t01-smoke
       Description: Manages only the disposable T01 preflight stack from the protected GitHub environment.
+      MaxSessionDuration: 9000
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -265,10 +310,16 @@ Resources:
                 Effect: Allow
                 Action: ec2:Describe*
                 Resource: '*'
+              - Sid: T01SmokeCreateInstanceRole
+                Effect: Allow
+                Action: iam:CreateRole
+                Resource: arn:aws:iam::594552273052:role/hive-v2-t01-smoke-instance
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: arn:aws:iam::594552273052:policy/hive-v2-t01-smoke-health-boundary
               - Sid: T01SmokeManageInstanceIdentity
                 Effect: Allow
                 Action:
-                  - iam:CreateRole
                   - iam:DeleteRole
                   - iam:GetRole
                   - iam:PutRolePolicy
@@ -283,6 +334,13 @@ Resources:
                 Resource:
                   - arn:aws:iam::594552273052:role/hive-v2-t01-smoke-instance
                   - arn:aws:iam::594552273052:instance-profile/hive-v2-t01-smoke
+              - Sid: T01SmokeUpdateInstanceBoundary
+                Effect: Allow
+                Action: iam:PutRolePermissionsBoundary
+                Resource: arn:aws:iam::594552273052:role/hive-v2-t01-smoke-instance
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: arn:aws:iam::594552273052:policy/hive-v2-t01-smoke-health-boundary
               - Sid: T01SmokePassInstanceRole
                 Effect: Allow
                 Action: iam:PassRole
@@ -327,10 +385,16 @@ Resources:
                   - lambda:AddPermission
                   - lambda:RemovePermission
                 Resource: arn:aws:lambda:us-east-1:594552273052:function:hive-v2-t01-broker-health
+              - Sid: T01HealthCreateRole
+                Effect: Allow
+                Action: iam:CreateRole
+                Resource: arn:aws:iam::594552273052:role/hive-v2-t01-broker-health
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary
               - Sid: T01HealthRoleLifecycle
                 Effect: Allow
                 Action:
-                  - iam:CreateRole
                   - iam:DeleteRole
                   - iam:GetRole
                   - iam:GetRolePolicy
@@ -339,6 +403,13 @@ Resources:
                   - iam:TagRole
                   - iam:UntagRole
                 Resource: arn:aws:iam::594552273052:role/hive-v2-t01-broker-health
+              - Sid: T01HealthUpdateBoundary
+                Effect: Allow
+                Action: iam:PutRolePermissionsBoundary
+                Resource: arn:aws:iam::594552273052:role/hive-v2-t01-broker-health
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary
               - Sid: T01HealthPassRole
                 Effect: Allow
                 Action: iam:PassRole

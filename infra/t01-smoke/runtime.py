@@ -147,41 +147,74 @@ def hermes_check():
         output_file.write('\n')
 
 
+MAX_EVIDENCE_BYTES = 65_536
+FAILURE_CHECKS = {'bootstrap_error', 'provisioning', 'complete'}
+
+
+def read_evidence(path):
+    if Path(path).stat().st_size > MAX_EVIDENCE_BYTES:
+        raise ValueError('evidence is oversized')
+    with open(path, encoding='utf-8') as source:
+        return [json.loads(line) for line in source if line.strip()]
+
+
+def valid_record(record):
+    if not isinstance(record, dict) or set(record) - ALLOWED_FIELDS:
+        return False
+    check = record.get('check')
+    if check not in ALLOWED_CHECKS or record.get('status') not in {'passed', 'failed'}:
+        return False
+    if record['status'] == 'failed' and check not in FAILURE_CHECKS:
+        return False
+    if check == 'bootstrap_error':
+        category = record.get('category')
+        origin = record.get('origin')
+        if set(record) != {'check', 'status', 'category', 'origin'}:
+            return False
+        if not isinstance(category, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.:-]*', category):
+            return False
+        if not isinstance(origin, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+:[0-9]+', origin):
+            return False
+    elif check == 'hermes_version':
+        if record != {'check': check, 'status': 'passed', 'version': VERSION, 'commit': COMMIT}:
+            return False
+    elif check == 'source_sha256':
+        if record != {'check': check, 'status': 'passed', 'sha256': SOURCE_SHA256}:
+            return False
+    elif set(record) != {'check', 'status'}:
+        return False
+    return True
+
+
+def sanitize_evidence(path):
+    try:
+        records = read_evidence(path)
+    except (OSError, ValueError):
+        return 1
+    seen = set()
+    for record in records:
+        check = record.get('check') if isinstance(record, dict) else None
+        if check in seen or not valid_record(record):
+            return 1
+        seen.add(check)
+    return 0
+
+
 def validate_evidence(path):
     try:
-        with open(path, encoding='utf-8') as source:
-            records = [json.loads(line) for line in source if line.strip()]
+        records = read_evidence(path)
     except (OSError, ValueError):
         return 1
     if not records or records[-1] != {'check': 'complete', 'status': 'passed'}:
         return 1
     seen = set()
     for record in records:
-        if not isinstance(record, dict) or set(record) - ALLOWED_FIELDS:
+        if not isinstance(record, dict):
             return 1
         check = record.get('check')
-        if check not in ALLOWED_CHECKS or record.get('status') not in {'passed', 'failed'}:
-            return 1
-        if check == 'bootstrap_error':
-            category = record.get('category')
-            origin = record.get('origin')
-            if set(record) != {'check', 'status', 'category', 'origin'}:
-                return 1
-            if not isinstance(category, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.:-]*', category):
-                return 1
-            if not isinstance(origin, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+:[0-9]+', origin):
-                return 1
-        if check in seen or record.get('status') != 'passed':
+        if check in seen or record.get('status') != 'passed' or not valid_record(record):
             return 1
         seen.add(check)
-        if check == 'hermes_version':
-            if record != {'check': check, 'status': 'passed', 'version': VERSION, 'commit': COMMIT}:
-                return 1
-        elif check == 'source_sha256':
-            if record != {'check': check, 'status': 'passed', 'sha256': SOURCE_SHA256}:
-                return 1
-        elif set(record) != {'check', 'status'}:
-            return 1
     required = SIMPLE_CHECKS | {'hermes_version', 'source_sha256', 'complete'}
     return 0 if seen == required else 1
 
@@ -205,6 +238,8 @@ def main():
             return 1
     if sys.argv[1] == 'validate-evidence' and len(sys.argv) == 3:
         return validate_evidence(sys.argv[2])
+    if sys.argv[1] == 'sanitize-evidence' and len(sys.argv) == 3:
+        return sanitize_evidence(sys.argv[2])
     return 2
 
 

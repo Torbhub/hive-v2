@@ -30,6 +30,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: hive-v2-t01-broker-health
+      PermissionsBoundary: arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -95,13 +96,16 @@ Resources:
               try:
                   response = client.get_secret_value(SecretId=os.environ['SECRET_ARN'])
                   value = json.loads(response['SecretString'])
+                  now = int(time.time())
                   valid_metadata = (
                       value['runId'] == os.environ['RUN_ID']
                       and type(value['activeAccounts']) is int and value['activeAccounts'] > 0
                       and type(value['healthyProbes']) is int and value['healthyProbes'] > 0
                       and value['healthyProbes'] <= value['activeAccounts']
                       and type(value['attestedAt']) is int
+                      and value['attestedAt'] <= now + 60 and now - value['attestedAt'] <= 600
                       and type(value['probeFinishedAt']) is int
+                      and value['probeFinishedAt'] <= now + 60 and now - value['probeFinishedAt'] <= 600
                       and value['probeFinishedAt'] <= value['attestedAt']
                       and type(value['expiresAt']) is int
                   )
@@ -112,7 +116,7 @@ Resources:
                       return reply(503)
                   if not hmac.compare_digest(authorization[7:], api_key):
                       return reply(401)
-                  if time.time() >= value['expiresAt']:
+                  if now >= value['expiresAt']:
                       return reply(401)
               except Exception:
                   return reply(503)

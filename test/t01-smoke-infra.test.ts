@@ -219,6 +219,30 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(workflow).toContain('aws cloudformation wait stack-rollback-complete --stack-name hive-v2-infra');
   });
 
+  it('bounds AWS sessions and renews the mutex across the whole lifecycle', () => {
+    const workflow = read('workflow');
+    const script = read('workflowScript');
+    expect(workflow).toContain('role-duration-seconds: 9000');
+    for (const command of ['issue_health_credential', 'deploy_broker', 'deploy_stack', 'collect_evidence', 'cleanup']) {
+      expect(script).toContain(`with_mutex_renewal ${command}`);
+    }
+    expect(script).toContain('python3 infra/t01-smoke/runtime.py sanitize-evidence "$candidate"');
+    expect(script).toContain('console_error');
+    expect(script).toContain('RequestTimeout');
+  });
+
+  it('uses only a reviewed /32 resolver for bootstrap DNS', () => {
+    const template = read('template');
+    const workflow = read('workflow');
+    const script = read('workflowScript');
+    expect(template).toContain('ResolverIp:');
+    expect(template).toContain('CidrIp: !Sub \'${ResolverIp}/32\'');
+    expect(template).toContain('IpProtocol: udp');
+    expect(template).toContain('IpProtocol: tcp');
+    expect(workflow).toContain('T01_RESOLVER_IP');
+    expect(script).toContain('"ResolverIp=$RESOLVER_IP"');
+  });
+
   it('documents live-only operation and validates all CloudFormation templates', () => {
     const runbook = read('runbook');
     for (const topic of [
