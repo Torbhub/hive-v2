@@ -268,4 +268,10 @@ describe('authenticated push consumption', () => {
       'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
     )).rejects.toThrow(/approver authorization changed/);
   });
+
+  it('rejects an agent principal when creating an execution approval', async () => {
+    const { root, commit } = await setup();
+    await expect(approved(root, commit, 'agent:builder', 'agent-grant'))
+      .rejects.toThrow(/human approver/);
+  });
 });
