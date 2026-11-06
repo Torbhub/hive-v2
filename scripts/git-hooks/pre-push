@@ -43,4 +43,4 @@ done
 npm test
 npm run build
 node scripts/discipline-gate.mjs
-cfn-lint infra/template.yaml
+cfn-lint infra/template.yaml infra/t01-smoke/template.yaml

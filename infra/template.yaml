@@ -1,6 +1,16 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: hive-v2 deploy infrastructure — GitHub OIDC deploy role
 
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    ref:
+      - at: infra/README.md
+        has: hub deployment roles and disposable T01 role ownership
+      - at: infra/t01-smoke/RUNBOOK.md
+        has: protected environment and scoped T01 stack lifecycle
+
 Parameters:
   GithubOidcProviderArn:
     Type: String
@@ -134,6 +144,154 @@ Resources:
                 Action: ssm:StartSession
                 Resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession
 
+  T01SmokeRole:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: protected main-only dispatch owns one disposable preflight stack
+        must:
+          - Create tags only during RunInstances or CreateSecurityGroup
+          - Operate on existing resources only when they carry the T01 role tag
+          - Renew and release only the same owner's fleet mutex
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: hive-v2-gh-t01-smoke
+      Description: Manages only the disposable T01 preflight stack from the protected GitHub environment.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GithubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:sub: !Sub '${GithubSubjectPrefix}:environment:t01-smoke'
+      Policies:
+        - PolicyName: hive-v2-t01-smoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: T01SmokeCloudFormation
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                Resource: arn:aws:cloudformation:us-east-1:594552273052:stack/hive-v2-t01-smoke/*
+              - Sid: T01SmokeValidateTemplate
+                Effect: Allow
+                Action: cloudformation:ValidateTemplate
+                Resource: '*'
+              - Sid: T01SmokeRunInstances
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - arn:aws:ec2:us-east-1:594552273052:instance/*
+                  - arn:aws:ec2:us-east-1:594552273052:volume/*
+                  - arn:aws:ec2:us-east-1:594552273052:network-interface/*
+                  - arn:aws:ec2:us-east-1:594552273052:security-group/*
+                  - arn:aws:ec2:us-east-1:594552273052:subnet/*
+                  - arn:aws:ec2:us-east-1::image/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Role: hive-v2-t01-smoke
+              - Sid: T01SmokeCreateSecurityGroup
+                Effect: Allow
+                Action: ec2:CreateSecurityGroup
+                Resource:
+                  - arn:aws:ec2:us-east-1:594552273052:security-group/*
+                  - arn:aws:ec2:us-east-1:594552273052:vpc/*
+              - Sid: T01SmokeTagOnRunInstances
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource:
+                  - arn:aws:ec2:us-east-1:594552273052:instance/*
+                  - arn:aws:ec2:us-east-1:594552273052:volume/*
+                  - arn:aws:ec2:us-east-1:594552273052:network-interface/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Role: hive-v2-t01-smoke
+                    ec2:CreateAction: RunInstances
+              - Sid: T01SmokeTagOnSecurityGroup
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: arn:aws:ec2:us-east-1:594552273052:security-group/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Role: hive-v2-t01-smoke
+                    ec2:CreateAction: CreateSecurityGroup
+              - Sid: T01SmokeManageInstances
+                Effect: Allow
+                Action:
+                  - ec2:TerminateInstances
+                  - ec2:GetConsoleOutput
+                Resource: arn:aws:ec2:us-east-1:594552273052:instance/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Role: hive-v2-t01-smoke
+              - Sid: T01SmokeDeleteSecurityGroup
+                Effect: Allow
+                Action: ec2:DeleteSecurityGroup
+                Resource: arn:aws:ec2:us-east-1:594552273052:security-group/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Role: hive-v2-t01-smoke
+              - Sid: T01SmokeManageSecurityGroupEgress
+                Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupEgress
+                Resource: arn:aws:ec2:us-east-1:594552273052:security-group/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Role: hive-v2-t01-smoke
+              - Sid: T01SmokeReadEc2
+                Effect: Allow
+                Action: ec2:Describe*
+                Resource: '*'
+              - Sid: T01SmokeManageInstanceIdentity
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:CreateInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:GetInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                Resource:
+                  - arn:aws:iam::594552273052:role/hive-v2-t01-smoke-instance
+                  - arn:aws:iam::594552273052:instance-profile/hive-v2-t01-smoke
+              - Sid: T01SmokePassInstanceRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: arn:aws:iam::594552273052:role/hive-v2-t01-smoke-instance
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com
+              - Sid: T01SmokeDeployMutex
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource: arn:aws:dynamodb:us-east-1:594552273052:table/citadel-deploy-mutex
+
 Outputs:
 
   DeployRoleArn:
@@ -142,3 +300,6 @@ Outputs:
   BenchRoleArn:
     Description: ARN the bench workflow assumes (set as secret HIVE_BENCH_ROLE_ARN).
     Value: !GetAtt BenchRole.Arn
+  T01SmokeRoleArn:
+    Description: ARN the protected t01-smoke environment assumes (set as secret HIVE_T01_SMOKE_ROLE_ARN).
+    Value: !GetAtt T01SmokeRole.Arn

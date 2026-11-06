@@ -41,10 +41,10 @@ jobs:
         run: node scripts/discipline-gate.mjs
       - name: Syntax-check the infra scripts
         run: bash -n infra/provision-box.sh && bash -n infra/deploy-box.sh && bash -n infra/deploy-mutex.sh
-      - name: Lint the CloudFormation template
+      - name: Lint the CloudFormation templates
         run: |
           pipx install cfn-lint
-          cfn-lint infra/template.yaml
+          cfn-lint infra/template.yaml infra/t01-smoke/template.yaml
 
   deploy:
     needs: gate

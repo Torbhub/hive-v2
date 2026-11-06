@@ -1,0 +1,133 @@
+name: t01-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Explicit smoke scenario
+        required: true
+        type: choice
+        options: [preflight]
+      matrix:
+        description: Explicit paid matrix selection
+        required: true
+        type: choice
+        options: [none]
+      paid_admission:
+        description: Paid admission stays blocked until the broker PR lands
+        required: true
+        default: false
+        type: boolean
+      max_input_tokens:
+        description: Input-token cap for each invocation, maximum 16000
+        required: true
+        type: string
+      max_output_tokens:
+        description: Output-token cap for each invocation, maximum 2000
+        required: true
+        type: string
+      max_reasoning_tokens:
+        description: Reasoning-token cap for each invocation, maximum 4000
+        required: true
+        type: string
+      max_total_tokens:
+        description: Total-token cap for each invocation, maximum 22000
+        required: true
+        type: string
+      max_api_calls:
+        description: API-call cap for each invocation, maximum 1
+        required: true
+        type: string
+      max_estimated_cost_usd:
+        description: Estimated dollar cap for each invocation, maximum 0.50
+        required: true
+        type: string
+      max_paid_admissions:
+        description: Whole-matrix admission cap, required to be 0 for preflight
+        required: true
+        type: string
+      lifetime_minutes:
+        description: Instance lifetime from 5 through 120 minutes
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t01-smoke
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    environment: t01-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate the no-spend contract before AWS access
+        id: validate
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+          MATRIX: ${{ inputs.matrix }}
+          PAID_ADMISSION: ${{ inputs.paid_admission }}
+          MAX_INPUT_TOKENS: ${{ inputs.max_input_tokens }}
+          MAX_OUTPUT_TOKENS: ${{ inputs.max_output_tokens }}
+          MAX_REASONING_TOKENS: ${{ inputs.max_reasoning_tokens }}
+          MAX_TOTAL_TOKENS: ${{ inputs.max_total_tokens }}
+          MAX_API_CALLS: ${{ inputs.max_api_calls }}
+          MAX_ESTIMATED_COST_USD: ${{ inputs.max_estimated_cost_usd }}
+          MAX_PAID_ADMISSIONS: ${{ inputs.max_paid_admissions }}
+          LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
+        run: bash infra/t01-smoke/workflow.sh validate-inputs
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Acquire the fleet deploy mutex
+        id: acquire
+        run: bash infra/t01-smoke/workflow.sh acquire
+      - name: Create the disposable preflight stack
+        id: deploy
+        env:
+          VPC_ID: ${{ vars.T01_VPC_ID }}
+          SUBNET_ID: ${{ vars.T01_SUBNET_ID }}
+          AMI_ID: ${{ vars.T01_AMI_ID }}
+          TEAMKIMI_URL: ${{ vars.T01_TEAMKIMI_URL }}
+          TEAMKIMI_SECRET_ARN: ${{ vars.T01_TEAMKIMI_SECRET_ARN }}
+          TEAMKIMI_SECRET_KEY: ${{ vars.T01_TEAMKIMI_SECRET_KEY || 'apiKey' }}
+          TEAMKIMI_CONNECTIVITY_PATH: ${{ vars.T01_TEAMKIMI_CONNECTIVITY_PATH || '/health' }}
+          SCENARIO: ${{ inputs.scenario }}
+          MATRIX: ${{ inputs.matrix }}
+          MAX_INPUT_TOKENS: ${{ inputs.max_input_tokens }}
+          MAX_OUTPUT_TOKENS: ${{ inputs.max_output_tokens }}
+          MAX_REASONING_TOKENS: ${{ inputs.max_reasoning_tokens }}
+          MAX_TOTAL_TOKENS: ${{ inputs.max_total_tokens }}
+          MAX_API_CALLS: ${{ inputs.max_api_calls }}
+          MAX_ESTIMATED_COST_USD: ${{ inputs.max_estimated_cost_usd }}
+          MAX_PAID_ADMISSIONS: ${{ inputs.max_paid_admissions }}
+          LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
+        run: bash infra/t01-smoke/workflow.sh deploy
+      - name: Collect only sanitized preflight evidence
+        id: collect
+        continue-on-error: true
+        env:
+          LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
+        run: bash infra/t01-smoke/workflow.sh collect
+      - name: Retain reviewed evidence for seven days
+        if: always() && steps.collect.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: t01-preflight-${{ github.run_id }}
+          path: t01-evidence/preflight.jsonl
+          if-no-files-found: error
+          retention-days: 7
+      - name: Delete the stack and release the fleet deploy mutex
+        if: always() && steps.acquire.outcome == 'success'
+        run: bash infra/t01-smoke/workflow.sh cleanup
+      - name: Fail after evidence and cleanup finish
+        if: steps.collect.outcome == 'failure'
+        run: exit 1

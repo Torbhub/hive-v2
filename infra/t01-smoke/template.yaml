@@ -1,0 +1,230 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Disposable Hermes T01 preflight instance with no ingress and a bounded lifetime
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    ref:
+      - at: infra/t01-smoke/RUNBOOK.md
+        has: credential boundary, no-spend workflow, evidence review, and deletion procedure
+    must:
+      - No paid model endpoint or automatic activation
+      - Terminate the instance and delete its root volume at the bounded deadline
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: Reviewed Amazon Linux 2023 x86_64 image for this bounded run.
+  TeamKimiUrl:
+    Type: String
+    AllowedPattern: '^https://[A-Za-z0-9.-]+(?::443)?$'
+    Description: Approved TeamKimi origin. No path, credentials, query, or alternate port.
+  TeamKimiSecretArn:
+    Type: String
+    AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:hive-v2-t01-smoke-[A-Za-z0-9/_+=.@-]+$'
+  TeamKimiSecretKey:
+    Type: String
+    Default: apiKey
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  TeamKimiConnectivityPath:
+    Type: String
+    Default: /health
+    AllowedPattern: '^/[A-Za-z0-9/_-]{1,128}$'
+  Scenario:
+    Type: String
+    AllowedValues: [preflight]
+  Matrix:
+    Type: String
+    AllowedValues: [none]
+  MaxInputTokens:
+    Type: Number
+    MinValue: 0
+    MaxValue: 16000
+  MaxOutputTokens:
+    Type: Number
+    MinValue: 0
+    MaxValue: 2000
+  MaxReasoningTokens:
+    Type: Number
+    MinValue: 0
+    MaxValue: 4000
+  MaxTotalTokens:
+    Type: Number
+    MinValue: 0
+    MaxValue: 22000
+  MaxApiCalls:
+    Type: Number
+    MinValue: 0
+    MaxValue: 1
+  MaxEstimatedCostUsd:
+    Type: Number
+    MinValue: 0
+    MaxValue: 0.5
+  MaxPaidAdmissions:
+    Type: Number
+    MinValue: 0
+    MaxValue: 0
+  LifetimeMinutes:
+    Type: Number
+    MinValue: 5
+    MaxValue: 120
+  ProvisionScriptUrl:
+    Type: String
+    AllowedPattern: '^https://raw.githubusercontent.com/Torbhub/hive-v2/[0-9a-f]{40}/infra/t01-smoke/provision.sh$'
+  ProvisionScriptSha256:
+    Type: String
+    AllowedPattern: '^[0-9a-f]{64}$'
+  RuntimeScriptUrl:
+    Type: String
+    AllowedPattern: '^https://raw.githubusercontent.com/Torbhub/hive-v2/[0-9a-f]{40}/infra/t01-smoke/runtime.py$'
+  RuntimeScriptSha256:
+    Type: String
+    AllowedPattern: '^[0-9a-f]{64}$'
+  RunId:
+    Type: String
+    AllowedPattern: '^[0-9]+$'
+
+Resources:
+  InstanceRole:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: broker-only TeamKimi secret access without a broad host identity
+        must:
+          - Read only the configured T01 TeamKimi secret
+          - Grant no other AWS permissions
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: hive-v2-t01-smoke-instance
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-one-teamkimi-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTeamKimiBrokerSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref TeamKimiSecretArn
+
+  InstanceProfile:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: attach only the broker-secret role to the disposable instance
+        must:
+          - Contain only InstanceRole
+          - Never attach a broad or shared instance profile
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: hive-v2-t01-smoke
+      Roles: [!Ref InstanceRole]
+
+  SecurityGroup:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: deny inbound access and allow only temporary provisioning egress
+        must:
+          - Allow no ingress
+          - Apply host default-deny egress before Hermes starts
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: hive-v2-t01-smoke
+      GroupDescription: No ingress. Provisioning egress is restricted by host firewall before Hermes starts.
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Role
+          Value: hive-v2-t01-smoke
+
+  Instance:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: fresh bounded preflight outside the shared Nexus production worker
+        must:
+          - Terminate at the requested lifetime and delete the encrypted root volume
+          - Install Hermes before lockdown and deny every unapproved destination
+          - Keep host credentials and broad instance profiles out of the environment
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.large
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetId
+          GroupSet: [!GetAtt SecurityGroup.GroupId]
+      IamInstanceProfile: !Ref InstanceProfile
+      InstanceInitiatedShutdownBehavior: terminate
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 40
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          umask 077
+          shutdown -h +${LifetimeMinutes}
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --max-redirs 0 --connect-timeout 10 --max-time 60 \
+            '${ProvisionScriptUrl}' --output /opt/t01-provision.sh
+          printf '%s  %s\n' '${ProvisionScriptSha256}' /opt/t01-provision.sh | sha256sum -c -
+          chmod 0700 /opt/t01-provision.sh
+          export TEAMKIMI_URL='${TeamKimiUrl}'
+          export TEAMKIMI_SECRET_ARN='${TeamKimiSecretArn}'
+          export TEAMKIMI_SECRET_KEY='${TeamKimiSecretKey}'
+          export TEAMKIMI_CONNECTIVITY_PATH='${TeamKimiConnectivityPath}'
+          export SCENARIO='${Scenario}' MATRIX='${Matrix}'
+          export MAX_INPUT_TOKENS='${MaxInputTokens}'
+          export MAX_OUTPUT_TOKENS='${MaxOutputTokens}'
+          export MAX_REASONING_TOKENS='${MaxReasoningTokens}'
+          export MAX_TOTAL_TOKENS='${MaxTotalTokens}'
+          export MAX_API_CALLS='${MaxApiCalls}'
+          export MAX_ESTIMATED_COST_USD='${MaxEstimatedCostUsd}'
+          export MAX_PAID_ADMISSIONS='${MaxPaidAdmissions}'
+          export LIFETIME_MINUTES='${LifetimeMinutes}' RUN_ID='${RunId}'
+          export RUNTIME_SCRIPT_URL='${RuntimeScriptUrl}'
+          export RUNTIME_SCRIPT_SHA256='${RuntimeScriptSha256}'
+          /opt/t01-provision.sh
+      Tags:
+        - Key: Name
+          Value: hive-v2-t01-smoke
+        - Key: Role
+          Value: hive-v2-t01-smoke
+        - Key: RunId
+          Value: !Ref RunId
+
+Outputs:
+  InstanceId:
+    Description: Disposable instance used by the evidence collector and cleanup step.
+    Value: !Ref Instance
+  BrokerSecretArn:
+    Description: Reference to the broker-only TeamKimi account secret. The value is never exposed.
+    Value: !Ref TeamKimiSecretArn
+  BrokerEndpoint:
+    Description: Loopback-only no-model endpoint available to Hermes during preflight.
+    Value: http://127.0.0.1:8765/v1
+  HermesCommit:
+    Description: Exact Hermes source commit installed by the verified provisioning script.
+    Value: f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab
