@@ -61,7 +61,7 @@ describe('human assertion boundary', () => {
     expect((await fetch(`${base}/api/view`, { headers: { 'x-hive-auth': 'legacy-shared-secret' } })).status).toBe(401);
     const valid = assertion();
     for (const token of [
-      valid.slice(0, -1) + (valid.endsWith('x') ? 'y' : 'x'),
+      `${valid.slice(0, valid.lastIndexOf('.') + 1)}${'A'.repeat(43)}`,
       assertion('user:alice', { exp: Math.floor(Date.now() / 1000) - 1 }),
       assertion('user:alice', { iss: 'other' }), assertion('user:alice', { aud: 'other' }),
       assertion('alice'),
