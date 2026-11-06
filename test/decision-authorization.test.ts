@@ -13,6 +13,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 async function setup() {
+  delete process.env.HIVE_COLLABORATION_ENABLED;
   const root = await mkdtemp(path.join(tmpdir(), 'hive-decision-auth-'));
   const remote = path.join(root, 'remote.git');
   const home = path.join(root, 'work');

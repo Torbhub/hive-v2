@@ -273,6 +273,7 @@ export async function pushByHash(
   branch: string,
   cwd: string,
   approval: { root: string; project: string; batch: string; question: string },
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   if (remote.startsWith('-')) throw new Error(`a remote may not start with '-': ${remote}`);
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`push is by full 40-char hash: ${sha}`);
@@ -284,7 +285,7 @@ export async function pushByHash(
     const anc = await run('git', ['merge-base', '--is-ancestor', remoteTip.stdout.trim(), sha], cwd);
     if (anc.code !== 0) throw new Error(`${remote}/${branch} is not an ancestor of ${sha}; a push would not be fast-forward`);
   }
-  const pushUrl = await consumePushApproval(approval.root, approval, remote, sha, branch, cwd);
+  const pushUrl = await consumePushApproval(approval.root, approval, remote, sha, branch, cwd, Date.now(), env);
   const pushed = await run('git', ['push', '--', pushUrl, `${sha}:refs/heads/${branch}`], cwd);
   if (pushed.code !== 0) throw new Error('git push failed');
 }

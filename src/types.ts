@@ -141,6 +141,9 @@ export type DecisionGrant = {
   fingerprint: string;
   expiresAt: string;
   executionAuthority: 'push' | 'none';
+  agent?: string;
+  task?: string;
+  aclEpoch?: number;
   consumedAt?: string;
 };
 
