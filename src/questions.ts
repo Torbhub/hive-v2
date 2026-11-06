@@ -278,6 +278,12 @@ async function authorizePushConsumption(root: string, batch: QuestionBatch,
     || Number(approver.aclEpoch) !== grant.approverAclEpoch) {
     throw new Refusal('approver authorization changed');
   }
+  if (grant.approverSubject.startsWith('user:')) {
+    const account = await registry.currentAccount(grant.approverSubject, credential);
+    if (!account || account.accountStatus !== 'active') {
+      throw new Refusal('approver account is not active');
+    }
+  }
 }
 
 export async function consumePushApproval(

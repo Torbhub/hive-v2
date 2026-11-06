@@ -4,7 +4,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildDecision } from '../src/decisions.js';
 import { createQuestionBatch } from '../src/questions.js';
 import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
@@ -73,6 +73,7 @@ function pushBatch(root: string): Promise<QuestionBatch> {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   delete process.env.HIVE_COLLABORATION_ENABLED;
   delete process.env.HIVE_REGISTRY_FILE;
@@ -184,5 +185,31 @@ describe('integration authorization and revocation', () => {
     expect(view.projects[0].repos).toEqual([]);
     expect(view.projects[0].agents.map((agent: { name: string }) => agent.name)).toEqual(['other']);
     expect(view.projects[0].open_tasks).toBe(1);
+  });
+
+  it('preserves ordinary execute endpoints without question-batch approval binding', async () => {
+    const { root, home, base } = await fixture();
+    await team(home);
+    const hub = await import('../src/hub.js');
+    vi.spyOn(hub, 'wake').mockResolvedValue('%1');
+    vi.spyOn(hub, 'continueProject').mockResolvedValue('%2');
+    vi.spyOn(hub, 'startProject').mockResolvedValue('%3');
+    vi.spyOn(hub, 'answerDialog').mockResolvedValue({
+      answered: true, option: '1', choice: '1', session: 'builder', dialog_gone: true,
+    });
+    const interrupt = await import('../src/interrupt.js');
+    vi.spyOn(interrupt, 'interruptAgent').mockResolvedValue({ target: 'builder', pane: '%1' });
+    const kill = await import('../src/kill.js');
+    vi.spyOn(kill, 'killAgent').mockResolvedValue({ target: 'builder', killed: ['builder'], summary: 'killed builder' });
+    for (const [pathname, body] of [
+      ['/api/wake', { project: 'demo', task: 'demo-1' }],
+      ['/api/continue', { project: 'demo', task: 'demo-1' }],
+      ['/api/start', { project: 'demo', task: 'demo-1' }],
+      ['/api/interrupt', { project: 'demo', agent: 'builder@one' }],
+      ['/api/kill', { project: 'demo', agent: 'builder@one' }],
+      ['/api/answer', { project: 'demo', agent: 'builder@one', choice: '1', fingerprint: 'x' }],
+    ] as const) {
+      expect((await post(base, pathname, body)).status).toBe(200);
+    }
   });
 });
