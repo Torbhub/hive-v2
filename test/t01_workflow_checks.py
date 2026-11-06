@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -5,6 +7,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / 'infra/t01-smoke/workflow.sh'
@@ -113,33 +116,35 @@ exit 99
         return calls
 
 
-calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 0, release_expected=True, secret_describe_rc=254)
-assert 'delete-stack' not in calls and 'delete-secret' not in calls, calls
-calls = cleanup_case(0, '', 0, release_expected=True)
-assert 'wait stack-delete-complete' in calls, calls
-assert 'delete-secret --secret-id hive-v2-t01-smoke-health-123 --force-delete-without-recovery' in calls, calls
-calls = cleanup_case(254, 'AccessDenied: not authorized', 254)
-assert 'delete-stack' not in calls, calls
-calls = cleanup_case(254, 'ThrottlingException: rate exceeded', 254)
-assert 'delete-stack' not in calls, calls
-calls = cleanup_case(1, 'network unreachable', 1)
-assert 'delete-stack' not in calls, calls
-calls = cleanup_case(0, '', 17, delete_rc=17)
-assert 'delete-stack' in calls and 'wait stack-delete-complete' not in calls, calls
-calls = cleanup_case(0, '', 19, wait_rc=19)
-assert 'wait stack-delete-complete' in calls, calls
-cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 23, release_rc=23, release_expected=True)
-calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 12, secret_delete_rc=12)
-assert 'delete-secret' in calls and 'release aws-acts' not in calls, calls
-calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 13, secret_describe_rc=13)
-assert 'delete-secret' not in calls and 'release aws-acts' not in calls, calls
-calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 14, secret_confirm_rc=14)
-assert 'delete-secret' in calls and 'release aws-acts' not in calls, calls
-calls = cleanup_case(
-    254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 0,
-    release_expected=True, secret_confirm_failures=2,
-)
-assert calls.count('secretsmanager describe-secret') == 4, calls
+missing = 'ValidationError: Stack with id hive-v2-t01-smoke does not exist'
+cleanup_cases = [
+    ((254, missing, 0), {'release_expected': True, 'secret_describe_rc': 254}),
+    ((0, '', 0), {'release_expected': True}),
+    ((254, 'AccessDenied: not authorized', 254), {}),
+    ((254, 'ThrottlingException: rate exceeded', 254), {}),
+    ((1, 'network unreachable', 1), {}),
+    ((0, '', 17), {'delete_rc': 17}),
+    ((0, '', 19), {'wait_rc': 19}),
+    ((254, missing, 23), {'release_rc': 23, 'release_expected': True}),
+    ((254, missing, 12), {'secret_delete_rc': 12}),
+    ((254, missing, 13), {'secret_describe_rc': 13}),
+    ((254, missing, 14), {'secret_confirm_rc': 14}),
+    ((254, missing, 0), {'release_expected': True, 'secret_confirm_failures': 2}),
+]
+with ThreadPoolExecutor(max_workers=8) as pool:
+    calls = list(pool.map(lambda case: cleanup_case(*case[0], **case[1]), cleanup_cases))
+assert 'delete-stack' not in calls[0] and 'delete-secret' not in calls[0], calls[0]
+assert 'wait stack-delete-complete' in calls[1], calls[1]
+assert 'delete-secret --secret-id hive-v2-t01-smoke-health-123 --force-delete-without-recovery' in calls[1], calls[1]
+assert 'delete-stack' not in calls[2], calls[2]
+assert 'delete-stack' not in calls[3], calls[3]
+assert 'delete-stack' not in calls[4], calls[4]
+assert 'delete-stack' in calls[5] and 'wait stack-delete-complete' not in calls[5], calls[5]
+assert 'wait stack-delete-complete' in calls[6], calls[6]
+assert 'delete-secret' in calls[8] and 'release aws-acts' not in calls[8], calls[8]
+assert 'delete-secret' not in calls[9] and 'release aws-acts' not in calls[9], calls[9]
+assert 'delete-secret' in calls[10] and 'release aws-acts' not in calls[10], calls[10]
+assert calls[11].count('secretsmanager describe-secret') == 4, calls[11]
 
 
 def release_case(error, aws_rc, expected_rc):
@@ -168,19 +173,25 @@ release_case('network unreachable', 1, 1)
 release_case('unexpected DynamoDB failure', 1, 1)
 
 
-def validate_evidence(records, expected_rc):
+def validate_evidence(records, expected_rc, cli=False):
     temporary, root = workspace()
     with temporary:
         artifact = root / 'evidence.jsonl'
         artifact.write_text(''.join(json.dumps(record, separators=(',', ':')) + '\n' for record in records))
-        result = subprocess.run(
-            ['python3', 'infra/t01-smoke/runtime.py', 'validate-evidence', str(artifact)],
-            cwd=root, capture_output=True, text=True,
-        )
+        if cli:
+            result = subprocess.run(
+                ['python3', 'infra/t01-smoke/runtime.py', 'validate-evidence', str(artifact)],
+                cwd=root, capture_output=True, text=True,
+            )
+        else:
+            spec = importlib.util.spec_from_file_location('t01_runtime', root / 'infra/t01-smoke/runtime.py')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            result = SimpleNamespace(returncode=module.validate_evidence(str(artifact)), stdout='', stderr='')
         assert result.returncode == expected_rc, (records, result.stdout, result.stderr)
 
 
-validate_evidence(evidence_records(), 0)
+validate_evidence(evidence_records(), 0, cli=True)
 validate_evidence([{'check': 'complete', 'status': 'passed'}], 1)
 validate_evidence([record for record in evidence_records() if record['check'] != 'lazy_install_disabled'], 1)
 wrong_version = evidence_records()
@@ -232,10 +243,10 @@ esac
 ''')
     write_executable(root / 'bin/date', '''#!/usr/bin/env bash
 now="$(cat "$MOCK_NOW")"
-printf '%s\n' "$((now + 30))" > "$MOCK_NOW"
+printf '%s\n' "$((now + 600))" > "$MOCK_NOW"
 printf '%s\n' "$now"
 ''')
-    write_executable(root / 'bin/sleep', '#!/usr/bin/env bash\nexit 0\n')
+    (root / 'bin/sleep').symlink_to('/bin/true')
     (root / 'now').write_text('0')
     (root / 'valid.jsonl').write_text(valid_evidence)
 
