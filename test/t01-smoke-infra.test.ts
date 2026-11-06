@@ -5,8 +5,11 @@ import { fileURLToPath } from 'node:url';
 
 const paths = {
   template: '../infra/t01-smoke/template.yaml',
+  brokerTemplate: '../infra/t01-smoke/broker_template.yaml',
   provision: '../infra/t01-smoke/provision.sh',
   workflowScript: '../infra/t01-smoke/workflow.sh',
+  healthCredential: '../infra/t01-smoke/health_credential.py',
+  attestation: '../infra/t01-smoke/teamkimi_attestation.py',
   workflow: '../.github/workflows/t01-smoke.yml',
   runbook: '../infra/t01-smoke/RUNBOOK.md',
   infraReadme: '../infra/README.md',
@@ -183,17 +186,39 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(read('runbook')).toContain('T01_AMI_ID');
   });
 
-  it('documents live-only operation and validates both CloudFormation templates', () => {
+  it('deploys a health-only broker with an expiring run credential and no model route', () => {
+    const broker = read('brokerTemplate');
+    const script = read('workflowScript');
+    const workflow = read('workflow');
+    expect(broker).toContain('AWS::Lambda::Url');
+    expect(broker).toContain("event.get('rawPath') != '/health'");
+    expect(broker).toContain("method != 'GET'");
+    expect(broker).toContain('hmac.compare_digest');
+    expect(broker).toContain('secretsmanager:GetSecretValue');
+    expect(broker).not.toContain('/v1/messages');
+    expect(broker).not.toContain('/teamkimi/status');
+    expect(script).toContain('hive-v2-t01-smoke-health-${GITHUB_RUN_ID');
+    expect(script).toContain('broker_teamkimi_url');
+    expect(script).toContain('health_secret_arn');
+    expect(script).toContain('--force-delete-without-recovery');
+    expect(workflow).toContain('workflow.sh issue-health-credential');
+    expect(workflow).toContain('workflow.sh deploy-broker');
+    expect(read('healthCredential')).toContain('secrets.token_urlsafe(32)');
+    expect(read('attestation')).toContain("teamkimi status --json --color=never");
+  });
+
+  it('documents live-only operation and validates all CloudFormation templates', () => {
     const runbook = read('runbook');
     for (const topic of [
       'fleet deploy mutex', 'Evidence review', 'Credential revocation',
-      'Termination', 'seven days', 'No paid run',
+      'Termination', 'seven days', 'No paid run', 'T01_HEALTH_ATTESTATION',
     ]) {
       expect(runbook).toContain(topic);
     }
     expect(runbook).toContain('max_paid_admissions=0');
     expect(read('infraReadme')).toContain('t01-smoke/RUNBOOK.md');
-    expect(read('deployWorkflow')).toContain('cfn-lint infra/template.yaml infra/t01-smoke/template.yaml');
-    expect(read('prePush')).toContain('cfn-lint infra/template.yaml infra/t01-smoke/template.yaml');
+    const validation = 'cfn-lint infra/template.yaml infra/t01-smoke/template.yaml infra/t01-smoke/broker_template.yaml';
+    expect(read('deployWorkflow')).toContain(validation);
+    expect(read('prePush')).toContain(validation);
   });
 });

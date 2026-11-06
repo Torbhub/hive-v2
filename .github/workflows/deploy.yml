@@ -41,10 +41,16 @@ jobs:
         run: node scripts/discipline-gate.mjs
       - name: Syntax-check the infra scripts
         run: bash -n infra/provision-box.sh && bash -n infra/deploy-box.sh && bash -n infra/deploy-mutex.sh
+      - name: Check T01 policy and behavior
+        run: |
+          python3 test/t01_policy_checks.py
+          python3 test/t01_runtime_checks.py
+          python3 test/t01_workflow_checks.py
+          python3 test/t01_health_broker_checks.py
       - name: Lint the CloudFormation templates
         run: |
           pipx install cfn-lint
-          cfn-lint infra/template.yaml infra/t01-smoke/template.yaml
+          cfn-lint infra/template.yaml infra/t01-smoke/template.yaml infra/t01-smoke/broker_template.yaml
 
   deploy:
     needs: gate

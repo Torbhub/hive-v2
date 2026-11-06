@@ -48,10 +48,11 @@ before routing, so `/hive/api/view` and `/api/view` are the same endpoint.
   `citadel-deploy-mutex`) before the SSM box deploy (the stack self-update
   is exempt) and releases it in cleanup. Any hand AWS act must acquire it
   too — see the deploy-discipline skill.
-- `t01-smoke/` — the disposable Hermes preflight stack and its explicit
-  dispatch workflow. It has no paid model route and no automatic trigger.
-  The live-only procedure and credential controls are in
-  `t01-smoke/RUNBOOK.md`.
+- `t01-smoke/` — the disposable Hermes preflight and health-only Lambda
+  broker stacks with their explicit dispatch workflow. They have no paid
+  model route and no automatic trigger. The health credential contains no
+  TeamKimi account credential. The live-only procedure and credential
+  controls are in `t01-smoke/RUNBOOK.md`.
 
 ## Bootstrap ceremony (once, by the operator)
 

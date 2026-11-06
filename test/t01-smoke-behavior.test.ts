@@ -7,6 +7,7 @@ const checks = [
   't01_policy_checks.py',
   't01_runtime_checks.py',
   't01_workflow_checks.py',
+  't01_health_broker_checks.py',
 ];
 
 describe('T01 behavior regressions', () => {

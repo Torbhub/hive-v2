@@ -90,14 +90,21 @@ jobs:
       - name: Acquire the fleet deploy mutex
         id: acquire
         run: bash infra/t01-smoke/workflow.sh acquire
+      - name: Issue the expiring no-spend health credential
+        id: health
+        env:
+          T01_HEALTH_ATTESTATION: ${{ vars.T01_HEALTH_ATTESTATION }}
+          LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
+        run: bash infra/t01-smoke/workflow.sh issue-health-credential
+      - name: Create the disposable health-only broker stack
+        id: broker
+        run: bash infra/t01-smoke/workflow.sh deploy-broker
       - name: Create the disposable preflight stack
         id: deploy
         env:
           VPC_ID: ${{ vars.T01_VPC_ID }}
           SUBNET_ID: ${{ vars.T01_SUBNET_ID }}
           AMI_ID: ${{ vars.T01_AMI_ID }}
-          TEAMKIMI_URL: ${{ vars.T01_TEAMKIMI_URL }}
-          TEAMKIMI_SECRET_ARN: ${{ vars.T01_TEAMKIMI_SECRET_ARN }}
           TEAMKIMI_SECRET_KEY: ${{ vars.T01_TEAMKIMI_SECRET_KEY || 'apiKey' }}
           TEAMKIMI_CONNECTIVITY_PATH: ${{ vars.T01_TEAMKIMI_CONNECTIVITY_PATH || '/health' }}
           SCENARIO: ${{ inputs.scenario }}
@@ -125,7 +132,7 @@ jobs:
           path: t01-evidence/preflight.jsonl
           if-no-files-found: error
           retention-days: 7
-      - name: Delete the stack and release the fleet deploy mutex
+      - name: Delete both stacks, revoke the health credential, and release the fleet deploy mutex
         if: always() && steps.acquire.outcome == 'success'
         run: bash infra/t01-smoke/workflow.sh cleanup
       - name: Fail after evidence and cleanup finish
