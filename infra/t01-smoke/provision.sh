@@ -65,12 +65,16 @@ on_error() {
   trap - ERR
   set +e
   lock_down
-  local category=unknown
+  local category=unknown origin=unknown:0
   if [ -f /var/lib/t01/evidence/bootstrap-category ]; then
     category="$(cat /var/lib/t01/evidence/bootstrap-category)"
   fi
+  if [ -f /var/lib/t01/evidence/bootstrap-origin ]; then
+    origin="$(cat /var/lib/t01/evidence/bootstrap-origin)"
+  fi
   [[ "$category" =~ ^[A-Za-z][A-Za-z0-9_.:-]*$ ]] || category=unknown
-  emit bootstrap_error failed "\"category\":\"$category\""
+  [[ "$origin" =~ ^[A-Za-z0-9_.-]+:[0-9]+$ ]] || origin=unknown:0
+  emit bootstrap_error failed "\"category\":\"$category\",\"origin\":\"$origin\""
   emit provisioning failed
   emit complete failed
   publish_evidence
@@ -117,12 +121,15 @@ ensure_package() {
   python3 - "$1" <<'PY'
 from pathlib import Path
 import sys
+import traceback
 try:
     from pm import ensure
     ensure(sys.argv[1], explicit=True)
 except Exception as error:
     category = f'{type(error).__name__}:{getattr(error, "package", "unknown")}'
+    frame = traceback.extract_tb(error.__traceback__)[-1]
     Path('/var/lib/t01/evidence/bootstrap-category').write_text(category, encoding='utf-8')
+    Path('/var/lib/t01/evidence/bootstrap-origin').write_text(f'{Path(frame.filename).name}:{frame.lineno}', encoding='utf-8')
     raise SystemExit(1)
 PY
 }

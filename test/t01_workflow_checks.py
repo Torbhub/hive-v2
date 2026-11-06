@@ -194,11 +194,23 @@ failed_check = evidence_records()
 failed_check[2]['status'] = 'failed'
 validate_evidence(failed_check, 1)
 bootstrap_failure = evidence_records()
-bootstrap_failure.insert(2, {'check': 'bootstrap_error', 'status': 'failed', 'category': 'InstallError:pm-runtime'})
+bootstrap_failure.insert(2, {
+    'check': 'bootstrap_error', 'status': 'failed',
+    'category': 'InstallError:pm-runtime', 'origin': 'client.py:212',
+})
 validate_evidence(bootstrap_failure, 1)
 bad_category = evidence_records()
-bad_category.insert(2, {'check': 'bootstrap_error', 'status': 'failed', 'category': 'unsafe message with spaces'})
+bad_category.insert(2, {
+    'check': 'bootstrap_error', 'status': 'failed',
+    'category': 'unsafe message with spaces', 'origin': 'client.py:212',
+})
 validate_evidence(bad_category, 1)
+bad_origin = evidence_records()
+bad_origin.insert(2, {
+    'check': 'bootstrap_error', 'status': 'failed',
+    'category': 'TypeError:unknown', 'origin': '/absolute/path.py:1',
+})
+validate_evidence(bad_origin, 1)
 not_last = evidence_records()
 not_last.insert(0, not_last.pop())
 validate_evidence(not_last, 1)

@@ -21,7 +21,7 @@ SIMPLE_CHECKS = {
     'paid_admission_disabled',
 }
 ALLOWED_CHECKS = SIMPLE_CHECKS | {'bootstrap_error', 'hermes_version', 'source_sha256', 'provisioning', 'complete'}
-ALLOWED_FIELDS = {'check', 'status', 'version', 'commit', 'sha256', 'category'}
+ALLOWED_FIELDS = {'check', 'status', 'version', 'commit', 'sha256', 'category', 'origin'}
 
 
 def read_json(path):
@@ -164,9 +164,12 @@ def validate_evidence(path):
             return 1
         if check == 'bootstrap_error':
             category = record.get('category')
-            if set(record) != {'check', 'status', 'category'} or not isinstance(category, str):
+            origin = record.get('origin')
+            if set(record) != {'check', 'status', 'category', 'origin'}:
                 return 1
-            if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.:-]*', category):
+            if not isinstance(category, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.:-]*', category):
+                return 1
+            if not isinstance(origin, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+:[0-9]+', origin):
                 return 1
         if check in seen or record.get('status') != 'passed':
             return 1
