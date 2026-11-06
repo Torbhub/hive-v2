@@ -118,7 +118,7 @@ for resource_name in ('HealthRole', 'HealthFunction', 'HealthUrl', 'HealthUrlPer
     assert context['must'], resource_name
 health_policy = BROKER_TEMPLATE['Resources']['HealthRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
 assert health_policy[0]['Action'] == 'secretsmanager:GetSecretValue'
-assert health_policy[0]['Resource'] == {'Ref': 'SecretArn'}
+assert health_policy[0]['Resource'] == 'SecretArn'
 role_context = TEMPLATE['Resources']['T01SmokeRole']['Metadata']['com.aws.cloudformation.Context']
 assert role_context['why'].strip()
 assert role_context['must']
