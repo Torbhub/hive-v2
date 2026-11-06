@@ -193,13 +193,13 @@ const audio = process.argv[3];
 const job = path.dirname(audio);
 const root = path.dirname(job);
 const name = path.basename(job);
-fs.writeFileSync(path.join(root, name + '.started'), '1');
-fs.mkdirSync(path.join(process.env.XDG_CONFIG_HOME, 'com.pais.handy', 'logs'), { recursive: true });
-fs.writeFileSync(path.join(process.env.XDG_CONFIG_HOME, 'com.pais.handy', 'logs', 'handy.log'), '${TRANSCRIPT_MARKER}');
 process.on('SIGTERM', () => {
   fs.writeFileSync(path.join(root, name + '.terminated'), '1');
   process.exit(0);
 });
+fs.mkdirSync(path.join(process.env.XDG_CONFIG_HOME, 'com.pais.handy', 'logs'), { recursive: true });
+fs.writeFileSync(path.join(process.env.XDG_CONFIG_HOME, 'com.pais.handy', 'logs', 'handy.log'), '${TRANSCRIPT_MARKER}');
+fs.writeFileSync(path.join(root, name + '.started'), String(process.pid));
 setInterval(() => {}, 1000);
 `, { mode: 0o755 });
     const controller = new AbortController();
@@ -209,6 +209,7 @@ setInterval(() => {}, 1000);
       env: { HOME: path.join(root, 'home'), PATH: process.env.PATH },
       signal: controller.signal,
     });
+    const rejected = expect(pending).rejects.toThrow('Handy transcription failed');
     let started: string | undefined;
     await vi.waitFor(async () => {
       const files = await fs.readdir(root);
@@ -216,9 +217,10 @@ setInterval(() => {}, 1000);
       expect(started).toBeDefined();
     });
     controller.abort();
-    await expect(pending).rejects.toThrow('Handy transcription failed');
+    await rejected;
     const job = started!.slice(0, -'.started'.length);
-    expect(await fs.stat(path.join(root, `${job}.terminated`))).toBeTruthy();
+    const pid = Number(await fs.readFile(path.join(root, `${job}.started`), 'utf8'));
+    expect(() => process.kill(pid, 0)).toThrow();
     await expect(fs.stat(path.join(root, job))).rejects.toMatchObject({ code: 'ENOENT' });
     expect((await fs.readdir(root)).some((file) => file.endsWith('.wav'))).toBe(false);
   });

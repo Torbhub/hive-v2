@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -205,14 +206,26 @@ beforeAll(async () => {
   await cdp.waitFor(`document.querySelector('input[aria-label="new task for demo"]')`);
 }, 45_000);
 
+async function stopChrome(): Promise<void> {
+  if (!browser || browser.exitCode !== null || browser.signalCode !== null) return;
+  const exited = once(browser, 'exit');
+  browser.kill('SIGTERM');
+  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  if (browser.exitCode === null && browser.signalCode === null) {
+    const killed = once(browser, 'exit');
+    browser.kill('SIGKILL');
+    await killed;
+  }
+}
+
 afterAll(async () => {
   cdp?.close();
-  if (browser && browser.exitCode === null) browser.kill('SIGTERM');
+  await stopChrome();
   await Promise.all([
     vite?.close(),
     new Promise<void>((resolve) => bridge?.close(() => resolve())),
   ]);
-  await fs.rm(profile, { recursive: true, force: true });
+  await fs.rm(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }, 30_000);
 
 async function viWaitForFile(file: string): Promise<void> {

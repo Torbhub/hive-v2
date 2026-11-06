@@ -42,6 +42,8 @@ The default standalone origin is `http://127.0.0.1:7684`. The origin must exactl
 
 The bridge listens only on `127.0.0.1:7685`. It prints a generated pairing token at startup. Keep the process running on the operator computer. Set `HIVE_HANDY_TOKEN` to supply a token with at least 32 characters instead. Set `HANDY_BIN` when the Handy executable is not on `PATH`.
 
+Portable Handy installations are not supported. The bridge rejects a valid `portable` marker before spawning Handy. Portable mode stores settings, models, and logs in `Data` beside the executable, so HOME and XDG isolation cannot contain them. Typing remains available after this rejection.
+
 Open the Hub in a browser on the same computer. Select **Dictate** beside a composer. Enter the pairing token, then select **Connect and dictate**. Grant microphone and local-network permission when the browser asks. Select **Stop** after speaking. Review and edit the inserted text before using the existing submit control.
 
 Select **Cancel dictation** to discard the recording or transcription. A late transcript cannot enter the draft after cancellation.
@@ -67,6 +69,10 @@ Normal Handy desktop use retains those logs under Handy's rotation policy. Hive 
 
 The bridge sets `RUST_LOG=off` and `HANDY_TRANSCRIBE_WORKER_LOG=off`. Handy's file logger ignores `RUST_LOG`, so the bridge also redirects every config, data, home, cache, and temporary path into the per-job directory. It copies `settings_store.json` and links only the model directory. Handy migrations cannot modify the original settings. Every Handy file log lands in the per-job directory and is deleted with the WAV. This rule also covers health checks and cancellation.
 
+Sandbox construction cleans up after any failure, including a failed settings copy. A deletion failure returns an error and keeps the active job closed to restart.
+
+The bridge copies only `models--*` repositories from `HF_HOME/hub` into the job and dereferences their blobs. This supports HF-only model layouts without exposing unrelated cache data or writes. Copying a large model can increase job time and disk use.
+
 The bridge does not log audio, transcripts, Handy standard error, or temporary paths. HTTP errors contain generic messages. The browser stores the pairing token only in page memory. Reloading the page clears the token. The browser does not persist audio or transcripts. Existing Hive draft and submission behavior stays unchanged after the operator submits text.
 
 ## Bridge security
@@ -77,7 +83,7 @@ Cross-origin preflight succeeds only for the configured Hub origin. The bridge r
 
 The Handy child process receives an allowlist of system and model-location environment variables. It does not receive ambient AWS credentials, Hive secrets, or Nexus tokens. The bridge accepts only WAV audio on the transcription endpoint. It cannot execute a supplied command or choose a supplied model.
 
-A premature disconnect aborts the Handy child and removes its per-job directory. **Cancel dictation** also calls the authenticated `/cancel` endpoint. The bridge waits for child termination and cleanup before answering. The browser offers another start only after that answer. A failed cancellation confirmation blocks another start.
+A premature disconnect aborts the Handy child and removes its per-job directory. **Cancel dictation** also calls the authenticated `/cancel` endpoint. The bridge waits for the child `close` event and successful cleanup before answering. A termination or deletion failure returns `Handy cleanup failed` and keeps the active job closed to restart. The browser offers another start only after confirmed cleanup.
 
 ## Limits and verification
 
