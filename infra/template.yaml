@@ -158,7 +158,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: hive-v2-gh-t01-smoke
-      Description: Manages only the disposable T01 preflight and health broker stacks from the protected GitHub environment.
+      Description: Manages only the disposable T01 preflight stack from the protected GitHub environment.
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:

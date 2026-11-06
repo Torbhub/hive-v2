@@ -136,6 +136,9 @@ for resource_name in ('HealthRole', 'HealthFunction', 'HealthUrl', 'HealthUrlPer
 health_policy = BROKER_TEMPLATE['Resources']['HealthRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
 assert health_policy[0]['Action'] == 'secretsmanager:GetSecretValue'
 assert health_policy[0]['Resource'] == 'SecretArn'
+assert TEMPLATE['Resources']['T01SmokeRole']['Properties']['Description'] == (
+    'Manages only the disposable T01 preflight stack from the protected GitHub environment.'
+)
 role_context = TEMPLATE['Resources']['T01SmokeRole']['Metadata']['com.aws.cloudformation.Context']
 assert role_context['why'].strip()
 assert role_context['must']
