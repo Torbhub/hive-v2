@@ -174,7 +174,19 @@ with patch.dict(os.environ, {'SECRET_ARN': 'arn:test:health-secret', 'RUN_ID': '
         assert handler(event(authorization='Bearer wrong'), None)['statusCode'] == 401
         assert handler(event(path='/v1/messages', method='POST'), None)['statusCode'] == 404
         assert handler(event(path='/teamkimi/status'), None)['statusCode'] == 404
+    secret_value = json.dumps(dict(
+        secret, attestedAt=secret['expiresAt'], probeFinishedAt=secret['expiresAt'],
+    ))
     with patch.object(namespace['time'], 'time', return_value=secret['expiresAt']):
         assert handler(event(), None)['statusCode'] == 401
+    secret_value = json.dumps(secret)
     with patch.dict(os.environ, {'RUN_ID': '999'}):
         assert handler(event(), None)['statusCode'] == 503
+
+for field in ('attestedAt', 'probeFinishedAt'):
+    for offset in (-601, 62):
+        secret_value = json.dumps(dict(secret, **{field: NOW + offset}))
+        with patch.dict(os.environ, {'SECRET_ARN': 'arn:test:health-secret', 'RUN_ID': '123'}):
+            with patch.object(namespace['time'], 'time', return_value=NOW + 1):
+                assert handler(event(), None)['statusCode'] == 503, (field, offset)
+secret_value = json.dumps(secret)

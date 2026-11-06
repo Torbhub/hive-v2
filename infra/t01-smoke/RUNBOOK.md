@@ -7,7 +7,7 @@ No paid run is authorized by this workflow. It installs Hermes and checks connec
 1. Create the `t01-smoke` GitHub environment with required reviewer approval. Restrict it to `main`.
 2. Set `HIVE_T01_SMOKE_ROLE_ARN` in that environment to the `T01SmokeRoleArn` stack output.
 3. Set `T01_VPC_ID`, `T01_SUBNET_ID`, and `T01_AMI_ID`. Use a reviewed Amazon Linux 2023 x86_64 AMI.
-4. Use a subnet outside the Nexus production worker network.
+4. Use a subnet outside the Nexus production worker network. Set `T01_RESOLVER_IP` to a reviewed IPv4 resolver in that network. The security group allows UDP and TCP port 53 only to this resolver as a `/32`.
 5. Keep `T01_TEAMKIMI_SECRET_KEY` at `apiKey` and `T01_TEAMKIMI_CONNECTIVITY_PATH` at `/health` unless a reviewed change requires different values.
 6. Run `python3 infra/t01-smoke/teamkimi_attestation.py` on the host with the existing TeamKimi CLI. Set its JSON output as `T01_HEALTH_ATTESTATION` in the environment. The output contains only aggregate account and successful-probe counts plus timestamps. It contains no names, credentials, URLs, or responses.
 
@@ -17,7 +17,9 @@ The workflow creates a random health credential that expires after the requested
 
 The disposable Lambda accepts only authenticated `GET /health` requests. It checks the run ID, expiry, and attestation. It has no model, discovery, forwarding, or general status route. The preflight stack receives the Lambda HTTPS origin and secret ARN dynamically. The health secret uses the AWS-managed Secrets Manager key.
 
-The instance and Lambda roles can read only the run secret. No operator adds a broad instance profile.
+The instance and Lambda roles have permission boundaries that allow only the run secret read. Inline policies cannot grant broader access. The workflow role session lasts 9000 seconds to cover the longest job. No operator adds a broad instance profile.
+
+The T01 workflow role can replace a boundary only with the same reviewed policy. It cannot detach a boundary. A CloudFormation rollback that requires detachment fails and leaves the boundary in place. This safe failure prevents an unbounded role. Recovery must use the root deployment controls and must not add detachment permission to the T01 role.
 
 ## Execute the no-spend preflight
 
@@ -27,14 +29,14 @@ The instance and Lambda roles can read only the run secret. No operator adds a b
 4. Leave `paid_admission` as `false`. A `true` value fails before AWS credentials are used.
 5. Enter every token, API-call, cost, admission, and lifetime cap. Set `max_paid_admissions=0`. Any other admission value fails before AWS credentials are used.
 6. Use a lifetime from 5 through 120 minutes. The instance terminates at that deadline even if the workflow stops.
-7. Start the workflow. It acquires the fleet deploy mutex before any AWS act. It creates the health secret and broker before the preflight stack. It renews the mutex every ten minutes during collection and releases it during cleanup.
+7. Start the workflow. It acquires the fleet deploy mutex before any AWS act. It creates the health secret and broker before the preflight stack. It renews the mutex every ten minutes throughout the critical section and stops renewal before the final release.
 
 The workflow uses only the `t01-smoke` environment role. It has no push, pull-request, schedule, or external-call trigger.
 
 ## Evidence review
 
 1. Wait for the connectivity checks and cleanup steps to finish.
-2. Download `t01-preflight-<run-id>`. The artifact contains only `T01_EVIDENCE` JSON lines from the instance console.
+2. Download `t01-preflight-<run-id>`. Every console candidate passes schema-only sanitization before it reaches the artifact. Rejected or oversized input is never uploaded.
 3. Check the Hermes commit, source hash, frozen install, and disabled lazy-install records.
 4. Check that every direct-IP, DNS, redirect, IPv6, alternate-port, metadata, and container-credential check passed.
 5. Check that `teamkimi_no_model` passed. This check uses the health-only Lambda and sends no model request.

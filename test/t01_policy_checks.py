@@ -116,12 +116,24 @@ def deploy_allows(action, resource):
     )
 
 
+def effective_permission(boundary_statement, inline_statement, action, resource):
+    return (
+        boundary_statement['Effect'] == 'Allow'
+        and action_matches(boundary_statement, action)
+        and resource_matches(boundary_statement, resource)
+        and inline_statement['Effect'] == 'Allow'
+        and action_matches(inline_statement, action)
+        and resource_matches(inline_statement, resource)
+    )
+
+
 INFRA_STACK = 'arn:aws:cloudformation:us-east-1:594552273052:stack/hive-v2-infra/*'
 SMOKE_ROLE = 'arn:aws:iam::594552273052:role/hive-v2-gh-t01-smoke'
 assert deploy_allows('cloudformation:ContinueUpdateRollback', INFRA_STACK)
 assert not deploy_allows('cloudformation:ContinueUpdateRollback', BROKER_STACK)
-assert deploy_allows('iam:UpdateRoleDescription', SMOKE_ROLE)
+assert not deploy_allows('iam:UpdateRoleDescription', SMOKE_ROLE)
 assert not deploy_allows('iam:UpdateRoleDescription', 'arn:aws:iam::594552273052:role/other-role')
+assert TEMPLATE['Resources']['T01SmokeRole']['Properties']['MaxSessionDuration'] == 9000
 
 SMOKE_PATH = ROOT / 'infra/t01-smoke/template.yaml'
 BROKER_PATH = ROOT / 'infra/t01-smoke/broker_template.yaml'
@@ -150,3 +162,51 @@ assert TEMPLATE['Resources']['T01SmokeRole']['Properties']['Description'] == (
 role_context = TEMPLATE['Resources']['T01SmokeRole']['Metadata']['com.aws.cloudformation.Context']
 assert role_context['why'].strip()
 assert role_context['must']
+
+INSTANCE_ROLE_ARN = 'arn:aws:iam::594552273052:role/hive-v2-t01-smoke-instance'
+INSTANCE_BOUNDARY = 'arn:aws:iam::594552273052:policy/hive-v2-t01-smoke-health-boundary'
+BROKER_BOUNDARY = 'arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary'
+for role_arn, boundary_arn in ((INSTANCE_ROLE_ARN, INSTANCE_BOUNDARY), (BROKER_ROLE, BROKER_BOUNDARY)):
+    for action in ('iam:CreateRole', 'iam:PutRolePermissionsBoundary'):
+        assert not allows(action, role_arn), f'{action} must require the exact permissions boundary'
+        assert allows(action, role_arn, **{'iam:PermissionsBoundary': boundary_arn})
+        assert not allows(action, role_arn, **{'iam:PermissionsBoundary': 'arn:aws:iam::594552273052:policy/other-boundary'})
+    for context in ({}, {'iam:PermissionsBoundary': boundary_arn}, {'iam:PermissionsBoundary': 'arn:aws:iam::594552273052:policy/other-boundary'}):
+        assert not allows('iam:DeleteRolePermissionsBoundary', role_arn, **context), 'T01 must never detach a runtime boundary'
+    for action in ('iam:CreatePolicy', 'iam:CreatePolicyVersion', 'iam:DeletePolicyVersion', 'iam:DeletePolicy'):
+        assert not allows(action, boundary_arn), 'T01 must not mutate boundary policy documents'
+        assert deploy_allows(action, boundary_arn), 'the root deploy role owns boundary lifecycle'
+
+for template, role_name, boundary_name, secret_parameter in (
+    (SMOKE_TEMPLATE, 'InstanceRole', 'T01SmokeHealthBoundary', 'TeamKimiSecretArn'),
+    (BROKER_TEMPLATE, 'HealthRole', 'T01BrokerHealthBoundary', 'SecretArn'),
+):
+    role = template['Resources'][role_name]
+    boundary = TEMPLATE['Resources'][boundary_name]
+    expected_arn = (
+        'arn:aws:iam::594552273052:policy/hive-v2-t01-smoke-health-boundary'
+        if boundary_name == 'T01SmokeHealthBoundary'
+        else 'arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary'
+    )
+    assert role['Properties']['PermissionsBoundary'] == expected_arn
+    statements = boundary['Properties']['PolicyDocument']['Statement']
+    assert len(statements) == 1
+    statement = statements[0]
+    assert statement['Effect'] == 'Allow'
+    assert statement['Action'] == 'secretsmanager:GetSecretValue'
+    assert statement['Resource'] == 'arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-*'
+    admin_inline_policy = {'Effect': 'Allow', 'Action': '*', 'Resource': '*'}
+    assert effective_permission(statement, admin_inline_policy, 'secretsmanager:GetSecretValue', HEALTH_SECRET)
+    assert not effective_permission(statement, admin_inline_policy, 'iam:DeleteRole', INSTANCE_ROLE_ARN)
+    assert not effective_permission(statement, admin_inline_policy, 'iam:PassRole', INSTANCE_ROLE_ARN)
+    other_secret = 'arn:aws:secretsmanager:us-east-1:594552273052:secret:other-secret'
+    assert not effective_permission(statement, admin_inline_policy, 'secretsmanager:GetSecretValue', other_secret)
+
+resolver_egress = SMOKE_TEMPLATE['Resources']['SecurityGroup']['Properties']['SecurityGroupEgress']
+resolver_rules = [rule for rule in resolver_egress if rule['FromPort'] == 53]
+assert len(resolver_rules) == 2
+assert {rule['IpProtocol'] for rule in resolver_rules} == {'udp', 'tcp'}
+assert all(rule['ToPort'] == 53 for rule in resolver_rules)
+assert all(rule['CidrIp'] == '${ResolverIp}/32' for rule in resolver_rules)
+assert all(rule['CidrIp'] != '0.0.0.0/0' for rule in resolver_rules)
+assert any(rule['FromPort'] == 443 and rule['CidrIp'] == '0.0.0.0/0' for rule in resolver_egress)

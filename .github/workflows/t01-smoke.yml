@@ -87,6 +87,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}
           aws-region: us-east-1
+          role-duration-seconds: 9000
       - name: Acquire the fleet deploy mutex
         id: acquire
         run: bash infra/t01-smoke/workflow.sh acquire
@@ -104,6 +105,7 @@ jobs:
         env:
           VPC_ID: ${{ vars.T01_VPC_ID }}
           SUBNET_ID: ${{ vars.T01_SUBNET_ID }}
+          RESOLVER_IP: ${{ vars.T01_RESOLVER_IP }}
           AMI_ID: ${{ vars.T01_AMI_ID }}
           TEAMKIMI_SECRET_KEY: ${{ vars.T01_TEAMKIMI_SECRET_KEY || 'apiKey' }}
           TEAMKIMI_CONNECTIVITY_PATH: ${{ vars.T01_TEAMKIMI_CONNECTIVITY_PATH || '/health' }}
