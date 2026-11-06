@@ -332,6 +332,10 @@ describe('authenticated MCP integration', () => {
     ] });
     await appendTaskEvent(r, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
     await appendTaskEvent(r, { id: 'demo-2', project: 'demo', event: 'asked', at: new Date().toISOString() });
+    const { registryItems } = await import('./security-fixture.js');
+    const items = registryItems().map((row) => row.sk === 'PRINCIPAL#agent:builder'
+      ? { ...row, pk: 'ACL#demo#demo-2#*', task: 'demo-2' } : row);
+    await writeSecurity(r, items);
     const file = path.join(r, 'credential.env');
     await writeFile(file, `HIVE_AGENT_CREDENTIAL='${AGENT_CREDENTIAL}'\n`, { mode: 0o600 });
     const c = connect({

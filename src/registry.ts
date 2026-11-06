@@ -64,19 +64,14 @@ export class FileRegistry implements Registry {
     request: DelegatedApprovalRequest): Promise<RegistryRow | undefined> {
     const rows = await this.read();
     const allowed = (principal: string, grantId: string): boolean => {
-      for (const task of [request.task, undefined]) {
-        const pk = `ACL#${request.project}#${task ?? '*'}#*`;
-        const sk = `PRINCIPAL#${principal}`;
-        const row = rows.find((candidate) => candidate.pk === pk && candidate.sk === sk);
-        if (!row) continue;
-        const ledger = rows.some((candidate) => candidate.pk === `REVOCATION#${pk}` && candidate.sk === sk);
-        const wrongScope = task !== undefined && row.task !== task;
-        if (row.revokedAt !== null && row.revokedAt !== undefined || ledger || wrongScope) {
-          return false;
-        }
-        return row.grantId === grantId && Array.isArray(row.actions) && row.actions.includes('execute');
-      }
-      return false;
+      const pk = `ACL#${request.project}#${request.task ?? '*'}#*`;
+      const sk = `PRINCIPAL#${principal}`;
+      const row = rows.find((candidate) => candidate.pk === pk && candidate.sk === sk);
+      if (!row) return false;
+      const ledger = rows.some((candidate) => candidate.pk === `REVOCATION#${pk}` && candidate.sk === sk);
+      const wrongScope = request.task !== undefined && row.task !== request.task;
+      if (row.revokedAt !== null && row.revokedAt !== undefined || ledger || wrongScope) return false;
+      return row.grantId === grantId && Array.isArray(row.actions) && row.actions.includes('execute');
     };
     if (!allowed(`agent:${agentId}`, request.consumerGrantId)
       || !allowed(request.approverSubject, request.approverGrantId)) {
