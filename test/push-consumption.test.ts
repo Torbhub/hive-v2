@@ -261,7 +261,7 @@ describe('authenticated push consumption', () => {
     });
     await replaceRows(root, values);
     const batch = await approved(root, commit, 'user:bob', 'bob-grant');
-    values.find((row) => row.sk === 'PRINCIPAL#user:bob')!.task = 'demo-2';
+    values.find((row) => row.sk === 'PRINCIPAL#user:bob')!.pk = 'ACL#demo#demo-2#*';
     await replaceRows(root, values);
     await expect(consumePushApproval(
       root, { project: 'demo', batch: batch.id, question: 'q1' },
