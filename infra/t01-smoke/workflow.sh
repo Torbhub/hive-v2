@@ -4,6 +4,7 @@ umask 077
 
 STACK_NAME=hive-v2-t01-smoke
 HEALTH_SECRET_NAME="hive-v2-t01-smoke-health-${GITHUB_RUN_ID:-manual}"
+PROXY_SECRET_NAME="hive-v2-t01-smoke-proxy-${GITHUB_RUN_ID:-manual}"
 OWNER="hive-v2-t01-smoke/${GITHUB_RUN_ID:-manual}"
 
 require_env() {
@@ -27,26 +28,58 @@ validate_inputs() {
   require_env SCENARIO
   require_env MATRIX
   require_env PAID_ADMISSION
-  [ "$SCENARIO" = preflight ] || { echo "only the preflight scenario is available" >&2; exit 2; }
-  [ "$MATRIX" = none ] || { echo "the paid matrix is not available" >&2; exit 2; }
-  [ "$PAID_ADMISSION" = false ] || { echo "paid admission requires the separate TeamKimi broker PR" >&2; exit 2; }
   validate_integer_cap MAX_INPUT_TOKENS 16000
   validate_integer_cap MAX_OUTPUT_TOKENS 2000
   validate_integer_cap MAX_REASONING_TOKENS 4000
-  validate_integer_cap MAX_TOTAL_TOKENS 22000
-  validate_integer_cap MAX_API_CALLS 1
-  validate_integer_cap MAX_PAID_ADMISSIONS 0
+  validate_integer_cap MAX_PAID_ADMISSIONS 12
   require_env MAX_ESTIMATED_COST_USD
-  python3 - "$MAX_ESTIMATED_COST_USD" <<'PY'
+  require_env MAX_TOTAL_TOKENS
+  require_env MAX_API_CALLS
+  case "$SCENARIO/$MATRIX/$PAID_ADMISSION" in
+    preflight/none/false)
+      validate_integer_cap MAX_TOTAL_TOKENS 22000
+      validate_integer_cap MAX_API_CALLS 1
+      [ "$MAX_PAID_ADMISSIONS" = 0 ] || { echo "preflight requires zero paid admissions" >&2; exit 2; }
+      python3 - "$MAX_ESTIMATED_COST_USD" 0.50 <<'PY'
 from decimal import Decimal, InvalidOperation
 import sys
 try:
     value = Decimal(sys.argv[1])
 except InvalidOperation:
     raise SystemExit("cost cap must be numeric")
-if value < 0 or value > Decimal("0.50"):
-    raise SystemExit("cost cap must be from 0 to 0.50")
+if value < 0 or value > Decimal(sys.argv[2]):
+    raise SystemExit("cost cap exceeds the scenario limit")
 PY
+      ;;
+    count/none/false)
+      [ "$MAX_TOTAL_TOKENS" = 0 ] && [ "$MAX_API_CALLS" = 0 ] && [ "$MAX_PAID_ADMISSIONS" = 0 ] \
+        && [ "$MAX_ESTIMATED_COST_USD" = 0 ] || { echo "count requires zero generation caps and admissions" >&2; exit 2; }
+      require_env T01_TEAMKIMI_HOST_ID
+      [[ "$T01_TEAMKIMI_HOST_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || { echo "invalid TeamKimi host ID" >&2; exit 2; }
+      ;;
+    matrix/full/true)
+      [ "$MAX_INPUT_TOKENS" = 16000 ] && [ "$MAX_OUTPUT_TOKENS" = 2000 ] && [ "$MAX_REASONING_TOKENS" = 4000 ] \
+        && [ "$MAX_TOTAL_TOKENS" = 132000 ] && [ "$MAX_API_CALLS" = 12 ] && [ "$MAX_PAID_ADMISSIONS" = 12 ] \
+        && [ "$MAX_ESTIMATED_COST_USD" = 5 ] || { echo "full matrix requires exact reviewed ceilings" >&2; exit 2; }
+      require_env T01_TEAMKIMI_HOST_ID
+      [[ "$T01_TEAMKIMI_HOST_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || { echo "invalid TeamKimi host ID" >&2; exit 2; }
+      local attestation_file
+      attestation_file="$(mktemp)"
+      trap "rm -f $attestation_file" EXIT
+      python3 - "$attestation_file" <<'PY'
+import os
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text(os.environ['PRICING_ATTESTATION'], encoding='utf-8')
+PY
+      node_modules/.bin/tsx tools/hermes-live/cli.ts validate-policy \
+        --attestation "$attestation_file" --expected-policy-hash "$EXPECTED_POLICY_HASH" || exit 2
+      ;;
+    *)
+      echo "scenario, matrix, and paid admission do not form a reviewed dispatch" >&2
+      exit 2
+      ;;
+  esac
   validate_integer_cap LIFETIME_MINUTES 120
   (( LIFETIME_MINUTES >= 5 )) || { echo "lifetime must be at least five minutes" >&2; exit 2; }
 }
@@ -133,6 +166,12 @@ issue_health_credential() {
   python3 infra/t01-smoke/health_credential.py
 }
 
+issue_proxy_credential() {
+  require_env GITHUB_RUN_ID
+  require_env TEAMKIMI_PROXY_KEY
+  python3 infra/t01-smoke/runtime.py create-proxy-secret
+}
+
 health_secret_arn() {
   aws secretsmanager describe-secret --secret-id "$HEALTH_SECRET_NAME" --query ARN --output text
 }
@@ -142,10 +181,15 @@ deploy_stack() {
   for name in VPC_ID SUBNET_ID RESOLVER_IP AMI_ID GITHUB_REPOSITORY GITHUB_SHA; do
     require_env "$name"
   done
-  local script_sha runtime_sha
+  if [ "$SCENARIO" = matrix ]; then
+    require_env TEAMKIMI_PROXY_SECRET_ARN
+  fi
+  local script_sha runtime_sha runner_archive_url runner_archive_sha
   TEAMKIMI_SECRET_ARN="$(health_secret_arn)"
   script_sha="$(sha256sum infra/t01-smoke/provision.sh | cut -d' ' -f1)"
   runtime_sha="$(sha256sum infra/t01-smoke/runtime.py | cut -d' ' -f1)"
+  runner_archive_url="https://codeload.github.com/$GITHUB_REPOSITORY/tar.gz/$GITHUB_SHA"
+  runner_archive_sha="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-redirs 0 --max-time 180 "$runner_archive_url" | sha256sum | cut -d' ' -f1)"
   aws cloudformation deploy \
     --stack-name "$STACK_NAME" \
     --template-file infra/t01-smoke/template.yaml \
@@ -156,8 +200,15 @@ deploy_stack() {
       "ResolverIp=$RESOLVER_IP" \
       "AmiId=$AMI_ID" \
       "TeamKimiSecretArn=$TEAMKIMI_SECRET_ARN" \
+      "TeamKimiProxySecretArn=${TEAMKIMI_PROXY_SECRET_ARN:-}" \
       "Scenario=$SCENARIO" \
       "Matrix=$MATRIX" \
+      "PaidAdmission=$PAID_ADMISSION" \
+      "TeamKimiHostId=${T01_TEAMKIMI_HOST_ID:-}" \
+      "ExpectedPolicyHash=${EXPECTED_POLICY_HASH:-}" \
+      "PricingAttestationBase64=$(printf '%s' "${PRICING_ATTESTATION:-}" | base64 -w0)" \
+      "RunnerArchiveUrl=$runner_archive_url" \
+      "RunnerArchiveSha256=$runner_archive_sha" \
       "MaxInputTokens=$MAX_INPUT_TOKENS" \
       "MaxOutputTokens=$MAX_OUTPUT_TOKENS" \
       "MaxReasoningTokens=$MAX_REASONING_TOKENS" \
@@ -173,6 +224,30 @@ deploy_stack() {
       "RunId=${GITHUB_RUN_ID:-0}"
 }
 
+collect_paid_evidence() {
+  local candidate="$1" evidence_dir="$2" quarantine credential_id
+  require_env PRICING_ATTESTATION
+  require_env EXPECTED_POLICY_HASH
+  require_env GITHUB_RUN_ID
+  quarantine="$(mktemp -d)"
+  trap "rm -rf $quarantine" RETURN
+  aws s3 cp "s3://${T01_EVIDENCE_BUCKET:-hive-v2-t01-evidence-594552273052}/hive-v2-t01-smoke/$GITHUB_RUN_ID/" "$quarantine/export" --recursive
+  credential_id="$(python3 infra/t01-smoke/runtime.py paid-export-credential "$candidate" "$quarantine/export/manifest.json")"
+  python3 - "$quarantine/attestation.json" <<'PY'
+import os
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text(os.environ['PRICING_ATTESTATION'], encoding='utf-8')
+PY
+  node dist-t01/tools/hermes-live/cli.js verify \
+    --manifest "$quarantine/export/manifest.json" \
+    --attestation "$quarantine/attestation.json" \
+    --expected-policy-hash "$EXPECTED_POLICY_HASH" \
+    --credential-id "$credential_id"
+  mv "$quarantine/export" "$evidence_dir/export"
+  export PAID_EVIDENCE_VERIFIED=yes
+}
+
 handle_evidence_candidate() {
   local console="$1" candidate="$2" evidence_dir="$3" line classification
   : > "$candidate"
@@ -185,6 +260,9 @@ handle_evidence_candidate() {
   case "$classification" in
     passed)
       cp "$candidate" "$evidence_dir/preflight.jsonl"
+      if [ "${SCENARIO:-preflight}" = matrix ]; then
+        collect_paid_evidence "$candidate" "$evidence_dir"
+      fi
       exit 0
       ;;
     failed)
@@ -252,13 +330,13 @@ delete_stack() {
   return "$describe_rc"
 }
 
-delete_health_secret() {
-  local describe_rc poll
-  if aws secretsmanager describe-secret --secret-id "$HEALTH_SECRET_NAME" >"$CLEANUP_OUTPUT" 2>"$CLEANUP_ERROR"; then
-    aws secretsmanager delete-secret --secret-id "$HEALTH_SECRET_NAME" --force-delete-without-recovery \
+delete_run_secret() {
+  local secret_name="$1" describe_rc poll
+  if aws secretsmanager describe-secret --secret-id "$secret_name" >"$CLEANUP_OUTPUT" 2>"$CLEANUP_ERROR"; then
+    aws secretsmanager delete-secret --secret-id "$secret_name" --force-delete-without-recovery \
       --query '{Name:Name,VersionId:VersionId,DeletionDate:DeletionDate}' --output json || return $?
     for ((poll = 0; poll < 10; poll++)); do
-      if aws secretsmanager describe-secret --secret-id "$HEALTH_SECRET_NAME" >"$CLEANUP_OUTPUT" 2>"$CLEANUP_ERROR"; then
+      if aws secretsmanager describe-secret --secret-id "$secret_name" >"$CLEANUP_OUTPUT" 2>"$CLEANUP_ERROR"; then
         sleep 1
       else
         describe_rc=$?
@@ -268,7 +346,7 @@ delete_health_secret() {
         return "$describe_rc"
       fi
     done
-    echo "health secret still exists after deletion" >&2
+    echo "run secret still exists after deletion" >&2
     return 1
   else
     describe_rc=$?
@@ -280,16 +358,32 @@ delete_health_secret() {
 }
 
 cleanup() {
-  local status=0 rc=0
+  local status=0
+  if [ "${SCENARIO:-preflight}" = matrix ] && [ "${PAID_EVIDENCE_VERIFIED:-no}" != yes ] \
+      && [ "${T01_REVIEWED_UNCERTAIN_CLEANUP:-}" != yes ]; then
+    echo "external paid evidence is not verified; retaining resources and the fleet mutex" >&2
+    return 1
+  fi
   CLEANUP_OUTPUT="$(mktemp)"
   CLEANUP_ERROR="$(mktemp)"
   trap "rm -f $CLEANUP_OUTPUT $CLEANUP_ERROR" EXIT
-  delete_stack "$STACK_NAME" || status=$?
+  if [ "${SCENARIO:-preflight}" = matrix ] && [ "${PAID_EVIDENCE_VERIFIED:-no}" = yes ]; then
+    require_env GITHUB_RUN_ID
+    aws s3 rm "s3://${T01_EVIDENCE_BUCKET:-hive-v2-t01-evidence-594552273052}/hive-v2-t01-smoke/$GITHUB_RUN_ID/" --recursive || status=$?
+  fi
   if (( status == 0 )); then
-    rc=0
-    delete_health_secret || rc=$?
-    if (( rc != 0 )); then
-      status=$rc
+    delete_stack "$STACK_NAME" || status=$?
+  fi
+  if (( status == 0 )); then
+    delete_run_secret "$HEALTH_SECRET_NAME" || status=$?
+  fi
+  if (( status == 0 )) && [ "${SCENARIO:-preflight}" = matrix ]; then
+    delete_run_secret "$PROXY_SECRET_NAME" || status=$?
+  fi
+  if (( status == 0 )) && [ "${SCENARIO:-preflight}" != preflight ] && [ "${T01_REVIEWED_UNCERTAIN_CLEANUP:-}" != yes ]; then
+    if ! python3 infra/t01-smoke/runtime.py validate-evidence "${EVIDENCE_DIR:-$PWD/t01-evidence}/preflight.jsonl"; then
+      echo "paid evidence is incomplete or uncertain; retaining the fleet mutex" >&2
+      status=1
     fi
   fi
   return "$status"
@@ -299,8 +393,9 @@ case "${1:-}" in
   validate-inputs) validate_inputs ;;
   acquire) acquire_mutex ;;
   issue-health-credential) with_mutex_renewal issue_health_credential ;;
+  issue-proxy-credential) with_mutex_renewal issue_proxy_credential ;;
   deploy) with_mutex_renewal deploy_stack ;;
   collect) with_mutex_renewal collect_evidence ;;
   cleanup) with_mutex_renewal cleanup ;;
-  *) echo "usage: $0 validate-inputs|acquire|issue-health-credential|deploy|collect|cleanup" >&2; exit 2 ;;
+  *) echo "usage: $0 validate-inputs|acquire|issue-health-credential|issue-proxy-credential|deploy|collect|cleanup" >&2; exit 2 ;;
 esac

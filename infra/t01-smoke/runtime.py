@@ -1,3 +1,4 @@
+import hashlib
 import http.client
 import json
 import os
@@ -5,21 +6,31 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = '0.22.6'
 COMMIT = 'f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab'
 SOURCE_SHA256 = '551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae2efa81'
-SIMPLE_CHECKS = {
-    'uv_install', 'python_install', 'frozen_hash_lock_install',
-    'lazy_install_disabled', 'service_filesystem_access',
+BASE_SIMPLE_CHECKS = {
+    'uv_install', 'python_install', 'frozen_hash_lock_install', 'node_runtime_locked',
+    'runner_dependencies_locked', 'lazy_install_disabled', 'service_filesystem_access',
     'default_deny_lockdown', 'direct_ip', 'unapproved_dns', 'redirect', 'ipv6',
     'alternate_port', 'metadata', 'container_credentials', 'teamkimi_no_model',
-    'paid_admission_disabled',
+}
+SIMPLE_CHECKS = BASE_SIMPLE_CHECKS | {
+    'paid_admission_disabled', 'trusted_tunnel_ready', 'count_only_no_generation',
+    'teamkimi_control_port', 'teamkimi_control_broker',
+    'tunnel_cleanup', 'paid_evidence_export', 'paid_matrix_completed',
 }
 ALLOWED_CHECKS = SIMPLE_CHECKS | {'bootstrap_error', 'hermes_version', 'source_sha256', 'provisioning', 'complete'}
-ALLOWED_FIELDS = {'check', 'status', 'version', 'commit', 'sha256', 'category', 'origin'}
+ALLOWED_FIELDS = {
+    'check', 'status', 'version', 'commit', 'sha256', 'category', 'origin', 'policyHash',
+    'requestHash', 'model', 'inputTokens', 'baseInputTokens', 'cacheReadInputTokens',
+    'cacheCreationInputTokens', 'cacheCreation5mInputTokens', 'cacheCreation1hInputTokens',
+    'generationRequests', 'timestamp', 'revokedAt', 'proof', 'credentialId',
+}
 
 
 def read_json(path):
@@ -116,6 +127,26 @@ def wait_for_broker():
     return 1
 
 
+def wait_for_teamkimi():
+    for attempt in range(30):
+        try:
+            connection = http.client.HTTPConnection('127.0.0.1', 8765, timeout=2)
+            connection.request('GET', '/teamkimi/smoke/status', headers={'Accept': 'application/json'})
+            response = connection.getresponse()
+            payload = response.read(65_537)
+            connection.close()
+            if response.status == 200 and len(payload) <= 65_536:
+                status = json.loads(payload)
+                if status.get('enabled') is True and status.get('reservations') == [] \
+                        and status.get('totals', {}).get('admissions') == 0:
+                    return 0
+        except (OSError, ValueError, json.JSONDecodeError, http.client.HTTPException):
+            pass
+        if attempt < 29:
+            time.sleep(1)
+    return 1
+
+
 def run_process(arguments, timeout):
     return subprocess.run(arguments, capture_output=True, text=True, timeout=timeout, check=False)
 
@@ -184,6 +215,55 @@ def classify_version_exit(returncode, output):
     if 1 <= returncode <= 255:
         return f'runtime-version-system-exit-{returncode}'
     return 'runtime-version-exit-failed'
+
+
+def proxy_control_key(value):
+    if not isinstance(value, str) or not value or len(value) > 512 or any(character.isspace() for character in value):
+        raise ValueError('invalid TeamKimi proxy control key')
+    return value
+
+
+def create_proxy_secret():
+    key = proxy_control_key(os.environ['TEAMKIMI_PROXY_KEY'])
+    run_id = os.environ['GITHUB_RUN_ID']
+    if not re.fullmatch(r'[0-9]+', run_id):
+        raise ValueError('invalid run ID')
+    name = f'hive-v2-t01-smoke-proxy-{run_id}'
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', delete=False) as temporary:
+        temporary.write(key)
+        path = Path(temporary.name)
+    try:
+        result = run_process([
+            'aws', 'secretsmanager', 'create-secret', '--name', name,
+            '--description', 'Expiring run-scoped T01 TeamKimi control key',
+            '--secret-string', f'file://{path}',
+        ], 30)
+        if result.returncode != 0:
+            raise RuntimeError('proxy secret creation failed')
+        created = json.loads(result.stdout)
+    finally:
+        path.unlink(missing_ok=True)
+    output = os.environ.get('GITHUB_OUTPUT')
+    if output:
+        with open(output, 'a', encoding='utf-8') as destination:
+            destination.write(f'arn={created["ARN"]}\n')
+    print(json.dumps({'arn': created['ARN']}, separators=(',', ':')))
+
+
+def write_proxy_environment():
+    result = run_process([
+        'aws', 'secretsmanager', 'get-secret-value', '--secret-id', os.environ['TEAMKIMI_PROXY_SECRET_ARN'],
+        '--query', 'SecretString', '--output', 'text',
+    ], 30)
+    if result.returncode != 0:
+        raise RuntimeError('proxy secret read failed')
+    key = proxy_control_key(result.stdout.rstrip('\n'))
+    path = Path(os.environ.get('T01_PROXY_ENVIRONMENT', '/etc/t01/proxy.env'))
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o400)
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as environment:
+        environment.write(f'HIVE_T01_PROXY_KEY={key}\n')
+    path.chmod(0o400)
+
 
 
 def hermes_check():
@@ -264,6 +344,73 @@ def read_evidence(path):
         return [json.loads(line) for line in source if line.strip()]
 
 
+COUNT_INPUT_FIELDS = (
+    'inputTokens', 'baseInputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens',
+    'cacheCreation5mInputTokens', 'cacheCreation1hInputTokens',
+)
+
+
+def valid_counted_input(counts):
+    return isinstance(counts, dict) \
+        and all(type(counts.get(key)) is int and counts[key] >= 0 for key in COUNT_INPUT_FIELDS) \
+        and counts['cacheCreationInputTokens'] == counts['cacheCreation5mInputTokens'] + counts['cacheCreation1hInputTokens'] \
+        and counts['inputTokens'] == counts['baseInputTokens'] + counts['cacheReadInputTokens'] + counts['cacheCreationInputTokens']
+
+
+def count_evidence(path):
+    raw = Path(path).read_bytes()
+    if len(raw) > MAX_EVIDENCE_BYTES:
+        raise ValueError('count evidence is oversized')
+    value = json.loads(raw)
+    if not isinstance(value, dict) or set(value) != {
+        'schemaVersion', 'model', 'requestHash', 'counts', 'generationRequests', 'status', 'timestamp', 'revocation',
+    } or value['schemaVersion'] != 1 or value['model'] != 'kimi-code/k3.1-pro' \
+            or value['status'] != 'counted' or value['generationRequests'] != 0 \
+            or not re.fullmatch(r'[a-f0-9]{64}', value['requestHash']):
+        raise ValueError('invalid count evidence')
+    counts = value['counts']
+    if set(counts) != set(COUNT_INPUT_FIELDS) or not valid_counted_input(counts):
+        raise ValueError('invalid counted input')
+    revocation = value['revocation']
+    if not isinstance(revocation, dict) or set(revocation) != {'id', 'revokedAt', 'proof'} \
+            or not re.fullmatch(r'[A-Za-z0-9._:-]{1,256}', revocation['id']) \
+            or type(revocation['revokedAt']) is not int or revocation['revokedAt'] < 0 \
+            or not re.fullmatch(r'[a-f0-9]{64}', revocation['proof']) \
+            or type(value['timestamp']) is not int or value['timestamp'] < 0:
+        raise ValueError('invalid count revocation')
+    record = {
+        'check': 'count_only_no_generation', 'status': 'passed',
+        'sha256': hashlib.sha256(raw).hexdigest(), 'requestHash': value['requestHash'],
+        'model': value['model'], **counts, 'generationRequests': 0,
+        'timestamp': value['timestamp'], 'revokedAt': revocation['revokedAt'], 'proof': revocation['proof'],
+    }
+    if not valid_record(record):
+        raise ValueError('count record failed sanitization')
+    print(json.dumps(record, separators=(',', ':'), sort_keys=True))
+
+
+def paid_export_credential(path, manifest_path):
+    records = [record for record in read_evidence(path) if record.get('check') == 'paid_evidence_export']
+    if len(records) != 1 or not valid_record(records[0]):
+        raise ValueError('invalid paid export marker')
+    if hashlib.sha256(Path(manifest_path).read_bytes()).hexdigest() != records[0]['sha256']:
+        raise ValueError('paid export manifest hash mismatch')
+    print(records[0]['credentialId'])
+
+
+def manifest_credential(path):
+    raw = Path(path).read_bytes()
+    if len(raw) > MAX_EVIDENCE_BYTES:
+        raise ValueError('oversized preflight evidence')
+    revocation = json.loads(raw).get('revocation', {})
+    if revocation.get('scope') != 'generation' or revocation.get('verified') is not True \
+            or revocation.get('revoked') is not True or revocation.get('credentialId') != revocation.get('receiptId') \
+            or not re.fullmatch(r'[a-f0-9]{32}', revocation.get('credentialId', '')) \
+            or not re.fullmatch(r'[a-f0-9]{64}', revocation.get('proof', '')):
+        raise ValueError('generation revocation not proven')
+    print(revocation['credentialId'])
+
+
 def valid_record(record):
     if not isinstance(record, dict) or set(record) - ALLOWED_FIELDS:
         return False
@@ -292,9 +439,54 @@ def valid_record(record):
     elif check == 'source_sha256':
         if record != {'check': check, 'status': 'passed', 'sha256': SOURCE_SHA256}:
             return False
+    elif check == 'node_runtime_locked':
+        if record != {'check': check, 'status': 'passed', 'version': '22.23.2'}:
+            return False
+    elif check == 'paid_evidence_export':
+        if set(record) != {'check', 'status', 'sha256', 'credentialId'} \
+                or not re.fullmatch(r'[a-f0-9]{64}', record.get('sha256', '')) \
+                or not re.fullmatch(r'[a-f0-9]{32}', record.get('credentialId', '')):
+            return False
+    elif check == 'count_only_no_generation':
+        expected = {
+            'check', 'status', 'sha256', 'requestHash', 'model', *COUNT_INPUT_FIELDS,
+            'generationRequests', 'timestamp', 'revokedAt', 'proof',
+        }
+        if set(record) != expected or record['model'] != 'kimi-code/k3.1-pro' \
+                or not re.fullmatch(r'[a-f0-9]{64}', record['sha256']) \
+                or not re.fullmatch(r'[a-f0-9]{64}', record['requestHash']) \
+                or not re.fullmatch(r'[a-f0-9]{64}', record['proof']) \
+                or any(type(record[key]) is not int or record[key] < 0 for key in ('timestamp', 'revokedAt')) \
+                or type(record['generationRequests']) is not int or record['generationRequests'] != 0 \
+                or not valid_counted_input(record):
+            return False
+    elif check == 'paid_matrix_completed':
+        if set(record) != {'check', 'status', 'policyHash'} or not re.fullmatch(r'[a-f0-9]{64}', record.get('policyHash', '')):
+            return False
     elif set(record) != {'check', 'status'}:
         return False
     return True
+
+
+def sanitize_evidence(path):
+    try:
+        records = read_evidence(path)
+    except (OSError, ValueError):
+        return 1
+    seen = set()
+    for record in records:
+        check = record.get('check') if isinstance(record, dict) else None
+        if check in seen or not valid_record(record):
+            return 1
+        seen.add(check)
+    return 0
+
+
+def validate_evidence(path):
+    try:
+        return 0 if classify_records(read_evidence(path)) == 'passed' else 1
+    except (OSError, ValueError):
+        return 1
 
 
 def classify_records(records):
@@ -307,7 +499,20 @@ def classify_records(records):
     if 'complete' not in seen:
         return 'incomplete'
     if records[-1] == {'check': 'complete', 'status': 'passed'}:
-        required = SIMPLE_CHECKS | {'hermes_version', 'source_sha256', 'complete'}
+        required = BASE_SIMPLE_CHECKS | {'hermes_version', 'source_sha256', 'complete'}
+        if 'paid_matrix_completed' in seen:
+            required |= {
+                'trusted_tunnel_ready', 'count_only_no_generation', 'tunnel_cleanup',
+                'teamkimi_control_port', 'teamkimi_control_broker',
+                'paid_evidence_export', 'paid_matrix_completed',
+            }
+        elif 'count_only_no_generation' in seen:
+            required |= {
+                'trusted_tunnel_ready', 'count_only_no_generation', 'tunnel_cleanup',
+                'teamkimi_control_port', 'teamkimi_control_broker', 'paid_admission_disabled',
+            }
+        else:
+            required.add('paid_admission_disabled')
         return 'passed' if seen == required else 'invalid'
     if records[-1] == {'check': 'complete', 'status': 'failed'}:
         return 'failed'
@@ -332,6 +537,20 @@ def main():
             return wait_for_broker()
         except (OSError, ValueError):
             return 1
+    if sys.argv[1] == 'wait-for-teamkimi' and len(sys.argv) == 2:
+        return wait_for_teamkimi()
+    if sys.argv[1] == 'create-proxy-secret' and len(sys.argv) == 2:
+        try:
+            create_proxy_secret()
+            return 0
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            return 1
+    if sys.argv[1] == 'write-proxy-environment' and len(sys.argv) == 2:
+        try:
+            write_proxy_environment()
+            return 0
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            return 1
     if sys.argv[1] == 'hermes-check' and len(sys.argv) == 2:
         try:
             hermes_check()
@@ -339,9 +558,31 @@ def main():
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
             record_hermes_check_error(error)
             return 1
+    if sys.argv[1] == 'validate-evidence' and len(sys.argv) == 3:
+        return validate_evidence(sys.argv[2])
+    if sys.argv[1] == 'sanitize-evidence' and len(sys.argv) == 3:
+        return sanitize_evidence(sys.argv[2])
     if sys.argv[1] == 'classify-evidence' and len(sys.argv) == 3:
         print(classify_evidence(sys.argv[2]))
         return 0
+    if sys.argv[1] == 'count-evidence' and len(sys.argv) == 3:
+        try:
+            count_evidence(sys.argv[2])
+            return 0
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return 1
+    if sys.argv[1] == 'manifest-credential' and len(sys.argv) == 3:
+        try:
+            manifest_credential(sys.argv[2])
+            return 0
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return 1
+    if sys.argv[1] == 'paid-export-credential' and len(sys.argv) == 4:
+        try:
+            paid_export_credential(sys.argv[2], sys.argv[3])
+            return 0
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return 1
     return 2
 
 

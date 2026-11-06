@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, open, writeFile } from 'node:fs/promises';
+import { chmod, chown, mkdir, mkdtemp, open, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { HermesLifecycle, type CanonicalState, type LifecycleObservation, type SanitizedNativeEvent, type TraceEntry } from './parser.js';
+import { MATRIX_CEILING, SCENARIO_CEILING, providerSemantics, sameCountedInput, usageEvidence } from './policy.js';
 
 export const EXPECTED_VERSION = '0.22.6';
 export const EXPECTED_COMMIT = 'f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab';
@@ -28,7 +29,12 @@ export type ProcessSupervisor = {
   }>;
 };
 
-export type UsageEvidence = { inputTokens: number; outputTokens: number; reasoningTokens: number; totalTokens: number; costMicros: number };
+export type CountedInputEvidence = {
+  inputTokens: number; baseInputTokens: number; cacheReadInputTokens: number;
+  cacheCreationInputTokens: number; cacheCreation5mInputTokens: number; cacheCreation1hInputTokens: number;
+};
+export type UsageCeiling = { inputTokens: number; outputTokens: number; reasoningTokens: number; totalTokens: number; costMicros: number };
+export type UsageEvidence = CountedInputEvidence & UsageCeiling;
 export type BrokerReadiness = {
   provider: 'TeamKimi';
   model: string;
@@ -41,11 +47,13 @@ export type BrokerReadiness = {
   };
   enforcement: {
     atomicReservations: true; sharedLedger: true; modelCeiling: true; tokenCeiling: true; dollarCeiling: true;
-    pricingVerified: true; policyHash: string; admissionAllowed: true; blockedReason: null;
+    pricingVerified: true; policyHash: string;
+    providerSemantics: { maxTokens: string; thinking: string; usage: string };
+    admissionAllowed: true; blockedReason: null;
   };
   ceilings: {
-    scenario: UsageEvidence;
-    matrix: UsageEvidence & { admissions: number };
+    scenario: UsageCeiling;
+    matrix: UsageCeiling & { admissions: number };
   };
   egress: {
     defaultDeny: boolean; approvedDestination: boolean; directIpDenied: boolean; unapprovedDnsDenied: boolean;
@@ -59,7 +67,9 @@ export type BrokerReceipt = {
   receiptId?: string;
   model?: string;
   inputVerified?: boolean;
+  countedInput?: CountedInputEvidence;
   usage?: UsageEvidence;
+  policyHash?: string;
   requestHash?: string;
   admissionRequestHash?: string;
   errorCategory?: string;
@@ -78,6 +88,10 @@ export type SessionEvidence = {
   childSessionCount?: number;
   updatedAt?: string;
 };
+export type RevocationEvidence = {
+  revoked: boolean; receiptId: string; proof: string;
+  credentialId?: string; revokedAt?: number; scope?: 'generation' | 'count-only'; verified?: boolean;
+};
 export type T01Broker = {
   readiness(): Promise<BrokerReadiness>;
   admit(admission: BrokerAdmission): Promise<{ admissionId: string; requestHash: string; endpoint: string }>;
@@ -86,7 +100,7 @@ export type T01Broker = {
   recordActivities(admissionId: string, activities: BrokerActivity[]): Promise<void>;
   recordSession(session: SessionEvidence): Promise<void>;
   sessionEvidence(sessionId: string): Promise<SessionEvidence>;
-  revoke(): Promise<{ revoked: boolean; receiptId: string; proof: string }>;
+  revoke(): Promise<RevocationEvidence>;
 };
 
 type Scenario = {
@@ -127,7 +141,7 @@ export type RunEvidence = {
   stdout: { sha256: string; bytes: number };
   stderr: { sha256: string; bytes: number };
   usage?: UsageEvidence;
-  usageFile?: { status: 'present' | 'missing' | 'invalid'; sha256?: string; model?: string; usage?: UsageEvidence; callCount?: number };
+  usageFile?: { status: 'present' | 'missing' | 'invalid'; sha256?: string; model?: string; usage?: UsageCeiling; callCount?: number };
   receipt?: BrokerReceipt;
   session?: SessionEvidence;
   process: ProcessIdentity & { exitCode?: number; signals: string[]; reaped: boolean };
@@ -146,7 +160,7 @@ export type T01Report = {
   };
   runs: RunEvidence[];
   workspace: { path: string; cleanupAfter: string };
-  revocation?: { revoked: boolean; receiptId: string; proof: string };
+  revocation?: RevocationEvidence;
 };
 export type T01RunnerOptions = {
   process: ProcessSupervisor;
@@ -157,8 +171,10 @@ export type T01RunnerOptions = {
   home?: string;
   path?: string;
   hermesPath?: string;
+  hermesUser?: string;
   pythonPath?: string;
   probePath?: string;
+  expectedPolicyHash?: string;
   deadlineMs?: number;
   cancellationGraceMs?: number;
   receiptPollMs?: number;
@@ -169,8 +185,6 @@ export type T01RunnerOptions = {
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 const delay = (ms: number) => new Promise<void>((resolveDelay) => setTimeout(resolveDelay, ms));
-const expectedScenarioCeiling = { inputTokens: 16000, outputTokens: 2000, reasoningTokens: 4000, totalTokens: 22000, costMicros: 500000 };
-const expectedMatrixCeiling = { admissions: 12, inputTokens: 96000, outputTokens: 12000, reasoningTokens: 24000, totalTokens: 132000, costMicros: 5000000 };
 
 function exactObject(value: unknown, keys: readonly string[]) {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('invalid-readiness-object');
@@ -193,7 +207,7 @@ function usageCeiling(value: unknown, matrix = false) {
   return input;
 }
 
-function validateReadiness(value: BrokerReadiness, model: string): BrokerReadiness {
+function validateReadiness(value: BrokerReadiness, model: string, expectedPolicyHash?: string): BrokerReadiness {
   const input = exactObject(value, ['provider', 'model', 'credential', 'isolation', 'enforcement', 'ceilings', 'egress']);
   if (input.provider !== 'TeamKimi' || input.model !== model || model !== EXPECTED_MODEL) throw new Error('broker-readiness-not-approved');
   const credential = exactObject(input.credential, ['smokeOnly', 'shortLived', 'isolatedFromHermes']);
@@ -205,13 +219,16 @@ function validateReadiness(value: BrokerReadiness, model: string): BrokerReadine
   Object.values(exactObject(input.isolation, isolationKeys)).forEach(literalTrue);
   const enforcement = exactObject(input.enforcement, [
     'atomicReservations', 'sharedLedger', 'modelCeiling', 'tokenCeiling', 'dollarCeiling', 'pricingVerified',
-    'policyHash', 'admissionAllowed', 'blockedReason',
+    'policyHash', 'providerSemantics', 'admissionAllowed', 'blockedReason',
   ]);
   for (const key of ['atomicReservations', 'sharedLedger', 'modelCeiling', 'tokenCeiling', 'dollarCeiling', 'pricingVerified', 'admissionAllowed']) literalTrue(enforcement[key]);
-  if (typeof enforcement.policyHash !== 'string' || !/^[a-f0-9]{64}$/.test(enforcement.policyHash) || enforcement.blockedReason !== null) throw new Error('broker-readiness-not-approved');
+  if (typeof enforcement.policyHash !== 'string' || !/^[a-f0-9]{64}$/.test(enforcement.policyHash)
+    || expectedPolicyHash !== undefined && enforcement.policyHash !== expectedPolicyHash
+    || enforcement.blockedReason !== null) throw new Error('broker-readiness-not-approved');
+  providerSemantics(enforcement.providerSemantics);
   const ceilings = exactObject(input.ceilings, ['scenario', 'matrix']);
-  if (JSON.stringify(usageCeiling(ceilings.scenario)) !== JSON.stringify(expectedScenarioCeiling)
-    || JSON.stringify(usageCeiling(ceilings.matrix, true)) !== JSON.stringify(expectedMatrixCeiling)) throw new Error('broker-readiness-not-approved');
+  if (JSON.stringify(usageCeiling(ceilings.scenario)) !== JSON.stringify(SCENARIO_CEILING)
+    || JSON.stringify(usageCeiling(ceilings.matrix, true)) !== JSON.stringify(MATRIX_CEILING)) throw new Error('broker-readiness-not-approved');
   const egressKeys = [
     'defaultDeny', 'approvedDestination', 'directIpDenied', 'unapprovedDnsDenied', 'redirectDenied', 'ipv6Denied',
     'alternatePortDenied', 'metadataDenied',
@@ -226,6 +243,18 @@ export function policyAdmissionHash(admission: BrokerAdmission) {
 
 export function admissionEvidenceHash(admission: BrokerAdmission, forwardedBodySha256: string) {
   return sha256(JSON.stringify({ ...admission, forwardedBodySha256 }));
+}
+
+export async function writeScenarioPrompt(workspace: string, scenarioId: ScenarioId, prompt: string) {
+  const directory = join(workspace, 'prompts');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
+  const path = join(directory, `${scenarioId}.prompt`);
+  await writeFile(path, prompt, { mode: 0o440, flag: 'wx' });
+  await chmod(path, 0o440);
+  if (process.getuid?.() === 0) await chown(path, 0, 10000);
+  await chmod(directory, 0o555);
+  return path;
 }
 
 function policyHash(scenario: Scenario, routeHash: string) {
@@ -244,11 +273,12 @@ function finiteNumber(value: unknown) {
 }
 
 function exactUsage(value: unknown): value is UsageEvidence {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const usage = value as Record<string, unknown>;
-  const keys = ['inputTokens', 'outputTokens', 'reasoningTokens', 'totalTokens', 'costMicros'];
-  if (Object.keys(usage).length !== keys.length || keys.some((key) => !Number.isSafeInteger(usage[key]) || (usage[key] as number) < 0)) return false;
-  return usage.totalTokens === (usage.inputTokens as number) + (usage.outputTokens as number) + (usage.reasoningTokens as number);
+  try {
+    usageEvidence(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readUsageFile(path: string): Promise<RunEvidence['usageFile']> {
@@ -324,9 +354,10 @@ function validateNativeSession(value: unknown): SessionEvidence {
   return session;
 }
 
-export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report> {
+async function runT01MatrixInner(options: T01RunnerOptions): Promise<T01Report> {
   const preflightOnly = options.preflightOnly ?? true;
   if (!preflightOnly && options.paidAuthorization !== true) throw new Error('paid-admissions-not-authorized');
+  if (!preflightOnly && !/^[a-f0-9]{64}$/.test(options.expectedPolicyHash ?? '')) throw new Error('expected-policy-hash-required');
   const workspace = options.workspace ?? await mkdtemp(join(tmpdir(), 'hive-t01-'));
   const home = options.home ?? join(workspace, 'home');
   const hermesHome = join(workspace, 'hermes-home');
@@ -337,6 +368,9 @@ export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report
     HOME: home,
     PATH: options.path ?? '/usr/local/bin:/usr/bin:/bin',
     HERMES_HOME: hermesHome,
+    HERMES_INSTALL_ROOT: '/opt/t01/source',
+    PYTHONPATH: '/opt/t01/source',
+    HERMES_RUNTIME_DIR: '/opt/t01/tools',
     TEAMKIMI_OPENAI_COMPATIBLE_URL: options.brokerUrl,
     TEAMKIMI_MODEL_ID: options.model,
   };
@@ -358,6 +392,13 @@ export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report
     receiptDeadlineMs: options.receiptDeadlineMs ?? 10_000,
   };
   const baseRequest = { cwd: workspace, env };
+  if (options.hermesUser !== undefined && !/^[a-z_][a-z0-9_-]*$/.test(options.hermesUser)) throw new Error('invalid-hermes-user');
+  const hermesInvocation = (command: string, args: string[], environment = env) => ({
+    command: options.hermesUser ? '/usr/bin/runuser' : command,
+    args: options.hermesUser
+      ? ['-u', options.hermesUser, '--', 'env', '-i', ...Object.entries(environment).map(([key, value]) => `${key}=${value}`), command, ...args]
+      : args,
+  });
   let aborted = false;
 
   const abort = (reason: string) => {
@@ -368,7 +409,7 @@ export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report
 
   const nativeSession = async (scenarioId: ScenarioId, sessionId: string) => {
     const captured = await options.process.capture({
-      ...baseRequest, scenarioId, command: pythonPath, args: [probePath, '--session-id', sessionId],
+      ...baseRequest, scenarioId, ...hermesInvocation(pythonPath, [probePath, '--session-id', sessionId]),
     });
     if (captured.code !== 0) throw new Error('native-session-probe-failed');
     return validateNativeSession(JSON.parse(captured.stdout));
@@ -378,8 +419,7 @@ export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report
     const frozenPolicyHash = policyHash(scenario, routeHash);
     const admissionPolicy = { scenarioId: scenario.id, generation: 1, routeHash, policyHash: frozenPolicyHash };
     const admission = await options.broker.admit(admissionPolicy);
-    const promptPath = join(workspace, `${scenario.id}.prompt`);
-    await writeFile(promptPath, scenario.prompt, { mode: 0o400, flag: 'wx' });
+    const promptPath = await writeScenarioPrompt(workspace, scenario.id, scenario.prompt);
     const args = [
       'chat', '--query-file', promptPath, '--format', 'stream-json', '--model', options.model,
       '--provider', 'anthropic', '--base-url', admission.endpoint, '--api-key', 'hive-adapter-placeholder',
@@ -395,12 +435,12 @@ export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report
     let forcedRequest: Promise<void> | undefined;
     let processDone: () => void = () => undefined;
     const done = new Promise<void>((resolveDone) => { processDone = resolveDone; });
+    const processEnv = { ...baseRequest.env, TEAMKIMI_OPENAI_COMPATIBLE_URL: admission.endpoint };
     const handle = await options.process.start({
       ...baseRequest,
-      env: { ...baseRequest.env, TEAMKIMI_OPENAI_COMPATIBLE_URL: admission.endpoint },
+      env: processEnv,
       scenarioId: scenario.id,
-      command: hermesPath,
-      args,
+      ...hermesInvocation(hermesPath, args, processEnv),
     }, (observation) => {
       lifecycle.observe(observation);
       if (observation.type === 'exit') processDone();
@@ -464,11 +504,15 @@ export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report
       || activity.status !== 'succeeded' || activity.sequence !== index + 1)
       || activityIds.size !== actualActivities.length || requiredActivities.some((id) => !activityIds.has(id));
     const boundReceipt = Boolean(receipt?.receiptId && receipt.inputVerified === true
+      && receipt.policyHash === report.preflight.readiness?.enforcement.policyHash
+      && sameCountedInput(receipt.countedInput, receipt.usage)
       && receipt.requestHash && /^[a-f0-9]{64}$/.test(receipt.requestHash)
       && receipt.admissionRequestHash === admissionEvidenceHash(admissionPolicy, receipt.requestHash) && exactUsage(receipt.usage));
-    const succeeded = state === 'succeeded' && !cancelRequested && receipt?.status === 'completed';
-    const failed = state === 'failed' && !cancelRequested && receipt?.status === 'failed';
-    const cancelled = state === 'cancelled' && cancelRequested && receipt?.status === 'interrupted';
+    const succeeded = !['P07', 'P08', 'P09', 'P10'].includes(scenario.id)
+      && state === 'succeeded' && !cancelRequested && receipt?.status === 'completed';
+    const failed = scenario.id === 'P07' && state === 'failed' && !cancelRequested && receipt?.status === 'failed';
+    const cancelled = ['P08', 'P09', 'P10'].includes(scenario.id)
+      && state === 'cancelled' && cancelRequested && receipt?.status === 'interrupted';
     if (!reaped || !boundReceipt || (!succeeded && !failed && !cancelled)
       || wrongModel || wrongTool || missingTools || wrongActivities) {
       lifecycle.observe({ type: 'receipt', status: 'conflicting' });
@@ -476,7 +520,7 @@ export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report
     }
     let reconciliation: RunEvidence['reconciliation'];
     try {
-      const captured = await options.process.capture({ ...baseRequest, scenarioId: 'PREFLIGHT', command: pythonPath, args: [probePath] });
+      const captured = await options.process.capture({ ...baseRequest, scenarioId: 'PREFLIGHT', ...hermesInvocation(pythonPath, [probePath]) });
       const reconciledProbe = validateProbe(JSON.parse(captured.stdout));
       validateCapabilities(reconciledProbe);
       const registryHash = sha256(JSON.stringify(reconciledProbe.scenarios[scenario.id]));
@@ -500,8 +544,16 @@ export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report
         status: 'present' as const, sessionId, admissionId: admission.admissionId,
         routeHash, policyHash: frozenPolicyHash, generation: 1,
       };
-      await mkdir(join(hermesHome, 't01-sessions'), { recursive: true, mode: 0o700 });
-      await writeFile(join(hermesHome, 't01-sessions', `${sha256(sessionId)}.json`), JSON.stringify(sidecar), { mode: 0o600, flag: 'wx' });
+      const directory = join(hermesHome, 't01-sessions');
+      const path = join(directory, `${sha256(sessionId)}.json`);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await writeFile(path, JSON.stringify(sidecar), { mode: 0o440, flag: 'wx' });
+      await chmod(path, 0o440);
+      if (process.getuid?.() === 0) {
+        await chown(path, 0, 10000);
+        await chown(directory, 0, 10000);
+      }
+      await chmod(directory, 0o550);
       await options.broker.recordSession(sidecar);
     }
     const evidence: RunEvidence = {
@@ -525,15 +577,15 @@ export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report
   };
 
   try {
-    const version = await options.process.capture({ ...baseRequest, scenarioId: 'PREFLIGHT', command: hermesPath, args: ['--version'] });
+    const version = await options.process.capture({ ...baseRequest, scenarioId: 'PREFLIGHT', ...hermesInvocation(hermesPath, ['--version']) });
     if (version.code !== 0 || !/(?:^|\s)v?0\.22\.6(?:\s|$)/.test(version.stdout.trim())) throw new Error('version-pin-mismatch');
-    const capturedProbe = await options.process.capture({ ...baseRequest, scenarioId: 'PREFLIGHT', command: pythonPath, args: [probePath] });
+    const capturedProbe = await options.process.capture({ ...baseRequest, scenarioId: 'PREFLIGHT', ...hermesInvocation(pythonPath, [probePath]) });
     if (capturedProbe.code !== 0) throw new Error('preflight-probe-failed');
     const probe = validateProbe(JSON.parse(capturedProbe.stdout));
     validateCapabilities(probe);
     report.preflight.installation = { version: probe.version, commit: probe.commit, artifactHash: probe.artifactHash, lockedDependenciesHash: probe.lockedDependenciesHash };
     for (const scenario of SCENARIOS) report.preflight.registryHashes[scenario.id] = sha256(JSON.stringify(probe.scenarios[scenario.id]));
-    report.preflight.readiness = validateReadiness(await options.broker.readiness(), options.model);
+    report.preflight.readiness = validateReadiness(await options.broker.readiness(), options.model, options.expectedPolicyHash);
     const unknown = await options.broker.sessionEvidence('unknown-session');
     if (unknown.status !== 'missing') throw new Error('unknown-session-not-missing');
 
@@ -581,15 +633,31 @@ export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report
     }
   } catch {
     if (!report.abortReason) abort('preflight-or-runner-error');
-  } finally {
-    try {
-      report.revocation = await options.broker.revoke();
-      if (!report.revocation.revoked) abort('revocation-failed');
-    } catch {
-      abort('revocation-failed');
-    }
   }
   return report;
+}
+
+export async function runT01Matrix(options: T01RunnerOptions): Promise<T01Report> {
+  let report: T01Report | undefined;
+  try {
+    report = await runT01MatrixInner(options);
+    return report;
+  } finally {
+    try {
+      const revocation = await options.broker.revoke();
+      if (report) {
+        report.revocation = revocation;
+        if (!revocation.revoked) {
+          report.state = 'aborted';
+          report.abortReason = 'revocation-failed';
+        }
+      }
+    } catch (error) {
+      if (!report) throw error;
+      report.state = 'aborted';
+      report.abortReason = 'revocation-failed';
+    }
+  }
 }
 
 async function reconcile(lifecycle: HermesLifecycle, admissionId: string, cancelRequested: boolean, timings: { receiptPollMs: number; receiptDeadlineMs: number }, broker: T01Broker) {

@@ -1,4 +1,5 @@
-import { lutimes, mkdir, mkdtemp, readFile, readdir, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { chmod, chown, lutimes, mkdir, mkdtemp, readFile, readdir, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,7 +9,10 @@ import {
   cleanupManifest,
   cleanupWorkspace,
   exportEvidence,
+  verifyEvidenceExport,
+  verifyEvidenceReport,
 } from '../tools/hermes-live/evidence.js';
+import { attestation, matrixUsage, policyHash as expectedPolicyHash } from './hermes-live-fixtures.js';
 import { HermesLifecycle, HermesParser } from '../tools/hermes-live/parser.js';
 import {
   EXPECTED_COMMIT,
@@ -46,7 +50,12 @@ function lifecycle(observations: Parameters<HermesLifecycle['observe']>[0][]) {
   return run.snapshot();
 }
 
-const usage = { inputTokens: 3, outputTokens: 2, reasoningTokens: 1, totalTokens: 6, costMicros: 10 };
+const usage = matrixUsage;
+const counted = {
+  inputTokens: usage.inputTokens, baseInputTokens: usage.baseInputTokens,
+  cacheReadInputTokens: usage.cacheReadInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens,
+  cacheCreation5mInputTokens: usage.cacheCreation5mInputTokens, cacheCreation1hInputTokens: usage.cacheCreation1hInputTokens,
+};
 
 function readiness(): BrokerReadiness {
   return {
@@ -60,7 +69,12 @@ function readiness(): BrokerReadiness {
     },
     enforcement: {
       atomicReservations: true, sharedLedger: true, modelCeiling: true, tokenCeiling: true, dollarCeiling: true,
-      pricingVerified: true, policyHash: 'f'.repeat(64), admissionAllowed: true, blockedReason: null,
+      pricingVerified: true, policyHash: expectedPolicyHash,
+      providerSemantics: {
+        maxTokens: 'independent-output-ceiling', thinking: 'independent-reasoning-ceiling',
+        usage: 'messages-total-input-output-reasoning-v1',
+      },
+      admissionAllowed: true, blockedReason: null,
     },
     ceilings: {
       scenario: { inputTokens: 16000, outputTokens: 2000, reasoningTokens: 4000, totalTokens: 22000, costMicros: 500000 },
@@ -95,7 +109,7 @@ class FakeBroker implements T01Broker {
     const scenarioId = admissionId.replace('admission-', '');
     const common = {
       receiptId: `receipt-${scenarioId}`, model: EXPECTED_MODEL, inputVerified: true, usage,
-      requestHash: 'd'.repeat(64),
+      countedInput: counted, policyHash: expectedPolicyHash, requestHash: 'd'.repeat(64),
       admissionRequestHash: admissionEvidenceHash(this.admissions.find((entry) => entry.scenarioId === scenarioId)!, 'd'.repeat(64)),
       activities: this.activityRecords.get(admissionId) ?? [],
     };
@@ -117,11 +131,18 @@ class FakeBroker implements T01Broker {
     if (sessionId === 'unknown-session') return this.unknownSession;
     return this.sessionOverrides.get(sessionId) ?? this.sessions.get(sessionId) ?? { status: 'missing' };
   }
-  async revoke() { this.revoked = true; return { revoked: true, receiptId: 'revocation-1', proof: 'e'.repeat(64) }; }
+  async revoke() {
+    this.revoked = true;
+    return {
+      revoked: true, receiptId: '0'.repeat(32), credentialId: '0'.repeat(32), revokedAt: 1,
+      proof: 'e'.repeat(64), scope: 'generation' as const, verified: true,
+    };
+  }
 }
 
 class FakeProcess implements ProcessSupervisor {
   readonly requests: ProcessRequest[] = [];
+  readonly captures: ProcessRequest[] = [];
   readonly signals = new Map<string, string[]>();
   readonly reaped = new Map<string, boolean>();
   broker?: FakeBroker;
@@ -130,6 +151,7 @@ class FakeProcess implements ProcessSupervisor {
   overrides = new Map<string, ProcessObservation[]>();
 
   async capture(request: ProcessRequest) {
+    this.captures.push(request);
     if (request.args.includes('--version')) return { code: 0, stdout: 'hermes 0.22.6\n', stderr: '' };
     if (request.args.includes('--session-id')) {
       const sessionId = request.args.at(-1)!;
@@ -218,7 +240,7 @@ async function matrix(process = new FakeProcess(), broker = new FakeBroker()) {
   process.broker = broker;
   return runT01Matrix({
     process, broker, brokerUrl: 'https://broker.invalid/v1', model: EXPECTED_MODEL,
-    preflightOnly: false, paidAuthorization: true,
+    preflightOnly: false, paidAuthorization: true, expectedPolicyHash: expectedPolicyHash,
     deadlineMs: 50, cancellationGraceMs: 20, receiptPollMs: 1, receiptDeadlineMs: 10,
   });
 }
@@ -260,6 +282,34 @@ describe('Hermes live parser and lifecycle', () => {
 });
 
 describe('Hermes live matrix', () => {
+  it('runs every Hermes executable and probe as t01hermes with a scrubbed environment', async () => {
+    const process = new FakeProcess();
+    const broker = new FakeBroker();
+    process.broker = broker;
+    const report = await runT01Matrix({
+      process, broker, brokerUrl: 'https://broker.invalid/v1', model: EXPECTED_MODEL,
+      hermesUser: 't01hermes', preflightOnly: false, paidAuthorization: true, expectedPolicyHash,
+      deadlineMs: 50, cancellationGraceMs: 20, receiptPollMs: 1, receiptDeadlineMs: 10,
+    });
+    expect(report.state).toBe('completed');
+    expect(process.captures.some((request) => request.args.includes('--version'))).toBe(true);
+    expect(process.captures.some((request) => request.args.some((arg) => arg.endsWith('hermes_preflight_probe.py')) && !request.args.includes('--session-id'))).toBe(true);
+    expect(process.captures.some((request) => request.args.includes('--session-id'))).toBe(true);
+    for (const request of [...process.captures, ...process.requests]) {
+      expect(request.command).toBe('/usr/bin/runuser');
+      expect(request.args.slice(0, 5)).toEqual(['-u', 't01hermes', '--', 'env', '-i']);
+      const environment = request.args.slice(5, 5 + Object.keys(request.env).length);
+      expect(environment).toEqual(Object.entries(request.env).map(([key, value]) => `${key}=${value}`));
+      expect(request.env).toMatchObject({
+        HERMES_INSTALL_ROOT: '/opt/t01/source',
+        PYTHONPATH: '/opt/t01/source',
+        HERMES_RUNTIME_DIR: '/opt/t01/tools',
+      });
+      expect(environment.join('\n')).not.toMatch(/AWS|PROXY|CREDENTIAL/);
+      expect(request.args.length).toBeGreaterThan(5 + environment.length);
+    }
+  });
+
   it('runs exactly P01-P12, freezes resume, and runs only P11/P12 concurrently', async () => {
     const process = new FakeProcess();
     const broker = new FakeBroker();
@@ -278,6 +328,11 @@ describe('Hermes live matrix', () => {
     });
     expect(report.abortReason).toBeUndefined();
     expect(report.state).toBe('completed');
+    expect(Object.fromEntries(report.runs.map((run) => [run.scenarioId, run.state]))).toEqual({
+      P01: 'succeeded', P02: 'succeeded', P03: 'succeeded', P04: 'succeeded',
+      P05: 'succeeded', P06: 'succeeded', P07: 'failed', P08: 'cancelled',
+      P09: 'cancelled', P10: 'cancelled', P11: 'succeeded', P12: 'succeeded',
+    });
     expect(report.runs.find((run) => run.scenarioId === 'P03')?.usageFile?.status).toBe('missing');
     expect(report.runs.find((run) => run.scenarioId === 'P06')?.receipt?.activities).toHaveLength(2);
     expect(broker.admissions.map((entry) => entry.scenarioId)).toEqual(SCENARIOS.map((entry) => entry.id));
@@ -289,11 +344,96 @@ describe('Hermes live matrix', () => {
     expect(process.requests.every((request) => !request.args.includes('--run-budget'))).toBe(true);
     for (const request of process.requests) {
       expect(Object.keys(request.env).sort()).toEqual([
-        'HERMES_HOME', 'HOME', 'PATH', 'TEAMKIMI_MODEL_ID', 'TEAMKIMI_OPENAI_COMPATIBLE_URL',
+        'HERMES_HOME', 'HERMES_INSTALL_ROOT', 'HERMES_RUNTIME_DIR', 'HOME', 'PATH', 'PYTHONPATH',
+        'TEAMKIMI_MODEL_ID', 'TEAMKIMI_OPENAI_COMPATIBLE_URL',
       ]);
     }
     expect(report.runs.find((run) => run.scenarioId === 'P07')?.state).toBe('failed');
     expect(broker.revoked).toBe(true);
+  });
+
+  it('writes P01 native-session files with read-only t01hermes group access under umask 077', async () => {
+    const previousUmask = process.umask(0o077);
+    try {
+      const report = await matrix();
+      const directory = join(report.workspace.path, 'hermes-home', 't01-sessions');
+      const [name] = await readdir(directory);
+      const sidecarPath = join(directory, name);
+      const directoryMetadata = await stat(directory);
+      const sidecarMetadata = await stat(sidecarPath);
+      const expectedGroup = process.getuid?.() === 0 ? 10000 : process.getgid?.();
+      expect(directoryMetadata.uid).toBe(process.getuid?.());
+      expect(directoryMetadata.gid).toBe(expectedGroup);
+      expect(directoryMetadata.mode & 0o777).toBe(0o550);
+      expect(sidecarMetadata.uid).toBe(process.getuid?.());
+      expect(sidecarMetadata.gid).toBe(expectedGroup);
+      expect(sidecarMetadata.mode & 0o777).toBe(0o440);
+      expect(JSON.parse(await readFile(sidecarPath, 'utf8'))).toMatchObject({ sessionId: 'session-1', admissionId: 'admission-P01' });
+    } finally {
+      process.umask(previousUmask);
+    }
+  });
+
+  const rootIt = process.getuid?.() === 0 ? it : it.skip;
+  rootIt('reads the P01 sidecar through the real native probe as UID 10000', async () => {
+    const process = new FakeProcess();
+    const broker = new FakeBroker();
+    const report = await matrix(process, broker);
+    expect(report.state).toBe('completed');
+    const workspace = report.workspace.path;
+    const hermesHome = join(workspace, 'hermes-home');
+    const directory = join(hermesHome, 't01-sessions');
+    const [name] = await readdir(directory);
+    expect((await stat(directory)).mode & 0o777).toBe(0o550);
+    expect((await stat(join(directory, name))).mode & 0o777).toBe(0o440);
+    await chown(workspace, 10000, 10000);
+    await chown(hermesHome, 10000, 10000);
+
+    const database = join(hermesHome, 'state.db');
+    const created = spawnSync('python3', ['-c', `
+import sqlite3
+import sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY, ended_at INTEGER, parent_session_id TEXT)')
+connection.execute('CREATE TABLE messages (session_id TEXT)')
+connection.execute('INSERT INTO sessions VALUES (?, 1, NULL)', ('session-1',))
+connection.execute('INSERT INTO messages VALUES (?)', ('session-1',))
+connection.execute('PRAGMA user_version = 7')
+connection.commit()
+connection.close()
+`, database], { encoding: 'utf8' });
+    expect(created.status).toBe(0);
+    await chown(database, 10000, 10000);
+    await chmod(database, 0o600);
+
+    const stubs = join(workspace, 'probe-stubs');
+    await mkdir(join(stubs, 'hermes_cli'), { recursive: true, mode: 0o555 });
+    await mkdir(join(stubs, 'pm'), { recursive: true, mode: 0o555 });
+    const modules = {
+      'psutil.py': '',
+      'model_tools.py': 'def get_tool_definitions(**kwargs): return []\n',
+      'hermes_cli/__init__.py': '',
+      'hermes_cli/config.py': 'def load_config(): pass\n',
+      'hermes_cli/gateway_runtime_discovery.py': 'def query_identify(*args, **kwargs): raise RuntimeError("unused")\n',
+      'hermes_cli/gateway_session_store.py': 'def session_store(): raise RuntimeError("unused")\n',
+      'hermes_cli/plugins.py': 'VALID_HOOKS = set()\ndef iter_hook_callbacks(event): return []\n',
+      'hermes_cli/version_info.py': 'def get_version_info(): raise RuntimeError("unused")\n',
+      'pm/__init__.py': '',
+      'pm/paths.py': 'def install_stamp_path(value): return value\ndef repo_root(): return None\n',
+    };
+    for (const [path, source] of Object.entries(modules)) await writeFile(join(stubs, path), source);
+    const inspected = spawnSync('setpriv', [
+      '--reuid=10000', '--regid=10000', '--clear-groups', 'env', '-i',
+      'PATH=/usr/bin:/bin', `HERMES_HOME=${hermesHome}`, `PYTHONPATH=${stubs}`,
+      'python3', join(import.meta.dirname, '../tools/hermes-live/hermes_preflight_probe.py'),
+      '--session-id', 'session-1',
+    ], { encoding: 'utf8' });
+    expect(inspected.stderr).toBe('');
+    expect(inspected.status).toBe(0);
+    expect(JSON.parse(inspected.stdout)).toMatchObject({
+      status: 'present', sessionId: 'session-1', admissionId: 'admission-P01',
+      schemaVersion: 7, rowCount: 1, state: 'finalized', childSessionCount: 0,
+    });
   });
 
   it('verifies readiness before the first admission', async () => {
@@ -431,6 +571,27 @@ describe('sanitized evidence export', () => {
     expect(await readdir(root)).toEqual([]);
   });
 
+  it('verifies the external manifest, scenario outcomes, receipt arithmetic, and revocation', async () => {
+    const report = await matrix();
+    const root = await mkdtemp(join(tmpdir(), 't01-evidence-'));
+    const manifest = await exportEvidence(root, report);
+    const options = { attestation, expectedPolicyHash, credentialId: '0'.repeat(32) };
+    await verifyEvidenceExport(manifest, options);
+    verifyEvidenceReport(report, options);
+
+    const wrongOutcome = structuredClone(report);
+    wrongOutcome.runs.find((run) => run.scenarioId === 'P07')!.state = 'succeeded';
+    expect(() => verifyEvidenceReport(wrongOutcome, options)).toThrow('scenario-outcome');
+
+    const wrongCost = structuredClone(report);
+    wrongCost.runs[0].receipt!.usage!.costMicros++;
+    expect(() => verifyEvidenceReport(wrongCost, options)).toThrow('receipt-cost-mismatch');
+
+    const wrongRevocation = structuredClone(report);
+    wrongRevocation.revocation!.credentialId = '1'.repeat(32);
+    expect(() => verifyEvidenceReport(wrongRevocation, options)).toThrow('revocation');
+  });
+
   it('rejects an artifact changed after export before approval', async () => {
     const report = await matrix();
     const root = await mkdtemp(join(tmpdir(), 't01-evidence-'));
@@ -517,14 +678,65 @@ describe('T01 security and lifecycle regressions', () => {
     expect(report.runs.at(-1)?.state).toBe('unknown');
   });
 
-  it('rejects receipt admission hashes, input-count gaps, and incomplete usage', async () => {
-    for (const mutation of ['hash', 'usage', 'inputVerified'] as const) {
+  it.each(['P07', 'P08', 'P09', 'P10'] as const)('rejects unexpected success in %s', async (scenarioId) => {
+    const process = new FakeProcess();
+    const broker = new FakeBroker();
+    const sessionId = `session-${scenarioId}`;
+    const events: ProcessObservation[] = [
+      { type: 'stdout', bytes: encode({ timestamp: 1, type: 'system', subtype: 'init', session_id: sessionId, model: EXPECTED_MODEL }) },
+      { type: 'stdout', bytes: encode(result(0, sessionId)) },
+      { type: 'eof' }, { type: 'exit', code: 0 },
+    ];
+    if (scenarioId === 'P08') {
+      events.splice(1, 0,
+        { type: 'stdout', bytes: encode({ timestamp: 1, type: 'tool_use', name: 't01:sleep', tool_call_id: 'sleep-1' }) },
+        { type: 'stdout', bytes: encode({ timestamp: 1, type: 'tool_result', name: 't01:sleep', tool_call_id: 'sleep-1', output: 'done', duration_ms: 1, is_error: false }) });
+    }
+    process.overrides.set(scenarioId, events);
+    const receive = broker.receipt.bind(broker);
+    broker.receipt = async (admissionId) => {
+      const valid = await receive(admissionId);
+      return admissionId === `admission-${scenarioId}` ? { ...valid, status: 'completed' } : valid;
+    };
+    const report = await matrix(process, broker);
+    expect(report.state).toBe('aborted');
+    expect(report.abortReason).toBe('ambiguous-outcome');
+    expect(report.runs.at(-1)?.scenarioId).toBe(scenarioId);
+    expect(broker.admissions.at(-1)?.scenarioId).toBe(scenarioId);
+  });
+
+  it('rejects a failed outcome for a scenario that must succeed', async () => {
+    const process = new FakeProcess();
+    process.overrides.set('P01', [
+      { type: 'stdout', bytes: encode({ timestamp: 1, type: 'system', subtype: 'init', session_id: 'session-1', model: EXPECTED_MODEL }) },
+      { type: 'stdout', bytes: encode({ timestamp: 1, type: 'tool_use', name: 'read_file', tool_call_id: 'read-1' }) },
+      { type: 'stdout', bytes: encode({ timestamp: 1, type: 'tool_result', name: 'read_file', tool_call_id: 'read-1', output: 'done', duration_ms: 1, is_error: false }) },
+      { type: 'stdout', bytes: encode(result(1, 'session-1')) },
+      { type: 'eof' }, { type: 'exit', code: 1 },
+    ]);
+    const broker = new FakeBroker();
+    const receive = broker.receipt.bind(broker);
+    broker.receipt = async (admissionId) => {
+      const valid = await receive(admissionId);
+      return admissionId === 'admission-P01' ? { ...valid, status: 'failed' } : valid;
+    };
+    const report = await matrix(process, broker);
+    expect(report.state).toBe('aborted');
+    expect(report.abortReason).toBe('ambiguous-outcome');
+    expect(broker.admissions.map((entry) => entry.scenarioId)).toEqual(['P01']);
+    expect(report.runs[0].state).toBe('unknown');
+  });
+
+  it('rejects receipt hashes, policy drift, counted-input gaps, and incomplete usage', async () => {
+    for (const mutation of ['hash', 'usage', 'inputVerified', 'policy', 'counted'] as const) {
       const process = new FakeProcess();
       const broker = new FakeBroker();
       const valid = await broker.receipt('admission-P01');
       const changed = mutation === 'hash' ? { ...valid, admissionRequestHash: '0'.repeat(64) }
         : mutation === 'inputVerified' ? { ...valid, inputVerified: false }
-        : { ...valid, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costMicros: 1 } as never };
+          : mutation === 'policy' ? { ...valid, policyHash: '0'.repeat(64) }
+            : mutation === 'counted' ? { ...valid, countedInput: { ...counted, baseInputTokens: 0 } }
+              : { ...valid, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costMicros: 1 } as never };
       broker.receiptOverrides.set('admission-P01', [changed]);
       const report = await matrix(process, broker);
       expect(report.state).toBe('aborted');

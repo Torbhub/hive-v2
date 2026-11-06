@@ -5,7 +5,24 @@ umask 077
 HERMES_VERSION=v0.22.6
 HERMES_COMMIT=f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab
 HERMES_ARCHIVE_SHA256=551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae2efa81
+NODE_VERSION=22.23.2
+NODE_ARCHIVE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
 EVIDENCE=/var/lib/t01/evidence/preflight.jsonl
+EVIDENCE_IP=
+TUNNEL_PID=
+BROKER_PORT=8765
+if [ "$SCENARIO" != preflight ]; then
+  BROKER_PORT=8766
+fi
+
+mkdir -p /opt/t01/source /opt/t01/fixtures /opt/t01/tools /opt/t01/pm-home
+mkdir -p /opt/t01/runner-source /opt/t01/node /var/lib/t01/evidence /var/lib/t01/hermes /var/lib/t01/workspace /etc/t01/broker
+chown root:root /opt/t01 /var/lib/t01 /etc/t01
+chmod 0711 /opt/t01 /var/lib/t01 /etc/t01
+chmod 0700 /var/lib/t01/evidence /opt/t01/pm-home
+: > "$EVIDENCE"
+chmod 0600 /var/lib/t01/evidence/preflight.jsonl
+shutdown -h +"${LIFETIME_MINUTES}"
 
 emit() {
   local check="$1" status="$2" details="${3:-}" record
@@ -20,6 +37,14 @@ publish_evidence() {
   done < "$EVIDENCE"
 }
 
+stop_tunnel() {
+  if [ -n "$TUNNEL_PID" ]; then
+    kill -TERM -- "-$TUNNEL_PID"
+    wait "$TUNNEL_PID" || [ "$?" = 143 ]
+    TUNNEL_PID=
+  fi
+}
+
 lock_down() {
   iptables -P INPUT DROP
   iptables -P FORWARD DROP
@@ -29,12 +54,18 @@ lock_down() {
   iptables -F OUTPUT
   iptables -A INPUT -i lo -j ACCEPT
   iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  if [ "$SCENARIO" != preflight ]; then
+    iptables -A OUTPUT -o lo -p tcp --dport 8765 -m owner --uid-owner 10000 -j REJECT
+  fi
   iptables -A OUTPUT -o lo -j ACCEPT
   iptables -A OUTPUT -d 169.254.169.254 -j REJECT
   iptables -A OUTPUT -d 169.254.170.2 -j REJECT
   iptables -A OUTPUT -p udp --dport 53 -j REJECT
   iptables -A OUTPUT -p tcp --dport 53 -j REJECT
   iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  if [ -n "$EVIDENCE_IP" ]; then
+    iptables -A OUTPUT -p tcp -d "$EVIDENCE_IP" --dport 443 -m owner --uid-owner 0 -j ACCEPT
+  fi
   iptables -A OUTPUT -j REJECT
   ip6tables -P INPUT DROP
   ip6tables -P FORWARD DROP
@@ -74,6 +105,7 @@ on_error() {
   local status=$?
   trap - ERR
   set +e
+  stop_tunnel
   lock_down
   local category=unknown origin=unknown:0
   local hermes_check_output="${T01_RUNTIME_CHECK_OUT:-/var/lib/t01/hermes/runtime-check.json}"
@@ -120,15 +152,17 @@ require_value() {
 }
 
 BOOTSTRAP_STAGE=input-validation
-for name in TEAMKIMI_SECRET_ARN SCENARIO MATRIX LIFETIME_MINUTES RUN_ID RUNTIME_SCRIPT_URL RUNTIME_SCRIPT_SHA256; do
+for name in TEAMKIMI_SECRET_ARN SCENARIO MATRIX PAID_ADMISSION LIFETIME_MINUTES RUN_ID RUNTIME_SCRIPT_URL RUNTIME_SCRIPT_SHA256 RUNNER_ARCHIVE_URL RUNNER_ARCHIVE_SHA256; do
   require_value "$name"
 done
-[ "$SCENARIO" = preflight ]
-[ "$MATRIX" = none ]
-[ "$MAX_PAID_ADMISSIONS" = 0 ]
+case "$SCENARIO/$MATRIX/$PAID_ADMISSION/$MAX_PAID_ADMISSIONS" in
+  preflight/none/false/0) ;;
+  count/none/false/0|matrix/full/true/12) require_value T01_TEAMKIMI_HOST_ID ;;
+  *) false ;;
+esac
 
 BOOTSTRAP_STAGE=system-packages
-dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables
+dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables session-manager-plugin
 BOOTSTRAP_STAGE=runtime-download
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --max-redirs 0 --connect-timeout 10 --max-time 60 \
@@ -138,13 +172,35 @@ chmod 0555 /opt/t01/runtime.py
 BOOTSTRAP_STAGE=source-download
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --max-redirs 0 --connect-timeout 10 --max-time 180 \
+  "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz" --output /opt/t01/node.tar.xz
+printf '%s  %s\n' "$NODE_ARCHIVE_SHA256" /opt/t01/node.tar.xz | sha256sum -c -
+tar -xJf /opt/t01/node.tar.xz -C /opt/t01/node --strip-components=1
+rm -f /opt/t01/node.tar.xz
+curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+  --max-redirs 0 --connect-timeout 10 --max-time 180 \
+  "$RUNNER_ARCHIVE_URL" --output /opt/t01/runner.tar.gz
+printf '%s  %s\n' "$RUNNER_ARCHIVE_SHA256" /opt/t01/runner.tar.gz | sha256sum -c -
+tar -xzf /opt/t01/runner.tar.gz -C /opt/t01/runner-source --strip-components=1
+rm -f /opt/t01/runner.tar.gz
+cd /opt/t01/runner-source
+export PATH=/opt/t01/node/bin:/usr/local/bin:/usr/bin:/bin
+/opt/t01/node/bin/npm ci --ignore-scripts
+/opt/t01/node/bin/node ./node_modules/typescript/bin/tsc -p tools/hermes-live/tsconfig.json
+cp tools/hermes-live/hermes_preflight_probe.py tools/hermes-live/count-probe.mjs dist-t01/tools/hermes-live/
+cp -R tools/hermes-live/fixtures dist-t01/tools/hermes-live/
+cp infra/t01-smoke/paid.sh /opt/t01/paid.sh
+chmod 0500 /opt/t01/paid.sh
+emit node_runtime_locked passed "\"version\":\"$NODE_VERSION\""
+emit runner_dependencies_locked passed
+curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+  --max-redirs 0 --connect-timeout 10 --max-time 180 \
   "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/$HERMES_COMMIT" \
   --output /opt/t01/hermes.tar.gz
 printf '%s  %s\n' "$HERMES_ARCHIVE_SHA256" /opt/t01/hermes.tar.gz | sha256sum -c -
 tar -xzf /opt/t01/hermes.tar.gz -C /opt/t01/source --strip-components=1
 rm -f /opt/t01/hermes.tar.gz
-printf '{"schemaVersion":2,"baseVersion":"0.22.6","commit":"%s","distribution":"source","source":"t01","updateMechanism":"external"}\n' \
-  "$HERMES_COMMIT" > /opt/t01/source/install-stamp.json
+printf '{"schemaVersion":2,"baseVersion":"0.22.6","commit":"%s","artifactSha256":"%s","distribution":"source","source":"t01","updateMechanism":"external"}\n' \
+  "$HERMES_COMMIT" "$HERMES_ARCHIVE_SHA256" > /opt/t01/source/install-stamp.json
 emit source_sha256 passed "\"sha256\":\"$HERMES_ARCHIVE_SHA256\""
 
 export HERMES_HOME=/opt/t01/pm-home
@@ -201,6 +257,9 @@ chmod -R go-w /opt/t01/source /opt/t01/hermes /opt/t01/tools
 useradd --system --user-group --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin t01broker
 useradd --system --user-group --uid 10000 --home-dir /var/lib/t01/hermes --shell /usr/sbin/nologin t01hermes
 chown -R t01hermes:t01hermes /var/lib/t01/hermes
+mkdir -p /var/lib/t01/workspace/home /var/lib/t01/workspace/hermes-home
+chown -R t01hermes:t01hermes /var/lib/t01/workspace
+chmod 0700 /var/lib/t01/workspace /var/lib/t01/workspace/home /var/lib/t01/workspace/hermes-home
 chown root:root /var/lib/t01/hermes/config.yaml
 chmod 0444 /var/lib/t01/hermes/config.yaml
 
@@ -208,6 +267,22 @@ aws secretsmanager get-secret-value --secret-id "$TEAMKIMI_SECRET_ARN" \
   --query SecretString --output text > /etc/t01/broker/teamkimi.json
 chown t01broker:t01broker /etc/t01/broker/teamkimi.json
 chmod 0400 /etc/t01/broker/teamkimi.json
+
+if [ "$SCENARIO" = matrix ]; then
+  python3 /opt/t01/runtime.py write-proxy-environment
+fi
+
+if [ "$SCENARIO" != preflight ]; then
+  EVIDENCE_IP="$(python3 - <<'PY'
+import socket
+addresses = socket.getaddrinfo('s3.us-east-1.amazonaws.com', 443, socket.AF_INET, socket.SOCK_STREAM)
+if not addresses:
+    raise SystemExit('evidence endpoint resolution failed')
+print(addresses[0][4][0])
+PY
+)"
+  printf '%s %s\n' "$EVIDENCE_IP" s3.us-east-1.amazonaws.com >> /etc/hosts
+fi
 
 python3 - <<'PY'
 import json
@@ -221,17 +296,37 @@ names = (
 config = {name.lower(): os.environ[name] for name in names}
 config.update({
     "teamkimi_model_id": "Kimi 3.1 Pro",
-    "paid_admission": False,
+    "paid_admission": os.environ["PAID_ADMISSION"] == "true",
 })
 Path("/etc/t01/broker/config.json").write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
+controls = {
+    "credential": {"smokeOnly": True, "shortLived": True, "isolatedFromHermes": True},
+    "isolation": {
+        "disposable": True, "readOnlyFixtures": True, "confinedWorkingDirectories": True,
+        "noPrivilegedMode": True, "noHostNetwork": True, "noHostPid": True,
+        "noContainerSockets": True, "noCredentialMounts": True, "noWritableHostPaths": True,
+        "noOnDemandInstalls": True, "coreDumpsDisabled": True, "debuggingDisabled": True,
+    },
+    "egress": {
+        "defaultDeny": True, "approvedDestination": True, "directIpDenied": True,
+        "unapprovedDnsDenied": True, "redirectDenied": True, "ipv6Denied": True,
+        "alternatePortDenied": True, "metadataDenied": True,
+    },
+}
+Path("/etc/t01/broker/controls.json").write_text(json.dumps(controls, sort_keys=True), encoding="utf-8")
 PY
-chown root:t01broker /etc/t01/broker /etc/t01/broker/config.json
+if [ "$SCENARIO" = matrix ]; then
+  printf '%s' "$PRICING_ATTESTATION_BASE64" | base64 -d > /etc/t01/broker/pricing-attestation.json
+else
+  : > /etc/t01/broker/pricing-attestation.json
+fi
+chown root:t01broker /etc/t01/broker /etc/t01/broker/config.json /etc/t01/broker/controls.json /etc/t01/broker/pricing-attestation.json
 chmod 0750 /etc/t01/broker
-chmod 0440 /etc/t01/broker/config.json
+chmod 0440 /etc/t01/broker/config.json /etc/t01/broker/controls.json /etc/t01/broker/pricing-attestation.json
 chown root:t01hermes /var/lib/t01/hermes/config.yaml
 chmod 0440 /var/lib/t01/hermes/config.yaml
 chmod 0700 /var/lib/t01/hermes
-chmod -R a+rX,go-w /opt/t01/source /opt/t01/hermes /opt/t01/tools /opt/t01/fixtures
+chmod -R a+rX,go-w /opt/t01/source /opt/t01/hermes /opt/t01/tools /opt/t01/fixtures /opt/t01/runner-source /opt/t01/node
 
 cat > /etc/systemd/system/t01-broker.service <<EOF
 [Unit]
@@ -242,6 +337,7 @@ After=network.target
 Type=simple
 User=t01broker
 Group=t01broker
+Environment=T01_BROKER_PORT=$BROKER_PORT
 ExecStart=/usr/bin/python3 /opt/t01/runtime.py broker
 Restart=no
 NoNewPrivileges=yes
@@ -275,7 +371,7 @@ Environment=HERMES_HOME=/var/lib/t01/hermes
 Environment=HERMES_INSTALL_ROOT=/opt/t01/source
 Environment=PYTHONPATH=/opt/t01/source
 Environment=HERMES_RUNTIME_DIR=/opt/t01/tools
-Environment=TEAMKIMI_OPENAI_COMPATIBLE_URL=http://127.0.0.1:8765/v1
+Environment=TEAMKIMI_OPENAI_COMPATIBLE_URL=http://127.0.0.1:$BROKER_PORT/v1
 Environment=TEAMKIMI_MODEL_ID=Kimi 3.1 Pro
 ExecStart=/opt/t01/hermes/bin/python /opt/t01/runtime.py hermes-check
 NoNewPrivileges=yes
@@ -294,10 +390,52 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 StandardOutput=null
 StandardError=null
 EOF
-chmod 0444 /etc/systemd/system/t01-broker.service /etc/systemd/system/t01-hermes-check.service
+
+cat > /etc/systemd/system/t01-paid.service <<EOF
+[Unit]
+Description=T01 count-only probe and explicitly admitted paid matrix
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=SCENARIO=$SCENARIO
+Environment=EXPECTED_POLICY_HASH=$EXPECTED_POLICY_HASH
+Environment=T01_EVIDENCE_BUCKET=$T01_EVIDENCE_BUCKET
+Environment=RUN_ID=$RUN_ID
+Environment=AWS_REGION=us-east-1
+Environment=AWS_ENDPOINT_URL=https://s3.us-east-1.amazonaws.com
+ExecStart=/opt/t01/paid.sh
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadOnlyPaths=/opt/t01 /etc/t01/broker/controls.json /etc/t01/broker/pricing-attestation.json
+ReadWritePaths=/var/lib/t01/evidence /var/lib/t01/workspace
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+IPAddressAllow=::1/128
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=null
+StandardError=null
+EOF
+if [ "$SCENARIO" != preflight ]; then
+  printf 'IPAddressAllow=%s/32\n' "$EVIDENCE_IP" >> /etc/systemd/system/t01-paid.service
+fi
+chmod 0444 /etc/systemd/system/t01-broker.service /etc/systemd/system/t01-hermes-check.service /etc/systemd/system/t01-paid.service
 
 BOOTSTRAP_STAGE=default-deny-lockdown
 systemctl daemon-reload
+if [ "$SCENARIO" != preflight ]; then
+  setsid runuser -u t01broker -- env -i HOME=/nonexistent PATH=/usr/local/sessionmanagerplugin/bin:/usr/local/bin:/usr/bin:/bin AWS_REGION=us-east-1 \
+    aws ssm start-session --target "$T01_TEAMKIMI_HOST_ID" \
+    --document-name hive-v2-t01-teamkimi-port-forward >/dev/null 2>&1 &
+  TUNNEL_PID=$!
+  runuser -u t01broker -- env -i PATH=/usr/bin:/bin /usr/bin/python3 /opt/t01/runtime.py wait-for-teamkimi
+  emit trusted_tunnel_ready passed
+fi
 lock_down
 emit default_deny_lockdown passed
 BOOTSTRAP_STAGE=broker-access
@@ -317,10 +455,13 @@ fi
 if runuser -u t01hermes -- test -x /etc/t01/broker; then
   false
 fi
+if [ "$SCENARIO" = matrix ] && runuser -u t01hermes -- test -r /etc/t01/proxy.env; then
+  false
+fi
 BOOTSTRAP_STAGE=broker-start
 systemctl start t01-broker.service
 BOOTSTRAP_STAGE=broker-health
-runuser -u t01hermes -- env -i PATH=/usr/bin:/bin /usr/bin/python3 /opt/t01/runtime.py wait-for-broker
+runuser -u t01hermes -- env -i PATH=/usr/bin:/bin T01_BROKER_PORT=$BROKER_PORT /usr/bin/python3 /opt/t01/runtime.py wait-for-broker
 BOOTSTRAP_STAGE=hermes-check
 systemctl start t01-hermes-check.service
 BOOTSTRAP_STAGE=runtime-version
@@ -342,7 +483,7 @@ as_hermes() {
     HOME=/var/lib/t01/hermes \
     PATH=/usr/bin:/bin \
     HERMES_HOME=/var/lib/t01/hermes \
-    TEAMKIMI_OPENAI_COMPATIBLE_URL=http://127.0.0.1:8765/v1 \
+    TEAMKIMI_OPENAI_COMPATIBLE_URL=http://127.0.0.1:$BROKER_PORT/v1 \
     TEAMKIMI_MODEL_ID='Kimi 3.1 Pro' "$@"
 }
 
@@ -372,15 +513,38 @@ expect_allowed() {
 BOOTSTRAP_STAGE=network-negative
 expect_denied direct_ip curl -4 --fail --silent https://192.0.2.1/
 expect_denied unapproved_dns curl -4 --fail --silent https://example.com/
-expect_denied redirect curl -4 --fail --silent --location http://127.0.0.1:8765/redirect-fixture
+expect_denied redirect curl -4 --fail --silent --location "http://127.0.0.1:$BROKER_PORT/redirect-fixture"
 expect_denied ipv6 curl -6 --fail --silent 'https://[2606:4700:4700::1111]/'
 expect_denied alternate_port curl -4 --fail --silent https://192.0.2.1:8443/
 expect_denied metadata curl -4 --fail --silent http://169.254.169.254/latest/meta-data/
 expect_denied container_credentials curl -4 --fail --silent http://169.254.170.2/
 BOOTSTRAP_STAGE=teamkimi-no-model
-expect_allowed teamkimi_no_model curl -4 --fail --silent http://127.0.0.1:8765/health
+expect_allowed teamkimi_no_model curl -4 --fail --silent "http://127.0.0.1:$BROKER_PORT/health"
+expect_broker_allowed() {
+  local name="$1"
+  shift
+  if ! runuser -u t01broker -- env -i PATH=/usr/bin:/bin timeout 15 "$@" >/dev/null 2>&1; then
+    emit "$name" failed
+    return 1
+  fi
+  emit "$name" passed
+}
+if [ "$SCENARIO" != preflight ]; then
+  expect_denied teamkimi_control_port curl -4 --fail --silent -X POST -H 'content-type: application/json' \
+    --data '{"scope":"generation"}' http://127.0.0.1:8765/teamkimi/smoke/credentials
+  expect_broker_allowed teamkimi_control_broker curl -4 --fail --silent http://127.0.0.1:8765/teamkimi/smoke/status
+fi
 BOOTSTRAP_STAGE=broker-stop
 systemctl stop t01-broker.service
-emit paid_admission_disabled passed
+if [ "$SCENARIO" = preflight ]; then
+  emit paid_admission_disabled passed
+else
+  systemctl start t01-paid.service
+  stop_tunnel
+  emit tunnel_cleanup passed
+  if [ "$SCENARIO" = count ]; then
+    emit paid_admission_disabled passed
+  fi
+fi
 emit complete passed
 publish_evidence

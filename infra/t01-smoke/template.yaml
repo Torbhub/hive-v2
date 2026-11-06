@@ -27,12 +27,40 @@ Parameters:
   TeamKimiSecretArn:
     Type: String
     AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:hive-v2-t01-smoke-[A-Za-z0-9/_+=.@-]+$'
+  TeamKimiProxySecretArn:
+    Type: String
+    Default: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-proxy-0
+    NoEcho: true
+    AllowedPattern: '^$|^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:hive-v2-t01-smoke-proxy-[A-Za-z0-9/_+=.@-]+$'
   Scenario:
     Type: String
-    AllowedValues: [preflight]
+    AllowedValues: [preflight, count, matrix]
   Matrix:
     Type: String
-    AllowedValues: [none]
+    AllowedValues: [none, full]
+  PaidAdmission:
+    Type: String
+    AllowedValues: ['false', 'true']
+    Default: 'false'
+  TeamKimiHostId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^i-[0-9a-f]{8,17}$'
+  ExpectedPolicyHash:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9a-f]{64}$'
+  PricingAttestationBase64:
+    Type: String
+    Default: ''
+    NoEcho: true
+    AllowedPattern: '^$|^[A-Za-z0-9+/]+={0,2}$'
+  RunnerArchiveUrl:
+    Type: String
+    AllowedPattern: '^https://codeload.github.com/Torbhub/hive-v2/tar.gz/[0-9a-f]{40}$'
+  RunnerArchiveSha256:
+    Type: String
+    AllowedPattern: '^[0-9a-f]{64}$'
   MaxInputTokens:
     Type: Number
     MinValue: 0
@@ -48,19 +76,19 @@ Parameters:
   MaxTotalTokens:
     Type: Number
     MinValue: 0
-    MaxValue: 22000
+    MaxValue: 132000
   MaxApiCalls:
     Type: Number
     MinValue: 0
-    MaxValue: 1
+    MaxValue: 12
   MaxEstimatedCostUsd:
     Type: Number
     MinValue: 0
-    MaxValue: 0.5
+    MaxValue: 5
   MaxPaidAdmissions:
     Type: Number
     MinValue: 0
-    MaxValue: 0
+    MaxValue: 12
   LifetimeMinutes:
     Type: Number
     MinValue: 5
@@ -81,14 +109,18 @@ Parameters:
     Type: String
     AllowedPattern: '^[0-9]+$'
 
+Conditions:
+  Matrix: !Equals [!Ref Scenario, matrix]
+
 Resources:
   InstanceRole:
     Metadata:
       com.aws.cloudformation.Context:
-        why: broker-only TeamKimi secret access without a broad host identity
+        why: run-scoped secret access and fixed TeamKimi tunnel without a broad host identity
         must:
-          - Read only the configured T01 TeamKimi secret
-          - Grant no other AWS permissions
+          - Read only the configured run-scoped T01 secrets
+          - Start only the reviewed tunnel to the tagged TeamKimi host
+          - Grant no shell, command, or other AWS permissions
     Type: AWS::IAM::Role
     Properties:
       RoleName: hive-v2-t01-smoke-instance
@@ -109,6 +141,28 @@ Resources:
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Ref TeamKimiSecretArn
+              - !If
+                - Matrix
+                - Sid: ReadRunTeamKimiControlKey
+                  Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref TeamKimiProxySecretArn
+                - !Ref AWS::NoValue
+              - Sid: WriteRunEvidence
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::hive-v2-t01-evidence-594552273052/hive-v2-t01-smoke/${RunId}/*'
+              - Sid: T01TeamKimiTunnelHost
+                Effect: Allow
+                Action: ssm:StartSession
+                Resource: arn:aws:ec2:us-east-1:594552273052:instance/*
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/Role: nexus-kimi-session
+              - Sid: T01TeamKimiTunnelDocument
+                Effect: Allow
+                Action: ssm:StartSession
+                Resource: arn:aws:ssm:us-east-1:594552273052:document/hive-v2-t01-teamkimi-port-forward
 
   InstanceProfile:
     Metadata:
@@ -193,7 +247,14 @@ Resources:
           printf '%s  %s\n' '${ProvisionScriptSha256}' /opt/t01-provision.sh | sha256sum -c -
           chmod 0700 /opt/t01-provision.sh
           export TEAMKIMI_SECRET_ARN='${TeamKimiSecretArn}'
-          export SCENARIO='${Scenario}' MATRIX='${Matrix}'
+          export TEAMKIMI_PROXY_SECRET_ARN='${TeamKimiProxySecretArn}'
+          export SCENARIO='${Scenario}' MATRIX='${Matrix}' PAID_ADMISSION='${PaidAdmission}'
+          export T01_TEAMKIMI_HOST_ID='${TeamKimiHostId}'
+          export EXPECTED_POLICY_HASH='${ExpectedPolicyHash}'
+          export PRICING_ATTESTATION_BASE64='${PricingAttestationBase64}'
+          export RUNNER_ARCHIVE_URL='${RunnerArchiveUrl}'
+          export RUNNER_ARCHIVE_SHA256='${RunnerArchiveSha256}'
+          export T01_EVIDENCE_BUCKET='hive-v2-t01-evidence-594552273052'
           export MAX_INPUT_TOKENS='${MaxInputTokens}'
           export MAX_OUTPUT_TOKENS='${MaxOutputTokens}'
           export MAX_REASONING_TOKENS='${MaxReasoningTokens}'

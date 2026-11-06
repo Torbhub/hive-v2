@@ -13,6 +13,7 @@ SMOKE_TEMPLATE = ROOT / 'infra/t01-smoke/template.yaml'
 COMMIT = 'f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab'
 MANDATORY_PASSED = [
     'uv_install', 'python_install', 'frozen_hash_lock_install',
+    'node_runtime_locked', 'runner_dependencies_locked',
     'lazy_install_disabled', 'service_filesystem_access',
     'default_deny_lockdown', 'direct_ip', 'unapproved_dns', 'redirect', 'ipv6',
     'alternate_port', 'metadata', 'container_credentials', 'teamkimi_no_model',
@@ -26,6 +27,7 @@ def evidence_records():
         {'check': 'source_sha256', 'status': 'passed', 'sha256': '551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae2efa81'},
     ]
     records.extend({'check': name, 'status': 'passed'} for name in MANDATORY_PASSED)
+    next(record for record in records if record['check'] == 'node_runtime_locked')['version'] = '22.23.2'
     records.append({'check': 'complete', 'status': 'passed'})
     return records
 

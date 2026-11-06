@@ -3,28 +3,14 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { TeamKimiAdapter, type HiveControlEvidence } from '../tools/hermes-live/broker.js';
+import { TeamKimiAdapter } from '../tools/hermes-live/broker.js';
 import { HermesProcessSupervisor } from '../tools/hermes-live/process.js';
 import { EXPECTED_MODEL } from '../tools/hermes-live/runner.js';
+import { attestation, controls, policyHash, wireUsage } from './hermes-live-fixtures.js';
 
 const disposable = process.env.HIVE_T01_DISPOSABLE_HERMES === '1';
 const describeDisposable = disposable ? describe : describe.skip;
-
-function controls(): HiveControlEvidence {
-  return {
-    credential: { smokeOnly: true, shortLived: true, isolatedFromHermes: true },
-    isolation: {
-      disposable: true, readOnlyFixtures: true, confinedWorkingDirectories: true,
-      noPrivilegedMode: true, noHostNetwork: true, noHostPid: true,
-      noContainerSockets: true, noCredentialMounts: true, noWritableHostPaths: true,
-      noOnDemandInstalls: true, coreDumpsDisabled: true, debuggingDisabled: true,
-    },
-    egress: {
-      defaultDeny: true, approvedDestination: true, directIpDenied: true, unapprovedDnsDenied: true,
-      redirectDenied: true, ipv6Denied: true, alternatePortDenied: true, metadataDenied: true,
-    },
-  };
-}
+const usage = wireUsage;
 
 function listen(server: http.Server) {
   return new Promise<number>((resolve) => server.listen(0, '127.0.0.1', () => {
@@ -51,14 +37,14 @@ describeDisposable('pinned Hermes in the disposable environment', () => {
         if (request.url === '/teamkimi/smoke/status') {
           response.writeHead(200, { 'content-type': 'application/json' });
           response.end(JSON.stringify({
-            enabled: true, admissionAllowed: true, blockedReason: null, policyHash: 'a'.repeat(64),
+            enabled: true, admissionAllowed: true, blockedReason: null, policyHash,
             pricingVerified: true, model: EXPECTED_MODEL,
             ceilings: {
               scenario: { inputTokens: 16000, outputTokens: 2000, reasoningTokens: 4000, totalTokens: 22000, costMicros: 500000 },
               matrix: { admissions: 12, inputTokens: 96000, outputTokens: 12000, reasoningTokens: 24000, totalTokens: 132000, costMicros: 5000000 },
             },
             totals: { admissions: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0, costMicros: 0 },
-            credentials: [{ id: '0123456789abcdef0123456789abcdef', issuedAt: Date.now() - 1000, expiresAt: Date.now() + 60000, revokedAt: null, revocationProof: null }],
+            credentials: [{ id: '0123456789abcdef0123456789abcdef', scope: 'generation', issuedAt: Date.now() - 1000, expiresAt: Date.now() + 60000, revokedAt: null, revocationProof: null }],
             reservations: reservation ? [reservation] : [],
           }));
           return;
@@ -68,9 +54,7 @@ describeDisposable('pinned Hermes in the disposable environment', () => {
           reservation = {
             admissionId: '0123456789abcdef0123456789abcdef', scenarioId: 'P01', state: 'reconciled',
             createdAt: Date.now(), reconciledAt: Date.now(), httpStatus: null, ambiguousReason: null,
-            inputVerified: true,
-            reserved: { inputTokens: 10, outputTokens: 20, reasoningTokens: 30, totalTokens: 60, costMicros: 140 },
-            actual: { inputTokens: 10, outputTokens: 20, reasoningTokens: 30, totalTokens: 60, costMicros: 140 },
+            inputVerified: true, reserved: usage, actual: usage,
           };
           response.writeHead(200, { 'content-type': 'application/json' });
           response.end(JSON.stringify({
@@ -84,7 +68,11 @@ describeDisposable('pinned Hermes in the disposable environment', () => {
       });
     });
     const upstreamPort = await listen(upstream);
-    const adapter = new TeamKimiAdapter({ baseUrl: `http://127.0.0.1:${upstreamPort}`, credential: 'tcs-disposable-test', controls: controls() });
+    const adapter = new TeamKimiAdapter({
+      baseUrl: `http://127.0.0.1:${upstreamPort}`, credential: 'tcs-disposable-test',
+      credentialId: '0123456789abcdef0123456789abcdef', controls: controls(),
+      attestation, expectedPolicyHash: policyHash,
+    });
     await adapter.start();
     try {
       const admission = await adapter.admit({ scenarioId: 'P01', generation: 1, routeHash: 'a'.repeat(64), policyHash: 'b'.repeat(64) });

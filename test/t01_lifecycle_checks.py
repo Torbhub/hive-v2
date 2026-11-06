@@ -164,6 +164,9 @@ case "$1 $2" in
     ;;
 esac
 ''')
+    write_executable(root / 'bin/curl', '''#!/usr/bin/env bash
+printf 'synthetic-runner-archive'
+''')
     write_executable(root / 'bin/sleep', '''#!/usr/bin/env bash
 if [ "${1:-}" = 600 ]; then
   /bin/sleep 0.01
@@ -181,6 +184,7 @@ DEPLOY_ENV = {
     'GITHUB_SHA': 'a' * 40,
     'SCENARIO': 'preflight',
     'MATRIX': 'none',
+    'PAID_ADMISSION': 'false',
     'MAX_INPUT_TOKENS': '0',
     'MAX_OUTPUT_TOKENS': '0',
     'MAX_REASONING_TOKENS': '0',

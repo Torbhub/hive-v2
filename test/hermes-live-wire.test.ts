@@ -5,37 +5,17 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
-import { canonicalAnthropicBody, TeamKimiAdapter, type HiveControlEvidence } from '../tools/hermes-live/broker.js';
+import { canonicalAnthropicBody, TeamKimiAdapter } from '../tools/hermes-live/broker.js';
 import { admissionEvidenceHash } from '../tools/hermes-live/runner.js';
+import { usageCostMicros } from '../tools/hermes-live/policy.js';
+import { attestation, controls, policyHash, wireCounted, wireUsage } from './hermes-live-fixtures.js';
 
 const source = process.env.TEAMKIMI_SMOKE_SOURCE;
-const TESTED_TEAMKIMI_COMMIT = 'efa7efee23b8e209c8f897a3306414bf308aff40';
+const TESTED_TEAMKIMI_COMMIT = 'faeb27d2be4e07ac1a9d063c7ac326aec7373183';
+const attemptKey = 'a'.repeat(64);
+const proxyApiKey = 'ordinary-proxy-key';
 const describeWire = source ? describe : describe.skip;
-const pricing = {
-  verified: true,
-  source: 'wire-fixed-price',
-  inputMicrosPerToken: 1,
-  outputMicrosPerToken: 2,
-  reasoningMicrosPerToken: 3,
-};
 const closers: (() => Promise<void>)[] = [];
-
-function controls(): HiveControlEvidence {
-  return {
-    credential: { smokeOnly: true, shortLived: true, isolatedFromHermes: true },
-    isolation: {
-      disposable: true, readOnlyFixtures: true, confinedWorkingDirectories: true,
-      noPrivilegedMode: true, noHostNetwork: true, noHostPid: true,
-      noContainerSockets: true, noCredentialMounts: true, noWritableHostPaths: true,
-      noOnDemandInstalls: true, coreDumpsDisabled: true, debuggingDisabled: true,
-    },
-    egress: {
-      defaultDeny: true, approvedDestination: true, directIpDenied: true,
-      unapprovedDnsDenied: true, redirectDenied: true, ipv6Denied: true,
-      alternatePortDenied: true, metadataDenied: true,
-    },
-  };
-}
 
 function listen(server: http.Server) {
   return new Promise<number>((resolve) => server.listen(0, '127.0.0.1', () => {
@@ -127,7 +107,7 @@ async function fixture(responseStatus = 200, mode: 'json' | 'malformed-sse' | 's
   const proxy = serverModule.createProxyServer(accounts, {
     proxy: { apiKey: 'ordinary-proxy-key' },
     upstream: `http://127.0.0.1:${upstreamPort}`,
-    smoke: { enabled: true, statePath: join(directory, 'ledger.json'), pricing },
+    smoke: { enabled: true, statePath: join(directory, 'ledger.json'), pricing: { attestation } },
   });
   const proxyPort = await listen(proxy);
   closers.push(async () => {
@@ -154,17 +134,23 @@ describe('Anthropic canonicalization', () => {
       thinking: { type: 'enabled', budget_tokens: 4000 }, messages: [],
     });
   });
+
+  it('computes the wire fixture cost even when live integration is skipped', () => {
+    expect([usageCostMicros(wireUsage, attestation.rates), wireUsage.costMicros]).toEqual([140, 140]);
+  });
 });
 
-describeWire('TeamKimi PR15 no-paid HTTP wire contract', () => {
+describeWire('TeamKimi PR16 no-paid HTTP wire contract', () => {
   it('injects credentials, forwards the exact Anthropic request, and maps usage and revocation', async () => {
     const wire = await fixture();
-    const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', { method: 'POST' });
+    const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', {
+      method: 'POST', credential: proxyApiKey, body: { scope: 'generation', attemptKey },
+    });
     expect(issued.status).toBe(201);
     const adapter = new TeamKimiAdapter({
       baseUrl: `http://127.0.0.1:${wire.proxyPort}`,
-      credential: issued.body.credential,
-      controls: controls(),
+      credential: issued.body.credential, credentialId: issued.body.id, attemptKey, proxyApiKey,
+      controls: controls(), attestation, expectedPolicyHash: policyHash,
     });
     await adapter.start();
     closers.push(adapter.close.bind(adapter));
@@ -186,7 +172,9 @@ describeWire('TeamKimi PR15 no-paid HTTP wire contract', () => {
     expect(receipt.status).toBe('completed');
     expect(receipt.requestHash).toMatch(/^[a-f0-9]{64}$/);
     expect(receipt.admissionRequestHash).toBe(admissionEvidenceHash(policy, receipt.requestHash!));
-    expect(receipt.usage).toEqual({ inputTokens: 10, outputTokens: 20, reasoningTokens: 30, totalTokens: 60, costMicros: 140 });
+    expect(receipt.usage).toEqual(wireUsage);
+    expect(receipt.countedInput).toEqual(wireCounted);
+    expect(receipt.policyHash).toBe(policyHash);
     expect(receipt.inputVerified).toBe(true);
     expect(wire.upstreamRequests.map((entry) => entry.url)).toEqual(['/v1/messages/count_tokens', '/v1/messages']);
     const upstream = wire.upstreamRequests[1];
@@ -205,11 +193,13 @@ describeWire('TeamKimi PR15 no-paid HTTP wire contract', () => {
 
   it('maps a provider error without exporting raw error content', async () => {
     const wire = await fixture(403);
-    const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', { method: 'POST' });
+    const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', {
+      method: 'POST', credential: proxyApiKey, body: { scope: 'generation', attemptKey },
+    });
     const adapter = new TeamKimiAdapter({
       baseUrl: `http://127.0.0.1:${wire.proxyPort}`,
-      credential: issued.body.credential,
-      controls: controls(),
+      credential: issued.body.credential, credentialId: issued.body.id, attemptKey, proxyApiKey,
+      controls: controls(), attestation, expectedPolicyHash: policyHash,
     });
     await adapter.start();
     closers.push(adapter.close.bind(adapter));
@@ -224,14 +214,16 @@ describeWire('TeamKimi PR15 no-paid HTTP wire contract', () => {
     expect(receipt.status).toBe('failed');
     expect(receipt.errorCategory).toBe('provider');
     expect(receipt.inputVerified).toBe(true);
-    expect(receipt.usage).toEqual({ inputTokens: 10, outputTokens: 2000, reasoningTokens: 4000, totalTokens: 6010, costMicros: 16010 });
+    expect(receipt.usage).toEqual({ ...wireUsage, outputTokens: 2000, reasoningTokens: 4000, totalTokens: 6010, costMicros: 16010 });
     expect(JSON.stringify(receipt)).not.toContain('synthetic provider denial');
   });
 
   it('maps malformed SSE to conflicting evidence', async () => {
     const wire = await fixture(200, 'malformed-sse');
-    const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', { method: 'POST' });
-    const adapter = new TeamKimiAdapter({ baseUrl: `http://127.0.0.1:${wire.proxyPort}`, credential: issued.body.credential, controls: controls() });
+    const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', {
+      method: 'POST', credential: proxyApiKey, body: { scope: 'generation', attemptKey },
+    });
+    const adapter = new TeamKimiAdapter({ baseUrl: `http://127.0.0.1:${wire.proxyPort}`, credential: issued.body.credential, credentialId: issued.body.id, attemptKey, proxyApiKey, controls: controls(), attestation, expectedPolicyHash: policyHash });
     await adapter.start();
     closers.push(adapter.close.bind(adapter));
     const admission = await adapter.admit({ scenarioId: 'P02', generation: 1, routeHash: 'a'.repeat(64), policyHash: 'b'.repeat(64) });
@@ -246,8 +238,10 @@ describeWire('TeamKimi PR15 no-paid HTTP wire contract', () => {
 
   it('rejects a terminal SSE without final usage', async () => {
     const wire = await fixture(200, 'missing-usage-sse');
-    const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', { method: 'POST' });
-    const adapter = new TeamKimiAdapter({ baseUrl: `http://127.0.0.1:${wire.proxyPort}`, credential: issued.body.credential, controls: controls() });
+    const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', {
+      method: 'POST', credential: proxyApiKey, body: { scope: 'generation', attemptKey },
+    });
+    const adapter = new TeamKimiAdapter({ baseUrl: `http://127.0.0.1:${wire.proxyPort}`, credential: issued.body.credential, credentialId: issued.body.id, attemptKey, proxyApiKey, controls: controls(), attestation, expectedPolicyHash: policyHash });
     await adapter.start();
     closers.push(adapter.close.bind(adapter));
     const admission = await adapter.admit({ scenarioId: 'P03', generation: 1, routeHash: 'a'.repeat(64), policyHash: 'b'.repeat(64) });
@@ -263,8 +257,10 @@ describeWire('TeamKimi PR15 no-paid HTTP wire contract', () => {
 
   it('maps genuine detachment to interrupted and closes pending responses', async () => {
     const wire = await fixture(200, 'slow-sse');
-    const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', { method: 'POST' });
-    const adapter = new TeamKimiAdapter({ baseUrl: `http://127.0.0.1:${wire.proxyPort}`, credential: issued.body.credential, controls: controls() });
+    const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', {
+      method: 'POST', credential: proxyApiKey, body: { scope: 'generation', attemptKey },
+    });
+    const adapter = new TeamKimiAdapter({ baseUrl: `http://127.0.0.1:${wire.proxyPort}`, credential: issued.body.credential, credentialId: issued.body.id, attemptKey, proxyApiKey, controls: controls(), attestation, expectedPolicyHash: policyHash });
     await adapter.start();
     closers.push(adapter.close.bind(adapter));
     const admission = await adapter.admit({ scenarioId: 'P09', generation: 1, routeHash: 'a'.repeat(64), policyHash: 'b'.repeat(64) });

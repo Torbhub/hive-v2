@@ -83,7 +83,7 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision).toContain('551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae2efa81');
     expect(provision).toContain('v0.22.6');
     expect(provision).toContain('"baseVersion":"0.22.6"');
-    expect(provision).toContain('"$HERMES_COMMIT" > /opt/t01/source/install-stamp.json');
+    expect(provision).toContain('"$HERMES_COMMIT" "$HERMES_ARCHIVE_SHA256" > /opt/t01/source/install-stamp.json');
     expect(provision).toContain('Environment=HERMES_INSTALL_ROOT=/opt/t01/source');
     expect(provision).toContain('uv.lock');
     expect(provision).toContain('dnf install -y');
@@ -139,7 +139,8 @@ Environment=HERMES_RUNTIME_DIR=/opt/t01/tools`,
     expect(provision).toContain('User=t01hermes');
     expect(provision).toContain('Environment=HOME=/var/lib/t01/hermes');
     expect(provision).toContain('Environment=HERMES_HOME=/var/lib/t01/hermes');
-    expect(provision).toContain('TEAMKIMI_OPENAI_COMPATIBLE_URL=http://127.0.0.1:8765/v1');
+    expect(provision).toContain('BROKER_PORT=8765');
+    expect(provision).toContain('TEAMKIMI_OPENAI_COMPATIBLE_URL=http://127.0.0.1:$BROKER_PORT/v1');
     expect(provision).toContain('ReadOnlyPaths=/opt/t01/fixtures');
     expect(provision).toContain('ReadOnlyPaths=/var/lib/t01/hermes/config.yaml');
     expect(provision).toContain('ProtectSystem=strict');
@@ -173,7 +174,7 @@ Environment=HERMES_RUNTIME_DIR=/opt/t01/tools`,
     expect(provision).not.toContain('TEAMKIMI_IP');
     expect(provision).not.toContain('TEAMKIMI_URL');
     expect(provision).toContain('IPAddressDeny=any');
-    expect(provision).toContain('127.0.0.1:8765/health');
+    expect(provision).toContain('127.0.0.1:$BROKER_PORT/health');
   });
 
   it('creates an isolated encrypted instance with no ingress or broad instance role', () => {
@@ -192,7 +193,7 @@ Environment=HERMES_RUNTIME_DIR=/opt/t01/tools`,
     expect(template).toContain('TeamKimiSecretArn');
     expect(template).toContain('secret:hive-v2-t01-smoke-');
     expect(template).toContain('ProvisionScriptSha256');
-    expect(template).toMatch(/MaxPaidAdmissions:\n\s+Type: Number\n\s+MinValue: 0\n\s+MaxValue: 0/);
+    expect(template).toMatch(/MaxPaidAdmissions:\n\s+Type: Number\n\s+MinValue: 0\n\s+MaxValue: 12/);
     expect(template).toContain('aws-cloudformation@3');
   });
 

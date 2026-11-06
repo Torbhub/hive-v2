@@ -73,6 +73,33 @@ Resources:
                 Effect: Allow
                 Action: ssm:StartSession
                 Resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession
+              - Sid: T01TeamKimiDocumentLifecycle
+                Effect: Allow
+                Action:
+                  - ssm:CreateDocument
+                  - ssm:UpdateDocument
+                  - ssm:UpdateDocumentDefaultVersion
+                  - ssm:DeleteDocument
+                  - ssm:DescribeDocument
+                  - ssm:GetDocument
+                  - ssm:ListDocumentVersions
+                Resource: arn:aws:ssm:us-east-1:594552273052:document/hive-v2-t01-teamkimi-port-forward
+              - Sid: T01EvidenceBucketLifecycle
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:DeleteObject
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:PutEncryptionConfiguration
+                  - s3:PutLifecycleConfiguration
+                  - s3:PutBucketTagging
+                  - s3:PutBucketOwnershipControls
+                  - s3:PutBucketPublicAccessBlock
+                Resource:
+                  - arn:aws:s3:::hive-v2-t01-evidence-594552273052
+                  - arn:aws:s3:::hive-v2-t01-evidence-594552273052/*
               - Sid: CloudFormationSelfDeploy
                 Effect: Allow
                 # the complete action set of a changeset-based
@@ -164,12 +191,66 @@ Resources:
                 Action: ssm:StartSession
                 Resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession
 
+  T01EvidenceBucket:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: short-lived external collection of sanitized T01 manifests and scenario evidence
+        must:
+          - Deny public access and encrypt objects
+          - Expire objects after seven days
+    DependsOn: DeployRole
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: hive-v2-t01-evidence-594552273052
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireSanitizedEvidenceAfterSevenDays
+            Status: Enabled
+            ExpirationInDays: 7
+      Tags:
+        - Key: Role
+          Value: hive-v2-t01-smoke
+
+  T01TeamKimiPortForwardDocument:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: fixed loopback port forwarding to the existing tagged TeamKimi host
+        must:
+          - Forward only local port 8765 to host port 8765
+          - Open no public listener and run no shell command
+    DependsOn: DeployRole
+    Type: AWS::SSM::Document
+    Properties:
+      Name: hive-v2-t01-teamkimi-port-forward
+      DocumentType: Session
+      DocumentFormat: YAML
+      Content:
+        schemaVersion: '2.2'
+        description: Fixed T01 loopback forwarding to the TeamKimi smoke listener.
+        documentType: Session
+        properties:
+          portNumber: '8765'
+          type: LocalPortForwarding
+          localPortNumber: '8765'
+
   T01SmokeHealthBoundary:
     Metadata:
       com.aws.cloudformation.Context:
         why: root-owned immutable boundary for the disposable instance role
         must:
-          - Allow only run-scoped health secret reads
+          - Allow only run-scoped secret reads, evidence writes, and the fixed TeamKimi tunnel
     DependsOn: DeployRole
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -180,6 +261,22 @@ Resources:
           - Effect: Allow
             Action: secretsmanager:GetSecretValue
             Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-*
+          - Sid: ReadRunTeamKimiControlKey
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-proxy-*
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource: arn:aws:s3:::hive-v2-t01-evidence-594552273052/hive-v2-t01-smoke/*
+          - Effect: Allow
+            Action: ssm:StartSession
+            Resource: arn:aws:ec2:us-east-1:594552273052:instance/*
+            Condition:
+              StringEquals:
+                ssm:resourceTag/Role: nexus-kimi-session
+          - Effect: Allow
+            Action: ssm:StartSession
+            Resource: arn:aws:ssm:us-east-1:594552273052:document/hive-v2-t01-teamkimi-port-forward
 
   T01SmokeRole:
     Metadata:
@@ -347,6 +444,26 @@ Resources:
                   - secretsmanager:DescribeSecret
                   - secretsmanager:DeleteSecret
                 Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-*
+              - Sid: T01ProxyCredentialLifecycle
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:DeleteSecret
+                Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-proxy-*
+              - Sid: T01PaidEvidenceReadback
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: arn:aws:s3:::hive-v2-t01-evidence-594552273052/hive-v2-t01-smoke/*
+              - Sid: T01PaidEvidenceListing
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: arn:aws:s3:::hive-v2-t01-evidence-594552273052
+                Condition:
+                  StringLike:
+                    s3:prefix: hive-v2-t01-smoke/*
               - Sid: T01SmokeDeployMutex
                 Effect: Allow
                 Action:
