@@ -69,9 +69,9 @@ export class FileRegistry implements Registry {
         const sk = `PRINCIPAL#${principal}`;
         const row = rows.find((candidate) => candidate.pk === pk && candidate.sk === sk);
         if (!row) continue;
-        if (row.revokedAt !== null && row.revokedAt !== undefined
-          || rows.some((candidate) => candidate.pk === `REVOCATION#${pk}` && candidate.sk === sk
-            || (task !== undefined && row.task !== task)) {
+        const ledger = rows.some((candidate) => candidate.pk === `REVOCATION#${pk}` && candidate.sk === sk);
+        const wrongScope = task !== undefined && row.task !== task;
+        if (row.revokedAt !== null && row.revokedAt !== undefined || ledger || wrongScope) {
           return false;
         }
         return row.grantId === grantId && Array.isArray(row.actions) && row.actions.includes('execute');
