@@ -67,6 +67,12 @@ on_error() {
   set +e
   lock_down
   local category=unknown origin=unknown:0
+  case "${BOOTSTRAP_STAGE:-}" in
+    python-binary|pm-build)
+      category="failure:$BOOTSTRAP_STAGE"
+      origin="$BOOTSTRAP_STAGE:$status"
+      ;;
+  esac
   if [[ "$status" =~ ^(124|137)$ ]] && [ -n "${BOOTSTRAP_STAGE:-}" ]; then
     category="timeout:$BOOTSTRAP_STAGE"
     origin="$BOOTSTRAP_STAGE:$status"
@@ -143,6 +149,7 @@ ensure_package uv
 emit uv_install passed
 ensure_package python
 emit python_install passed
+BOOTSTRAP_STAGE=python-binary
 PYTHON="$(python3.11 -c 'from pm import installed_package; print(installed_package("python").binary)')"
 BOOTSTRAP_STAGE=pm-build
 timeout --signal=TERM --kill-after=30s 1800 python3.11 -m pm.build_env \
@@ -156,6 +163,7 @@ export UV_OFFLINE=1
 [ -f /opt/t01/source/uv.lock ]
 [ -x /opt/t01/hermes/bin/hermes ]
 emit frozen_hash_lock_install passed
+BOOTSTRAP_STAGE=
 
 cat > /var/lib/t01/hermes/config.yaml <<'EOF'
 security:
