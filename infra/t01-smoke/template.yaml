@@ -1,0 +1,177 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Disposable Hermes T01 preflight instance with no ingress and a bounded lifetime
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  TeamKimiUrl:
+    Type: String
+    AllowedPattern: '^https://[A-Za-z0-9.-]+(?::443)?$'
+    Description: Approved TeamKimi origin. No path, credentials, query, or alternate port.
+  TeamKimiSecretArn:
+    Type: String
+    AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+  TeamKimiSecretKey:
+    Type: String
+    Default: apiKey
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  TeamKimiConnectivityPath:
+    Type: String
+    Default: /health
+    AllowedPattern: '^/[A-Za-z0-9/_-]{1,128}$'
+  Scenario:
+    Type: String
+    AllowedValues: [preflight]
+  Matrix:
+    Type: String
+    AllowedValues: [none]
+  MaxInputTokens:
+    Type: Number
+    MinValue: 0
+    MaxValue: 16000
+  MaxOutputTokens:
+    Type: Number
+    MinValue: 0
+    MaxValue: 2000
+  MaxReasoningTokens:
+    Type: Number
+    MinValue: 0
+    MaxValue: 4000
+  MaxTotalTokens:
+    Type: Number
+    MinValue: 0
+    MaxValue: 22000
+  MaxApiCalls:
+    Type: Number
+    MinValue: 0
+    MaxValue: 1
+  MaxEstimatedCostUsd:
+    Type: Number
+    MinValue: 0
+    MaxValue: 0.5
+  MaxPaidAdmissions:
+    Type: Number
+    MinValue: 0
+    MaxValue: 12
+  LifetimeMinutes:
+    Type: Number
+    MinValue: 5
+    MaxValue: 120
+  ProvisionScriptUrl:
+    Type: String
+    AllowedPattern: '^https://raw.githubusercontent.com/Torbhub/hive-v2/[0-9a-f]{40}/infra/t01-smoke/provision.sh$'
+  ProvisionScriptSha256:
+    Type: String
+    AllowedPattern: '^[0-9a-f]{64}$'
+  RunId:
+    Type: String
+    AllowedPattern: '^[0-9]+$'
+
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: hive-v2-t01-smoke-instance
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-one-teamkimi-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTeamKimiBrokerSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref TeamKimiSecretArn
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: hive-v2-t01-smoke
+      Roles: [!Ref InstanceRole]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: hive-v2-t01-smoke
+      GroupDescription: No ingress. Provisioning egress is restricted by host firewall before Hermes starts.
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Role
+          Value: hive-v2-t01-smoke
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: t3.large
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      IamInstanceProfile: !Ref InstanceProfile
+      AssociatePublicIpAddress: true
+      InstanceInitiatedShutdownBehavior: terminate
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 40
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          umask 077
+          shutdown -h +${LifetimeMinutes}
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --max-redirs 0 --connect-timeout 10 --max-time 60 \
+            '${ProvisionScriptUrl}' --output /opt/t01-provision.sh
+          printf '%s  %s\n' '${ProvisionScriptSha256}' /opt/t01-provision.sh | sha256sum -c -
+          chmod 0700 /opt/t01-provision.sh
+          export TEAMKIMI_URL='${TeamKimiUrl}'
+          export TEAMKIMI_SECRET_ARN='${TeamKimiSecretArn}'
+          export TEAMKIMI_SECRET_KEY='${TeamKimiSecretKey}'
+          export TEAMKIMI_CONNECTIVITY_PATH='${TeamKimiConnectivityPath}'
+          export SCENARIO='${Scenario}' MATRIX='${Matrix}'
+          export MAX_INPUT_TOKENS='${MaxInputTokens}'
+          export MAX_OUTPUT_TOKENS='${MaxOutputTokens}'
+          export MAX_REASONING_TOKENS='${MaxReasoningTokens}'
+          export MAX_TOTAL_TOKENS='${MaxTotalTokens}'
+          export MAX_API_CALLS='${MaxApiCalls}'
+          export MAX_ESTIMATED_COST_USD='${MaxEstimatedCostUsd}'
+          export MAX_PAID_ADMISSIONS='${MaxPaidAdmissions}'
+          export LIFETIME_MINUTES='${LifetimeMinutes}' RUN_ID='${RunId}'
+          /opt/t01-provision.sh
+      Tags:
+        - Key: Name
+          Value: hive-v2-t01-smoke
+        - Key: Role
+          Value: hive-v2-t01-smoke
+        - Key: RunId
+          Value: !Ref RunId
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+  BrokerSecretArn:
+    Value: !Ref TeamKimiSecretArn
+  BrokerEndpoint:
+    Value: http://127.0.0.1:8765/v1
+  HermesCommit:
+    Value: f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab
