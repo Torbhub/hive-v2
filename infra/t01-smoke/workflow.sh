@@ -189,16 +189,23 @@ delete_stack() {
 }
 
 delete_health_secret() {
-  local describe_rc
+  local describe_rc poll
   if aws secretsmanager describe-secret --secret-id "$HEALTH_SECRET_NAME" >"$CLEANUP_OUTPUT" 2>"$CLEANUP_ERROR"; then
     aws secretsmanager delete-secret --secret-id "$HEALTH_SECRET_NAME" --force-delete-without-recovery \
       --query '{Name:Name,VersionId:VersionId,DeletionDate:DeletionDate}' --output json || return $?
-    if aws secretsmanager describe-secret --secret-id "$HEALTH_SECRET_NAME" >"$CLEANUP_OUTPUT" 2>"$CLEANUP_ERROR"; then
-      echo "health secret still exists after deletion" >&2
-      return 1
-    else
-      describe_rc=$?
-    fi
+    for ((poll = 0; poll < 10; poll++)); do
+      if aws secretsmanager describe-secret --secret-id "$HEALTH_SECRET_NAME" >"$CLEANUP_OUTPUT" 2>"$CLEANUP_ERROR"; then
+        sleep 1
+      else
+        describe_rc=$?
+        if grep -q ResourceNotFoundException "$CLEANUP_ERROR"; then
+          return 0
+        fi
+        return "$describe_rc"
+      fi
+    done
+    echo "health secret still exists after deletion" >&2
+    return 1
   else
     describe_rc=$?
   fi
