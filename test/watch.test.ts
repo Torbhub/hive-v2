@@ -74,9 +74,11 @@ vi.mock('../src/state.js', async (importOriginal) => {
   return { ...orig, appendDecision: vi.fn(orig.appendDecision) };
 });
 
+vi.mock('../src/compact.js', () => ({ maybeCompact: vi.fn(async () => {}) }));
 import { buildStatus, continueProject, readDialogFor, answerDialog, wake } from '../src/hub.js';
 import { typeLine, wakeAgent } from '../src/spawn.js';
 import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
+import { maybeCompact } from '../src/compact.js';
 import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep, tmux } from '../src/tmux.js';
 import { withTimeout } from '../src/view.js';
 import { appendDecision, hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, writePendingPane, hivePath } from '../src/state.js';
@@ -183,6 +185,26 @@ async function setupProject(opts: { approvals?: string; mode?: string; agents?: 
 }
 
 describe('watchCycle watchdog', () => {
+  it('offers each live Hive worker to the compaction policy', async () => {
+    const { root } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
+    });
+    await watchCycle(root);
+    expect(maybeCompact).toHaveBeenCalledWith(root, 'demo', expect.objectContaining({ name: 'builder' }));
+  });
+
+  it('offers closed and pane-less records for legacy cleanup before liveness checks', async () => {
+    const { root } = await setupProject({
+      agents: [
+        { name: 'closed', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_closed', closed_at: '2026-11-06T11:00:00Z' },
+        { name: 'unrecorded', session_id: 'session_unrecorded' },
+      ],
+    });
+    await watchCycle(root);
+    expect(maybeCompact).toHaveBeenCalledWith(root, 'demo', expect.objectContaining({ name: 'closed' }));
+    expect(maybeCompact).toHaveBeenCalledWith(root, 'demo', expect.objectContaining({ name: 'unrecorded' }));
+  });
+
   it('logs a death once, backs off a failed wake, and logs a real resurrection', async () => {
     const { root } = await setupProject({
       agents: [

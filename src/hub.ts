@@ -154,6 +154,11 @@ async function projectStatus(
   };
   if (orchEntry) {
     orchestrator.name = orchEntry.name;
+    orchestrator.auto_compact = orchEntry.auto_compact !== false;
+    if (orchEntry.compaction) {
+      const { instruction: _, ...compaction } = orchEntry.compaction as NonNullable<TeamEntry['compaction']> & { instruction?: string };
+      orchestrator.compaction = compaction;
+    }
     orchestrator.children = team.agents.filter((a) => !a.orchestrator && a.parent === orchEntry.name).length;
     if (orchEntry.session_id) orchestrator.session_id = orchEntry.session_id;
     const snap = await snapshot(orchEntry);
@@ -210,6 +215,11 @@ async function projectStatus(
       ref: agentRef(a.name, nameCounts, a.worktree),
     };
     if (a.session_id) agent.session_id = a.session_id;
+    agent.auto_compact = a.auto_compact !== false;
+    if (a.compaction) {
+      const { instruction: _, ...compaction } = a.compaction as NonNullable<TeamEntry['compaction']> & { instruction?: string };
+      agent.compaction = compaction;
+    }
     if (snap.context !== null && snap.alive !== 'gone') {
       agent.context = snap.context;
       agent.context_assumed = false;
@@ -324,7 +334,6 @@ export async function answerDialog(
   }
   await sleep(2000);
   const after = await readDialogFor(root, project, agentRefArg);
-  // Lore: every owner answer lands in the permanent decisions log.
   const firstLine = dialog.text.split('\n').map((l) => l.trim()).find((l) => l && !/^[─╌-]+$/.test(l)) ?? '';
   const command = extractCommand(dialog.text);
   const subject = command ? `$ ${command}` : firstLine;

@@ -19,6 +19,8 @@ export type HubAgent = {
   context_assumed?: boolean;
   context_unknown?: boolean;
   context_tokens?: number;
+  auto_compact?: boolean;
+  compaction?: Omit<CompactionState, 'instruction'>;
   worktree?: string;
   session_id?: string;
   ref?: string;
@@ -39,6 +41,8 @@ export type HubOrchestrator = {
   context_assumed?: boolean;
   context_unknown?: boolean;
   context_tokens?: number;
+  auto_compact?: boolean;
+  compaction?: Omit<CompactionState, 'instruction'>;
   starting?: {
     pane: string;
     kind: string;
@@ -162,6 +166,22 @@ export type HubStatus = {
   projects: HubProject[];
 };
 
+export type CompactionStatus = 'sending' | 'submitted' | 'queued' | 'in_progress' | 'compacted' | 'failed' | 'ambiguous';
+
+export type CompactionState = {
+  session_id: string;
+  status: CompactionStatus;
+  at: string;
+  attempts: number;
+  activity_at?: number;
+  instruction_hash?: string;
+  rejection_before?: number;
+  completion_before?: number;
+  pre_input?: boolean;
+  retry_at?: string;
+  detail?: string;
+};
+
 export type TeamEntry = {
   name: string;
   orchestrator?: boolean;
@@ -182,6 +202,8 @@ export type TeamEntry = {
   wedged_at?: string;
   task?: string;
   model?: string;
+  auto_compact?: boolean;
+  compaction?: CompactionState;
 };
 
 export const TASK_EVENTS = [

@@ -59,6 +59,8 @@ src/
   gate.ts      — gate runner + gate-verify (log, commits)
   cleanup.ts   — manifest-driven cleanup, trash-not-delete
   watch.ts     — watchdog (dead-pane log + wake), safe/smart auto-approver, and direct Auto dialog answers
+  compact.ts   — idle compaction policy, durable attempts, and per-worker controls
+  cache-expiry.ts — exact cache-dialog parsing and identity-checked cursor input
   ui/HubApp.tsx   — the hub screen (spec docs/hub-ui-spec.md)
   ui/look.ts      — the shared look: ago, look tables, needs-building (Ink and web both import it)
   ui/buttons.tsx  — keyboard-driven button (Tab focus, Enter press, hotkeys)
@@ -105,7 +107,9 @@ Per project, `<project>/.hive/`:
 
 - `team.json` — one entry per agent: name, tmux target, pane pid +
   starttime (identity is pid+starttime, never the bare `%N`), worktree,
-  session resume info, handoff path. Orchestrator included.
+  session resume info, handoff path. Orchestrator included. `auto_compact`
+  controls the 30-minute policy for that worker. `compaction` stores the
+  session id, status, attempt count, activity epoch, instruction hash, and failure detail.
 - `team/<agent>/role.md`, `team/<agent>/RULES.md` — copies made at spawn.
 - `handoffs/<agent>.md` — the agent's persistent memory. Worker START HERE
   blocks carry Assignment and Deliverable sections. Fresh launch validates and
@@ -129,6 +133,7 @@ hive spawn <project> --agent <name> --assignment <text> --deliverable <text> [--
 hive gate --log <path> -- <name> <cmd>... | gate-verify log <path> [--commit sha] | gate-verify commits <base>..<tip>
 hive push <remote> <sha> <branch>        — fast-forward only, by full hash
 hive cleanup <project> [--dry-run]
+hive compact <project> [agent] on|off
 hive ui                                  — the hub screen
 ```
 
@@ -209,8 +214,14 @@ hive ui                                  — the hub screen
     options, mark `Type something`-like free-text options not-offered, sha1
     fingerprint over the dialog text. `answer` re-checks the fingerprint
     before sending keys (digit or Escape). Never types over a dialog.
-- Typing: `send-keys -l` then `Enter`, only after idle, re-verifying pane
-  identity before every send.
+- Typing: `send-keys -l` then `Enter`, re-verifying pane identity before every
+  send. Normal task input waits for idle. Auto-compaction also uses Kimi's
+  supported busy queue. The only dialog fallback selects `Compact and continue`
+  on a complete Kimi 2.5.1 cache-expiry chooser. The final send holds the team
+  lock, rechecks disablement and the screen, and verifies process identity and
+  the full dialog fingerprint before every key. It also rechecks activity and
+  requires a non-dialog screen before every Enter and after each input capture.
+  Legacy instruction cleanup runs before closed and pane-less liveness branches.
 - Rotation: `hive spawn respawn <project> --agent <name>` (kill pane, fresh
   session, pickup line points at the handoff). The screen shows context % so
   the owner/orchestrator knows when; no automatic rotation in v2.

@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { captureDeathBundle, wireLogMtime } from './death-bundle.js';
+import { maybeCompact } from './compact.js';
 import { answerDialog, buildStatus, continueProject, readDialogFor, Refusal, wake } from './hub.js';
 import { DEFAULT_MODEL, typeLine, wakeAgent } from './spawn.js';
 import { classify, isNativeQuestion, lines } from './screen.js';
@@ -421,6 +422,9 @@ export async function watchCycle(
     const proj = status.projects.find((x) => x.name === p.name);
     const team = await readTeam(p.home);
     for (const a of team.agents) {
+      await maybeCompact(root, p.name, a).catch(async (e: unknown) => {
+        await appendWatchLog(root, `${new Date().toISOString()} ${p.name} auto-compaction failed for ${a.name}: ${lastLine(e)}`);
+      });
       if (!a.pane || a.closed_at) continue;
       if (!(await paneExists(a.pane))) {
         await handleDeath(root, p.name, p.home, a, deaths, wakes);

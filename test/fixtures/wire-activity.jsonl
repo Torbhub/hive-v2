@@ -1,0 +1,9 @@
+{"type":"turn.prompt","time":1760000000000,"origin":{"kind":"user"}}
+{"type":"turn.ended","kind":"event","time":1760000001000}
+{"type":"permission.record_approval_result","time":1760000002000}
+{"type":"task.waitDelivered","time":1760000003000}
+{"type":"turn.prompt","time":1760000004000,"origin":{"kind":"system_trigger"}}
+{"type":"token_counting.measured","time":1760000005000}
+{"type":"full_compaction.complete","time":1760000006000}
+{"type":"task.waitDelivered","time":1760000007000}
+{"type":"permission.record_approval_result","time":1760000008000}

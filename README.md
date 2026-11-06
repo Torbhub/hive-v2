@@ -99,6 +99,18 @@ plays a fake approval dialog, and the real watch cycle detects it, calls the
 classifier (a stub `kimi` on PATH), and answers the pane or correctly holds
 back.
 
+### Idle compaction
+
+Every Hive Kimi worker compacts after 30 minutes without a completed turn or compaction. Pane polls, keepalives, local state writes, and question heartbeats do not reset this clock. The watch uses `/compact <instruction>` on an idle prompt. On a busy turn, Kimi queues the command. Hive never starts, clears, forks, or resumes a session for compaction.
+
+One fixed instruction preserves the objective, approved plan, checkpoints, paths, commits, PR/CI state, gates, processes, questions, and next actions. It reads existing records in the current workspace when needed. It contains no handoff, task, path, or Git text, so external content cannot alter the instruction or the credentials boundary.
+
+Disable one worker with `hive compact demo builder off`. Use `on` to enable it again. Omit `builder` to control the orchestrator. The setting survives respawns. `hive hub status --json` shows the setting and attempt state. The decision feed shows submissions, failures, and ambiguous outcomes.
+
+Hive retries a proven pre-input failure once after a five-minute delay and a fresh idle period. Post-input and uncertain failures become `ambiguous` without retry. Terminal states rearm only after new qualifying activity and another full idle period. A `compacted` state requires an observed compaction spinner followed by explicit completion text. Kimi's public docs do not specify a completion event for automation. Silent completion therefore becomes `ambiguous`, never `compacted`.
+
+The [slash command reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/slash-commands.html) documents `/compact [<instruction>]` and busy queueing. The [session guide](https://www.kimi.com/code/docs/en/kimi-code-cli/guides/sessions.html) documents preservation hints and duplicate refusal. If a cache-expiry chooser blocks command input, Hive accepts only its `Compact and continue` option. Other dialogs stay untouched. Non-Hive sessions remain outside the private tmux socket.
+
 ## The daily loop
 
 Once a day the box posts a `daily-scan` task to the hivev2 project by

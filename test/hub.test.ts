@@ -84,6 +84,23 @@ describe('buildStatus pane identity', () => {
     const status = await buildStatus(root);
     expect(status.projects[0].orchestrator).toMatchObject({ state: 'running', pane: '%15' });
   });
+  it('exposes compaction status without the preservation instruction', async () => {
+    const { root, home } = await setup();
+    const compaction = {
+      session_id: 'session_b', status: 'ambiguous', at: '2026-11-06T12:00:00Z', attempts: 1,
+      instruction: '/compact private task details', detail: 'delivery is unknown',
+    };
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [
+        { name: 'demo-orchestrator', orchestrator: true, compaction: { ...compaction, instruction: undefined } },
+        { name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', auto_compact: false, compaction },
+      ],
+    });
+    const status = await buildStatus(root);
+    expect(status.projects[0].orchestrator.auto_compact).toBe(true);
+    expect(status.projects[0].agents[0]).toMatchObject({ auto_compact: false, compaction: { status: 'ambiguous', detail: 'delivery is unknown' } });
+    expect(status.projects[0].agents[0].compaction).not.toHaveProperty('instruction');
+  });
 });
 
 describe('buildStatus structured questions', () => {
