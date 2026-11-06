@@ -179,53 +179,21 @@ An agent that needs decisions calls the `ask_operator` MCP tool
 (`mcp__hive-operator__ask_operator`). A conditional Kimi hook disables native
 `AskUserQuestion` only for Hive agents. If the hook misses a dialog, the watchdog
 dismisses it and redirects the agent here. Non-Hive sessions keep the native tool.
-One call carries the whole batch and waits for you. A general question has its
-own context, a priority, 2-8 described choices, and one recommendation.
-
-An approval uses a `decision` object instead. It names one action: `push`, `pr`,
-`merge`, `deploy`, `paid_work`, `deletion`, or `credentials`. Use a separate
-question for every action. General and Other answers carry no approval
-authority. Legacy approval-shaped questions become safe detail requests.
-
-For repository actions, Hive resolves the registered project and agent worktree.
-It derives the repository, branch, full 40-character commit, diff summary,
-files, and destination from Git. Agent claims replace none of these facts.
-Verification failures produce an incomplete card without approval. Other
-actions include exact scope. Paid work also includes a budget. Their
-destinations are fixed action-specific text, not agent-provided authoritative
-facts. Every agent field is normalized before security-instruction checks.
-
-The card shows the decision and scope first. Verified facts, consequences,
-age, and validity follow. Approval is available only while verification is
-fresh. The server enforces the same rule when answers arrive. Internal tool
-output, stack traces, and handoffs are removed from every owner-visible field.
-Mixed batches preserve safe overarching context and show a separate notice
-that no approval happens automatically. Agent context is labelled untrusted.
-Approval or safety instructions remove that context. Deletion and credential
-headings never interpolate scope.
-
-A decision answer includes action, outcome, facts, and a grant when approved.
-The grant binds batch, question, project, verified-fact fingerprint, expiry,
-and execution authority. Push grants work once through `hive push --approval
-<batch>/<question>`. The command rechecks current facts and rejects replay or
-substitution. Other actions have `executionAuthority: none`.
+One call carries the whole batch: the
+overarching context, then each question with its own context, a priority,
+2-8 described choices, and one recommendation. The call waits for you.
 
 Open batches appear on the main web screen with their answer controls. The
-`Questions N` button opens the same cards in a full-screen view. Every question
-also takes Other with your own words. Other text is bounded and nonblank but
-otherwise preserved exactly. Other never grants approval. If a selected
-approval expires, the card selects Refresh and announces the change. Submit
-stays disabled while any selected choice is invalid.
-
-An optional presentation rewriter receives a defensive copy of sanitized
-facts and an abort signal, but model text never supplies the security overview.
-Cards always keep deterministic security wording, so model claims cannot create
-approval, cost, or factual assertions. No model integration or paid call is
-enabled by default.
-
-A batch left open for more than 7 days expires the next time the hub view runs
-its sweep. Closed history keeps only the newest 200. The screen shows the
-oldest 50 open batches and tells you when more are waiting behind them.
+`Questions N` button opens the same cards in a full-screen view. Batches read
+top to bottom: why this is being asked, who asks, then the questions in priority order.
+Recommendations come pre-selected, so accepting them all is one Submit.
+Every question also takes Other with your own words. Submit answers the
+whole batch at once, and the waiting agent gets your choices as JSON.
+Cancel is the escape hatch and tells the agent not to assume an answer.
+A batch left open for more than 7 days expires the next time the hub view
+runs its sweep, and closed history keeps only the newest 200. The screen
+shows the oldest 50 open batches and tells you when more are waiting
+behind them.
 
 The tool is registered for every kimi session by provision. Agents launched
 before that registration need a respawn to see it and to get the HIVE_*

@@ -231,18 +231,6 @@ describe('validateAnswers', () => {
     expect(() => validateAnswers(batch, [{ question: 'q1', choice: 'c1', text: 'no' }, ok[1]])).toThrow(/only an other answer/);
     expect(() => validateAnswers(batch, 'yes')).toThrow(/an array/);
   });
-
-  it('preserves bounded nonblank Other text exactly as submitted', async () => {
-    const r = await root();
-    const batch = await createQuestionBatch(r, meta, input());
-    for (const text of ['Error: owner detail\n  at owner.js:1:2', 'tool result was interrupted\nKeep this exact\t spacing']) {
-      const answers = validateAnswers(batch, [
-        { question: 'q1', choice: 'other', text },
-        { question: 'q2', choice: 'c1' },
-      ]);
-      expect(answers[0].text).toBe(text);
-    }
-  });
 });
 
 describe('sweepQuestionBatches', () => {

@@ -298,29 +298,6 @@ type HubDialog = {
 }
 
 type QuestionChoice = { id: string, label: string, description: string }
-type DecisionFacts = {
-  action: 'push' | 'pr' | 'merge' | 'deploy' | 'paid_work' | 'deletion' | 'credentials' | 'unknown'
-  repository?: string
-  repositoryFingerprint?: string  // sha256 of the exact push URL, not displayed
-  branch?: string
-  commit?: string             // canonical 40 hex id from Git, shown as 8 chars
-  diffSummary?: string
-  files?: string[]            // at most 20 verified paths
-  destination?: string
-  reason?: string            // why the agent needs this approval now
-  scope?: string
-  budget?: string
-  verifiedAt?: string         // ISO timestamp
-  validUntil?: string         // ISO timestamp
-}
-type DecisionCard = {
-  action: DecisionFacts['action']
-  facts: DecisionFacts
-  missing: string[]
-  consequences: string[]
-  overview: string
-  overviewSource: 'deterministic' | 'model'
-}
 type OperatorQuestion = {
   id: string
   question: string
@@ -328,24 +305,8 @@ type OperatorQuestion = {
   priority: number
   choices: QuestionChoice[]
   recommended: string
-  decision?: DecisionCard
 }
-type DecisionGrant = {
-  batch: string
-  question: string
-  project: string
-  fingerprint: string       // sha256 of verified facts except validity timestamps
-  expiresAt: string
-  executionAuthority: 'push' | 'none'
-  consumedAt?: string       // set once by the push execution path
-}
-type DecisionAnswer = {
-  action: DecisionFacts['action']
-  outcome: 'refresh' | 'approve' | 'cancel' | 'details' | 'other'
-  facts: DecisionFacts
-  grant?: DecisionGrant
-}
-type QuestionAnswer = { question: string, choice: string, text?: string, decision?: DecisionAnswer }
+type QuestionAnswer = { question: string, choice: string, text?: string }
 type QuestionBatch = {
   id: string
   project: string
@@ -354,7 +315,6 @@ type QuestionBatch = {
   questions: OperatorQuestion[]
   status: 'open' | 'answered' | 'cancelled'
   createdAt: string
-  waitHeartbeatAt?: string
   closedAt?: string
   answers?: QuestionAnswer[]
 }
@@ -620,17 +580,9 @@ Success answers `{ok: true, target, killed, summary}` and, when at least one ent
 
 **Screen.** Both views use the same batch cards. The whole-screen header shows `Questions`, an `{N} open` badge with the same total, and **back**. The view carries at most the oldest 50 open batches and `questionsTotal` counts all of them. When more remain, the whole-screen view reads `Showing the oldest {loaded} of {total}. Answer or cancel these to see the rest.` Cards follow oldest `createdAt` first. The card header shows the batch context, `{project} · {agent}`, and the ISO `createdAt` value. With no open batches, the whole-screen body shows `No open questions.`
 
-Questions sort by numeric `priority` ascending. Equal priorities keep their batch order. Each question shows a `P{priority}` badge, its question text, and its context as supporting text. Choices use native radio inputs. Each choice shows its label and description. The recommended choice carries a `Recommended` badge and starts selected. A submit with no changes accepts every recommendation.
+Questions sort by numeric `priority` ascending. Equal priorities keep their batch order. Each question shows a `P{priority}` badge, its question text, and its context as supporting text. Choices use native radio inputs. Each choice shows its label and description. The recommended choice carries a `recommended` badge and starts selected. A submit with no changes accepts every recommendation.
 
-**Decision cards.** An action request states its one decision and scope before any commit id. Safe batch context stays in the header as `Agent context (untrusted): ...`, including for mixed general and decision batches. Approval or safety instructions replace that context with `Agent context removed.` A separate line reads `Review each requested action separately. No approval happens automatically.` Raw handoffs, tool results, stack traces, and legacy approval-shaped questions become `More detail is needed before approval.` They offer only **Send back for details**, **Cancel request**, and **Other**. Every owner-visible field passes the internal-content boundary.
-
-The card body shows a deterministic security overview first. Model text never supplies this wording or its approval, cost, and factual claims. A two-column fact grid becomes one column on narrow screens. Repository, branch, canonical commit, diff, destination, and changed files come from the registered worktree through Git. Agent repository claims never supply these facts. Retained context appears as `Agent reason (untrusted)`, `Agent scope (untrusted)`, or `Agent budget (untrusted)`. Offending context is omitted and removes approval. Bare approval imperatives and approval-not-required claims are removed after invisible-character normalization. Paid work uses `the named paid-work provider`, deletion uses `the named deletion target`, and credentials use `the named credential audience` as deterministic destinations. Deletion uses `Delete the named target?`. Credentials use `Grant the named credential access?`. Agent scope never changes those headings. Long values wrap. The **Exact consequences** list keeps push, pull request creation, merge, deploy, paid work, deletion, and credential grants separate.
-
-The last detail line shows `Current`, `Stale`, `Expired`, `Invalid`, or `Incomplete`, then `Verification {age}` and `Valid until {ISO}` when present. Verification over 15 minutes old is stale. A current request offers **Refresh facts first** as Recommended, one action-specific approval, **Cancel request**, and **Other**. An incomplete, stale, expired, or invalid request has no enabled approval. A decision card updates its clock each second. A selected approval that becomes invalid resets to Refresh and announces `Approval expired. Refresh facts first was selected.` Submit stays disabled while any selected choice is invalid, so unrelated answers can still submit after the reset. The server also refuses stale or expired approval. Other never grants approval.
-
-An approved answer carries a grant bound to batch, question, project, action, verified-fact fingerprint, expiry, and execution authority. Push grants work once through `hive push --approval <batch>/<question>`, which rechecks current facts and rejects replay and substitution. Other actions have `executionAuthority: none`. Submit returns the answer and never executes the action itself.
-
-Every question also has an **Other** radio and a free-text input. The input starts disabled. Selecting **Other** enables it and makes it required. Its value is capped at 4000 characters. Whitespace alone is not a valid answer. Every other byte is preserved exactly as submitted, including newlines, tabs, `Error:`, and `tool result was interrupted`. Selecting a listed choice disables the input and removes the requirement. The draft keeps the text.
+Every question also has an **Other** radio and a free-text input. The input starts disabled. Selecting **Other** enables it and makes it required. Its value is capped at 4000 characters. Whitespace alone is not a valid answer. Selecting a listed choice disables the input and removes the requirement. The draft keeps the text.
 
 Each batch has one **Submit** button. It stays disabled until every question has a valid answer. A submit POSTs `/api/questions/answer` with no project field. Answers follow the displayed question order. Other text is sent as entered.
 
@@ -638,7 +590,7 @@ Each batch has one **Submit** button. It stays disabled until every question has
 {"id":"<uuid>","answers":[{"question":"q1","choice":"c1"},{"question":"q2","choice":"other","text":"..."}]}
 ```
 
-The server validates the answers through `answerQuestionBatch`. For a structured decision it adds `decision: {action, outcome, facts, grant?}` to each stored and returned answer. Outcomes are `refresh`, `approve`, `cancel`, `details`, and `other`. The agent uses this typed outcome, not the raw choice id. Other never grants approval. General answers keep their old shape. Success answers `{ok: true, batch}` with the answered batch. A refusal answers 400 `{ok: false, detail}` and shows a toast. A failed submit keeps every draft. The shared action gate disables action buttons during the request.
+The server validates the answers through `answerQuestionBatch`. Success answers `{ok: true, batch}` with the answered batch. A refusal answers 400 `{ok: false, detail}` and shows a toast. A failed submit keeps every draft. The shared action gate disables action buttons during the request.
 
 **Cancel.** Each batch has a two-step **Cancel batch** action. The first click only shows **Cancel batch?** and **Keep batch**. It posts nothing. **Keep batch** abandons the cancel. The confirm stays disabled for about half a second after arming. The second click POSTs `/api/questions/cancel` with no project field.
 

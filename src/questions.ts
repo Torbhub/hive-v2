@@ -1,13 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type { Dirent } from 'node:fs';
-import type { DecisionAnswer, OperatorQuestion, QuestionAnswer, QuestionBatch } from './types.js';
+import type { OperatorQuestion, QuestionAnswer, QuestionBatch } from './types.js';
 import { Refusal, appendDecision, hubPath, readJson, withHubLock, writeJson } from './state.js';
-import {
-  applyDecisionRewrite, buildDecision, buildHandoffFallback, cleanAgentText, containsSecurityInstruction,
-  decisionApprovalAllowed, decisionValidity, isInternalHandoff, type DecisionRewriter,
-} from './decisions.js';
-import { decisionFingerprint, repositoryFingerprint, verifyDecisionFacts, verifyExecutionRepository } from './decision-verification.js';
 
 export const QUESTION_LIMITS = {
   questions: 20, choices: 8, context: 4000, question: 1000,
@@ -18,14 +13,6 @@ function text(value: unknown, at: string, max: number): string {
   if (typeof value !== 'string' || !value.trim()) throw new Refusal(`${at}: a non-empty string is required`);
   if (value.length > max) throw new Refusal(`${at}: ${value.length} chars exceeds the ${max} cap`);
   return value;
-}
-
-function agentContext(value: unknown, at: string, max: number): string {
-  if (typeof value !== 'string' || !value.trim()) throw new Refusal(`${at}: a non-empty string is required`);
-  if (value.length > max) throw new Refusal(`${at}: ${value.length} chars exceeds the ${max} cap`);
-  const clean = cleanAgentText(value);
-  if (clean === 'Internal content removed.') return clean;
-  return containsSecurityInstruction(clean) ? 'Agent context removed.' : value;
 }
 
 function exactKeys(value: unknown, keys: string[], at: string, optional: string[] = []): Record<string, unknown> {
@@ -42,30 +29,25 @@ function exactKeys(value: unknown, keys: string[], at: string, optional: string[
   return obj;
 }
 
-export function validateBatchInput(raw: unknown, now = Date.now()): { context: string; questions: OperatorQuestion[] } {
+// The agent-facing contract is deliberately rigid: a batch the operator can
+// skim has no optional context, no choice without a description, and exactly
+// one recommendation per question.
+export function validateBatchInput(raw: unknown): { context: string; questions: OperatorQuestion[] } {
   const input = exactKeys(raw, ['context', 'questions'], 'batch');
-  const context = agentContext(input.context, 'batch.context', QUESTION_LIMITS.context);
+  const context = text(input.context, 'batch.context', QUESTION_LIMITS.context);
   if (!Array.isArray(input.questions) || input.questions.length < 1 || input.questions.length > QUESTION_LIMITS.questions) {
     throw new Refusal(`batch.questions: an array of 1..${QUESTION_LIMITS.questions} questions is required`);
   }
-  const questions = input.questions.map((q, i): OperatorQuestion => {
+  const questions = input.questions.map((q, i) => {
     const at = `questions[${i}]`;
-    const obj = exactKeys(q, ['priority'], at, ['question', 'context', 'choices', 'recommended', 'decision']);
+    const obj = exactKeys(q, ['question', 'context', 'priority', 'choices', 'recommended'], at);
     if (!Number.isInteger(obj.priority) || (obj.priority as number) < 1) {
       throw new Refusal(`${at}.priority: an integer >= 1 is required (1 decides first)`);
     }
-    const common = { id: `q${i + 1}`, priority: obj.priority as number };
-    if (obj.decision !== undefined) {
-      return { ...common, ...buildDecision(obj.decision, `${at}.decision`, now) };
-    }
-    if (isInternalHandoff(obj)) {
-      return { ...common, ...buildHandoffFallback() };
-    }
-    const general = exactKeys(q, ['question', 'context', 'priority', 'choices', 'recommended'], at, ['decision']);
-    if (!Array.isArray(general.choices) || general.choices.length < 2 || general.choices.length > QUESTION_LIMITS.choices) {
+    if (!Array.isArray(obj.choices) || obj.choices.length < 2 || obj.choices.length > QUESTION_LIMITS.choices) {
       throw new Refusal(`${at}.choices: an array of 2..${QUESTION_LIMITS.choices} choices is required`);
     }
-    const choices = general.choices.map((c, j) => {
+    const choices = obj.choices.map((c, j) => {
       const co = exactKeys(c, ['label', 'description'], `${at}.choices[${j}]`);
       return {
         id: `c${j + 1}`,
@@ -73,14 +55,15 @@ export function validateBatchInput(raw: unknown, now = Date.now()): { context: s
         description: text(co.description, `${at}.choices[${j}].description`, QUESTION_LIMITS.description),
       };
     });
-    const recommended = text(general.recommended, `${at}.recommended`, 10);
+    const recommended = text(obj.recommended, `${at}.recommended`, 10);
     if (!choices.some((c) => c.id === recommended)) {
       throw new Refusal(`${at}.recommended: must be one of ${choices.map((c) => c.id).join(', ')} (c1 is the first choice)`);
     }
     return {
-      ...common,
-      question: text(general.question, `${at}.question`, QUESTION_LIMITS.question),
-      context: text(general.context, `${at}.context`, QUESTION_LIMITS.context),
+      id: `q${i + 1}`,
+      question: text(obj.question, `${at}.question`, QUESTION_LIMITS.question),
+      context: text(obj.context, `${at}.context`, QUESTION_LIMITS.context),
+      priority: obj.priority as number,
       choices,
       recommended,
     };
@@ -88,24 +71,7 @@ export function validateBatchInput(raw: unknown, now = Date.now()): { context: s
   return { context, questions };
 }
 
-function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, answer: QuestionAnswer): QuestionAnswer {
-  const card = question.decision;
-  if (!card) return answer;
-  let outcome: DecisionAnswer['outcome'];
-  if (answer.choice === 'other') outcome = 'other';
-  else if (answer.choice === 'c1') outcome = card.action === 'unknown' || card.missing.length ? 'details' : 'refresh';
-  else if (answer.choice === 'c2' && question.choices.length === 3) outcome = 'approve';
-  else outcome = 'cancel';
-  const facts = structuredClone(card.facts);
-  const grant = outcome === 'approve' ? {
-    batch: batch.id, question: question.id, project: batch.project,
-    fingerprint: decisionFingerprint(facts), expiresAt: facts.validUntil!,
-    executionAuthority: card.action === 'push' ? 'push' as const : 'none' as const,
-  } : undefined;
-  return { ...answer, decision: { action: card.action, outcome, facts, grant } };
-}
-
-export function validateAnswers(batch: QuestionBatch, raw: unknown, now = Date.now()): QuestionAnswer[] {
+export function validateAnswers(batch: QuestionBatch, raw: unknown): QuestionAnswer[] {
   if (!Array.isArray(raw)) throw new Refusal('answers: an array with one answer per question is required');
   const seen = new Set<string>();
   const answers = raw.map((a, i): QuestionAnswer => {
@@ -117,16 +83,13 @@ export function validateAnswers(batch: QuestionBatch, raw: unknown, now = Date.n
     seen.add(qid);
     const choice = text(obj.choice, `answers[${i}].choice`, 20);
     if (choice === 'other') {
-      return withDecisionAnswer(batch, q, { question: qid, choice, text: text(obj.text, `answers[${i}].text (other)`, QUESTION_LIMITS.other) });
+      return { question: qid, choice, text: text(obj.text, `answers[${i}].text (other)`, QUESTION_LIMITS.other) };
     }
     if (!q.choices.some((c) => c.id === choice)) {
       throw new Refusal(`answers[${i}].choice: ${qid} offers ${q.choices.map((c) => c.id).join(', ')} or other`);
     }
-    if (q.decision && q.choices.length === 3 && choice === 'c2' && !decisionApprovalAllowed(q, now)) {
-      throw new Refusal(`${qid}: ${decisionValidity(q, now)} approval is not allowed; refresh facts first`);
-    }
     if (obj.text !== undefined) throw new Refusal(`answers[${i}].text: only an other answer carries text`);
-    return withDecisionAnswer(batch, q, { question: qid, choice });
+    return { question: qid, choice };
   });
   const missing = batch.questions.filter((q) => !seen.has(q.id)).map((q) => q.id);
   if (missing.length) throw new Refusal(`answers: no answer for ${missing.join(', ')}`);
@@ -155,27 +118,12 @@ async function writeBatch(root: string, id: string, batch: QuestionBatch): Promi
 
 export async function createQuestionBatch(
   root: string, meta: { project: string; agent: string }, raw: unknown,
-  opts: { rewrite?: DecisionRewriter; rewriteTimeoutMs?: number } = {},
 ): Promise<QuestionBatch> {
-  const now = Date.now();
-  const { context, questions } = validateBatchInput(raw, now);
-  const verified = await Promise.all(questions.map(async (question): Promise<OperatorQuestion> => {
-    const card = question.decision;
-    if (!card || card.action === 'unknown') return question;
-    const requested = { ...card.facts, action: card.action };
-    try {
-      const facts = await verifyDecisionFacts(root, meta, requested, now);
-      return { id: question.id, priority: question.priority, ...buildDecision(facts, 'verified decision', now) };
-    } catch {
-      const safe = { action: card.action, reason: card.facts.reason, scope: card.facts.scope, budget: card.facts.budget };
-      return { id: question.id, priority: question.priority, ...buildDecision(safe, 'unverified decision', now) };
-    }
-  }));
-  const presented = await applyDecisionRewrite(verified, opts.rewrite, opts.rewriteTimeoutMs);
+  const { context, questions } = validateBatchInput(raw);
   const batch: QuestionBatch = {
     id: randomUUID(), project: meta.project, agent: meta.agent,
-    context, questions: presented, status: 'open', createdAt: new Date(now).toISOString(),
-    waitHeartbeatAt: new Date(now).toISOString(),
+    context, questions, status: 'open', createdAt: new Date().toISOString(),
+    waitHeartbeatAt: new Date().toISOString(),
   };
   await withHubLock(root, async () => {
     const open = await listOpenQuestionBatches(root);
@@ -195,82 +143,11 @@ export async function heartbeatQuestionBatch(root: string, id: string): Promise<
   });
 }
 
-function hasConsumedGrant(batch: QuestionBatch): boolean {
-  return Boolean(batch.answers?.some((answer) => answer.decision?.grant?.consumedAt));
-}
-
 export async function readQuestionBatch(root: string, id: string): Promise<QuestionBatch> {
-  const open = await readJson<QuestionBatch>(batchPath(root, id));
-  const closed = await readJson<QuestionBatch>(batchPath(root, id, true));
-  if (open && open.status !== 'open' && closed) {
-    if (JSON.stringify(open) !== JSON.stringify(closed)) throw new Refusal(`duplicate terminal question batch ${id}`);
-    await fs.rm(batchPath(root, id), { force: true });
-    return closed;
-  }
-  if (open?.status !== 'open' && open) {
-    await fs.mkdir(hubPath(root, 'questions', 'closed'), { recursive: true, mode: 0o700 });
-    try {
-      await fs.rename(batchPath(root, id), batchPath(root, id, true));
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-      const moved = await readJson<QuestionBatch>(batchPath(root, id, true));
-      if (!moved) throw e;
-      if (JSON.stringify(open) !== JSON.stringify(moved)) throw new Refusal(`duplicate terminal question batch ${id}`);
-      return moved;
-    }
-    return open;
-  }
-  const batch = open ?? closed;
+  const batch = await readJson<QuestionBatch>(batchPath(root, id))
+    ?? await readJson<QuestionBatch>(batchPath(root, id, true));
   if (!batch) throw new Refusal(`no question batch ${id}`);
   return batch;
-}
-
-export async function consumePushApproval(
-  root: string,
-  reference: { project: string; batch: string; question: string },
-  remote: string,
-  sha: string,
-  branch: string,
-  cwd: string,
-  now = Date.now(),
-): Promise<string> {
-  return withHubLock(root, async () => {
-    const [open, closed] = await Promise.all([
-      readJson<QuestionBatch>(batchPath(root, reference.batch)),
-      readJson<QuestionBatch>(batchPath(root, reference.batch, true)),
-    ]);
-    if ((open && hasConsumedGrant(open)) || (closed && hasConsumedGrant(closed))) {
-      throw new Refusal('approval is already consumed');
-    }
-    const batch = await readQuestionBatch(root, reference.batch);
-    const answer = batch.answers?.find((entry) => entry.question === reference.question);
-    const decision = answer?.decision;
-    const grant = decision?.grant;
-    if (batch.status !== 'answered' || batch.project !== reference.project) throw new Refusal('approval project does not match');
-    if (!answer || !decision || !grant || decision.action !== 'push' || decision.outcome !== 'approve') {
-      throw new Refusal('a push approval is required');
-    }
-    if (grant.batch !== batch.id || grant.question !== answer.question || grant.project !== reference.project) {
-      throw new Refusal('approval identity does not match');
-    }
-    if (grant.executionAuthority !== 'push') throw new Refusal('approval has no push execution authority');
-    if (grant.consumedAt) throw new Refusal('approval is already consumed');
-    const expiresAt = Date.parse(grant.expiresAt);
-    if (!Number.isFinite(expiresAt) || now >= expiresAt) throw new Refusal('approval is expired');
-    const fresh = await verifyDecisionFacts(root, { project: batch.project, agent: batch.agent }, {
-      ...decision.facts, action: 'push',
-    }, now);
-    const canonical = buildDecision(fresh, 'consume approval', now).decision!;
-    if (decisionFingerprint(canonical.facts) !== grant.fingerprint) throw new Refusal('verified facts changed after approval');
-    const executionUrl = await verifyExecutionRepository(root, { project: batch.project, agent: batch.agent }, cwd);
-    if (repositoryFingerprint(executionUrl) !== fresh.repositoryFingerprint) throw new Refusal('push origin does not match the approved repository');
-    if (remote !== 'origin' || sha !== fresh.commit || branch !== fresh.branch || fresh.destination !== `origin/${branch}`) {
-      throw new Refusal('push arguments do not match the approved commit and branch');
-    }
-    grant.consumedAt = new Date(now).toISOString();
-    await writeJson(batchPath(root, batch.id, true), batch, 0o600);
-    return executionUrl;
-  });
 }
 
 export async function listOpenQuestionBatches(root: string): Promise<QuestionBatch[]> {

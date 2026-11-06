@@ -258,20 +258,6 @@ describe('ask_operator lifecycle', () => {
     c.close();
   });
 
-  it('re-reads and reports an answered batch at the wait limit', async () => {
-    const r = await root();
-    const c = connect(envFor(r), { timeoutMs: 200 });
-    c.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
-    await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 1);
-    const [batch] = await listOpenQuestionBatches(r);
-    await answerQuestionBatch(r, batch.id, [{ question: 'q1', choice: 'c1' }]);
-    await c.waitFor(() => c.messages().length === 1);
-    const result = c.messages()[0].result as { isError?: boolean; content: { text: string }[] };
-    expect(result.isError).not.toBe(true);
-    expect(result.content[0].text).toContain('"status":"answered"');
-    c.close();
-  });
-
   it('a wait past the limit errors and leaves the batch open for the operator', async () => {
     const r = await root();
     const c = connect(envFor(r), { timeoutMs: 25 });

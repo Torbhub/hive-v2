@@ -39,18 +39,6 @@ describe('cli boundary', () => {
     expect(r.stderr).toMatch(/agent name is/);
   });
 
-  it('requires a structured approval for every CLI push', () => {
-    const r = cli(['push', 'origin', 'a'.repeat(40), 'feat/t16']);
-    expect(r.status).toBe(64);
-    expect(r.stderr).toMatch(/structured push approval/);
-  });
-
-  it('blocks the bundled land route', () => {
-    const r = cli(['land', 'origin', 'a'.repeat(40), 'feat/t16']);
-    expect(r.status).toBe(64);
-    expect(r.stderr).toMatch(/separate structured approvals/);
-  });
-
   it('rejects a non-numeric --max-files', () => {
     const r = cli(['gate-verify', 'commits', 'a..b', '--max-files', 'lots', '--style', 'free', '--attribution', 'allow']);
     expect(r.status).toBe(64);

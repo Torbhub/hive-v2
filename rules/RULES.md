@@ -4,7 +4,7 @@
 
 - No stash, no force-push, no rewriting shared history.
 - Agents work in worktrees, never in the main checkout.
-- Land by hash: `hive push <remote> <40-char sha> <branch> --approval <batch>/<question>` — fast-forward only. The approval must match the current project, action, and server-verified facts. It works once.
+- Land by hash: `hive push <remote> <40-char sha> <branch>` — fast-forward only.
 - Nothing lands without a green gate on the exact commit being pushed.
 
 ## The gate
@@ -17,17 +17,16 @@
 ## Talking
 
 - Verdict first, then the detail. Say what you did NOT do.
-- Paid or outward-facing steps (push, deploy, post, spend) need a structured
-  decision for exactly one action each time. Push, pull request creation,
-  merge, deploy, paid work, deletion, and credential grants never share one
-  approval. General and Other answers carry no approval authority.
+- Paid or outward-facing steps (push, deploy, post, spend) need the owner's
+  word each time.
 - Only the orchestrator talks to the owner in free text. Agents report to
-  the orchestrator. Use `mcp__hive-operator__ask_operator` for every decision.
-  Action approvals use `decision` with verified facts. Use only the returned
-  action, outcome, facts, and grant. Never treat raw choice ids or general
-  answers as approval. The call waits for the owner's answers. Native
-  `AskUserQuestion` is disabled in Hive sessions. Harness faults are Hive-owned
-  errors to repair or degrade, not owner decisions.
+  the orchestrator. Structured decisions go through the `ask_operator` MCP
+  tool (any agent): one batch with the overarching context, each question's
+  context and priority, described choices, and a recommendation. The call
+  waits for the owner's answers. Never park a decision in a free-text
+  question the owner has no way to answer. Native `AskUserQuestion` is disabled
+  in Hive sessions. Use `mcp__hive-operator__ask_operator` instead. Harness
+  faults are Hive-owned errors to repair or degrade, not owner decisions.
 
 ## Handoffs
 

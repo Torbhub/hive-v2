@@ -8,13 +8,12 @@ const ASK_OPERATOR = {
   name: 'ask_operator',
   description: [
     'Ask the human operator a whole batch of structured questions and wait for the answers.',
-    'For an approval, put one action in decision: push, pr, merge, deploy, paid_work, deletion,',
-    'or credentials. Supply only verified request facts. Hive owns the card text and choices.',
-    'Use a separate question for every action. For a general question, supply question, context,',
-    '2-8 described choices, and one recommended choice id. Every question needs priority.',
-    'For a decision answer, use only answer.decision.outcome and answer.decision.facts.',
-    'Raw choice ids and general answers have no action authority. Other never grants approval.',
-    'The call returns when the batch is answered or cancelled; the answers come back as JSON.',
+    'Use this whenever you need a decision: one call carries the overarching context and every',
+    'question, so the operator can decide without reading your session. Each question needs its',
+    'own context (why you ask), a priority (1 decides first), 2-8 choices each with a label and',
+    'a description, and exactly one recommended choice id (c1 is the first choice, c2 the second).',
+    'The operator can always pick Other with free text. The call returns when the batch is',
+    'answered or cancelled; the answers come back as JSON.',
   ].join(' '),
   inputSchema: {
     type: 'object',
@@ -30,10 +29,10 @@ const ASK_OPERATOR = {
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['priority'],
+          required: ['question', 'context', 'priority', 'choices', 'recommended'],
           properties: {
-            question: { type: 'string', minLength: 1, maxLength: 1000, description: 'For a general question only. Ignored for a decision card.' },
-            context: { type: 'string', minLength: 1, maxLength: 4000, description: 'For a general question only. Ignored for a decision card.' },
+            question: { type: 'string', minLength: 1, maxLength: 1000, description: 'The decision the operator must make.' },
+            context: { type: 'string', minLength: 1, maxLength: 4000, description: 'Why this question is being asked: background, tradeoffs, what happens after the answer.' },
             priority: { type: 'integer', minimum: 1, description: 'Decision order: 1 is shown first.' },
             choices: {
               type: 'array', minItems: 2, maxItems: 8,
@@ -41,28 +40,11 @@ const ASK_OPERATOR = {
                 type: 'object', additionalProperties: false, required: ['label', 'description'],
                 properties: {
                   label: { type: 'string', minLength: 1, maxLength: 200 },
-                  description: { type: 'string', minLength: 1, maxLength: 2000, description: 'For a general question. What this choice means, its cost and its risk.' },
+                  description: { type: 'string', minLength: 1, maxLength: 2000, description: 'What this choice means, its cost and its risk.' },
                 },
               },
             },
-            recommended: { type: 'string', description: 'For a general question: c1 for the first choice, c2 for the second, and so on.' },
-            decision: {
-              type: 'object', additionalProperties: false, required: ['action'],
-              properties: {
-                action: { type: 'string', enum: ['push', 'pr', 'merge', 'deploy', 'paid_work', 'deletion', 'credentials'] },
-                repository: { type: 'string', maxLength: 240 },
-                branch: { type: 'string', maxLength: 240 },
-                commit: { type: 'string', pattern: '^[0-9a-fA-F]{40}$' },
-                diffSummary: { type: 'string', maxLength: 2000 },
-                files: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 200 } },
-                destination: { type: 'string', maxLength: 240 },
-                reason: { type: 'string', maxLength: 240, description: 'Why the agent needs this approval now.' },
-                scope: { type: 'string', maxLength: 240 },
-                budget: { type: 'string', maxLength: 240 },
-                verifiedAt: { type: 'string', maxLength: 40 },
-                validUntil: { type: 'string', maxLength: 40 },
-              },
-            },
+            recommended: { type: 'string', description: 'The id of your recommended choice: c1 for the first choice, c2 for the second, and so on.' },
           },
         },
       },
@@ -129,17 +111,6 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
     }
     const deadline = Date.now() + (opts.timeoutMs ?? 7 * DAY_MS);
     let heartbeatAt = Date.now();
-    const reportTerminal = (current: QuestionBatch): boolean => {
-      if (current.status === 'answered') {
-        toolText(id, JSON.stringify({ id: batch.id, status: 'answered', answers: current.answers }));
-        return true;
-      }
-      if (current.status === 'cancelled') {
-        toolText(id, `the operator cancelled question batch ${batch.id}; do not assume any answer`, true);
-        return true;
-      }
-      return false;
-    };
     try {
       for (;;) {
         if (Date.now() - heartbeatAt >= 15_000) {
@@ -147,15 +118,16 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
           heartbeatAt = Date.now();
         }
         const current = await readQuestionBatch(root, batch.id);
-        if (reportTerminal(current)) return;
+        if (current.status === 'answered') {
+          toolText(id, JSON.stringify({ id: batch.id, status: 'answered', answers: current.answers }));
+          return;
+        }
+        if (current.status === 'cancelled') {
+          toolText(id, `the operator cancelled question batch ${batch.id}; do not assume any answer`, true);
+          return;
+        }
         if (Date.now() > deadline) {
-          try {
-            const latest = await readQuestionBatch(root, batch.id);
-            if (reportTerminal(latest)) return;
-            toolText(id, `question batch ${batch.id} is ${latest.status === 'open' ? 'still open' : latest.status} after the wait limit; it stays on the operator's Questions screen`, true);
-          } catch (e) {
-            toolText(id, `question batch ${batch.id} state is unknown after the wait limit: ${e instanceof Error ? e.message : e}`, true);
-          }
+          toolText(id, `question batch ${batch.id} is still open after the wait limit; it stays on the operator's Questions screen`, true);
           return;
         }
         await sleep(opts.pollMs ?? 2000, signal);
