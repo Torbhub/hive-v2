@@ -279,7 +279,10 @@ async function authorizePushConsumption(root: string, batch: QuestionBatch,
     throw new Refusal('approver authorization changed');
   }
   if (grant.approverSubject.startsWith('user:')) {
-    const account = await registry.currentAccount(grant.approverSubject, credential);
+    const account = await registry.delegatedApprovalAccount(principal.agentId, credential, {
+      project: batch.project, task, consumerGrantId: grant.grantId ?? '',
+      approverSubject: grant.approverSubject, approverGrantId: grant.approverGrantId ?? '',
+    });
     if (!account || account.accountStatus !== 'active') {
       throw new Refusal('approver account is not active');
     }

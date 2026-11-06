@@ -7,9 +7,19 @@ const execFileAsync = promisify(execFile);
 
 export type RegistryRow = Record<string, unknown> & { pk: string; sk: string };
 
+export type DelegatedApprovalRequest = {
+  project: string;
+  task?: string;
+  consumerGrantId: string;
+  approverSubject: string;
+  approverGrantId: string;
+};
+
 export interface Registry {
   get(pk: string, sk: string): Promise<RegistryRow | undefined>;
   currentAccount(subject: string, credential: string): Promise<RegistryRow | undefined>;
+  delegatedApprovalAccount(agentId: string, credential: string,
+    request: DelegatedApprovalRequest): Promise<RegistryRow | undefined>;
   put(row: RegistryRow, credential: string): Promise<RegistryRow>;
   query(pk: string, skPrefix: string): Promise<RegistryRow[]>;
 }
@@ -48,6 +58,26 @@ export class FileRegistry implements Registry {
 
   async currentAccount(subject: string, _credential: string): Promise<RegistryRow | undefined> {
     return this.get(`SUBJECT#${subject}`, 'PROFILE');
+  }
+
+  async delegatedApprovalAccount(agentId: string, _credential: string,
+    request: DelegatedApprovalRequest): Promise<RegistryRow | undefined> {
+    const rows = await this.read();
+    const allowed = (principal: string, grantId: string): boolean => {
+      const pk = `ACL#${request.project}#${request.task ?? '*'}#*`;
+      const row = rows.find((candidate) => candidate.pk === pk && candidate.sk === `PRINCIPAL#${principal}`);
+      if (!row || row.revokedAt !== null && row.revokedAt !== undefined
+        || rows.some((candidate) => candidate.pk === `REVOCATION#${pk}` && candidate.sk === row.sk)) {
+        return false;
+      }
+      return row.grantId === grantId && Array.isArray(row.actions) && row.actions.includes('execute');
+    };
+    if (!allowed(`agent:${agentId}`, request.consumerGrantId)
+      || !allowed(request.approverSubject, request.approverGrantId)) {
+      return undefined;
+    }
+    const account = rows.find((row) => row.pk === `SUBJECT#${request.approverSubject}` && row.sk === 'PROFILE');
+    return account?.accountStatus === 'active' ? account : undefined;
   }
 
   async query(pk: string, skPrefix: string): Promise<RegistryRow[]> {
@@ -130,6 +160,16 @@ export class DynamoCliRegistry implements Registry {
       throw new RegistryUnavailable('broker account response is invalid');
     }
     return { ...row, pk: `SUBJECT#${subject}`, sk: 'PROFILE' };
+  }
+
+  async delegatedApprovalAccount(agentId: string, credential: string,
+    request: DelegatedApprovalRequest): Promise<RegistryRow | undefined> {
+    const row = await this.broker('/api/hive/broker/delegated-approval', credential, request);
+    if (row.subject !== request.approverSubject || row.accountStatus !== 'active'
+      || !Number.isSafeInteger(row.accountEpoch)) {
+      throw new RegistryUnavailable('delegated approval response is invalid');
+    }
+    return { ...row, pk: `SUBJECT#${request.approverSubject}`, sk: 'PROFILE' };
   }
 
   async put(row: RegistryRow, credential: string): Promise<RegistryRow> {
