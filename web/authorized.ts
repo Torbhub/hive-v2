@@ -40,10 +40,13 @@ async function filteredView(root: string, view: HubView, principal: Principal, r
   for (const project of view.projects) await allowed(project.name);
   const tasks = [];
   for (const task of view.tasks) {
-    if (await allowed(task.project, task.id)) tasks.push(task);
-    const narrower = await registry.get(
-      `ACL#${task.project}#${task.id}#*`, `PRINCIPAL#${principal.subject}`);
-    if (narrower && await revoked(registry, narrower)) redactedProjects.add(task.project);
+    const permitted = await allowed(task.project, task.id);
+    if (permitted) tasks.push(task);
+    const pk = `ACL#${task.project}#${task.id}#*`;
+    const sk = `PRINCIPAL#${principal.subject}`;
+    const narrower = await registry.get(pk, sk);
+    const ledger = await registry.get(`REVOCATION#${pk}`, sk);
+    if ((narrower && !permitted) || ledger) redactedProjects.add(task.project);
   }
   const agentTask = async (project: string, agent: unknown): Promise<string | null | undefined> => {
     try {
@@ -209,8 +212,10 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   if (pathname === '/api/message' && principal.kind === 'agent') throw new AuthorizationError('not found');
   const scope = await postScope(context.root, pathname, body, principal);
   const action = await requiredAction(context.root, pathname, body);
-  await authorize(principal, context.registry, action, scope);
-  const result = await handlePost(context.root, pathname, body, principal);
+  const approvalGrant = await authorize(principal, context.registry, action, scope);
+  const result = await handlePost(context.root, pathname, body, principal, {
+    task: scope.task, aclEpoch: Number(approvalGrant.aclEpoch),
+  });
   const current = await context.authenticate();
   await authorize(current, context.registry, action, scope);
   sendJson(res, 200, result);

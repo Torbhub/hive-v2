@@ -345,6 +345,43 @@ describe('authenticated MCP integration', () => {
     await cancelQuestionBatch(r, batch.id);
     await c.waitFor(() => c.messages().length === 1);
     c.close();
+
+    const attack = connect({
+      HIVE_HUB_ROOT: r, HIVE_COLLABORATION_ENABLED: '1',
+      HIVE_AGENT_CREDENTIAL_FILE: file, HIVE_AGENT_REF: `mallory@${two}`,
+    });
+    attack.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
+    await attack.waitFor(() => attack.messages().length === 1);
+    expect(attack.messages()[0].result).toMatchObject({ isError: true });
+    expect(await listOpenQuestionBatches(r)).toEqual([]);
+    attack.close();
+  });
+
+  it('creates a question card for an enabled named orchestrator', async () => {
+    const r = await root();
+    const { registryItems } = await import('./security-fixture.js');
+    const rows = registryItems().map((row) => JSON.parse(JSON.stringify(row).replaceAll('builder', 'demo-orchestrator')));
+    await writeSecurity(r, rows);
+    const home = path.join(r, 'demo');
+    await writeProjects(r, { projects: [{ name: 'demo', home, repos: [] }] });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, worktree: home, task: 'demo-1' }],
+    });
+    await appendTaskEvent(r, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
+    const file = path.join(r, 'orchestrator.env');
+    const credential = AGENT_CREDENTIAL.replace('builder', 'demo-orchestrator');
+    await writeFile(file, `HIVE_AGENT_CREDENTIAL='${credential}'\n`, { mode: 0o600 });
+    const c = connect({
+      HIVE_HUB_ROOT: r, HIVE_COLLABORATION_ENABLED: '1',
+      HIVE_AGENT_CREDENTIAL_FILE: file, HIVE_AGENT_REF: `demo-orchestrator@${home}`,
+    });
+    c.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
+    await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 1);
+    const [batch] = await listOpenQuestionBatches(r);
+    expect(batch.agent).toBe(`demo-orchestrator@${home}`);
+    await cancelQuestionBatch(r, batch.id);
+    await c.waitFor(() => c.messages().length === 1);
+    c.close();
   });
 
   for (const rejected of [false, true]) {

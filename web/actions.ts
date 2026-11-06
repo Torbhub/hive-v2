@@ -9,7 +9,7 @@ import { sendOwnerMessage } from '../src/message.js';
 import { checkName, PROJECT_NAME_RE } from '../src/names.js';
 import { addProjectFromBody, removeProject } from '../src/project.js';
 import { handleCurrentOrchestratorDialog } from '../src/watch.js';
-import { readQuestionBatch } from '../src/questions.js';
+import { readQuestionBatch, type ApprovalAuthorization } from '../src/questions.js';
 import { AuthorizationError, type Principal } from '../src/security.js';
 import { ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, withTimeout } from '../src/view.js';
 import { HttpError } from './http-error.js';
@@ -88,8 +88,9 @@ export function requestAgentRef(body: Record<string, unknown>, principal: Princi
 }
 
 export async function handlePost(root: string, pathname: string, body: Record<string, unknown>,
-  principal: Principal): Promise<unknown> {
-  const questionAction = await handleQuestionAction(root, pathname, body); if (questionAction !== null) return questionAction;
+  principal: Principal, authorization?: ApprovalAuthorization): Promise<unknown> {
+  const questionAction = await handleQuestionAction(root, pathname, body, authorization);
+  if (questionAction !== null) return questionAction;
   if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/project-delete', '/api/task-resolve', '/api/progress'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }

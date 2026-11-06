@@ -181,10 +181,11 @@ export async function currentGrant(registry: Registry, project: string, subject:
   task?: string, thread?: string): Promise<RegistryRow | undefined> {
   const candidates = [[task, thread], [task, undefined], [undefined, thread], [undefined, undefined]] as const;
   for (const [taskId, threadId] of candidates) {
-    const row = await registry.get(
-      `ACL#${project}#${taskId ?? '*'}#${threadId ?? '*'}`, `PRINCIPAL#${subject}`,
-    );
-    if (row) return await revoked(registry, row) ? undefined : row;
+    const pk = `ACL#${project}#${taskId ?? '*'}#${threadId ?? '*'}`;
+    const sk = `PRINCIPAL#${subject}`;
+    if (await registry.get(`REVOCATION#${pk}`, sk)) return undefined;
+    const row = await registry.get(pk, sk);
+    if (row) return row.revokedAt !== null && row.revokedAt !== undefined ? undefined : row;
   }
   return undefined;
 }

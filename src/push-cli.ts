@@ -14,6 +14,6 @@ export async function runPushCommand(
   const root = env.HIVE_HUB_ROOT;
   const project = env.HIVE_PROJECT;
   if (!batch || !question || !root || !project) throw new UsageError('approval requires batch/question and Hive project state');
-  await pushByHash(remote, sha, branch, cwd, { root, project, batch, question });
+  await pushByHash(remote, sha, branch, cwd, { root, project, batch, question }, env);
   console.log(`hive: pushed ${sha} to ${remote}/${branch}`);
 }

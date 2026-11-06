@@ -145,7 +145,42 @@ describe('integration authorization and revocation', () => {
     });
     expect(approved.status).toBe(200);
     const body = await approved.json();
-    expect(body.batch.answers[0].decision.grant.executionAuthority).toBe('push');
+    expect(body.batch.answers[0].decision.grant).toMatchObject({
+      executionAuthority: 'push', agent: 'builder@one', task: 'demo-1', aclEpoch: 1,
+    });
     expect(JSON.stringify(body)).not.toContain(AGENT_CREDENTIAL);
+  });
+
+  it('blocks project fallback and redacts metadata for a restored ledger-only task revocation', async () => {
+    const { root, home, base } = await fixture();
+    await team(home);
+    const values = await rows(root);
+    values.push({
+      pk: 'REVOCATION#ACL#demo#demo-1#*', sk: 'PRINCIPAL#agent:builder', epoch: 2, revokedAt: 1,
+    });
+    await replaceRows(root, values);
+    const view = await (await fetch(`${base}/api/view`, { headers: agentHeaders() })).json();
+    expect(view.tasks.map((task: { id: string }) => task.id)).toEqual(['demo-2']);
+    expect(view.projects[0].home).toBe('');
+    expect(view.projects[0].repos).toEqual([]);
+    expect(view.projects[0].agents.map((agent: { name: string }) => agent.name)).toEqual(['other']);
+    expect(view.projects[0].open_tasks).toBe(1);
+  });
+
+  it('redacts metadata for an active narrower grant that denies read', async () => {
+    const { root, home, base } = await fixture();
+    await team(home);
+    const values = await rows(root);
+    values.push({
+      pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#agent:builder', project: 'demo', task: 'demo-1',
+      principal: 'agent:builder', grantId: 'write-only-task', actions: ['write'], aclEpoch: 1, revokedAt: null,
+    });
+    await replaceRows(root, values);
+    const view = await (await fetch(`${base}/api/view`, { headers: agentHeaders() })).json();
+    expect(view.tasks.map((task: { id: string }) => task.id).sort()).toEqual(['demo-1', 'demo-2']);
+    expect(view.projects[0].home).toBe('');
+    expect(view.projects[0].repos).toEqual([]);
+    expect(view.projects[0].agents.map((agent: { name: string }) => agent.name)).toEqual(['other']);
+    expect(view.projects[0].open_tasks).toBe(2);
   });
 });

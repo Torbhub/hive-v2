@@ -156,6 +156,7 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
       const { project, agentId } = principal;
       if (principal.kind !== 'agent' || !project || !agentId) throw new Error('authorization failed');
       const agentRef = environment.HIVE_AGENT_REF ?? agentId;
+      if (agentRef.split('@')[0] !== agentId) throw new Error('authorization failed');
       const task = await storedAgentTask(root, project, agentRef);
       await authorize(principal, registry, 'write', { project, task });
       return { principal, project, agentRef };

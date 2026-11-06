@@ -8,7 +8,7 @@ export async function storedAgentTask(root: string, project: string, agentRef: u
   const ref = agentRef === undefined || agentRef === '' ? undefined : String(agentRef);
   const [name, worktree] = ref?.split('@') ?? [];
   const candidates = name
-    ? team.agents.filter((agent) => !agent.orchestrator && agent.name === name)
+    ? team.agents.filter((agent) => agent.name === name)
     : team.agents.filter((agent) => agent.orchestrator);
   const entry = worktree
     ? candidates.find((agent) => agent.worktree === worktree)
