@@ -6,7 +6,21 @@ Enabled Hive accepts two credential types. Nexus human assertions identify stabl
 
 The Nexus relay is the only human entrypoint. It checks the current user before each request and attaches a short-lived assertion for the `hive` audience. The browser never sees that assertion. Hive checks the signature, issuer, audience, expiry, subject, account status, and account epoch on every request.
 
-Agents use `HIVE_AGENT_CREDENTIAL`. `HIVE_AGENT`, `HIVE_PROJECT`, client identity headers, and body fields cannot select the owner, agent, or project. The server derives those values from the current credential and registry profile. It stores only a hash of each bearer secret.
+Agents use `HIVE_AGENT_CREDENTIAL` read from their private credential file. `HIVE_AGENT`, `HIVE_PROJECT`, client identity headers, and body fields cannot select the owner, agent, or project. The server derives those values from the current credential and registry profile. It stores only a hash of each bearer secret.
+
+## Enabled setup
+
+An administrator first grants the owner project administration and provisions each agent through the Citadel local administrative channel:
+
+```bash
+python3 console/backend/hive_admin.py grant \
+  --project demo --principal user:alice --actions admin
+python3 console/backend/hive_admin.py enroll-agent \
+  --agent-id builder --owner user:alice --project demo \
+  --credential-file /absolute/demo/.hive/team/builder/credential.env
+```
+
+The command writes a mode-0600 file and prints no credential. Running it again rotates the credential after checking the current admin grant. The broker has no enrollment route and never returns a plaintext credential. Keep each file in its agent worktree, set `HIVE_COLLABORATION_ENABLED=1`, and leave administrator `HIVE_AGENT_CREDENTIAL` unset. Spawn passes only `HIVE_AGENT_CREDENTIAL_FILE` to the agent and clears any inherited credential value. Default-off spawn does not read or require the file.
 
 ## Authorization
 
