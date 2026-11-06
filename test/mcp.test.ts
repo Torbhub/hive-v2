@@ -12,7 +12,6 @@ import { AGENT_CREDENTIAL, agentEnv, configureSecurity, writeSecurity } from './
 
 afterEach(() => {
   vi.restoreAllMocks();
-  delete process.env.HIVE_COLLABORATION_ENABLED;
   delete process.env.HIVE_REGISTRY_FILE;
   delete process.env.HIVE_ASSERTION_KEYS_JSON;
 });
@@ -335,7 +334,6 @@ describe('authenticated MCP integration', () => {
     await appendTaskEvent(r, { id: 'demo-2', project: 'demo', event: 'asked', at: new Date().toISOString() });
     const file = path.join(r, 'credential.env');
     await writeFile(file, `HIVE_AGENT_CREDENTIAL='${AGENT_CREDENTIAL}'\n`, { mode: 0o600 });
-    process.env.HIVE_COLLABORATION_ENABLED = '1';
     const c = connect({
       HIVE_HUB_ROOT: r, HIVE_COLLABORATION_ENABLED: '1',
       HIVE_AGENT_CREDENTIAL_FILE: file, HIVE_AGENT_REF: `builder@${two}`,
