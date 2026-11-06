@@ -241,7 +241,7 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   const scope = await postScope(context.root, pathname, body, principal);
   const action = await requiredAction(context.root, pathname, body);
   const approvalGrant = await authorize(principal, context.registry, action, scope);
-  const authorization = action === 'execute'
+  const authorization = pathname === '/api/questions/answer' && action === 'execute'
     ? await approvalAuthorization(context, principal, body, scope, approvalGrant) : undefined;
   const result = await handlePost(context.root, pathname, body, principal, authorization);
   const current = await context.authenticate();

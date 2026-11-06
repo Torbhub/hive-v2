@@ -196,4 +196,16 @@ describe('authenticated push consumption', () => {
       'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
     )).rejects.toThrow(/approver|not found/);
   });
+
+  it('rejects a disabled human approver account even with a valid ACL grant', async () => {
+    const { root, home, commit } = await setup();
+    const batch = await approved(root, commit);
+    const values = await rows(root);
+    values.find((row) => row.pk === 'SUBJECT#user:alice')!.accountStatus = 'disabled';
+    await replaceRows(root, values);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+    )).rejects.toThrow(/approver account/);
+  });
 });
