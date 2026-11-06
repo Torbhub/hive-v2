@@ -69,7 +69,7 @@ def mock_aws(root, content):
 def cleanup_case(
     describe_rc, describe_error, expected_rc, delete_rc=0, wait_rc=0,
     release_rc=0, release_expected=False, secret_describe_rc=0,
-    secret_delete_rc=0, secret_confirm_rc=254,
+    secret_delete_rc=0, secret_confirm_rc=254, secret_confirm_failures=0,
 ):
     temporary, root = workspace()
     with temporary:
@@ -84,7 +84,9 @@ case "$1 $2" in
   'cloudformation wait') exit {wait_rc} ;;
   'secretsmanager describe-secret')
     describe_count=$(grep -c '^secretsmanager describe-secret' "$MOCK_CALLS" || true)
-    if [ "$describe_count" -gt 1 ]; then
+    if [ "$describe_count" -gt 1 ] && [ "$describe_count" -le $(({secret_confirm_failures} + 1)) ]; then
+      rc=0
+    elif [ "$describe_count" -gt 1 ]; then
       rc={secret_confirm_rc}
     else
       rc={secret_describe_rc}
@@ -132,6 +134,11 @@ calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does
 assert 'delete-secret' not in calls and 'release aws-acts' not in calls, calls
 calls = cleanup_case(254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 14, secret_confirm_rc=14)
 assert 'delete-secret' in calls and 'release aws-acts' not in calls, calls
+calls = cleanup_case(
+    254, 'ValidationError: Stack with id hive-v2-t01-smoke does not exist', 0,
+    release_expected=True, secret_confirm_failures=2,
+)
+assert calls.count('secretsmanager describe-secret') == 4, calls
 
 
 def release_case(error, aws_rc, expected_rc):

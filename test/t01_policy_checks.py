@@ -57,8 +57,15 @@ def allows(action, resource, **context):
 
 INSTANCE = 'arn:aws:ec2:us-east-1:594552273052:instance/i-preexisting'
 SECURITY_GROUP = 'arn:aws:ec2:us-east-1:594552273052:security-group/sg-new'
+NETWORK_INTERFACE = 'arn:aws:ec2:us-east-1:594552273052:network-interface/eni-new'
+SUBNET = 'arn:aws:ec2:us-east-1:594552273052:subnet/subnet-new'
+IMAGE = 'arn:aws:ec2:us-east-1::image/ami-new'
 ROLE_TAG = {'aws:RequestTag/Role': 'hive-v2-t01-smoke'}
 
+assert not allows('ec2:RunInstances', INSTANCE), 'instance creation requires the T01 request tag'
+assert allows('ec2:RunInstances', INSTANCE, **ROLE_TAG)
+for resource in (NETWORK_INTERFACE, SECURITY_GROUP, SUBNET, IMAGE):
+    assert allows('ec2:RunInstances', resource), f'RunInstances must support {resource}'
 assert not allows('ec2:CreateTags', INSTANCE, **ROLE_TAG), 'an existing instance can be tagged arbitrarily'
 assert not allows('ec2:TerminateInstances', INSTANCE), 'an untagged preexisting instance can be terminated'
 assert not allows('ec2:ModifyInstanceAttribute', INSTANCE, **{'aws:ResourceTag/Role': 'hive-v2-t01-smoke'})
