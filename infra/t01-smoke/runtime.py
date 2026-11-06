@@ -13,7 +13,8 @@ VERSION = '0.22.6'
 COMMIT = 'f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab'
 SOURCE_SHA256 = '551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae2efa81'
 SIMPLE_CHECKS = {
-    'frozen_hash_lock_install', 'lazy_install_disabled', 'service_filesystem_access',
+    'uv_install', 'python_install', 'frozen_hash_lock_install',
+    'lazy_install_disabled', 'service_filesystem_access',
     'default_deny_lockdown', 'direct_ip', 'unapproved_dns', 'redirect', 'ipv6',
     'alternate_port', 'metadata', 'container_credentials', 'teamkimi_no_model',
     'paid_admission_disabled',

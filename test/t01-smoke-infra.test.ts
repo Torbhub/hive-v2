@@ -90,6 +90,8 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision).toContain('allow_lazy_installs: false');
     expect(provision).toContain('UV_OFFLINE=1');
     expect(provision).toContain('UV_FROZEN=1');
+    expect(provision).toContain('emit uv_install passed');
+    expect(provision).toContain('emit python_install passed');
     expect(provision.indexOf('lock_down')).toBeLessThan(provision.lastIndexOf('hermes-check'));
   });
 
