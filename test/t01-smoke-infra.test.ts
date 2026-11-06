@@ -98,6 +98,14 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision.indexOf('lock_down')).toBeLessThan(provision.lastIndexOf('hermes-check'));
   });
 
+  it('reports the active stage and exit status for generic bootstrap failures', () => {
+    const provision = read('provision');
+    expect(provision).toContain('BOOTSTRAP_STAGE=python-binary');
+    expect(provision).toContain('BOOTSTRAP_STAGE=pm-build');
+    expect(provision).toContain('category="failure:$BOOTSTRAP_STAGE"');
+    expect(provision).toContain('origin="$BOOTSTRAP_STAGE:$status"');
+  });
+
   it('separates broker credentials from the sanitized Hermes context', () => {
     const provision = read('provision');
     expect(provision).toContain('t01broker');
