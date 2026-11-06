@@ -25,7 +25,14 @@ async function fixture() {
   await writeJson(hubPath(root, 'hub.json'), { name: 'hub' });
   await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
   await appendTaskEvent(root, { id: 'demo-2', project: 'demo', event: 'asked', at: new Date().toISOString() });
-  await writeSecurity(root);
+  const items = registryItems();
+  for (const row of items) {
+    if (row.pk === 'ACL#demo#demo-1#*') {
+      row.pk = 'ACL#demo#*#*';
+      row.task = null;
+    }
+  }
+  await writeSecurity(root, items);
   configureSecurity(root);
   const server = createServer(root);
   servers.push(server);
@@ -127,6 +134,11 @@ describe('integration authorization and revocation', () => {
     await team(home);
     const batch = await pushBatch(root);
     const values = await rows(root);
+    for (const subject of ['user:alice', 'agent:builder']) {
+      const row = values.find((candidate) => candidate.sk === `PRINCIPAL#${subject}`)!;
+      row.pk = 'ACL#demo#demo-1#*';
+      row.task = 'demo-1';
+    }
     const grant = values.find((row) => row.sk === 'PRINCIPAL#user:alice')!;
     grant.actions = ['read', 'write'];
     await replaceRows(root, values);

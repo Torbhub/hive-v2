@@ -35,11 +35,11 @@ export function registryItems(project = 'demo'): Record<string, unknown>[] {
       expiresAt: 0, revokedAt: null, credentialEpoch: 1,
     },
     {
-      pk: `ACL#${project}#*#*`, sk: 'PRINCIPAL#user:alice', project, principal: 'user:alice',
+      pk: `ACL#${project}#demo-1#*`, sk: 'PRINCIPAL#user:alice', project, task: 'demo-1', principal: 'user:alice',
       grantId: 'human-grant', actions, aclEpoch: 1, revokedAt: null,
     },
     {
-      pk: `ACL#${project}#*#*`, sk: 'PRINCIPAL#agent:builder', project, principal: 'agent:builder',
+      pk: `ACL#${project}#demo-1#*`, sk: 'PRINCIPAL#agent:builder', project, task: 'demo-1', principal: 'agent:builder',
       grantId: 'agent-grant', actions, aclEpoch: 1, revokedAt: null,
     },
   ];
