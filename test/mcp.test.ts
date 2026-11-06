@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { serveMcp, sleep } from '../src/mcp.js';
 import { answerQuestionBatch, cancelQuestionBatch, listOpenQuestionBatches } from '../src/questions.js';
+import { agentEnv, configureSecurity, writeSecurity } from './security-fixture.js';
 
 const GOOD_BATCH = {
   context: 'Choosing a database for the hub.',
@@ -42,11 +43,14 @@ function connect(env: NodeJS.ProcessEnv, extra: { timeoutMs?: number } = {}) {
 }
 
 function envFor(root: string): NodeJS.ProcessEnv {
-  return { HIVE_HUB_ROOT: root, HIVE_PROJECT: 'demo', HIVE_AGENT: 'demo-orchestrator' };
+  return agentEnv(root);
 }
 
 async function root(): Promise<string> {
-  return mkdtemp(path.join(tmpdir(), 'hive-mcp-'));
+  const root = await mkdtemp(path.join(tmpdir(), 'hive-mcp-'));
+  await writeSecurity(root);
+  configureSecurity(root, false);
+  return root;
 }
 
 describe('MCP protocol', () => {

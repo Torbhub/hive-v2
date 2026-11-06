@@ -152,6 +152,12 @@ async function resolveEntry(
   return { entry, name };
 }
 
+export async function resolveLogTarget(root: string, project: string,
+  agentRef?: string): Promise<{ name: string; task?: string }> {
+  const { entry, name } = await resolveEntry(root, project, agentRef);
+  return { name, task: entry.task };
+}
+
 export async function readAgentLog(
   root: string,
   project: string,
