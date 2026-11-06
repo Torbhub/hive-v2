@@ -8,7 +8,7 @@ import { classify, isNativeQuestion, lines } from './screen.js';
 import { appendDecision, hasLiveSendingClaim, hivePath, hubPath, readPendingPane, readProjects, readTeam, upsertTeamEntry, writeJson } from './state.js';
 import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
-import { loadProcessedKeys, recordProcessedKey } from './watch-persist.js';
+import { loadProcessedKeys, migrateLegacyStaleKey, recordProcessedKey } from './watch-persist.js';
 import type { Approvals, TeamEntry } from './types.js';
 
 // Read-only leaders: a chain segment must start with one of these to be
@@ -227,8 +227,8 @@ async function handleDeath(
 }
 
 // A live pane with a silent wire log for 15 minutes is a stalled lane.
-// One decisions line per pane per hour; the persisted set carries it across
-// restarts so systemd never turns one stall into an hourly-repeat flood.
+// One decision per session, pane, and last wire write. The persisted set
+// carries that episode across restarts without hourly repeats.
 async function flagStale(
   root: string,
   project: string,
@@ -240,14 +240,19 @@ async function flagStale(
   if (wireAt === null) return;
   const ageMs = Date.now() - wireAt;
   if (ageMs < STALE_WIRE_MS) return;
-  const key = `stale:${a.pane}:${Math.floor(Date.now() / 3_600_000)}`;
+  const key = `stale:${a.session_id}:${a.pane}:${wireAt}`;
   if (seen.has(key)) return;
   seen.add(key);
-  await recordProcessedKey(root, key);
-  await appendDecision(root, {
-    project, by: 'watch',
-    summary: `stale: ${project}/${a.name} no output for ${Math.floor(ageMs / 60_000)}m`,
-  });
+  try {
+    if (await migrateLegacyStaleKey(root, project, a, wireAt, key, seen)) return;
+    await appendDecision(root, {
+      project, by: 'watch', watch_key: key,
+      summary: `stale: ${project}/${a.name} no output for ${Math.floor(ageMs / 60_000)}m`,
+    });
+  } catch (e) {
+    seen.delete(key);
+    throw e;
+  }
 }
 
 async function stackProbe(sections: string[], title: string, cmd: string, args: string[]): Promise<void> {
