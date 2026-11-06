@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import type { HubDialog, HubTask, HubView } from '../src/types';
 import { ago, staleTask, taskProgress, type Need } from '../src/ui/look';
 import { cn } from './lib/utils';
 import { Btn } from './action';
 import { Input } from './components/ui/input';
+import { DictationControl, type DictationEngine } from './dictation';
 
 const NEED_ACCENT: Record<string, string> = { magenta: 'border-l-fuchsia-400', yellow: 'border-l-amber-400', red: 'border-l-red-500' };
 
@@ -155,7 +156,7 @@ function PlanDetail({ detail, checkpoints }: { detail: string; checkpoints: Need
 }
 
 export function NeedCard({
-  need, view, busy, onAnswer, onContinue, onPlanAnswer, onResolve, onNudge,
+  need, view, busy, onAnswer, onContinue, onPlanAnswer, onResolve, onNudge, dictationEngine,
 }: {
   need: Need;
   view: HubView;
@@ -165,6 +166,7 @@ export function NeedCard({
   onPlanAnswer: (project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => void;
   onResolve: (project: string, taskId: string, action: 'cancel' | 'rebrief', note?: string) => void;
   onNudge: (project: string, taskId: string) => void;
+  dictationEngine?: DictationEngine;
 }) {
   const accent = NEED_ACCENT[need.color] ?? 'border-l-zinc-600';
   const continuing = need.action === 'continue' && need.project
@@ -199,10 +201,10 @@ export function NeedCard({
         <NeedDialog dialogKey={need.dialogKey} dialogs={view.dialogs} busy={busy} onAnswer={onAnswer} />
       )}
       {need.action === 'plan' && need.project && need.taskId && !need.dialogKey && (
-        <PlanActions need={need} busy={busy} onPlanAnswer={onPlanAnswer} />
+        <PlanActions need={need} busy={busy} onPlanAnswer={onPlanAnswer} dictationEngine={dictationEngine} />
       )}
       {need.action === 'resolve' && need.project && need.taskId && (
-        <ResolveActions need={need} busy={busy} onResolve={onResolve} />
+        <ResolveActions need={need} busy={busy} onResolve={onResolve} dictationEngine={dictationEngine} />
       )}
       {need.action === 'continue' && need.project && (
         <div className="mt-2">
@@ -227,14 +229,16 @@ export function NeedCard({
 }
 
 function ResolveActions({
-  need, busy, onResolve,
+  need, busy, onResolve, dictationEngine,
 }: {
   need: Need;
   busy: { project: string; what: string; who?: string } | null;
   onResolve: (project: string, taskId: string, action: 'cancel' | 'rebrief', note?: string) => void;
+  dictationEngine?: DictationEngine;
 }) {
   const [rebriefing, setRebriefing] = useState(false);
   const [brief, setBrief] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
   const project = need.project!;
   const taskId = need.taskId!;
   if (busy?.what === 'resolving' && busy.who === taskId) {
@@ -243,18 +247,23 @@ function ResolveActions({
   if (rebriefing) {
     return (
       <form
-        className="mt-2 flex gap-1.5"
+        className="mt-2 flex flex-wrap gap-1.5"
         // Block the native reload; the Send button's onPress is the one
         // submit path (Enter in the input clicks the submit button).
         onSubmit={(e) => e.preventDefault()}
       >
         <Input
+          ref={inputRef}
           autoFocus
           value={brief}
           onChange={(e) => setBrief(e.target.value)}
           placeholder="the new brief"
           aria-label={`new brief for ${taskId}`}
           className="h-8 text-xs"
+        />
+        <DictationControl
+          inputRef={inputRef} value={brief} onChange={setBrief} label={`new brief for ${taskId}`}
+          dictationEngine={dictationEngine}
         />
         <Btn
           id={`rebrief-go-${taskId}`}
@@ -276,14 +285,16 @@ function ResolveActions({
 }
 
 function PlanActions({
-  need, busy, onPlanAnswer,
+  need, busy, onPlanAnswer, dictationEngine,
 }: {
   need: Need;
   busy: { project: string; what: string; who?: string } | null;
   onPlanAnswer: (project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => void;
+  dictationEngine?: DictationEngine;
 }) {
   const [sendingBack, setSendingBack] = useState(false);
   const [feedback, setFeedback] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
   const project = need.project!;
   const taskId = need.taskId!;
   if (busy?.project === project && busy.what === 'answering' && busy.who === taskId) {
@@ -301,17 +312,22 @@ function PlanActions({
       </div>
       {sendingBack && (
         <form
-          className="flex gap-1.5"
+          className="flex flex-wrap gap-1.5"
           // Block the native reload; the Send button's onPress is the one
           // submit path (Enter in the input clicks the submit button).
           onSubmit={(e) => e.preventDefault()}
         >
           <Input
+            ref={inputRef}
             autoFocus
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
             placeholder="what should change? (optional)"
             className="h-8 text-xs"
+          />
+          <DictationControl
+            inputRef={inputRef} value={feedback} onChange={setFeedback} label={`plan feedback for ${taskId}`}
+            dictationEngine={dictationEngine}
           />
           <Btn id={`plan-sendback-go-${taskId}`} onPress={() => onPlanAnswer(project, taskId, 'sendback', feedback.trim() || undefined)}>
             Send

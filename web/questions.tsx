@@ -1,12 +1,60 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { QuestionAnswer, QuestionBatch } from '../src/types';
 import { Btn } from './action';
 import { Badge } from './components/ui/badge';
 import { Card, CardContent, CardHeader } from './components/ui/card';
 import { Input } from './components/ui/input';
 import { Separator } from './components/ui/separator';
+import { DictationControl, type DictationEngine } from './dictation';
 
 type Draft = { choice: string; text: string };
+
+function OtherAnswer({
+  batchId, questionId, draft, onSelect, onText, dictationEngine,
+}: {
+  batchId: string;
+  questionId: string;
+  draft: Draft;
+  onSelect: () => void;
+  onText: (text: string) => void;
+  dictationEngine?: DictationEngine;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <div className="flex items-start gap-2">
+      <input
+        id={`${batchId}-${questionId}-other`}
+        type="radio"
+        name={`${batchId}-${questionId}`}
+        value="other"
+        checked={draft.choice === 'other'}
+        onChange={onSelect}
+        className="mt-1 accent-sky-400"
+      />
+      <div className="w-full">
+        <label htmlFor={`${batchId}-${questionId}-other`} className="text-sm text-zinc-200">Other</label>
+        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+          <Input
+            ref={inputRef}
+            aria-label={`Other answer for ${questionId}`}
+            value={draft.text}
+            onChange={(event) => onText(event.target.value)}
+            disabled={draft.choice !== 'other'}
+            required={draft.choice === 'other'}
+            maxLength={4000}
+            className="text-xs"
+          />
+          {draft.choice === 'other' && (
+            <DictationControl
+              inputRef={inputRef} value={draft.text} onChange={onText} label={`Other answer for ${questionId}`}
+              dictationEngine={dictationEngine}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function CancelBatch({ batch, onCancel }: { batch: QuestionBatch; onCancel: () => void }) {
   const [arming, setArming] = useState(false);
@@ -35,11 +83,12 @@ function CancelBatch({ batch, onCancel }: { batch: QuestionBatch; onCancel: () =
 }
 
 export function BatchCard({
-  batch, onAnswer, onCancel,
+  batch, onAnswer, onCancel, dictationEngine,
 }: {
   batch: QuestionBatch;
   onAnswer: (batch: QuestionBatch, answers: QuestionAnswer[]) => void;
   onCancel: (batch: QuestionBatch) => void;
+  dictationEngine?: DictationEngine;
 }) {
   const [drafts, setDrafts] = useState<Record<string, Draft>>(() => Object.fromEntries(
     batch.questions.map((q) => [q.id, { choice: q.recommended, text: '' }]),
@@ -103,29 +152,14 @@ export function BatchCard({
                       </div>
                     );
                   })}
-                  <div className="flex items-start gap-2">
-                    <input
-                      id={`${batch.id}-${q.id}-other`}
-                      type="radio"
-                      name={`${batch.id}-${q.id}`}
-                      value="other"
-                      checked={draft.choice === 'other'}
-                      onChange={() => update(q.id, { choice: 'other' })}
-                      className="mt-1 accent-sky-400"
-                    />
-                    <div className="w-full">
-                      <label htmlFor={`${batch.id}-${q.id}-other`} className="text-sm text-zinc-200">Other</label>
-                      <Input
-                        aria-label={`Other answer for ${q.id}`}
-                        value={draft.text}
-                        onChange={(e) => update(q.id, { text: e.target.value })}
-                        disabled={draft.choice !== 'other'}
-                        required={draft.choice === 'other'}
-                        maxLength={4000}
-                        className="mt-1 text-xs"
-                      />
-                    </div>
-                  </div>
+                  <OtherAnswer
+                    batchId={batch.id}
+                    questionId={q.id}
+                    draft={draft}
+                    onSelect={() => update(q.id, { choice: 'other' })}
+                    onText={(text) => update(q.id, { text })}
+                    dictationEngine={dictationEngine}
+                  />
                 </div>
               </fieldset>
             );

@@ -618,3 +618,26 @@ Every CLI or web launch writes a unique claim under `.hive-hub/launches/` while 
 
 Deletion removes only the project's entry from `projects.json`. It preserves tasks, decisions, handoffs, manifests, repositories, and team files. A refused deletion preserves the pending launch record and every other record.
 
+## 18. Handy dictation (web UI only)
+
+Every new-task, owner-message, rebrief, and plan-feedback input has a **Dictate** button. A question shows the same button beside its **Other** input only after the operator selects **Other**. The button starts no global hotkey or always-on microphone path. Predefined choices and approval buttons have no dictation control. The TUI has no dictation control.
+
+The first **Dictate** click without a pairing token shows a password input labeled `Handy pairing token for {input label}` and a **Connect and dictate** button. The token stays in page memory and clears on reload. The token field never submits the surrounding composer. A token needs at least 32 characters. The browser checks the local Handy bridge before it requests microphone permission.
+
+An active start shows **Cancel dictation**. Recording adds **Stop**. Every dictation button has `type="button"` and an input-specific accessible label. The shared action gate disables every dictation button while another Hub action runs. A polite live status region carries `data-dictation-state` and one of these exact states and messages:
+
+- `starting`: `Requesting microphone permission.`
+- `recording`: `Recording. Stop when you finish. The limit is 60 seconds.`
+- `transcribing`: `Transcribing locally with Handy.`
+- `success`: `Dictation added. Review and edit it before sending.`
+- `cancelled`: `Dictation cancelled. No text was added.`
+- `permission-denied`: `Microphone permission was denied. Allow it in the browser or keep typing.`
+- `unavailable`: `Handy is unavailable, or no microphone is available. Start the local bridge or keep typing.`
+- `failure`: `Dictation failed. Check Handy and the pairing token, then try again.`
+
+Recording starts only after the explicit gesture and browser permission. **Stop** ends recording and starts local transcription. **Cancel dictation** discards recording or transcription and ignores every late result. Stopping the page also stops the microphone. The recording lasts at most 60 seconds and its encoded browser audio is capped at 8 MiB.
+
+Success trims the transcript and inserts it at the current input selection. It adds one adjacent space only when the surrounding text has no whitespace. It then places the cursor after the insertion. The input remains enabled during every state. The operator can review and edit the draft. Dictation never calls a task, message, rebrief, plan, approval, or question submit callback. Existing Enter, Send, choice, and approval behavior stays unchanged. Unsupported browsers, denied permission, and an absent bridge leave normal typing usable.
+
+The browser converts audio to 16 kHz mono 16-bit PCM WAV and posts it to `http://127.0.0.1:7685/transcribe`. The Hub content security policy permits this exact loopback endpoint in `connect-src`. The bridge requires the pairing token and the configured Hub origin. Setup, retention, and live-engine limits live in `docs/handy-dictation.md`.
+

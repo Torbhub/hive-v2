@@ -57,6 +57,7 @@ src/
   hub.ts       — status/tasks/task/log/dialog/answer/wake/continue/start logic
   spawn.ts     — spawn/respawn/close of orchestrator + agent sessions
   gate.ts      — gate runner + gate-verify (log, commits)
+  handy.ts     — loopback-only Handy CLI bridge for browser dictation
   cleanup.ts   — manifest-driven cleanup, trash-not-delete
   watch.ts     — watchdog (dead-pane log + wake), safe/smart auto-approver, and direct Auto dialog answers
   compact.ts   — idle compaction policy, durable attempts, and per-worker controls
@@ -68,7 +69,7 @@ src/
 roles/         — orchestrator.md, implementer.md, reviewer.md, council-*.md, researcher.md, news-scout.md, deslop-reviewer.md (read by spawned sessions)
 rules/RULES.md — the team's working rules (git, gate, reporting, handoff format)
 skills/        — start, gate, cleanup, council, retro, digest-triage, experiment (Kimi Code skills; load with --skills-dir)
-web/           — server.ts (node:http, loopback) + the React/vite SPA (built to web/dist)
+web/           — server.ts (node:http, loopback), dictation.tsx (browser audio), + the React/vite SPA (built to web/dist)
 docs/          — this file, hub-ui-spec.md, mechanics.md (what was kept/cut and why), crawl-sources.md + crawl/ (the daily loop's ledger and findings)
 test/          — vitest: screen parsing, gate-verify, task ledger, arg parsing
 README.md      — written for a new SWE: what it is, install, the 6 commands you actually use
@@ -134,6 +135,7 @@ hive gate --log <path> -- <name> <cmd>... | gate-verify log <path> [--commit sha
 hive push <remote> <sha> <branch>        — fast-forward only, by full hash
 hive cleanup <project> [--dry-run]
 hive compact <project> [agent] on|off
+hive handy-bridge [--origin URL]         — local Handy transcription bridge
 hive ui                                  — the hub screen
 ```
 

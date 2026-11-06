@@ -30,7 +30,7 @@ const CONTENT_TYPES: Record<string, string> = {
 
 const STATIC_HEADERS: Record<string, string> = {
   'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer',
-  'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+  'content-security-policy': "default-src 'self'; connect-src 'self' http://127.0.0.1:7685; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
 };
 
 function sendJson(res: http.ServerResponse, code: number, value: unknown): void {
