@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type ViteDevServer } from 'vite';
 import { createHandyServer, HANDY_PORT } from '../src/handy.js';
 import type { Server } from 'node:http';
+import { launchChrome } from './browser-launcher.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TOKEN = 'real-browser-fake-engine-token-32';
@@ -156,13 +157,9 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => bridge.listen(HANDY_PORT, '127.0.0.1', resolve));
 
   profile = await fs.mkdtemp(path.join(tmpdir(), 'hive-chrome-e2e-'));
-  browser = spawn(await chromeExecutable(), [
-    '--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--remote-debugging-port=0',
-    `--user-data-dir=${profile}`, 'about:blank',
-  ], { stdio: 'ignore' });
-  await viWaitForFile(path.join(profile, 'DevToolsActivePort'));
-  const activePort = await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8');
-  cdp = await ChromePage.open(Number(activePort.split('\n')[0]));
+  const launched = await launchChrome(await chromeExecutable(), profile);
+  browser = launched.browser;
+  cdp = await ChromePage.open(launched.activePort);
   await cdp.call('Page.addScriptToEvaluateOnNewDocument', {
     source: `
       window.__trackStops = 0;
@@ -227,15 +224,6 @@ afterAll(async () => {
   ]);
   await fs.rm(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }, 30_000);
-
-async function viWaitForFile(file: string): Promise<void> {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (await fs.stat(file).catch(() => null)) return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`Chrome did not create ${file}`);
-}
 
 async function click(selector: string): Promise<void> {
   await cdp.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
