@@ -42,7 +42,7 @@ The default standalone origin is `http://127.0.0.1:7684`. The origin must exactl
 
 The bridge listens only on `127.0.0.1:7685`. It prints a generated pairing token at startup. Keep the process running on the operator computer. Set `HIVE_HANDY_TOKEN` to supply a token with at least 32 characters instead. Set `HANDY_BIN` when the Handy executable is not on `PATH`.
 
-Portable Handy installations are not supported. The bridge rejects a valid `portable` marker before spawning Handy. Portable mode stores settings, models, and logs in `Data` beside the executable, so HOME and XDG isolation cannot contain them. Typing remains available after this rejection.
+Portable Handy installations are not supported. The bridge rejects a valid magic marker or any legacy marker with an adjacent `Data` directory before spawning Handy. This includes empty and invalid legacy markers. Portable mode stores settings, models, and logs in `Data` beside the executable, so HOME and XDG isolation cannot contain them. Typing remains available after this rejection.
 
 Open the Hub in a browser on the same computer. Select **Dictate** beside a composer. Enter the pairing token, then select **Connect and dictate**. Grant microphone and local-network permission when the browser asks. Select **Stop** after speaking. Review and edit the inserted text before using the existing submit control.
 
@@ -71,7 +71,7 @@ The bridge sets `RUST_LOG=off` and `HANDY_TRANSCRIBE_WORKER_LOG=off`. Handy's fi
 
 Sandbox construction cleans up after any failure, including a failed settings copy. A deletion failure returns an error and keeps the active job closed to restart.
 
-The bridge copies only `models--*` repositories from `HF_HOME/hub` into the job and dereferences their blobs. This supports HF-only model layouts without exposing unrelated cache data or writes. Copying a large model can increase job time and disk use.
+The bridge copies only `models--*` repositories from `HF_HOME/hub` into the job. It verifies every resolved symlink against its model repository. Safe snapshot-to-blob links become relative links inside the job. An escaping link rejects the job and deletes the sandbox before Handy starts. This supports HF-only model layouts without exposing unrelated cache data or writes. Copying a large model can increase job time and disk use.
 
 The bridge does not log audio, transcripts, Handy standard error, or temporary paths. HTTP errors contain generic messages. The browser stores the pairing token only in page memory. Reloading the page clears the token. The browser does not persist audio or transcripts. Existing Hive draft and submission behavior stays unchanged after the operator submits text.
 

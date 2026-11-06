@@ -89,6 +89,26 @@ describe('portable Handy rejection', () => {
     expect(await fs.readFile(path.join(data, 'logs', 'handy.log'), 'utf8')).toBe('debug transcript');
     expect(await jobDirectories(directory)).toEqual([]);
   });
+
+  it.each(['', 'not a Handy marker'])('rejects legacy marker %j with Data before spawn and leaves Data unchanged', async (marker) => {
+    const directory = await root();
+    const executable = path.join(directory, 'handy');
+    await fs.writeFile(executable, '#!/usr/bin/env node\n', { mode: 0o755 });
+    await fs.writeFile(path.join(directory, 'portable'), marker);
+    const data = path.join(directory, 'Data');
+    await fs.mkdir(path.join(data, 'logs'), { recursive: true });
+    await fs.writeFile(path.join(data, 'settings_store.json'), '{"settings":{"post_process_api_keys":{"provider":"secret"}}}');
+    await fs.writeFile(path.join(data, 'logs', 'handy.log'), 'legacy debug transcript');
+    const runner = vi.fn<HandyRunner>();
+
+    await expect(transcribeWithHandy(wav(), {
+      handyPath: executable, tempRoot: directory, runner, env: { HOME: path.join(directory, 'home') },
+    })).rejects.toThrow('portable Handy');
+    expect(runner).not.toHaveBeenCalled();
+    expect(await fs.readFile(path.join(data, 'settings_store.json'), 'utf8')).toBe('{"settings":{"post_process_api_keys":{"provider":"secret"}}}');
+    expect(await fs.readFile(path.join(data, 'logs', 'handy.log'), 'utf8')).toBe('legacy debug transcript');
+    expect(await jobDirectories(directory)).toEqual([]);
+  });
 });
 
 describe('sandbox setup and cleanup failures', () => {
@@ -198,6 +218,56 @@ describe('Hugging Face cache containment', () => {
     expect(await response.json()).toEqual({ ok: true, text: 'hf-only transcript' });
     expect(await fs.readFile(path.join(repo, 'snapshots', 'sha', 'model.bin'), 'utf8')).toBe('original model');
     expect(await fs.readFile(path.join(hfHome, 'hub', 'datasets--private', 'secret.txt'), 'utf8')).toBe('secret');
+    expect(await jobDirectories(directory)).toEqual([]);
+  });
+
+  it('preserves a legitimate snapshot-to-blob symlink inside the model repository', async () => {
+    const directory = await root();
+    const hfHome = path.join(directory, 'hf-home');
+    const repo = path.join(hfHome, 'hub', 'models--org--demo');
+    await fs.mkdir(path.join(repo, 'snapshots', 'sha'), { recursive: true });
+    await fs.mkdir(path.join(repo, 'blobs'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'blobs', 'blob'), 'original blob');
+    await fs.symlink('../../blobs/blob', path.join(repo, 'snapshots', 'sha', 'model.bin'));
+    const runner: HandyRunner = async (_command, args, options) => {
+      const hf = options.env.HF_HOME!;
+      const link = path.join(hf, 'hub', 'models--org--demo', 'snapshots', 'sha', 'model.bin');
+      expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+      expect((await fs.realpath(link)).startsWith(hf)).toBe(true);
+      expect((await fs.realpath(link)).startsWith(hfHome)).toBe(false);
+      expect(await fs.readFile(link, 'utf8')).toBe('original blob');
+      await fs.writeFile(link, 'changed copy');
+      return args[0] === '--list-models'
+        ? JSON.stringify([{ is_downloaded: true }])
+        : JSON.stringify({ text: 'linked model transcript' });
+    };
+    const base = await bridge({ runner, tempRoot: directory, env: { HOME: path.join(directory, 'home'), HF_HOME: hfHome } });
+    expect((await fetch(`${base}/health`, { headers: headers() })).status).toBe(200);
+    expect((await transcribeRequest(base)).status).toBe(200);
+    expect(await fs.readFile(path.join(repo, 'blobs', 'blob'), 'utf8')).toBe('original blob');
+    expect(await jobDirectories(directory)).toEqual([]);
+  });
+
+  it.each(['relative-dataset', 'absolute-outside'])('rejects HF symlink escape to %s and cleans the sandbox', async (kind) => {
+    const directory = await root();
+    const hfHome = path.join(directory, 'hf-home');
+    const repo = path.join(hfHome, 'hub', 'models--org--demo');
+    await fs.mkdir(path.join(repo, 'snapshots', 'sha'), { recursive: true });
+    const secret = kind === 'relative-dataset'
+      ? path.join(hfHome, 'hub', 'datasets--private', 'secret.txt')
+      : path.join(directory, 'outside.txt');
+    await fs.mkdir(path.dirname(secret), { recursive: true });
+    await fs.writeFile(secret, 'must not be exposed');
+    const target = kind === 'relative-dataset' ? '../../../datasets--private/secret.txt' : secret;
+    await fs.symlink(target, path.join(repo, 'snapshots', 'sha', 'model.bin'));
+    const runner = vi.fn<HandyRunner>();
+
+    await expect(transcribeWithHandy(wav(), {
+      handyPath: '/not/run', tempRoot: directory, runner,
+      env: { HOME: path.join(directory, 'home'), HF_HOME: hfHome },
+    })).rejects.toThrow();
+    expect(runner).not.toHaveBeenCalled();
+    expect(await fs.readFile(secret, 'utf8')).toBe('must not be exposed');
     expect(await jobDirectories(directory)).toEqual([]);
   });
 });

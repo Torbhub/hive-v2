@@ -142,9 +142,47 @@ async function resolveExecutable(command: string, env: NodeJS.ProcessEnv): Promi
 async function rejectPortableHandy(options: HandyOptions): Promise<void> {
   const executable = await resolveExecutable(options.handyPath ?? 'handy', options.env ?? process.env);
   if (!executable) return;
-  const marker = await fs.readFile(path.join(path.dirname(executable), 'portable'), 'utf8').catch(() => '');
-  if (marker.trimStart().startsWith('Handy Portable Mode')) {
+  const executableDirectory = path.dirname(executable);
+  const markerPath = path.join(executableDirectory, 'portable');
+  const marker = await fs.readFile(markerPath, 'utf8').catch(() => '');
+  const markerExists = await fs.stat(markerPath).then(() => true).catch(() => false);
+  const legacy = markerExists && await fs.stat(path.join(executableDirectory, 'Data')).then(() => true).catch(() => false);
+  if (marker.trimStart().startsWith('Handy Portable Mode') || legacy) {
     throw new Error('portable Handy installations are not supported by Hive');
+  }
+}
+
+function insideRepository(repository: string, candidate: string): boolean {
+  const relative = path.relative(repository, candidate);
+  return relative === '' || relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+async function copyModelEntry(source: string, target: string, repository: string): Promise<void> {
+  await fs.mkdir(target, { recursive: true });
+  for (const entry of await fs.readdir(source, { withFileTypes: true })) {
+    const sourceEntry = path.join(source, entry.name);
+    const targetEntry = path.join(target, entry.name);
+    if (entry.isSymbolicLink()) {
+      const resolved = await fs.realpath(sourceEntry);
+      if (!insideRepository(repository, resolved)) throw new Error('HF model symlink escapes its repository');
+      const stat = await fs.stat(resolved);
+      const copiedTarget = path.join(target, path.relative(repository, resolved));
+      if (stat.isDirectory()) await copyModelEntry(resolved, copiedTarget, repository);
+      else if (stat.isFile()) {
+        await fs.mkdir(path.dirname(copiedTarget), { recursive: true });
+        await fs.copyFile(resolved, copiedTarget);
+      } else {
+        throw new Error('unsupported HF model link');
+      }
+      await fs.symlink(path.relative(path.dirname(targetEntry), copiedTarget), targetEntry,
+        process.platform === 'win32' ? (stat.isDirectory() ? 'junction' : 'file') : undefined);
+    } else if (entry.isDirectory()) {
+      await copyModelEntry(sourceEntry, targetEntry, repository);
+    } else if (entry.isFile()) {
+      await fs.copyFile(sourceEntry, targetEntry);
+    } else {
+      throw new Error('unsupported HF model entry');
+    }
   }
 }
 
@@ -158,10 +196,8 @@ async function copyHuggingFaceCache(directory: string, sourceEnv: NodeJS.Process
   const entries = await fs.readdir(actualHub, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
     if (!entry.name.startsWith('models--') || !entry.isDirectory()) continue;
-    await fs.cp(path.join(actualHub, entry.name), path.join(temporaryHub, entry.name), {
-      recursive: true,
-      dereference: true,
-    });
+    const repository = await fs.realpath(path.join(actualHub, entry.name));
+    await copyModelEntry(repository, path.join(temporaryHub, entry.name), repository);
   }
 }
 
