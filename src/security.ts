@@ -190,6 +190,27 @@ export async function currentGrant(registry: Registry, project: string, subject:
   return undefined;
 }
 
+export async function exactGrant(registry: Registry, project: string, subject: string,
+  task?: string, thread?: string): Promise<RegistryRow | undefined> {
+  const pk = `ACL#${project}#${task ?? '*'}#${thread ?? '*'}`;
+  const sk = `PRINCIPAL#${subject}`;
+  if (await registry.get(`REVOCATION#${pk}`, sk)) return undefined;
+  const row = await registry.get(pk, sk);
+  return row?.revokedAt === null || row?.revokedAt === undefined ? row : undefined;
+}
+
+export async function authorizeExact(principal: Principal, registry: Registry, action: string,
+  scope: { project: string; task?: string; thread?: string }): Promise<RegistryRow> {
+  if (!ACTIONS.has(action) || (principal.kind === 'agent' && principal.project !== scope.project)) {
+    throw new AuthorizationError('not found');
+  }
+  const grant = await exactGrant(registry, scope.project, principal.subject, scope.task, scope.thread);
+  if (!grant || !Array.isArray(grant.actions) || !grant.actions.includes(action)) {
+    throw new AuthorizationError('not found');
+  }
+  return grant;
+}
+
 export async function authorize(principal: Principal, registry: Registry, action: string,
   scope: { project: string; task?: string; thread?: string }): Promise<RegistryRow> {
   if (!ACTIONS.has(action) || (principal.kind === 'agent' && principal.project !== scope.project)) {

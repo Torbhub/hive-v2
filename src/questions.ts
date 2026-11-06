@@ -11,7 +11,7 @@ import { decisionFingerprint, repositoryFingerprint, verifyDecisionFacts, verify
 import { credentialFromEnvironment } from './collaboration-credentials.js';
 import { storedAgentTask } from './agent-target.js';
 import { registryFromEnv } from './registry.js';
-import { authenticateBearer, authorize } from './security.js';
+import { authenticateBearer, authorizeExact, exactGrant } from './security.js';
 
 export const QUESTION_LIMITS = {
   questions: 20, choices: 8, context: 4000, question: 1000,
@@ -270,7 +270,7 @@ async function authorizePushConsumption(root: string, batch: QuestionBatch,
   }
   const task = await storedAgentTask(root, batch.project, agentRef);
   if (grant.task !== task) throw new Refusal('approval task does not match');
-  const current = await authorize(principal, registry, 'execute', { project: batch.project, task });
+  const current = await authorizeExact(principal, registry, 'execute', { project: batch.project, task });
   if (grant.grantId !== current.grantId) throw new Refusal('execute grant identity does not match');
   const profile = await registry.get(`AGENT#${principal.agentId}`, 'PROFILE');
   if (!profile || Number(profile.aclEpoch) !== grant.profileAclEpoch) {
@@ -280,13 +280,8 @@ async function authorizePushConsumption(root: string, batch: QuestionBatch,
   if (!grant.approverSubject.startsWith('user:')) {
     throw new Refusal('execution approvals require a human approver');
   }
-  const pk = `ACL#${batch.project}#${task ?? '*'}#*`;
-  const sk = `PRINCIPAL#${grant.approverSubject}`;
-  const [approver, ledger] = await Promise.all([
-    registry.get(pk, sk), registry.get(`REVOCATION#${pk}`, sk),
-  ]);
-  if (!approver || ledger || approver.revokedAt !== null && approver.revokedAt !== undefined
-    || approver.grantId !== grant.approverGrantId
+  const approver = await exactGrant(registry, batch.project, grant.approverSubject, task);
+  if (!approver || approver.grantId !== grant.approverGrantId
     || Number(approver.aclEpoch) !== grant.approverAclEpoch) {
     throw new Refusal('approver authorization changed');
   }
