@@ -211,7 +211,7 @@ describe('T01 disposable smoke infrastructure', () => {
     const workflow = read('deployWorkflow');
     expect(workflow).toContain('UPDATE_ROLLBACK_FAILED');
     expect(workflow).toContain('aws cloudformation continue-update-rollback --stack-name hive-v2-infra');
-    expect(workflow).toContain('aws cloudformation wait stack-update-rollback-complete --stack-name hive-v2-infra');
+    expect(workflow).toContain('aws cloudformation wait stack-rollback-complete --stack-name hive-v2-infra');
   });
 
   it('documents live-only operation and validates all CloudFormation templates', () => {

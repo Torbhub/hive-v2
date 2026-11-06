@@ -120,7 +120,7 @@ jobs:
             --query 'Stacks[0].StackStatus' --output text)
           if [ "$STACK_STATUS" = "UPDATE_ROLLBACK_FAILED" ]; then
             aws cloudformation continue-update-rollback --stack-name hive-v2-infra
-            aws cloudformation wait stack-update-rollback-complete --stack-name hive-v2-infra
+            aws cloudformation wait stack-rollback-complete --stack-name hive-v2-infra
           fi
           aws cloudformation deploy \
             --stack-name hive-v2-infra \
