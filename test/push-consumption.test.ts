@@ -201,6 +201,7 @@ describe('authenticated push consumption', () => {
     const { root, home, commit } = await setup();
     const batch = await approved(root, commit);
     const values = await rows(root);
+    values.find((row) => row.pk === 'AGENT#builder' && row.sk === 'PROFILE')!.ownerSubject = 'user:bob';
     values.find((row) => row.pk === 'SUBJECT#user:alice')!.accountStatus = 'disabled';
     await replaceRows(root, values);
     await expect(consumePushApproval(
