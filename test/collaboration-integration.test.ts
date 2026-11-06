@@ -119,15 +119,18 @@ describe('integration authorization and revocation', () => {
 
   it('requires execute only for execution-granting push approvals', async () => {
     const { root, home, base } = await fixture();
+    const { authHeaders } = await import('./security-fixture.js');
+    const postAsOwner = (id: string, answers: unknown) => fetch(`${base}/api/questions/answer`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ id, answers }),
+    });
     await team(home);
     const batch = await pushBatch(root);
     const values = await rows(root);
-    const grant = values.find((row) => row.sk === 'PRINCIPAL#agent:builder')!;
+    const grant = values.find((row) => row.sk === 'PRINCIPAL#user:alice')!;
     grant.actions = ['read', 'write'];
     await replaceRows(root, values);
-    expect((await post(base, '/api/questions/answer', {
-      id: batch.id, answers: [{ question: 'q1', choice: 'c2' }],
-    })).status).toBe(404);
+    expect((await postAsOwner(batch.id, [{ question: 'q1', choice: 'c2' }])).status).toBe(404);
 
     const general = await createQuestionBatch(root, { project: 'demo', agent: 'builder@one' }, {
       context: 'Choose a direction.', questions: [{
@@ -135,23 +138,31 @@ describe('integration authorization and revocation', () => {
         choices: [{ label: 'Yes', description: 'Continue.' }, { label: 'No', description: 'Stop.' }],
       }],
     });
-    expect((await post(base, '/api/questions/answer', {
-      id: general.id, answers: [{ question: 'q1', choice: 'other', text: 'Use the other path.' }],
-    })).status).toBe(200);
+    expect((await postAsOwner(
+      general.id, [{ question: 'q1', choice: 'other', text: 'Use the other path.' }],
+    )).status).toBe(200);
 
     grant.actions = ['read', 'write', 'execute'];
     await replaceRows(root, values);
-    const approved = await post(base, '/api/questions/answer', {
-      id: batch.id, answers: [{ question: 'q1', choice: 'c2' }],
-    });
+    const approved = await postAsOwner(batch.id, [{ question: 'q1', choice: 'c2' }]);
     expect(approved.status).toBe(200);
     const body = await approved.json();
     expect(body.batch.answers[0].decision.grant).toMatchObject({
       executionAuthority: 'push', agent: 'builder@one', task: 'demo-1',
       grantId: 'agent-grant', profileAclEpoch: 1,
-      approverSubject: 'agent:builder', approverGrantId: 'agent-grant', approverAclEpoch: 1,
+      approverSubject: 'user:alice', approverGrantId: 'human-grant', approverAclEpoch: 1,
     });
     expect(JSON.stringify(body)).not.toContain(AGENT_CREDENTIAL);
+  });
+
+  it('rejects an agent principal for an execution approval', async () => {
+    const { root, home, base } = await fixture();
+    await team(home);
+    const batch = await pushBatch(root);
+    expect((await post(base, '/api/questions/answer', {
+      id: batch.id, answers: [{ question: 'q1', choice: 'c2' }],
+    })).status).toBe(400);
+    expect((await readQuestionBatch(root, batch.id)).status).toBe('open');
   });
 
   it('blocks project fallback and redacts metadata for a restored ledger-only task revocation', async () => {
