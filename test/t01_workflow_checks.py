@@ -193,6 +193,12 @@ validate_evidence(evidence_records() + [{'check': 'unapproved', 'status': 'passe
 failed_check = evidence_records()
 failed_check[2]['status'] = 'failed'
 validate_evidence(failed_check, 1)
+bootstrap_failure = evidence_records()
+bootstrap_failure.insert(2, {'check': 'bootstrap_error', 'status': 'failed', 'category': 'InstallError:pm-runtime'})
+validate_evidence(bootstrap_failure, 1)
+bad_category = evidence_records()
+bad_category.insert(2, {'check': 'bootstrap_error', 'status': 'failed', 'category': 'unsafe message with spaces'})
+validate_evidence(bad_category, 1)
 not_last = evidence_records()
 not_last.insert(0, not_last.pop())
 validate_evidence(not_last, 1)

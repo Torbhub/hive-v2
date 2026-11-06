@@ -65,6 +65,12 @@ on_error() {
   trap - ERR
   set +e
   lock_down
+  local category=unknown
+  if [ -f /var/lib/t01/evidence/bootstrap-category ]; then
+    category="$(cat /var/lib/t01/evidence/bootstrap-category)"
+  fi
+  [[ "$category" =~ ^[A-Za-z][A-Za-z0-9_.:-]*$ ]] || category=unknown
+  emit bootstrap_error failed "\"category\":\"$category\""
   emit provisioning failed
   emit complete failed
   publish_evidence
@@ -107,9 +113,22 @@ export HERMES_HOME=/opt/t01/pm-home
 export HERMES_RUNTIME_DIR=/opt/t01/tools
 export UV_FROZEN=1
 cd /opt/t01/source
-python3 -c 'from pm import ensure; ensure("uv", explicit=True)'
+ensure_package() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import sys
+try:
+    from pm import ensure
+    ensure(sys.argv[1], explicit=True)
+except Exception as error:
+    category = f'{type(error).__name__}:{getattr(error, "package", "unknown")}'
+    Path('/var/lib/t01/evidence/bootstrap-category').write_text(category, encoding='utf-8')
+    raise SystemExit(1)
+PY
+}
+ensure_package uv
 emit uv_install passed
-python3 -c 'from pm import ensure; ensure("python", explicit=True)'
+ensure_package python
 emit python_install passed
 PYTHON="$(python3 -c 'from pm import installed_package; print(installed_package("python").binary)')"
 python3 -m pm.build_env \

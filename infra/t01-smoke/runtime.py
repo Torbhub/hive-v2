@@ -2,6 +2,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import ssl
 import subprocess
 import sys
@@ -19,8 +20,8 @@ SIMPLE_CHECKS = {
     'alternate_port', 'metadata', 'container_credentials', 'teamkimi_no_model',
     'paid_admission_disabled',
 }
-ALLOWED_CHECKS = SIMPLE_CHECKS | {'hermes_version', 'source_sha256', 'provisioning', 'complete'}
-ALLOWED_FIELDS = {'check', 'status', 'version', 'commit', 'sha256'}
+ALLOWED_CHECKS = SIMPLE_CHECKS | {'bootstrap_error', 'hermes_version', 'source_sha256', 'provisioning', 'complete'}
+ALLOWED_FIELDS = {'check', 'status', 'version', 'commit', 'sha256', 'category'}
 
 
 def read_json(path):
@@ -161,6 +162,12 @@ def validate_evidence(path):
         check = record.get('check')
         if check not in ALLOWED_CHECKS or record.get('status') not in {'passed', 'failed'}:
             return 1
+        if check == 'bootstrap_error':
+            category = record.get('category')
+            if set(record) != {'check', 'status', 'category'} or not isinstance(category, str):
+                return 1
+            if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.:-]*', category):
+                return 1
         if check in seen or record.get('status') != 'passed':
             return 1
         seen.add(check)
