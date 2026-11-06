@@ -10,13 +10,16 @@ TEAMKIMI_IP=
 
 mkdir -p /opt/t01/source /opt/t01/fixtures /opt/t01/hermes /opt/t01/tools /opt/t01/pm-home
 mkdir -p /var/lib/t01/evidence /var/lib/t01/hermes /etc/t01/broker
+chown root:root /opt/t01 /var/lib/t01 /etc/t01
+chmod 0711 /opt/t01 /var/lib/t01 /etc/t01
+chmod 0700 /var/lib/t01/evidence /opt/t01/pm-home
 : > "$EVIDENCE"
 chmod 0600 /var/lib/t01/evidence/preflight.jsonl
 shutdown -h +"${LIFETIME_MINUTES}"
 
 emit() {
-  local check="$1" status="$2" record
-  record="{\"check\":\"$check\",\"status\":\"$status\"}"
+  local check="$1" status="$2" details="${3:-}" record
+  record="{\"check\":\"$check\",\"status\":\"$status\"${details:+,$details}}"
   printf '%s\n' "$record" >> "$EVIDENCE"
 }
 
@@ -76,7 +79,7 @@ require_value() {
   fi
 }
 
-for name in TEAMKIMI_URL TEAMKIMI_SECRET_ARN TEAMKIMI_SECRET_KEY TEAMKIMI_CONNECTIVITY_PATH SCENARIO MATRIX LIFETIME_MINUTES RUN_ID; do
+for name in TEAMKIMI_URL TEAMKIMI_SECRET_ARN TEAMKIMI_SECRET_KEY TEAMKIMI_CONNECTIVITY_PATH SCENARIO MATRIX LIFETIME_MINUTES RUN_ID RUNTIME_SCRIPT_URL RUNTIME_SCRIPT_SHA256; do
   require_value "$name"
 done
 [ "$SCENARIO" = preflight ]
@@ -84,6 +87,11 @@ done
 [ "$MAX_PAID_ADMISSIONS" = 0 ]
 
 dnf install -y gcc gcc-c++ make cmake python3-devel libffi-devel libatomic git xz ca-certificates iptables
+curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+  --max-redirs 0 --connect-timeout 10 --max-time 60 \
+  "$RUNTIME_SCRIPT_URL" --output /opt/t01/runtime.py
+printf '%s  %s\n' "$RUNTIME_SCRIPT_SHA256" /opt/t01/runtime.py | sha256sum -c -
+chmod 0555 /opt/t01/runtime.py
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --max-redirs 0 --connect-timeout 10 --max-time 180 \
   "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/$HERMES_COMMIT" \
@@ -93,8 +101,7 @@ tar -xzf /opt/t01/hermes.tar.gz -C /opt/t01/source --strip-components=1
 rm -f /opt/t01/hermes.tar.gz
 printf '{"schemaVersion":2,"baseVersion":"0.22.6","commit":"%s","distribution":"source","source":"t01","updateMechanism":"external"}\n' \
   "$HERMES_COMMIT" > /opt/t01/source/install-stamp.json
-emit "hermes_${HERMES_VERSION}_${HERMES_COMMIT}" passed
-emit "source_sha256_${HERMES_ARCHIVE_SHA256}" passed
+emit source_sha256 passed "\"sha256\":\"$HERMES_ARCHIVE_SHA256\""
 
 export HERMES_HOME=/opt/t01/pm-home
 export HERMES_RUNTIME_DIR=/opt/t01/tools
@@ -171,71 +178,13 @@ config.update({
 })
 Path("/etc/t01/broker/config.json").write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
 PY
-chmod 0444 /etc/t01/broker/config.json
-
-cat > /opt/t01/broker.py <<'PY'
-import http.client
-import json
-import ssl
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
-
-with open("/etc/t01/broker/config.json", encoding="utf-8") as config_file:
-    CONFIG = json.load(config_file)
-
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        return
-
-    def reply(self, status, body):
-        payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def do_GET(self):
-        if self.path == "/redirect-fixture":
-            self.send_response(302)
-            self.send_header("Location", "https://example.com/")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            return
-        if self.path != "/health":
-            self.reply(404, {"status": "unavailable"})
-            return
-        try:
-            with open("/etc/t01/broker/teamkimi.json", encoding="utf-8") as secret_file:
-                secret = json.load(secret_file)
-            api_key = secret[CONFIG["teamkimi_secret_key"]]
-            if not isinstance(api_key, str) or not api_key:
-                raise ValueError("invalid credential shape")
-            target = urlsplit(CONFIG["teamkimi_url"])
-            connection = http.client.HTTPSConnection(
-                target.hostname, 443, timeout=10, context=ssl.create_default_context()
-            )
-            connection.request("GET", CONFIG["teamkimi_connectivity_path"], headers={
-                "Authorization": f"Bearer {api_key}",
-                "Accept": "application/json",
-                "Connection": "close",
-            })
-            response = connection.getresponse()
-            response.read(1024)
-            connection.close()
-            if 200 <= response.status < 300:
-                self.reply(200, {"status": "ok"})
-            else:
-                self.reply(502, {"status": "upstream_rejected", "upstream_status": response.status})
-        except (OSError, ValueError, KeyError, json.JSONDecodeError, ssl.SSLError):
-            self.reply(502, {"status": "connectivity_failed"})
-
-
-ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
-PY
-chmod 0555 /opt/t01/broker.py
+chown root:t01broker /etc/t01/broker /etc/t01/broker/config.json
+chmod 0750 /etc/t01/broker
+chmod 0440 /etc/t01/broker/config.json
+chown root:t01hermes /var/lib/t01/hermes/config.yaml
+chmod 0440 /var/lib/t01/hermes/config.yaml
+chmod 0700 /var/lib/t01/hermes
+chmod -R a+rX,go-w /opt/t01/source /opt/t01/hermes /opt/t01/tools /opt/t01/fixtures
 
 cat > /etc/systemd/system/t01-broker.service <<EOF
 [Unit]
@@ -246,7 +195,7 @@ After=network.target
 Type=simple
 User=t01broker
 Group=t01broker
-ExecStart=/usr/bin/python3 /opt/t01/broker.py
+ExecStart=/usr/bin/python3 /opt/t01/runtime.py broker
 Restart=no
 NoNewPrivileges=yes
 CapabilityBoundingSet=
@@ -254,7 +203,7 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-ReadOnlyPaths=/etc/t01/broker /opt/t01/broker.py
+ReadOnlyPaths=/etc/t01/broker /opt/t01/runtime.py
 IPAddressDeny=any
 IPAddressAllow=127.0.0.0/8
 IPAddressAllow=${TEAMKIMI_IP}/32
@@ -279,7 +228,7 @@ Environment=PATH=/opt/t01/hermes/bin:/usr/bin:/bin
 Environment=HERMES_HOME=/var/lib/t01/hermes
 Environment=TEAMKIMI_OPENAI_COMPATIBLE_URL=http://127.0.0.1:8765/v1
 Environment=TEAMKIMI_MODEL_ID=Kimi 3.1 Pro
-ExecStart=/opt/t01/hermes/bin/hermes --version
+ExecStart=/opt/t01/hermes/bin/python /opt/t01/runtime.py hermes-check
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict
@@ -301,10 +250,36 @@ chmod 0444 /etc/systemd/system/t01-broker.service /etc/systemd/system/t01-hermes
 systemctl daemon-reload
 lock_down
 emit default_deny_lockdown passed
-systemctl start t01-broker.service
-systemctl start t01-hermes-check.service
-emit hermes_version_invocation passed
 command -v curl runuser timeout >/dev/null
+runuser -u t01broker -- test -r /opt/t01/runtime.py
+runuser -u t01broker -- test -r /etc/t01/broker/config.json
+runuser -u t01broker -- test -r /etc/t01/broker/teamkimi.json
+runuser -u t01broker -- test ! -w /etc/t01/broker/teamkimi.json
+runuser -u t01hermes -- test -x /opt/t01/hermes/bin
+runuser -u t01hermes -- test -r /opt/t01/fixtures/query.txt
+runuser -u t01hermes -- test -r /var/lib/t01/hermes/config.yaml
+runuser -u t01hermes -- test -w /var/lib/t01/hermes
+if runuser -u t01hermes -- test -r /etc/t01/broker/teamkimi.json; then
+  false
+fi
+if runuser -u t01hermes -- test -x /etc/t01/broker; then
+  false
+fi
+systemctl start t01-broker.service
+runuser -u t01hermes -- env -i PATH=/usr/bin:/bin curl --fail --silent http://127.0.0.1:8765/access-check >/dev/null
+systemctl start t01-hermes-check.service
+read -r RUNTIME_VERSION RUNTIME_COMMIT < <(python3 - <<'PY'
+import json
+with open('/var/lib/t01/hermes/runtime-check.json', encoding='utf-8') as source:
+    record = json.load(source)
+print(record['version'], record['commit'])
+PY
+)
+[ "$RUNTIME_VERSION" = "${HERMES_VERSION#v}" ]
+[ "$RUNTIME_COMMIT" = "$HERMES_COMMIT" ]
+emit hermes_version passed "\"version\":\"$RUNTIME_VERSION\",\"commit\":\"$RUNTIME_COMMIT\""
+emit lazy_install_disabled passed
+emit service_filesystem_access passed
 
 as_hermes() {
   runuser -u t01hermes -- env -i \

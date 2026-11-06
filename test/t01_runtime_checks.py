@@ -107,12 +107,12 @@ def hermes_check(version='0.22.6', lazy='false', lazy_rc=1):
             ['python3', str(RUNTIME), 'hermes-check'], env=env,
             capture_output=True, text=True, timeout=10,
         )
-        return result, output
+        return result, output.read_text() if output.exists() else None
 
 
 result, output = hermes_check()
 assert result.returncode == 0, result.stderr
-assert json.loads(output.read_text()) == {
+assert json.loads(output) == {
     'version': '0.22.6', 'commit': COMMIT, 'lazy_installs': False,
 }
 result, _ = hermes_check(version='0.0.0')

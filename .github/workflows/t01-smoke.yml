@@ -43,7 +43,7 @@ on:
         required: true
         type: string
       max_paid_admissions:
-        description: Whole-matrix admission cap, maximum 12
+        description: Whole-matrix admission cap, required to be 0 for preflight
         required: true
         type: string
       lifetime_minutes:

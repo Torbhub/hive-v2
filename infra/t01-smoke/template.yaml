@@ -68,7 +68,7 @@ Parameters:
   MaxPaidAdmissions:
     Type: Number
     MinValue: 0
-    MaxValue: 12
+    MaxValue: 0
   LifetimeMinutes:
     Type: Number
     MinValue: 5
@@ -77,6 +77,12 @@ Parameters:
     Type: String
     AllowedPattern: '^https://raw.githubusercontent.com/Torbhub/hive-v2/[0-9a-f]{40}/infra/t01-smoke/provision.sh$'
   ProvisionScriptSha256:
+    Type: String
+    AllowedPattern: '^[0-9a-f]{64}$'
+  RuntimeScriptUrl:
+    Type: String
+    AllowedPattern: '^https://raw.githubusercontent.com/Torbhub/hive-v2/[0-9a-f]{40}/infra/t01-smoke/runtime.py$'
+  RuntimeScriptSha256:
     Type: String
     AllowedPattern: '^[0-9a-f]{64}$'
   RunId:
@@ -173,6 +179,8 @@ Resources:
           export MAX_ESTIMATED_COST_USD='${MaxEstimatedCostUsd}'
           export MAX_PAID_ADMISSIONS='${MaxPaidAdmissions}'
           export LIFETIME_MINUTES='${LifetimeMinutes}' RUN_ID='${RunId}'
+          export RUNTIME_SCRIPT_URL='${RuntimeScriptUrl}'
+          export RUNTIME_SCRIPT_SHA256='${RuntimeScriptSha256}'
           /opt/t01-provision.sh
       Tags:
         - Key: Name

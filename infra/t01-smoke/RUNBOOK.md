@@ -21,9 +21,9 @@ The instance role can read only the referenced secret. The role cannot deploy, r
 2. Select the reviewed commit.
 3. Enter `preflight` for `scenario` and `none` for `matrix`.
 4. Leave `paid_admission` as `false`. A `true` value fails before AWS credentials are used.
-5. Enter every token, API-call, cost, admission, and lifetime cap. The workflow requires explicit values even though this run spends nothing.
+5. Enter every token, API-call, cost, admission, and lifetime cap. Set `max_paid_admissions=0`. Any other admission value fails before AWS credentials are used.
 6. Use a lifetime from 5 through 120 minutes. The instance terminates at that deadline even if the workflow stops.
-7. Start the workflow. It acquires the fleet deploy mutex before the stack act and releases the mutex during cleanup.
+7. Start the workflow. It acquires the fleet deploy mutex before the stack act, renews it every ten minutes during collection, and releases it during cleanup.
 
 The workflow uses only the `t01-smoke` environment role. It has no push, pull-request, schedule, or external-call trigger.
 

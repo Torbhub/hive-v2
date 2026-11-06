@@ -5,8 +5,9 @@
 # it). Any AWS act outside a stack deploy holds the mutex first.
 #
 # acquire blocks up to DEPLOY_MUTEX_WAIT_SECONDS (default 600) and exits 1
-# naming the holder when the lock stays taken. release frees the lock, and
-# releasing a lock the caller does not hold is a safe no-op. A crashed
+# naming the holder when the lock stays taken. renew extends the ttl only for
+# the same owner. release frees the lock, and releasing a lock the caller does
+# not hold is a safe no-op. A crashed
 # holder's row expires after 25 min (ttl). A later acquire then steals it.
 # Never delete a row by hand to unstick it.
 set -euo pipefail
@@ -22,7 +23,7 @@ resource="${2:-}"
 owner="${3:-}"
 
 die_usage() {
-  echo "usage: deploy-mutex.sh acquire|release <resource> <owner>" >&2
+  echo "usage: deploy-mutex.sh acquire|renew|release <resource> <owner>" >&2
   exit 2
 }
 
@@ -71,6 +72,16 @@ case "$cmd" in
       fi
       sleep "$SLEEP_SECONDS"
     done
+    ;;
+  renew)
+    now=$(date +%s)
+    _ddb update-item \
+      --key "$(_key)" \
+      --update-expression 'SET #t = :ttl' \
+      --condition-expression '#o = :me' \
+      --expression-attribute-names '{"#o":"owner","#t":"ttl"}' \
+      --expression-attribute-values "$(printf '{":me":{"S":"%s"},":ttl":{"N":"%s"}}' "$owner" "$(( now + TTL_SECONDS ))")"
+    echo "renewed $TABLE/$resource (owner $owner)"
     ;;
   release)
     _ddb delete-item \

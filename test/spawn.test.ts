@@ -877,7 +877,7 @@ describe('spawn parent', () => {
     expect(team.agents.find((a) => a.name === 'w1')?.parent).toBe('demo-orchestrator');
     expect(team.agents.find((a) => a.name === 'w2')?.parent).toBe('demo-orchestrator');
     expect(team.agents.find((a) => a.name === 'w3')?.parent).toBeUndefined();
-  }, 30_000);
+  }, 20_000);
 });
 
 describe('trust dialog at spawn', () => {
