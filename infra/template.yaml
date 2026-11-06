@@ -199,7 +199,6 @@ Resources:
                 Action: ec2:RunInstances
                 Resource:
                   - arn:aws:ec2:us-east-1:594552273052:instance/*
-                  - arn:aws:ec2:us-east-1:594552273052:volume/*
                 Condition:
                   StringEquals:
                     aws:RequestTag/Role: hive-v2-t01-smoke
@@ -208,6 +207,7 @@ Resources:
                 Action: ec2:RunInstances
                 Resource:
                   - arn:aws:ec2:us-east-1:594552273052:network-interface/*
+                  - arn:aws:ec2:us-east-1:594552273052:volume/*
                   - arn:aws:ec2:us-east-1:594552273052:security-group/*
                   - arn:aws:ec2:us-east-1:594552273052:subnet/*
                   - arn:aws:ec2:us-east-1::image/*
