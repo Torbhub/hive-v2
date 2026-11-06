@@ -70,6 +70,7 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(validate({ SCENARIO: undefined }).status).not.toBe(0);
     expect(validate({ MATRIX: 'P01' }).status).not.toBe(0);
     expect(validate({ MAX_OUTPUT_TOKENS: '2001' }).status).not.toBe(0);
+    expect(validate({ MAX_PAID_ADMISSIONS: '1' }).status).not.toBe(0);
     expect(validate({ MAX_PAID_ADMISSIONS: '13' }).status).not.toBe(0);
     expect(validate({ LIFETIME_MINUTES: '121' }).status).not.toBe(0);
   });
@@ -102,6 +103,13 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision).toContain('ReadOnlyPaths=/var/lib/t01/hermes/config.yaml');
     expect(provision).toContain('ProtectSystem=strict');
     expect(provision).toContain('chmod 0400 /etc/t01/broker/teamkimi.json');
+    expect(provision).toContain('chmod 0711 /opt/t01 /var/lib/t01 /etc/t01');
+    expect(provision).toContain('chmod 0750 /etc/t01/broker');
+    expect(provision).toContain('runuser -u t01broker -- test');
+    expect(provision).toContain('runuser -u t01hermes -- test');
+    expect(provision).toContain('service_filesystem_access');
+    expect(provision).toContain('lazy_install_disabled');
+    expect(provision).toContain('hermes_version');
     expect(provision).not.toContain('/v1/chat/completions');
     expect(provision).not.toContain('docker.sock');
     expect(provision).not.toContain('--privileged');
@@ -141,6 +149,7 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(template).toContain('TeamKimiSecretArn');
     expect(template).toContain('secret:hive-v2-t01-smoke-');
     expect(template).toContain('ProvisionScriptSha256');
+    expect(template).toMatch(/MaxPaidAdmissions:\n\s+Type: Number\n\s+MinValue: 0\n\s+MaxValue: 0/);
     expect(template).toContain('aws-cloudformation@3');
   });
 
@@ -182,6 +191,7 @@ describe('T01 disposable smoke infrastructure', () => {
     ]) {
       expect(runbook).toContain(topic);
     }
+    expect(runbook).toContain('max_paid_admissions=0');
     expect(read('infraReadme')).toContain('t01-smoke/RUNBOOK.md');
     expect(read('deployWorkflow')).toContain('cfn-lint infra/template.yaml infra/t01-smoke/template.yaml');
     expect(read('prePush')).toContain('cfn-lint infra/template.yaml infra/t01-smoke/template.yaml');
