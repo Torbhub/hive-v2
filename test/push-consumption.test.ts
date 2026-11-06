@@ -2,10 +2,11 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   answerQuestionBatch, consumePushApproval, createQuestionBatch, readQuestionBatch,
 } from '../src/questions.js';
+import { FileRegistry } from '../src/registry.js';
 import { appendTaskEvent, hivePath, writeJson, writeProjects } from '../src/state.js';
 import type { QuestionBatch } from '../src/types.js';
 import {
@@ -283,6 +284,26 @@ describe('authenticated push consumption', () => {
       root, { project: 'demo', batch: batch.id, question: 'q1' },
       'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
     )).rejects.toThrow(/approver authorization changed/);
+  });
+
+  it('rejects a consumer project-only grant before the delegated proof call', async () => {
+    const { root, home, commit } = await setup();
+    const values = await rows(root);
+    const consumer = values.find((row) => row.sk === 'PRINCIPAL#agent:builder')!;
+    consumer.pk = 'ACL#demo#*#*';
+    consumer.task = null;
+    await replaceRows(root, values);
+    const batch = await approved(root, commit);
+    const delegated = vi.spyOn(FileRegistry.prototype, 'delegatedApprovalAccount');
+    try {
+      await expect(consumePushApproval(
+        root, { project: 'demo', batch: batch.id, question: 'q1' },
+        'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+      )).rejects.toThrow(/execute grant identity|not found/);
+      expect(delegated).not.toHaveBeenCalled();
+    } finally {
+      delegated.mockRestore();
+    }
   });
 
   it('rejects a persisted legacy agent approval during consumption', async () => {

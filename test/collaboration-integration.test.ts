@@ -167,10 +167,51 @@ describe('integration authorization and revocation', () => {
     expect(JSON.stringify(body)).not.toContain(AGENT_CREDENTIAL);
   });
 
+  it('rejects a project-only consumer grant during execution approval creation', async () => {
+    const { root, home, base } = await fixture();
+    const { authHeaders } = await import('./security-fixture.js');
+    await team(home);
+    const batch = await pushBatch(root);
+    const values = await rows(root);
+    const approver = values.find((row) => row.sk === 'PRINCIPAL#user:alice')!;
+    approver.pk = 'ACL#demo#demo-1#*';
+    approver.task = 'demo-1';
+    await replaceRows(root, values);
+    const response = await fetch(`${base}/api/questions/answer`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ id: batch.id, answers: [{ question: 'q1', choice: 'c2' }] }),
+    });
+    expect(response.status).toBe(404);
+    expect((await readQuestionBatch(root, batch.id)).status).toBe('open');
+  });
+
+  it('rejects a project-only approver grant during execution approval creation', async () => {
+    const { root, home, base } = await fixture();
+    const { authHeaders } = await import('./security-fixture.js');
+    await team(home);
+    const batch = await pushBatch(root);
+    const values = await rows(root);
+    const consumer = values.find((row) => row.sk === 'PRINCIPAL#agent:builder')!;
+    consumer.pk = 'ACL#demo#demo-1#*';
+    consumer.task = 'demo-1';
+    await replaceRows(root, values);
+    const response = await fetch(`${base}/api/questions/answer`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ id: batch.id, answers: [{ question: 'q1', choice: 'c2' }] }),
+    });
+    expect(response.status).toBe(404);
+    expect((await readQuestionBatch(root, batch.id)).status).toBe('open');
+  });
+
   it('rejects an agent principal for an execution approval', async () => {
     const { root, home, base } = await fixture();
     await team(home);
     const batch = await pushBatch(root);
+    const values = await rows(root);
+    const approver = values.find((row) => row.sk === 'PRINCIPAL#agent:builder')!;
+    approver.pk = 'ACL#demo#demo-1#*';
+    approver.task = 'demo-1';
+    await replaceRows(root, values);
     expect((await post(base, '/api/questions/answer', {
       id: batch.id, answers: [{ question: 'q1', choice: 'c2' }],
     })).status).toBe(400);
