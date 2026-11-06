@@ -128,11 +128,14 @@ def effective_permission(boundary_statement, inline_statement, action, resource)
 
 
 INFRA_STACK = 'arn:aws:cloudformation:us-east-1:594552273052:stack/hive-v2-infra/*'
+DEPLOY_ROLE_ARN = 'arn:aws:iam::594552273052:role/hive-v2-gh-deploy'
 SMOKE_ROLE = 'arn:aws:iam::594552273052:role/hive-v2-gh-t01-smoke'
 assert deploy_allows('cloudformation:ContinueUpdateRollback', INFRA_STACK)
 assert not deploy_allows('cloudformation:ContinueUpdateRollback', BROKER_STACK)
-assert not deploy_allows('iam:UpdateRoleDescription', SMOKE_ROLE)
+assert deploy_allows('iam:UpdateRoleDescription', DEPLOY_ROLE_ARN)
+assert deploy_allows('iam:UpdateRoleDescription', SMOKE_ROLE)
 assert not deploy_allows('iam:UpdateRoleDescription', 'arn:aws:iam::594552273052:role/other-role')
+assert not deploy_allows('iam:UpdateRoleDescription', 'arn:aws:iam::594552273052:role/hive-v2-gh-bench')
 assert TEMPLATE['Resources']['T01SmokeRole']['Properties']['MaxSessionDuration'] == 9000
 
 SMOKE_PATH = ROOT / 'infra/t01-smoke/template.yaml'
@@ -166,6 +169,11 @@ assert role_context['must']
 INSTANCE_ROLE_ARN = 'arn:aws:iam::594552273052:role/hive-v2-t01-smoke-instance'
 INSTANCE_BOUNDARY = 'arn:aws:iam::594552273052:policy/hive-v2-t01-smoke-health-boundary'
 BROKER_BOUNDARY = 'arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary'
+BOUNDARY_LIFECYCLE_ACTIONS = {
+    'iam:CreatePolicy', 'iam:CreatePolicyVersion', 'iam:DeletePolicy',
+    'iam:DeletePolicyVersion', 'iam:GetPolicy', 'iam:GetPolicyVersion',
+    'iam:ListPolicyVersions', 'iam:SetDefaultPolicyVersion',
+}
 for role_arn, boundary_arn in ((INSTANCE_ROLE_ARN, INSTANCE_BOUNDARY), (BROKER_ROLE, BROKER_BOUNDARY)):
     for action in ('iam:CreateRole', 'iam:PutRolePermissionsBoundary'):
         assert not allows(action, role_arn), f'{action} must require the exact permissions boundary'
@@ -173,9 +181,15 @@ for role_arn, boundary_arn in ((INSTANCE_ROLE_ARN, INSTANCE_BOUNDARY), (BROKER_R
         assert not allows(action, role_arn, **{'iam:PermissionsBoundary': 'arn:aws:iam::594552273052:policy/other-boundary'})
     for context in ({}, {'iam:PermissionsBoundary': boundary_arn}, {'iam:PermissionsBoundary': 'arn:aws:iam::594552273052:policy/other-boundary'}):
         assert not allows('iam:DeleteRolePermissionsBoundary', role_arn, **context), 'T01 must never detach a runtime boundary'
-    for action in ('iam:CreatePolicy', 'iam:CreatePolicyVersion', 'iam:DeletePolicyVersion', 'iam:DeletePolicy'):
+    for action in BOUNDARY_LIFECYCLE_ACTIONS:
         assert not allows(action, boundary_arn), 'T01 must not mutate boundary policy documents'
         assert deploy_allows(action, boundary_arn), 'the root deploy role owns boundary lifecycle'
+        assert not deploy_allows(action, 'arn:aws:iam::594552273052:policy/other-policy')
+boundary_statement = next(statement for statement in DEPLOY_STATEMENTS if statement['Sid'] == 'ManageHiveBoundaryPolicies')
+assert set(boundary_statement['Action']) == BOUNDARY_LIFECYCLE_ACTIONS
+assert set(boundary_statement['Resource']) == {INSTANCE_BOUNDARY, BROKER_BOUNDARY}
+for resource_name in ('T01SmokeHealthBoundary', 'T01BrokerHealthBoundary', 'T01SmokeRole'):
+    assert TEMPLATE['Resources'][resource_name]['DependsOn'] == 'DeployRole'
 
 for template, role_name, boundary_name, secret_parameter in (
     (SMOKE_TEMPLATE, 'InstanceRole', 'T01SmokeHealthBoundary', 'TeamKimiSecretArn'),
