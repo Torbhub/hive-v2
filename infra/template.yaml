@@ -145,6 +145,13 @@ Resources:
                 Resource: arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession
 
   T01SmokeRole:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: protected main-only dispatch owns one disposable preflight stack
+        must:
+          - Create tags only during RunInstances or CreateSecurityGroup
+          - Operate on existing resources only when they carry the T01 role tag
+          - Renew and release only the same owner's fleet mutex
     Type: AWS::IAM::Role
     Properties:
       RoleName: hive-v2-gh-t01-smoke

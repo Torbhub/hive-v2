@@ -134,28 +134,35 @@ collect_evidence() {
 }
 
 cleanup() {
-  local status=0 describe_rc release_rc=0 stack_exists describe_output describe_error
+  local status=0 describe_rc release_rc=0 confirmed_absent=false describe_output describe_error
   describe_output="$(mktemp)"
   describe_error="$(mktemp)"
   trap "rm -f $describe_output $describe_error" EXIT
   if aws cloudformation describe-stacks --stack-name "$STACK_NAME" >"$describe_output" 2>"$describe_error"; then
-    stack_exists=true
+    if grep -q '"StackStatus": "DELETE_COMPLETE"' "$describe_output"; then
+      confirmed_absent=true
+    elif aws cloudformation delete-stack --stack-name "$STACK_NAME"; then
+      if aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"; then
+        confirmed_absent=true
+      else
+        status=$?
+      fi
+    else
+      status=$?
+    fi
   else
     describe_rc=$?
-    stack_exists=false
-    if ! grep -q ValidationError "$describe_error" || ! grep -q 'does not exist' "$describe_error"; then
+    if grep -q ValidationError "$describe_error" && grep -q 'does not exist' "$describe_error"; then
+      confirmed_absent=true
+    else
       status=$describe_rc
     fi
   fi
-  if [ "$stack_exists" = true ]; then
-    aws cloudformation delete-stack --stack-name "$STACK_NAME" || status=$?
-    if (( status == 0 )); then
-      aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" || status=$?
+  if [ "$confirmed_absent" = true ]; then
+    bash infra/deploy-mutex.sh release aws-acts "$OWNER" || release_rc=$?
+    if (( status == 0 && release_rc != 0 )); then
+      status=$release_rc
     fi
-  fi
-  bash infra/deploy-mutex.sh release aws-acts "$OWNER" || release_rc=$?
-  if (( status == 0 && release_rc != 0 )); then
-    status=$release_rc
   fi
   return "$status"
 }

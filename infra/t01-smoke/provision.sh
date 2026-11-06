@@ -266,7 +266,7 @@ if runuser -u t01hermes -- test -x /etc/t01/broker; then
   false
 fi
 systemctl start t01-broker.service
-runuser -u t01hermes -- env -i PATH=/usr/bin:/bin curl --fail --silent http://127.0.0.1:8765/access-check >/dev/null
+runuser -u t01hermes -- env -i PATH=/usr/bin:/bin /usr/bin/python3 /opt/t01/runtime.py wait-for-broker
 systemctl start t01-hermes-check.service
 read -r RUNTIME_VERSION RUNTIME_COMMIT < <(python3 - <<'PY'
 import json

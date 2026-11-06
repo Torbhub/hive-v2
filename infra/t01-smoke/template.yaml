@@ -91,6 +91,12 @@ Parameters:
 
 Resources:
   InstanceRole:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: broker-only TeamKimi secret access without a broad host identity
+        must:
+          - Read only the configured T01 TeamKimi secret
+          - Grant no other AWS permissions
     Type: AWS::IAM::Role
     Properties:
       RoleName: hive-v2-t01-smoke-instance
@@ -112,12 +118,24 @@ Resources:
                 Resource: !Ref TeamKimiSecretArn
 
   InstanceProfile:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: attach only the broker-secret role to the disposable instance
+        must:
+          - Contain only InstanceRole
+          - Never attach a broad or shared instance profile
     Type: AWS::IAM::InstanceProfile
     Properties:
       InstanceProfileName: hive-v2-t01-smoke
       Roles: [!Ref InstanceRole]
 
   SecurityGroup:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: deny inbound access and allow only temporary provisioning egress
+        must:
+          - Allow no ingress
+          - Apply host default-deny egress before Hermes starts
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: hive-v2-t01-smoke
@@ -133,6 +151,13 @@ Resources:
           Value: hive-v2-t01-smoke
 
   Instance:
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: fresh bounded preflight outside the shared Nexus production worker
+        must:
+          - Terminate at the requested lifetime and delete the encrypted root volume
+          - Install Hermes before lockdown and deny every unapproved destination
+          - Keep host credentials and broad instance profiles out of the environment
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref AmiId

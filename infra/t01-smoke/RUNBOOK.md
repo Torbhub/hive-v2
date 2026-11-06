@@ -50,6 +50,14 @@ The instance terminates automatically at the requested lifetime. Its encrypted r
 
 If the workflow stops, start no manual instance. Use the normal stack deployment controls under the fleet deploy mutex to delete `hive-v2-t01-smoke`. Confirm that the instance, instance profile, instance role, and security group are gone. Do not change the shared Nexus box.
 
+## Mutex recovery
+
+Cleanup releases the mutex only after confirmed stack absence or deletion. An AccessDenied, throttle, network, delete, or wait error returns nonzero and retains the mutex. Do not release the mutex after an uncertain cleanup. Never delete the mutex row by hand.
+
+Investigate the stack through the normal deployment controls while the same owner holds the mutex. Renew the mutex during active recovery. After confirmed deletion, run `bash infra/t01-smoke/workflow.sh cleanup` with the original `GITHUB_RUN_ID`. Confirmed absence permits the owner-safe release.
+
+A release error also returns nonzero. If the stack is already absent, run the same cleanup command after the AWS error clears. The retry releases only the same owner's mutex.
+
 ## Artifact deletion
 
 GitHub deletes the evidence artifact after seven days. Delete the artifact sooner after the evidence review when the issue contains the required sanitized results. If GitHub retention fails, delete the artifact through the GitHub Actions controls and record the deletion. Do not download old artifacts to preserve them beyond seven days.

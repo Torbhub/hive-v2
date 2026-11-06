@@ -72,6 +72,7 @@ with tempfile.TemporaryDirectory() as directory:
     process.wait()
     assert status == 502, f'unreadable broker secret returned {status}'
 
+    secret.chmod(0o400)
     port = free_port()
     readiness_env = {
         'PATH': os.environ['PATH'],

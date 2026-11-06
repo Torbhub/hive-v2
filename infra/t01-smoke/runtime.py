@@ -5,6 +5,7 @@ from pathlib import Path
 import ssl
 import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -91,6 +92,26 @@ def broker():
     ThreadingHTTPServer(('127.0.0.1', port), BrokerHandler).serve_forever()
 
 
+def wait_for_broker():
+    port = int(os.environ.get('T01_BROKER_PORT', '8765'))
+    attempts = int(os.environ.get('T01_BROKER_READINESS_ATTEMPTS', '30'))
+    delay = float(os.environ.get('T01_BROKER_READINESS_DELAY', '1'))
+    for attempt in range(attempts):
+        try:
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+            connection.request('GET', '/access-check')
+            response = connection.getresponse()
+            response.read(1024)
+            connection.close()
+            return 0 if 200 <= response.status < 300 else 1
+        except ConnectionRefusedError:
+            if attempt + 1 < attempts:
+                time.sleep(delay)
+        except OSError:
+            return 1
+    return 1
+
+
 def run_process(arguments, timeout):
     return subprocess.run(arguments, capture_output=True, text=True, timeout=timeout, check=False)
 
@@ -160,6 +181,11 @@ def main():
     if sys.argv[1] == 'broker':
         broker()
         return 0
+    if sys.argv[1] == 'wait-for-broker' and len(sys.argv) == 2:
+        try:
+            return wait_for_broker()
+        except (OSError, ValueError):
+            return 1
     if sys.argv[1] == 'hermes-check' and len(sys.argv) == 2:
         try:
             hermes_check()

@@ -6,9 +6,9 @@
 #
 # acquire blocks up to DEPLOY_MUTEX_WAIT_SECONDS (default 600) and exits 1
 # naming the holder when the lock stays taken. renew extends the ttl only for
-# the same owner. release frees the lock, and releasing a lock the caller does
-# not hold is a safe no-op. A crashed
-# holder's row expires after 25 min (ttl). A later acquire then steals it.
+# the same owner. release frees the lock, ignores only an owner-mismatch
+# conditional, and returns every other AWS error. A crashed holder's row
+# expires after 25 min (ttl). A later acquire then steals it.
 # Never delete a row by hand to unstick it.
 set -euo pipefail
 
@@ -84,13 +84,23 @@ case "$cmd" in
     echo "renewed $TABLE/$resource (owner $owner)"
     ;;
   release)
-    _ddb delete-item \
-      --key "$(_key)" \
-      --condition-expression "#o = :me" \
-      --expression-attribute-names '{"#o":"owner"}' \
-      --expression-attribute-values "$(printf '{":me":{"S":"%s"}}' "$owner")" \
-      2>/dev/null || true
-    exit 0
+    err_file=$(mktemp)
+    trap 'rm -f "$err_file"' EXIT
+    if _ddb delete-item \
+        --key "$(_key)" \
+        --condition-expression "#o = :me" \
+        --expression-attribute-names '{"#o":"owner"}' \
+        --expression-attribute-values "$(printf '{":me":{"S":"%s"}}' "$owner")" \
+        2>"$err_file"; then
+      exit 0
+    else
+      rc=$?
+    fi
+    if grep -q ConditionalCheckFailedException "$err_file"; then
+      exit 0
+    fi
+    cat "$err_file" >&2
+    exit "$rc"
     ;;
   *)
     die_usage
