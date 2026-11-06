@@ -143,7 +143,11 @@ export type DecisionGrant = {
   executionAuthority: 'push' | 'none';
   agent?: string;
   task?: string;
-  aclEpoch?: number;
+  grantId?: string;
+  profileAclEpoch?: number;
+  approverSubject?: string;
+  approverGrantId?: string;
+  approverAclEpoch?: number;
   consumedAt?: string;
 };
 

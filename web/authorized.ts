@@ -1,12 +1,12 @@
 import type http from 'node:http';
 import type { HubView } from '../src/types.js';
-import { listOpenQuestionBatches, readQuestionBatch } from '../src/questions.js';
+import { listOpenQuestionBatches, readQuestionBatch, type ApprovalAuthorization } from '../src/questions.js';
 import { readAgentLog, resolveLogTarget } from '../src/logview.js';
-import { RegistryUnavailable, type Registry } from '../src/registry.js';
+import { RegistryUnavailable, type Registry, type RegistryRow } from '../src/registry.js';
 import { Refusal } from '../src/state.js';
 import {
   AuthenticationError, AuthorizationError, authorize, bearerFromRequest, createWakeSubscription,
-  publicAgentIdentity, revoked, revokeWakeSubscription, type Principal,
+  currentGrant, publicAgentIdentity, revoked, revokeWakeSubscription, type Principal,
 } from '../src/security.js';
 import { buildView, lastLine } from '../src/view.js';
 import { BODY_CAP, checkBrowserHeaders, handlePost, postAction, postScope, readBody, storedAgentTask } from './actions.js';
@@ -170,6 +170,34 @@ async function wakeListResponse(context: RequestContext, principal: Principal): 
   })));
 }
 
+async function approvalAuthorization(context: RequestContext, principal: Principal,
+  body: Record<string, unknown>, scope: { project: string; task?: string },
+  approverGrant: RegistryRow): Promise<ApprovalAuthorization> {
+  const batch = await readQuestionBatch(context.root, String(body.id ?? ''));
+  const agentRef = batch.agent;
+  const agentId = agentRef.split('@')[0];
+  const [profile, task] = await Promise.all([
+    context.registry.get(`AGENT#${agentId}`, 'PROFILE'),
+    storedAgentTask(context.root, batch.project, agentRef),
+  ]);
+  if (!profile || await revoked(context.registry, profile) || profile.project !== batch.project
+    || task !== scope.task || !Number.isSafeInteger(Number(profile.aclEpoch))
+    || !Number.isSafeInteger(Number(approverGrant.aclEpoch))
+    || typeof approverGrant.grantId !== 'string') {
+    throw new AuthorizationError('not found');
+  }
+  const consumer = await currentGrant(context.registry, batch.project, `agent:${agentId}`, task);
+  if (!consumer || typeof consumer.grantId !== 'string'
+    || !Array.isArray(consumer.actions) || !consumer.actions.includes('execute')) {
+    throw new AuthorizationError('not found');
+  }
+  return {
+    task, consumerGrantId: consumer.grantId, consumerAclEpoch: Number(profile.aclEpoch),
+    approverSubject: principal.subject, approverGrantId: approverGrant.grantId,
+    approverAclEpoch: Number(approverGrant.aclEpoch),
+  };
+}
+
 async function requiredAction(root: string, pathname: string, body: Record<string, unknown>): Promise<string> {
   if (pathname !== '/api/questions/answer' || !Array.isArray(body.answers)) return postAction(pathname);
   const batch = await readQuestionBatch(root, String(body.id ?? ''));
@@ -213,9 +241,9 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   const scope = await postScope(context.root, pathname, body, principal);
   const action = await requiredAction(context.root, pathname, body);
   const approvalGrant = await authorize(principal, context.registry, action, scope);
-  const result = await handlePost(context.root, pathname, body, principal, {
-    task: scope.task, aclEpoch: Number(approvalGrant.aclEpoch),
-  });
+  const authorization = action === 'execute'
+    ? await approvalAuthorization(context, principal, body, scope, approvalGrant) : undefined;
+  const result = await handlePost(context.root, pathname, body, principal, authorization);
   const current = await context.authenticate();
   await authorize(current, context.registry, action, scope);
   sendJson(res, 200, result);
