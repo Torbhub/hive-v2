@@ -215,7 +215,7 @@ describe('authenticated push consumption', () => {
     const { root, remote, home, commit } = await setup();
     const values = await rows(root);
     values.push({
-      pk: 'ACL#demo#*#*', sk: 'PRINCIPAL#user:bob', project: 'demo', principal: 'user:bob',
+      pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#user:bob', project: 'demo', task: 'demo-1', principal: 'user:bob',
       grantId: 'bob-grant', actions: ['execute'], aclEpoch: 2, revokedAt: null,
     });
     await replaceRows(root, values);
@@ -230,7 +230,7 @@ describe('authenticated push consumption', () => {
     const { root, home, commit } = await setup();
     const values = await rows(root);
     values.push({
-      pk: 'ACL#demo#*#*', sk: 'PRINCIPAL#user:bob', project: 'demo', principal: 'user:bob',
+      pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#user:bob', project: 'demo', task: 'demo-1', principal: 'user:bob',
       grantId: 'bob-grant', actions: ['execute'], aclEpoch: 2, revokedAt: null,
     });
     await replaceRows(root, values);
@@ -267,6 +267,36 @@ describe('authenticated push consumption', () => {
       root, { project: 'demo', batch: batch.id, question: 'q1' },
       'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
     )).rejects.toThrow(/approver authorization changed/);
+  });
+
+  it('rejects project-only delegated grants for a task', async () => {
+    const { root, home, commit } = await setup();
+    const values = await rows(root);
+    for (const subject of ['agent:builder', 'user:alice']) {
+      const grant = values.find((row) => row.sk === `PRINCIPAL#${subject}`)!;
+      grant.pk = 'ACL#demo#*#*';
+      grant.task = null;
+    }
+    await replaceRows(root, values);
+    const batch = await approved(root, commit);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+    )).rejects.toThrow(/approver authorization changed/);
+  });
+
+  it('rejects a persisted legacy agent approval during consumption', async () => {
+    const { root, home, commit } = await setup();
+    const batch = await approved(root, commit);
+    const grant = batch.answers![0].decision!.grant!;
+    grant.approverSubject = 'agent:builder';
+    grant.approverGrantId = 'agent-grant';
+    grant.approverAclEpoch = 1;
+    await writeJson(path.join(root, '.hive-hub', 'questions', 'closed', `${batch.id}.json`), batch);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home),
+    )).rejects.toThrow(/human approver/);
   });
 
   it('rejects an agent principal when creating an execution approval', async () => {
