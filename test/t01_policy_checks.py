@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = yaml.load((ROOT / 'infra/template.yaml').read_text(), CloudFormationLoader)
 ROLE = TEMPLATE['Resources']['T01SmokeRole']
 STATEMENTS = ROLE['Properties']['Policies'][0]['PolicyDocument']['Statement']
+DEPLOY_STATEMENTS = TEMPLATE['Resources']['DeployRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
 
 
 def action_matches(statement, action):
@@ -97,6 +98,22 @@ assert allows('secretsmanager:DeleteSecret', HEALTH_SECRET)
 assert not allows('secretsmanager:DeleteSecret', HEALTH_SECRET.replace('health-', 'other-'))
 assert allows('iam:PassRole', BROKER_ROLE, **{'iam:PassedToService': 'lambda.amazonaws.com'})
 assert not allows('iam:PassRole', BROKER_ROLE, **{'iam:PassedToService': 'ec2.amazonaws.com'})
+
+
+def deploy_allows(action, resource):
+    return any(
+        statement['Effect'] == 'Allow' and action_matches(statement, action)
+        and resource_matches(statement, resource)
+        for statement in DEPLOY_STATEMENTS
+    )
+
+
+INFRA_STACK = 'arn:aws:cloudformation:us-east-1:594552273052:stack/hive-v2-infra/*'
+SMOKE_ROLE = 'arn:aws:iam::594552273052:role/hive-v2-gh-t01-smoke'
+assert deploy_allows('cloudformation:ContinueUpdateRollback', INFRA_STACK)
+assert not deploy_allows('cloudformation:ContinueUpdateRollback', BROKER_STACK)
+assert deploy_allows('iam:UpdateRoleDescription', SMOKE_ROLE)
+assert not deploy_allows('iam:UpdateRoleDescription', 'arn:aws:iam::594552273052:role/other-role')
 
 SMOKE_PATH = ROOT / 'infra/t01-smoke/template.yaml'
 BROKER_PATH = ROOT / 'infra/t01-smoke/broker_template.yaml'
