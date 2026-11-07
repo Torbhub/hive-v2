@@ -1,0 +1,337 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import type { Server } from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  answerQuestionBatch, consumePushApproval, createQuestionBatch, readQuestionBatch,
+} from '../src/questions.js';
+import { appendTaskEvent, hivePath, writeJson, writeProjects } from '../src/state.js';
+import type { QuestionBatch } from '../src/types.js';
+import {
+  AGENT_CREDENTIAL, ASSERTION_KEYS, MemoryRegistry, configureSecurity, registryItems, startTestRegistry,
+} from './security-fixture.js';
+
+const brokers: Server[] = [];
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(brokers.splice(0).map((broker) => new Promise<void>((resolve) => broker.close(() => resolve()))));
+});
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+async function setup() {
+  const root = await mkdtemp(path.join(tmpdir(), 'hive-push-consume-'));
+  const remote = path.join(root, 'remote.git');
+  const home = path.join(root, 'work');
+  git(root, 'init', '--bare', remote);
+  git(root, 'init', '-b', 'main', home);
+  git(home, 'config', 'user.email', 'test@example.invalid');
+  git(home, 'config', 'user.name', 'Test');
+  await writeFile(path.join(home, 'a.txt'), 'base\n');
+  git(home, 'add', 'a.txt');
+  git(home, 'commit', '-m', 'feat: base');
+  git(home, 'remote', 'add', 'origin', remote);
+  git(home, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+  git(home, 'checkout', '-b', 'feat/t16');
+  await writeFile(path.join(home, 'b.txt'), 'change\n');
+  git(home, 'add', 'b.txt');
+  git(home, 'commit', '-m', 'feat: change');
+  const commit = git(home, 'rev-parse', 'HEAD');
+  await writeProjects(root, { projects: [{ name: 'demo', home, repos: [] }] });
+  await writeJson(hivePath(home, 'team.json'), {
+    agents: [{ name: 'builder', worktree: home, task: 'demo-1' }],
+  });
+  await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
+  const values = registryItems();
+  values.find((row) => row.sk === 'PRINCIPAL#user:alice')!.aclEpoch = 2;
+  const { broker, registry } = await startTestRegistry(values);
+  brokers.push(broker);
+  configureSecurity();
+  await writeFile(path.join(root, 'credential.env'), `HIVE_AGENT_CREDENTIAL='${AGENT_CREDENTIAL}'\n`, { mode: 0o600 });
+  return { root, remote, home, commit, registry };
+}
+
+async function approved(root: string, commit: string,
+  approverSubject = 'user:alice', approverGrantId = 'human-grant'): Promise<QuestionBatch> {
+  const batch = await createQuestionBatch(root, { project: 'demo', agent: `builder@${path.join(root, 'work')}` }, {
+    context: 'Publish the reviewed change.',
+    questions: [{
+      priority: 1,
+      decision: {
+        action: 'push', repository: 'attacker/other', branch: 'feat/t16', commit,
+        diffSummary: '1 file changed', destination: 'origin/feat/t16', reason: 'Reviewed.',
+      },
+    }],
+  });
+  return answerQuestionBatch(root, batch.id, [{ question: 'q1', choice: 'c2' }], {
+    task: 'demo-1', consumerGrantId: 'agent-grant', consumerAclEpoch: 1,
+    approverSubject, approverGrantId, approverAclEpoch: 2,
+  });
+}
+
+function environment(root: string, home: string): NodeJS.ProcessEnv {
+  return {
+    HIVE_HUB_ROOT: root, HIVE_PROJECT: 'demo', HIVE_COLLABORATION_ENABLED: '1',
+    HIVE_AGENT_CREDENTIAL_FILE: path.join(root, 'credential.env'),
+    HIVE_AGENT_REF: `builder@${home}`,
+    HIVE_ASSERTION_KEYS_JSON: JSON.stringify(ASSERTION_KEYS),
+  };
+}
+
+describe('authenticated push consumption', () => {
+  it('binds and consumes a valid approval without running a push', async () => {
+    const { root, remote, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    expect(batch.answers![0].decision?.grant).toMatchObject({
+      agent: `builder@${home}`, task: 'demo-1', grantId: 'agent-grant', profileAclEpoch: 1,
+      approverSubject: 'user:alice', approverGrantId: 'human-grant', approverAclEpoch: 2,
+    });
+    const url = await consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry);
+    expect(url).toBe(remote);
+    expect((await readQuestionBatch(root, batch.id)).answers![0].decision?.grant?.consumedAt).toBeTruthy();
+  });
+
+  it('enforces delegated approver expiry before recording consumption', async () => {
+    const { root, remote, home, commit, registry } = await setup();
+    registry.items.push({
+      pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#user:bob', project: 'demo', task: 'demo-1', principal: 'user:bob',
+      grantId: 'bob-grant', actions: ['execute'], aclEpoch: 2, revokedAt: null,
+    });
+    const account = registry.items.find((row) => row.pk === 'SUBJECT#user:bob')!;
+    const now = Math.floor(Date.now() / 1000);
+    for (const [expiresAt, valid] of [
+      [now - 1, false], ['invalid', false], [undefined, true], [null, true], [0, true], [now + 60, true],
+    ] as const) {
+      if (expiresAt === undefined) delete account.expiresAt;
+      else account.expiresAt = expiresAt;
+      const batch = await approved(root, commit, 'user:bob', 'bob-grant');
+      const result = consumePushApproval(
+        root, { project: 'demo', batch: batch.id, question: 'q1' },
+        'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+      );
+      if (valid) await expect(result).resolves.toBe(remote);
+      else await expect(result).rejects.toThrow(/approver account|delegated approval/);
+      const stored = await readQuestionBatch(root, batch.id);
+      expect(Boolean(stored.answers![0].decision?.grant?.consumedAt)).toBe(valid);
+    }
+  });
+
+  it('rejects a revoked consuming credential', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    const values = registry.items;
+    values.find((row) => row.pk === 'AGENT#builder' && row.sk === 'PROFILE')!.revokedAt = 1;
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/invalid agent credential/);
+  });
+
+  it('rejects a revoked current execute grant', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    const values = registry.items;
+    values.find((row) => row.sk === 'PRINCIPAL#agent:builder')!.revokedAt = 1;
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/not found/);
+  });
+
+  it('rejects an other-name agent reference', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    const env = { ...environment(root, home), HIVE_AGENT_REF: `mallory@${home}` };
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), env, registry,
+    )).rejects.toThrow(/agent|not found/);
+  });
+
+  it('rejects consumption from a different task', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', worktree: home, task: 'demo-2' }],
+    });
+    await appendTaskEvent(root, { id: 'demo-2', project: 'demo', event: 'asked', at: new Date().toISOString() });
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/task/);
+  });
+
+  it('rejects a project grant replaced by a task grant with the same row-local epoch', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    const values = registry.items;
+    const index = values.findIndex((row) => row.sk === 'PRINCIPAL#agent:builder');
+    values.splice(index, 1, {
+      pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#agent:builder', project: 'demo', task: 'demo-1',
+      principal: 'agent:builder', grantId: 'task-grant', actions: ['execute'], aclEpoch: 1, revokedAt: null,
+    });
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/grant identity/);
+  });
+
+  it('rejects an agent ACL change that advances the profile epoch', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    const values = registry.items;
+    values.find((row) => row.pk === 'AGENT#builder' && row.sk === 'PROFILE')!.aclEpoch = 2;
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/profile ACL epoch/);
+  });
+
+  it('rejects a substituted execute grant identity', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    const values = registry.items;
+    values.find((row) => row.sk === 'PRINCIPAL#agent:builder')!.grantId = 'different-grant';
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/grant identity/);
+  });
+
+  it('rejects a revoked human approver grant', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    const values = registry.items;
+    values.find((row) => row.sk === 'PRINCIPAL#user:alice')!.revokedAt = 1;
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/approver|not found/);
+  });
+
+  it('rejects a disabled human approver account even with a valid ACL grant', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    const values = registry.items;
+    values.find((row) => row.pk === 'AGENT#builder' && row.sk === 'PROFILE')!.ownerSubject = 'user:bob';
+    values.find((row) => row.pk === 'SUBJECT#user:alice')!.accountStatus = 'disabled';
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('allows a different authorized human approver without returning the agent owner account', async () => {
+    const { root, remote, home, commit, registry } = await setup();
+    const values = registry.items;
+    values.push({
+      pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#user:bob', project: 'demo', task: 'demo-1', principal: 'user:bob',
+      grantId: 'bob-grant', actions: ['execute'], aclEpoch: 2, revokedAt: null,
+    });
+    const batch = await approved(root, commit, 'user:bob', 'bob-grant');
+    const url = await consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry);
+    expect(url).toBe(remote);
+  });
+
+  it('rejects a disabled different human approver', async () => {
+    const { root, home, commit, registry } = await setup();
+    const values = registry.items;
+    values.push({
+      pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#user:bob', project: 'demo', task: 'demo-1', principal: 'user:bob',
+      grantId: 'bob-grant', actions: ['execute'], aclEpoch: 2, revokedAt: null,
+    });
+    const batch = await approved(root, commit, 'user:bob', 'bob-grant');
+    values.find((row) => row.pk === 'SUBJECT#user:bob')!.accountStatus = 'disabled';
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('rejects an arbitrary approver subject', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit, 'user:charlie', 'charlie-grant');
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/approver|not found/);
+  });
+
+  it('rejects an approver grant from the wrong task', async () => {
+    const { root, home, commit, registry } = await setup();
+    const values = registry.items;
+    values.push({
+      pk: 'ACL#demo#*#*', sk: 'PRINCIPAL#user:bob', project: 'demo', principal: 'user:bob',
+      grantId: 'bob-grant', actions: ['execute'], aclEpoch: 2, revokedAt: null,
+    });
+    const batch = await approved(root, commit, 'user:bob', 'bob-grant');
+    values.find((row) => row.sk === 'PRINCIPAL#user:bob')!.pk = 'ACL#demo#demo-2#*';
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/approver authorization changed/);
+  });
+
+  it('rejects project-only delegated grants for a task', async () => {
+    const { root, home, commit, registry } = await setup();
+    const values = registry.items;
+    for (const subject of ['agent:builder', 'user:alice']) {
+      const grant = values.find((row) => row.sk === `PRINCIPAL#${subject}`)!;
+      grant.pk = 'ACL#demo#*#*';
+      grant.task = null;
+    }
+    const batch = await approved(root, commit);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/not found/);
+  });
+
+  it('rejects a consumer project-only grant before the delegated proof call', async () => {
+    const { root, home, commit, registry } = await setup();
+    const values = registry.items;
+    const consumer = values.find((row) => row.sk === 'PRINCIPAL#agent:builder')!;
+    consumer.pk = 'ACL#demo#*#*';
+    consumer.task = null;
+    const batch = await approved(root, commit);
+    const delegated = vi.spyOn(MemoryRegistry.prototype, 'delegatedApprovalAccount');
+    try {
+      await expect(consumePushApproval(
+        root, { project: 'demo', batch: batch.id, question: 'q1' },
+        'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+      )).rejects.toThrow(/execute grant identity|not found/);
+      expect(delegated).not.toHaveBeenCalled();
+    } finally {
+      delegated.mockRestore();
+    }
+  });
+
+  it('rejects a persisted legacy agent approval during consumption', async () => {
+    const { root, home, commit, registry } = await setup();
+    const batch = await approved(root, commit);
+    const grant = batch.answers![0].decision!.grant!;
+    grant.approverSubject = 'agent:builder';
+    grant.approverGrantId = 'agent-grant';
+    grant.approverAclEpoch = 1;
+    await writeJson(path.join(root, '.hive-hub', 'questions', 'closed', `${batch.id}.json`), batch);
+    await expect(consumePushApproval(
+      root, { project: 'demo', batch: batch.id, question: 'q1' },
+      'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/human approver/);
+  });
+
+  it('rejects an agent principal when creating an execution approval', async () => {
+    const { root, commit } = await setup();
+    await expect(approved(root, commit, 'agent:builder', 'agent-grant'))
+      .rejects.toThrow(/human approver/);
+  });
+});

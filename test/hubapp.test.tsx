@@ -112,7 +112,7 @@ describe('HubApp plan actions', () => {
     stdin.write('b');
     await waitForFrame(frame, 'what should change? (optional)');
     stdin.write('split it');
-    await tick(200);
+    await waitForFrame(frame, 'feedback: split it');
     stdin.write('\r');
     await tick(300);
     expect(planAnswer).toHaveBeenCalledWith('/r', 'demo', 'demo-3', 'sendback', 'split it');

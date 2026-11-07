@@ -60,12 +60,20 @@ import { typeLine } from '../src/spawn.js';
 import { capturePane, paneExists, paneIs, run, sendLiteral, sleep } from '../src/tmux.js';
 import { createServer } from '../web/server.js';
 import { appendTaskEvent, hivePath, hubPath, readProjects, Refusal, writeJson } from '../src/state.js';
+import { authHeaders, configureSecurity } from './security-fixture.js';
 
 let server: Server;
 let base: string;
 let root: string;
+const originalFetch = globalThis.fetch;
+globalThis.fetch = (input, init) => {
+  const headers = new Headers(init?.headers);
+  if (!headers.has('authorization')) headers.set('authorization', authHeaders().authorization);
+  return originalFetch(input, { ...init, headers });
+};
 
 async function listenOn(root: string): Promise<{ s: Server; url: string }> {
+  configureSecurity(false);
   const s = createServer(root);
   await new Promise<void>((resolve) => {
     s.listen(0, '127.0.0.1', resolve);
@@ -86,6 +94,7 @@ beforeAll(async () => {
   await appendTaskEvent(root, {
     id: 'demo-1', project: 'demo', event: 'plan', at: new Date().toISOString(),
   });
+  configureSecurity(false);
   server = createServer(root);
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', resolve);
@@ -94,6 +103,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  globalThis.fetch = originalFetch;
   server.close();
 });
 

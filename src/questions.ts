@@ -8,6 +8,10 @@ import {
   decisionApprovalAllowed, decisionValidity, isInternalHandoff, type DecisionRewriter,
 } from './decisions.js';
 import { decisionFingerprint, repositoryFingerprint, verifyDecisionFacts, verifyExecutionRepository } from './decision-verification.js';
+import { credentialFromEnvironment } from './collaboration-credentials.js';
+import { storedAgentTask } from './agent-target.js';
+import { registryFromEnv, type Registry } from './registry.js';
+import { accountActive, authenticateBearer, authorizeExact, exactGrant } from './security.js';
 
 export const QUESTION_LIMITS = {
   questions: 20, choices: 8, context: 4000, question: 1000,
@@ -88,7 +92,17 @@ export function validateBatchInput(raw: unknown, now = Date.now()): { context: s
   return { context, questions };
 }
 
-function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, answer: QuestionAnswer): QuestionAnswer {
+export type ApprovalAuthorization = {
+  task?: string;
+  consumerGrantId?: string;
+  consumerAclEpoch?: number;
+  approverSubject?: string;
+  approverGrantId?: string;
+  approverAclEpoch?: number;
+};
+
+function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, answer: QuestionAnswer,
+  authorization?: ApprovalAuthorization): QuestionAnswer {
   const card = question.decision;
   if (!card) return answer;
   let outcome: DecisionAnswer['outcome'];
@@ -96,16 +110,26 @@ function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, an
   else if (answer.choice === 'c1') outcome = card.action === 'unknown' || card.missing.length ? 'details' : 'refresh';
   else if (answer.choice === 'c2' && question.choices.length === 3) outcome = 'approve';
   else outcome = 'cancel';
+  if (outcome === 'approve' && card.action === 'push' && authorization
+    && !authorization.approverSubject?.startsWith('user:')) {
+    throw new Refusal('execution approvals require a human approver');
+  }
   const facts = structuredClone(card.facts);
   const grant = outcome === 'approve' ? {
     batch: batch.id, question: question.id, project: batch.project,
     fingerprint: decisionFingerprint(facts), expiresAt: facts.validUntil!,
     executionAuthority: card.action === 'push' ? 'push' as const : 'none' as const,
+    agent: batch.agent, task: authorization?.task,
+    grantId: authorization?.consumerGrantId, profileAclEpoch: authorization?.consumerAclEpoch,
+    approverSubject: authorization?.approverSubject,
+    approverGrantId: authorization?.approverGrantId,
+    approverAclEpoch: authorization?.approverAclEpoch,
   } : undefined;
   return { ...answer, decision: { action: card.action, outcome, facts, grant } };
 }
 
-export function validateAnswers(batch: QuestionBatch, raw: unknown, now = Date.now()): QuestionAnswer[] {
+export function validateAnswers(batch: QuestionBatch, raw: unknown, now = Date.now(),
+  authorization?: ApprovalAuthorization): QuestionAnswer[] {
   if (!Array.isArray(raw)) throw new Refusal('answers: an array with one answer per question is required');
   const seen = new Set<string>();
   const answers = raw.map((a, i): QuestionAnswer => {
@@ -117,7 +141,11 @@ export function validateAnswers(batch: QuestionBatch, raw: unknown, now = Date.n
     seen.add(qid);
     const choice = text(obj.choice, `answers[${i}].choice`, 20);
     if (choice === 'other') {
-      return withDecisionAnswer(batch, q, { question: qid, choice, text: text(obj.text, `answers[${i}].text (other)`, QUESTION_LIMITS.other) });
+      return withDecisionAnswer(
+        batch, q,
+        { question: qid, choice, text: text(obj.text, `answers[${i}].text (other)`, QUESTION_LIMITS.other) },
+        authorization,
+      );
     }
     if (!q.choices.some((c) => c.id === choice)) {
       throw new Refusal(`answers[${i}].choice: ${qid} offers ${q.choices.map((c) => c.id).join(', ')} or other`);
@@ -126,7 +154,7 @@ export function validateAnswers(batch: QuestionBatch, raw: unknown, now = Date.n
       throw new Refusal(`${qid}: ${decisionValidity(q, now)} approval is not allowed; refresh facts first`);
     }
     if (obj.text !== undefined) throw new Refusal(`answers[${i}].text: only an other answer carries text`);
-    return withDecisionAnswer(batch, q, { question: qid, choice });
+    return withDecisionAnswer(batch, q, { question: qid, choice }, authorization);
   });
   const missing = batch.questions.filter((q) => !seen.has(q.id)).map((q) => q.id);
   if (missing.length) throw new Refusal(`answers: no answer for ${missing.join(', ')}`);
@@ -225,6 +253,46 @@ export async function readQuestionBatch(root: string, id: string): Promise<Quest
   return batch;
 }
 
+async function authorizePushConsumption(root: string, batch: QuestionBatch,
+  grant: {
+    agent?: string; task?: string; grantId?: string; profileAclEpoch?: number;
+    approverSubject?: string; approverGrantId?: string; approverAclEpoch?: number;
+  }, env: NodeJS.ProcessEnv, registry: Registry, now: number): Promise<void> {
+  if (env.HIVE_COLLABORATION_ENABLED !== '1') return;
+  const credential = await credentialFromEnvironment(env);
+  if (!credential) throw new Refusal('consuming agent credential required');
+  const principal = await authenticateBearer(credential, registry, env);
+  if (principal.kind !== 'agent' || !principal.agentId) throw new Refusal('consuming agent required');
+  const agentRef = env.HIVE_AGENT_REF ?? principal.agentId;
+  if (agentRef.split('@')[0] !== principal.agentId || batch.agent !== agentRef || grant.agent !== batch.agent) {
+    throw new Refusal('approval agent does not match');
+  }
+  const task = await storedAgentTask(root, batch.project, agentRef);
+  if (grant.task !== task) throw new Refusal('approval task does not match');
+  const current = await authorizeExact(principal, registry, 'execute', { project: batch.project, task });
+  if (grant.grantId !== current.grantId) throw new Refusal('execute grant identity does not match');
+  const profile = await registry.get(`AGENT#${principal.agentId}`, 'PROFILE');
+  if (!profile || Number(profile.aclEpoch) !== grant.profileAclEpoch) {
+    throw new Refusal('agent profile ACL epoch is stale');
+  }
+  if (!grant.approverSubject) throw new Refusal('approver identity is required');
+  if (!grant.approverSubject.startsWith('user:')) {
+    throw new Refusal('execution approvals require a human approver');
+  }
+  const approver = await exactGrant(registry, batch.project, grant.approverSubject, task);
+  if (!approver || approver.grantId !== grant.approverGrantId
+    || Number(approver.aclEpoch) !== grant.approverAclEpoch) {
+    throw new Refusal('approver authorization changed');
+  }
+  const account = await registry.delegatedApprovalAccount(principal.agentId, credential, {
+    project: batch.project, task, consumerGrantId: grant.grantId ?? '',
+    approverSubject: grant.approverSubject, approverGrantId: grant.approverGrantId ?? '',
+  });
+  if (!accountActive(account, Math.floor(now / 1000))) {
+    throw new Refusal('approver account is not active');
+  }
+}
+
 export async function consumePushApproval(
   root: string,
   reference: { project: string; batch: string; question: string },
@@ -233,6 +301,8 @@ export async function consumePushApproval(
   branch: string,
   cwd: string,
   now = Date.now(),
+  env: NodeJS.ProcessEnv = process.env,
+  registry: Registry = registryFromEnv(env),
 ): Promise<string> {
   return withHubLock(root, async () => {
     const [open, closed] = await Promise.all([
@@ -257,6 +327,7 @@ export async function consumePushApproval(
     if (grant.consumedAt) throw new Refusal('approval is already consumed');
     const expiresAt = Date.parse(grant.expiresAt);
     if (!Number.isFinite(expiresAt) || now >= expiresAt) throw new Refusal('approval is expired');
+    await authorizePushConsumption(root, batch, grant, env, registry, now);
     const fresh = await verifyDecisionFacts(root, { project: batch.project, agent: batch.agent }, {
       ...decision.facts, action: 'push',
     }, now);
@@ -291,10 +362,11 @@ export async function listOpenQuestionBatches(root: string): Promise<QuestionBat
 
 async function closeBatchLocked(
   root: string, id: string, status: 'answered' | 'cancelled', rawAnswers?: unknown, audit?: string,
+  authorization?: ApprovalAuthorization,
 ): Promise<QuestionBatch> {
   const batch = await readQuestionBatch(root, id);
   if (batch.status !== 'open') throw new Refusal(`question batch ${id} is already ${batch.status}`);
-  const answers = status === 'answered' ? validateAnswers(batch, rawAnswers) : undefined;
+  const answers = status === 'answered' ? validateAnswers(batch, rawAnswers, Date.now(), authorization) : undefined;
   const closed: QuestionBatch = { ...batch, status, answers, closedAt: new Date().toISOString() };
   // The terminal state lands at the open path first. A crash before the
   // move still leaves a terminal file: the listing filters it out and the
@@ -317,12 +389,14 @@ async function closeBatchLocked(
 
 async function closeBatch(
   root: string, id: string, status: 'answered' | 'cancelled', rawAnswers?: unknown,
+  authorization?: ApprovalAuthorization,
 ): Promise<QuestionBatch> {
-  return withHubLock(root, () => closeBatchLocked(root, id, status, rawAnswers));
+  return withHubLock(root, () => closeBatchLocked(root, id, status, rawAnswers, undefined, authorization));
 }
 
-export function answerQuestionBatch(root: string, id: string, answers: unknown): Promise<QuestionBatch> {
-  return closeBatch(root, id, 'answered', answers);
+export function answerQuestionBatch(root: string, id: string, answers: unknown,
+  authorization?: ApprovalAuthorization): Promise<QuestionBatch> {
+  return closeBatch(root, id, 'answered', answers, authorization);
 }
 
 export function cancelQuestionBatch(root: string, id: string): Promise<QuestionBatch> {

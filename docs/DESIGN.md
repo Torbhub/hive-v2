@@ -148,7 +148,9 @@ hive ui                                  — the hub screen
   no SDK. It advertises one tool, `ask_operator`, registered for every kimi
   session as `hive-operator` in `~/.kimi-code/mcp.json` by provision
   (infra/merge-mcp.mjs). `toolTimeoutMs` is 7 days because a batch waits for
-  a human. Outside a hive session the tool returns an env error.
+  a human. A call needs `HIVE_HUB_ROOT` and an individual
+  `HIVE_AGENT_CREDENTIAL`. The current credential alone selects the owner,
+  agent, and project. Every poll rechecks credential status and the write ACL.
 - The tool input is strict (src/questions.ts): an overarching `context` and
   1-20 questions. General questions keep context, choices, and recommendation
   but carry no approval authority. A decision names exactly one action. Legacy
@@ -224,8 +226,9 @@ hive ui                                  — the hub screen
   resumes alike. Derived `ask` plus `safe` or `smart` orchestrator launches use
   supervised `--auto` instead. The model
   is the house default `kimi-code/k3.1-pro` unless the spawn passed `--model`,
-  and the effective model is stamped into team.json. The HIVE_* variables name
-  the agent and route its ask_operator MCP calls; the root is shell-quoted.
+  and the effective model is stamped into team.json. HIVE_AGENT and HIVE_PROJECT
+  remain pane and hook metadata. They cannot select MCP identity. An individual
+  agent credential selects that identity. The root is shell-quoted.
   `exec` so
   the pane process IS the CLI (identity check). Pre-flight: `teamkimi status`
   must succeed, else refuse.

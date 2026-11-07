@@ -1,5 +1,9 @@
 import type { QuestionBatch } from './types.js';
-import { createQuestionBatch, heartbeatQuestionBatch, readQuestionBatch } from './questions.js';
+import { cancelQuestionBatch, createQuestionBatch, heartbeatQuestionBatch, readQuestionBatch } from './questions.js';
+import { registryFromEnv, type Registry } from './registry.js';
+import { authenticateBearer, authorize } from './security.js';
+import { credentialFromEnvironment } from './collaboration-credentials.js';
+import { storedAgentTask } from './agent-target.js';
 
 const PROTOCOL = '2024-11-05';
 const DAY_MS = 24 * 60 * 60_000;
@@ -77,6 +81,7 @@ export type McpOptions = {
   input: NodeJS.ReadableStream;
   output: NodeJS.WritableStream;
   env: NodeJS.ProcessEnv;
+  registry?: Registry;
   pollMs?: number;
   timeoutMs?: number;
 };
@@ -115,23 +120,80 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
     reply(id, { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) });
 
   async function callAskOperator(id: RpcId, args: unknown, signal: AbortSignal): Promise<void> {
-    const { HIVE_HUB_ROOT: root, HIVE_PROJECT: project, HIVE_AGENT: agent } = opts.env;
-    if (!root || !project || !agent) {
-      toolText(id, 'ask_operator only works inside a hive-spawned session: HIVE_HUB_ROOT, HIVE_PROJECT, and HIVE_AGENT must be set.', true);
+    const environment = { ...process.env, ...opts.env };
+    const { HIVE_HUB_ROOT: root } = environment;
+    const collaboration = environment.HIVE_COLLABORATION_ENABLED === '1';
+    const abort = (): void => {
+      if (signal.aborted) throw new Error('aborted');
+    };
+    let credential: string | undefined;
+    try {
+      credential = collaboration ? await credentialFromEnvironment(environment) : undefined;
+      abort();
+      if (!root || collaboration && !credential) {
+        const message = collaboration
+          ? 'ask_operator requires HIVE_HUB_ROOT and an individual HIVE_AGENT_CREDENTIAL.'
+          : 'ask_operator only works inside a hive-spawned session: HIVE_HUB_ROOT, HIVE_PROJECT, and HIVE_AGENT must be set.';
+        toolText(id, message, true);
+        return;
+      }
+    } catch {
+      if (!signal.aborted) toolText(id, 'authorization failed for this agent credential', true);
+      return;
+    }
+    const registry = opts.registry ?? registryFromEnv(environment);
+    const authenticate = async () => {
+      if (!collaboration) {
+        const project = environment.HIVE_PROJECT;
+        const agentId = environment.HIVE_AGENT;
+        if (!project || !agentId) throw new Error('legacy session is not configured');
+        return {
+          principal: { kind: 'agent' as const, subject: `agent:${agentId}`, agentId, project, aclEpoch: 0 },
+          project, agentRef: agentId,
+        };
+      }
+      const principal = await authenticateBearer(credential!, registry, environment);
+      const { project, agentId } = principal;
+      if (principal.kind !== 'agent' || !project || !agentId) throw new Error('authorization failed');
+      const agentRef = environment.HIVE_AGENT_REF ?? agentId;
+      if (agentRef.split('@')[0] !== agentId) throw new Error('authorization failed');
+      const task = await storedAgentTask(root, project, agentRef);
+      await authorize(principal, registry, 'write', { project, task });
+      return { principal, project, agentRef };
+    };
+    let identity: Awaited<ReturnType<typeof authenticate>>;
+    try {
+      identity = await authenticate();
+      abort();
+    } catch {
+      if (!signal.aborted) toolText(id, 'authorization failed for this agent credential', true);
       return;
     }
     let batch: QuestionBatch;
     try {
-      batch = await createQuestionBatch(root, { project, agent }, args);
+      batch = await createQuestionBatch(root, { project: identity.project, agent: identity.agentRef }, args);
+      if (signal.aborted) {
+        await cancelQuestionBatch(root, batch.id);
+        return;
+      }
     } catch (e) {
-      toolText(id, `the batch was rejected; fix the input and call again: ${e instanceof Error ? e.message : e}`, true);
+      if (!signal.aborted) {
+        toolText(id, `the batch was rejected; fix the input and call again: ${e instanceof Error ? e.message : e}`, true);
+      }
       return;
     }
     const deadline = Date.now() + (opts.timeoutMs ?? 7 * DAY_MS);
     let heartbeatAt = Date.now();
     const reportTerminal = (current: QuestionBatch): boolean => {
+      if (signal.aborted) return true;
       if (current.status === 'answered') {
-        toolText(id, JSON.stringify({ id: batch.id, status: 'answered', answers: current.answers }));
+        toolText(id, JSON.stringify({
+          id: batch.id, status: 'answered', answers: current.answers,
+          authorization: {
+            aclEpoch: identity.principal.aclEpoch,
+            credentialEpoch: identity.principal.credentialEpoch,
+          },
+        }));
         return true;
       }
       if (current.status === 'cancelled') {
@@ -142,30 +204,35 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
     };
     try {
       for (;;) {
+        identity = await authenticate();
+        abort();
         if (Date.now() - heartbeatAt >= 15_000) {
           await heartbeatQuestionBatch(root, batch.id);
+          abort();
           heartbeatAt = Date.now();
         }
         const current = await readQuestionBatch(root, batch.id);
+        abort();
         if (reportTerminal(current)) return;
         if (Date.now() > deadline) {
           try {
             const latest = await readQuestionBatch(root, batch.id);
+            abort();
             if (reportTerminal(latest)) return;
+            abort();
             toolText(id, `question batch ${batch.id} is ${latest.status === 'open' ? 'still open' : latest.status} after the wait limit; it stays on the operator's Questions screen`, true);
           } catch (e) {
-            toolText(id, `question batch ${batch.id} state is unknown after the wait limit: ${e instanceof Error ? e.message : e}`, true);
+            if (!signal.aborted) {
+              toolText(id, `question batch ${batch.id} state is unknown after the wait limit: ${e instanceof Error ? e.message : e}`, true);
+            }
           }
           return;
         }
         await sleep(opts.pollMs ?? 2000, signal);
+        abort();
       }
-    } catch (e) {
-      // Aborted by cancellation or EOF: the batch stays open for the operator,
-      // and no late response is written to a dead client.
-      if (!signal.aborted) {
-        toolText(id, `question batch ${batch.id}: the wait failed: ${e instanceof Error ? e.message : e}`, true);
-      }
+    } catch {
+      if (!signal.aborted) toolText(id, `question batch ${batch.id}: authorization or recovery failed`, true);
     }
   }
 

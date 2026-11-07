@@ -119,6 +119,42 @@ describe('redactSecrets', () => {
     expect(redactSecrets(escaped)).toContain('Bearer [redacted]');
   });
 
+  it('redacts complete agent credentials in environment and tool argument shapes', () => {
+    const secret = 'unit-test-agent-secret-with-32-characters';
+    const credential = `hva1.builder.0123456789abcdef.${secret}`;
+    const representations = [
+      credential,
+      `HIVE_AGENT_CREDENTIAL=${credential}`,
+      `HIVE_AGENT_CREDENTIAL='${credential}'`,
+      JSON.stringify({ command: `export HIVE_AGENT_CREDENTIAL=${credential}` }),
+      JSON.stringify({ env: { HIVE_AGENT_CREDENTIAL: credential } }),
+    ];
+    for (const representation of representations) {
+      const redacted = redactSecrets(representation);
+      expect(redacted).not.toContain(credential);
+      expect(redacted).not.toContain(secret);
+      expect(redacted).toContain('[redacted-agent-credential]');
+    }
+    const capped = parseWireLine(loopEvent({
+      type: 'content.part', part: { type: 'text', text: `${'x'.repeat(480)}${credential}` },
+    }));
+    expect(capped?.text).not.toContain('hva1.');
+    expect(capped?.text).not.toContain(secret);
+  });
+
+  it('redacts source-truncated credential fragments before the text cap', () => {
+    for (const length of [31, 32]) {
+      const secret = 's'.repeat(length);
+      const fragment = `hva1.builder.0123456789abcdef.${secret}`;
+      expect(redactSecrets(`before ${fragment} after`)).toBe('before [redacted-agent-credential] after');
+      const capped = parseWireLine(loopEvent({
+        type: 'content.part', part: { type: 'text', text: `${'x'.repeat(480)}${fragment}` },
+      }));
+      expect(capped?.text).not.toContain('hva1.');
+      expect(capped?.text).not.toContain(secret);
+    }
+  });
+
   it('redacts sk- keys', () => {
     expect(redactSecrets('key sk-proj-abc123XYZ_-9 here')).toBe('key sk-[redacted] here');
   });

@@ -28,6 +28,7 @@ const TEXT_CAP = 500;
 // JSON.stringify output, which manufactures exactly those.
 export function redactSecrets(text: string): string {
   return text
+    .replace(/hva1\.(?:[a-z][a-z0-9-]{0,62})?(?:\.[0-9a-f]{0,16})?(?:\.[A-Za-z0-9_-]{0,256})?/g, '[redacted-agent-credential]')
     // Authorization header shapes: the scheme stays, the credential dies.
     .replace(/(authorization\\?["']?\s*[:=]?\s*\\?["']?\s*(?:bearer|basic|token)\s+)[^\s"',}\\]+/gi, '$1[redacted]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
@@ -150,6 +151,12 @@ async function resolveEntry(
   }
   if (!entry) throw new Refusal(`${project} has no agent named ${agentRef}`);
   return { entry, name };
+}
+
+export async function resolveLogTarget(root: string, project: string,
+  agentRef?: string): Promise<{ name: string; task?: string }> {
+  const { entry, name } = await resolveEntry(root, project, agentRef);
+  return { name, task: entry.task };
 }
 
 export async function readAgentLog(

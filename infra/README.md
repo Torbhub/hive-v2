@@ -17,7 +17,9 @@ The hub lives inside nexus: `nexus.dexima.ai/hive`. CloudFront sends
 `/hive/*` to the nexus Lambda, which relays the request over an SSM
 port-forward tunnel to the box's loopback. nginx on the box listens on
 `127.0.0.1:8081`, injects the app secret, and proxies to hive-web on 7684.
-The nexus session gate is the auth. The relay finds the box by its
+The relay checks the Nexus session and current account, then attaches a
+short-lived Hive assertion. The app secret is only a transport check. The
+relay finds the box by its
 `Role=nexus-kimi-session` tag, so no hostname, IP, certificate, or DNS
 record references it. There is no public hive hostname or TLS cert; the
 relay is the only way in. The hive server strips the `/hive` prefix

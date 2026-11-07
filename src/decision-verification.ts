@@ -59,9 +59,14 @@ async function worktree(root: string, project: string, agent: string): Promise<s
   const registered = (await readProjects(root)).projects.find((entry) => entry.name === project);
   if (!registered) throw new Error('unknown project');
   const team = await readTeam(registered.home);
-  const entry = team.agents.find((candidate) => candidate.name === agent);
-  if (!entry && agent !== `${project}-orchestrator`) throw new Error('unknown agent worktree');
-  return fs.realpath(entry?.worktree || registered.home);
+  const [name, worktree] = agent.split('@');
+  const candidates = team.agents.filter((candidate) => candidate.name === name);
+  const entry = worktree
+    ? candidates.find((candidate) => candidate.worktree === worktree)
+    : candidates.length === 1 ? candidates[0]
+      : agent === `${project}-orchestrator` ? candidates.find((candidate) => candidate.orchestrator) : undefined;
+  if (!entry) throw new Error('unknown agent worktree');
+  return fs.realpath(entry.worktree || registered.home);
 }
 
 export async function verifyExecutionRepository(
