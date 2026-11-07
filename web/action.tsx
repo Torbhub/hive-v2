@@ -9,7 +9,7 @@ export const ActionContext = createContext<{ acting: boolean; pressed: string | 
 });
 
 export function Btn({
-  id, variant = 'outline', size = 'sm', disabled, onPress, children,
+  id, variant = 'outline', size = 'sm', disabled, onPress, children, className,
 }: {
   id: string;
   variant?: 'default' | 'primary' | 'outline' | 'ghost';
@@ -17,6 +17,7 @@ export function Btn({
   disabled?: boolean;
   onPress: () => void;
   children: React.ReactNode;
+  className?: string;
 }) {
   const { acting, pressed } = useContext(ActionContext);
   return (
@@ -26,6 +27,7 @@ export function Btn({
       pressed={pressed === id}
       disabled={disabled || acting}
       onClick={onPress}
+      className={className}
     >
       {children}
     </Button>

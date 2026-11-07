@@ -180,7 +180,7 @@ Rendered under a need when a dialog was read for that session (`paddingLeft: 3`,
 
 1. **Dialog text lines**: `text.split('\n')`, drop lines matching `/^[\s─╌]*$/` (blank/rule-only), keep the **last 14**. Each: gray, `wrap: truncate-end`, verbatim.
 2. **Button row** (row, `flexWrap: wrap`, `columnGap: 1`), rendered when there is at least one offered option or `esc` is true:
-   - one **Button** per option with `offered === true`: label `` `${n} ${label}` `` plus ` (saves a rule)` when `saves_rule`. Press → answer with choice `String(n)`.
+   - one **Button** per option with `offered === true`: label `` `${n} ${label}` `` plus ` (saves a rule)` when `saves_rule`. Press → answer with choice `String(n)`. Web option buttons wrap within the viewport and grow vertically for long labels.
    - when `esc` true: a **Button** labeled `Esc`. Press → answer with choice `esc`.
 3. **Detail lines**: for each offered option with `detail !== ''`: gray, truncate-end: `{n}. {label} {detail}`.
 4. **Yellow hint line**, rendered when some option is not offered **or** there are no offered options:
