@@ -70,6 +70,36 @@ classify_evidence([
     {'check': 'provisioning', 'status': 'failed'},
     {'check': 'complete', 'status': 'failed'},
 ], 'failed')
+for category in (
+    'runtime-version-dependency-bootstrap-failed',
+    'runtime-version-permission-denied',
+    'runtime-version-missing-module',
+    'runtime-version-missing-module-openai',
+    'runtime-version-import-failed',
+    'runtime-version-system-exit-1',
+    'runtime-version-system-exit-255',
+    'runtime-version-signal-1',
+    'runtime-version-signal-64',
+):
+    classify_evidence([
+        source_record,
+        {'check': 'bootstrap_error', 'status': 'failed', 'category': category, 'origin': 'hermes-check:1'},
+        {'check': 'provisioning', 'status': 'failed'},
+        {'check': 'complete', 'status': 'failed'},
+    ], 'failed')
+for category in (
+    'runtime-version-system-exit-0',
+    'runtime-version-system-exit-256',
+    'runtime-version-signal-0',
+    'runtime-version-signal-65',
+    'runtime-version-missing-module-unreviewed',
+):
+    classify_evidence([
+        source_record,
+        {'check': 'bootstrap_error', 'status': 'failed', 'category': category, 'origin': 'hermes-check:1'},
+        {'check': 'provisioning', 'status': 'failed'},
+        {'check': 'complete', 'status': 'failed'},
+    ], 'invalid')
 classify_evidence([{'check': 'complete', 'status': 'passed', 'payload': 'malicious'}], 'invalid')
 classify_evidence([{'check': 'unknown', 'status': 'passed'}], 'invalid')
 classify_evidence(['not-json'], 'invalid')

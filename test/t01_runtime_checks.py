@@ -123,12 +123,18 @@ with tempfile.TemporaryDirectory() as directory:
     process.wait()
 
 
-def fake_hermes(root, version='0.22.6', lazy='false', lazy_rc=1, commit=COMMIT, invalid_json=False, version_rc=0):
+def fake_hermes(
+    root, version='0.22.6', lazy='false', lazy_rc=1, commit=COMMIT,
+    invalid_json=False, version_rc=0, version_output=None, version_signal=None,
+):
+    version_output = version_output if version_output is not None else f'Hermes Agent v{version}\n'
+    (root / 'version-output').write_text(version_output)
+    version_exit = f'kill -{version_signal} $$' if version_signal else f'exit {version_rc}'
     executable = root / 'hermes'
     executable.write_text(f'''#!/usr/bin/env bash
 if [ "$1" = --version ]; then
-  printf 'Hermes Agent v{version}\n'
-  exit {version_rc}
+  cat "{root}/version-output"
+  {version_exit}
 fi
 if [ "$1 $2 $3" = 'config get security.allow_lazy_installs' ]; then
   printf '{lazy}\n'
@@ -187,10 +193,16 @@ def assert_diagnostic(root, expected, result):
     assert records[2] == {'check': 'complete', 'status': 'failed'}
 
 
-def hermes_check(version='0.22.6', lazy='false', lazy_rc=1, commit=COMMIT, invalid_json=False, missing=False, version_rc=0):
+def hermes_check(
+    version='0.22.6', lazy='false', lazy_rc=1, commit=COMMIT, invalid_json=False,
+    missing=False, version_rc=0, version_output=None, version_signal=None,
+):
     temporary = tempfile.TemporaryDirectory()
     root = Path(temporary.name)
-    executable, stamp = fake_hermes(root, version, lazy, lazy_rc, commit, invalid_json, version_rc)
+    executable, stamp = fake_hermes(
+        root, version, lazy, lazy_rc, commit, invalid_json,
+        version_rc, version_output, version_signal,
+    )
     if missing:
         executable = root / 'missing-hermes'
     output = root / 'runtime-check.json'
@@ -232,6 +244,11 @@ def assert_untrusted(category, origin='hermes-check:1', prepare=None):
 
 assert_untrusted('runtime-version-check-failed:malicious')
 assert_untrusted('runtime-version-check-failed', 'hermes-check:0')
+assert_untrusted('runtime-version-system-exit-0')
+assert_untrusted('runtime-version-system-exit-256')
+assert_untrusted('runtime-version-signal-0')
+assert_untrusted('runtime-version-signal-65')
+assert_untrusted('runtime-version-missing-module-unreviewed')
 assert_untrusted('not-json')
 assert_untrusted('A' * 65)
 
@@ -262,7 +279,34 @@ def assert_failure(expected, **kwargs):
         assert_diagnostic(root, expected, result)
 
 
-assert_failure('runtime-version-exit-failed', version_rc=1)
+assert_failure('runtime-version-system-exit-1', version_rc=1)
+assert_failure('runtime-version-system-exit-2', version_rc=2)
+assert_failure('runtime-version-system-exit-255', version_rc=255)
+assert_failure('runtime-version-signal-15', version_signal='TERM')
+assert_failure(
+    'runtime-version-dependency-bootstrap-failed', version_rc=1,
+    version_output='hermes: no dependency environment is committed for this install; run `hermes pm repair`\n',
+)
+assert_failure(
+    'runtime-version-dependency-bootstrap-failed', version_rc=1,
+    version_output='hermes: cannot read dependency environment: /secret/state; run `hermes pm repair`\n',
+)
+assert_failure(
+    'runtime-version-permission-denied', version_rc=1,
+    version_output='hermes: install state is not writable by this user (/secret/path); run as the install owner\n',
+)
+assert_failure(
+    'runtime-version-missing-module-openai', version_rc=1,
+    version_output="ModuleNotFoundError: No module named 'openai'\n",
+)
+assert_failure(
+    'runtime-version-missing-module', version_rc=1,
+    version_output="ModuleNotFoundError: No module named 'unreviewed_secret'\n",
+)
+assert_failure(
+    'runtime-version-import-failed', version_rc=1,
+    version_output="ImportError: cannot import name 'secret' from 'openai' (/secret/path)\n",
+)
 assert_failure('runtime-version-format-failed', version='0.0.0')
 assert_failure('runtime-version-format-failed', version='0.22.60')
 assert_failure('runtime-identity-check-failed', commit='0' * 40)

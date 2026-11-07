@@ -120,6 +120,72 @@ def run_process(arguments, timeout):
     return subprocess.run(arguments, capture_output=True, text=True, timeout=timeout, check=False)
 
 
+MODULE_ALLOWLIST = {
+    'pm': 'pm',
+    'hermes_cli': 'hermes-cli',
+    'hermes_bootstrap': 'hermes-bootstrap',
+    'hermes_constants': 'hermes-constants',
+    'openai': 'openai',
+    'httpx': 'httpx',
+    'rich': 'rich',
+    'ruamel': 'ruamel',
+    'pydantic': 'pydantic',
+    'mcp': 'mcp',
+    'fire': 'fire',
+    'dotenv': 'dotenv',
+}
+DEPENDENCY_BOOTSTRAP_SIGNATURES = (
+    'hermes: no dependency environment is committed for this install; run `hermes pm repair`',
+    'hermes: cannot read dependency environment:',
+    'hermes: invalid dependency environment record:',
+    'hermes: invalid dependency environment path;',
+    'hermes: dependency environment is missing or outside this install;',
+    'hermes: dependency environment has no site-packages:',
+)
+RUNTIME_VERSION_CATEGORIES = frozenset({
+    'runtime-version-check-failed',
+    'runtime-version-exit-failed',
+    'runtime-version-format-failed',
+    'runtime-version-dependency-bootstrap-failed',
+    'runtime-version-permission-denied',
+    'runtime-version-missing-module',
+    'runtime-version-import-failed',
+    *(f'runtime-version-missing-module-{name}' for name in MODULE_ALLOWLIST.values()),
+})
+
+
+def valid_runtime_version_category(category):
+    if category in RUNTIME_VERSION_CATEGORIES:
+        return True
+    for kind, maximum in (('system-exit', 255), ('signal', 64)):
+        match = re.fullmatch(fr'runtime-version-{kind}-([1-9][0-9]*)', category)
+        if match:
+            return int(match.group(1)) <= maximum
+    return False
+
+
+def classify_version_exit(returncode, output):
+    if returncode < 0:
+        signal = -returncode
+        return f'runtime-version-signal-{signal}' if signal <= 64 else 'runtime-version-exit-failed'
+    if any(signature in output for signature in DEPENDENCY_BOOTSTRAP_SIGNATURES):
+        return 'runtime-version-dependency-bootstrap-failed'
+    if 'hermes: install state is not writable by this user (' in output or 'Permission denied' in output:
+        return 'runtime-version-permission-denied'
+    missing = re.search(
+        r"(?m)^ModuleNotFoundError: No module named '([A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z_][A-Za-z0-9_]*)*'$",
+        output,
+    )
+    if missing:
+        module = MODULE_ALLOWLIST.get(missing.group(1))
+        return f'runtime-version-missing-module-{module}' if module else 'runtime-version-missing-module'
+    if re.search(r'(?m)^ImportError:', output):
+        return 'runtime-version-import-failed'
+    if 1 <= returncode <= 255:
+        return f'runtime-version-system-exit-{returncode}'
+    return 'runtime-version-exit-failed'
+
+
 def hermes_check():
     executable = os.environ.get('T01_HERMES_BIN', '/opt/t01/hermes/bin/hermes')
     stamp_path = os.environ.get('T01_INSTALL_STAMP', '/opt/t01/source/install-stamp.json')
@@ -129,7 +195,7 @@ def hermes_check():
     version_line = f'Hermes Agent v{VERSION}'
     matching_lines = [line.strip() for line in output.splitlines() if line.strip().startswith(version_line)]
     if result.returncode != 0:
-        raise RuntimeError('runtime version exit failed')
+        raise RuntimeError(classify_version_exit(result.returncode, output))
     if not any(
         line == version_line or line[len(version_line):].startswith((' ', '('))
         for line in matching_lines
@@ -176,7 +242,10 @@ def record_hermes_check_error(error):
     elif isinstance(error, OSError):
         category = 'hermes-check-os-error'
     elif isinstance(error, RuntimeError):
-        category = HERMES_CHECK_CATEGORIES.get(str(error), 'hermes-check-runtime-error')
+        message = str(error)
+        category = HERMES_CHECK_CATEGORIES.get(message, 'hermes-check-runtime-error')
+        if valid_runtime_version_category(message):
+            category = message
     else:
         category = 'hermes-check-value-error'
     output_path = Path(os.environ.get('T01_RUNTIME_CHECK_OUT', '/var/lib/t01/hermes/runtime-check.json'))
@@ -212,6 +281,8 @@ def valid_record(record):
         if set(record) != {'check', 'status', 'category', 'origin'}:
             return False
         if not isinstance(category, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.:-]*', category):
+            return False
+        if category.startswith('runtime-version-') and not valid_runtime_version_category(category):
             return False
         if not isinstance(origin, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+:[0-9]+', origin):
             return False

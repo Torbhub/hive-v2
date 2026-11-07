@@ -59,6 +59,10 @@ read_hermes_check_metadata() {
   candidate_origin="$(cat "$origin_file")"
   case "$candidate_category" in
     runtime-version-check-failed|runtime-version-exit-failed|runtime-version-format-failed|runtime-identity-check-failed|lazy-install-config-check-failed|lazy-install-request-accepted|hermes-check-timeout|hermes-check-os-error|hermes-check-json-error|hermes-check-runtime-error|hermes-check-value-error) ;;
+    runtime-version-dependency-bootstrap-failed|runtime-version-permission-denied|runtime-version-missing-module|runtime-version-import-failed) ;;
+    runtime-version-missing-module-pm|runtime-version-missing-module-hermes-cli|runtime-version-missing-module-hermes-bootstrap|runtime-version-missing-module-hermes-constants|runtime-version-missing-module-openai|runtime-version-missing-module-httpx|runtime-version-missing-module-rich|runtime-version-missing-module-ruamel|runtime-version-missing-module-pydantic|runtime-version-missing-module-mcp|runtime-version-missing-module-fire|runtime-version-missing-module-dotenv) ;;
+    runtime-version-system-exit-[1-9]|runtime-version-system-exit-[1-9][0-9]|runtime-version-system-exit-1[0-9][0-9]|runtime-version-system-exit-2[0-4][0-9]|runtime-version-system-exit-25[0-5]) ;;
+    runtime-version-signal-[1-9]|runtime-version-signal-[1-5][0-9]|runtime-version-signal-6[0-4]) ;;
     *) return 0 ;;
   esac
   [ "$candidate_origin" = hermes-check:1 ] || return 0
