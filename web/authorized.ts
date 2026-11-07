@@ -5,8 +5,8 @@ import { readAgentLog, resolveLogTarget } from '../src/logview.js';
 import { RegistryUnavailable, type Registry, type RegistryRow } from '../src/registry.js';
 import { Refusal } from '../src/state.js';
 import {
-  AuthenticationError, AuthorizationError, authorize, authorizeExact, bearerFromRequest, createWakeSubscription,
-  exactGrant, publicAgentIdentity, revoked, revokeWakeSubscription, type Principal,
+  AuthenticationError, AuthorizationError, authorize, authorizeExact, bearerFromRequest,
+  exactGrant, publicAgentIdentity, revoked, type Principal,
 } from '../src/security.js';
 import { buildView, lastLine } from '../src/view.js';
 import { BODY_CAP, checkBrowserHeaders, handlePost, postAction, postScope, readBody, storedAgentTask } from './actions.js';
@@ -216,16 +216,14 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   if (!contentType.startsWith('application/json')) throw new HttpError(415, 'POST a JSON body');
   const body = await readBody(req, pathname === '/api/questions/answer' ? 512 * 1024 : BODY_CAP);
   if (pathname === '/api/wake-subscriptions') {
-    sendJson(res, 200, await createWakeSubscription(
-      context.registry, principal, agentId(body), String(body.executionGrantId ?? ''),
-      bearerFromRequest(req),
+    sendJson(res, 200, await context.registry.createWakeSubscription(
+      agentId(body), bearerFromRequest(req), String(body.executionGrantId ?? ''),
     ));
     return;
   }
   if (pathname === '/api/wake-subscriptions/revoke') {
-    await revokeWakeSubscription(
-      context.registry, principal, agentId(body), String(body.subscriptionId ?? ''),
-      bearerFromRequest(req),
+    await context.registry.revokeWakeSubscription(
+      agentId(body), bearerFromRequest(req), String(body.subscriptionId ?? ''),
     );
     sendJson(res, 200, { ok: true });
     return;

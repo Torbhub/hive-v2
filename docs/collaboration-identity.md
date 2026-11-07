@@ -38,6 +38,6 @@ Execution approvals require a human approver. Agent principals cannot create the
 
 ## Configuration and restore
 
-The session box has read-only access to `nexus-hive-collaboration`. It has no `nexus-users` access and no table write access. Canonical account status and wake writes go through `/api/hive/broker/*` on Nexus. `HIVE_COLLABORATION_TABLE` can select another table. `HIVE_NEXUS_BASE_URL` selects the broker. `HIVE_ASSERTION_KEYS_SECRET` defaults to `citadel/hive/assertion-keys`. Tests and isolated local development can use `HIVE_REGISTRY_FILE` and `HIVE_ASSERTION_KEYS_JSON`. Missing or invalid configuration fails closed.
+The session box has read-only access to `nexus-hive-collaboration`. It has no `nexus-users` access and no table write access. Canonical account status, delegated approval, and wake writes go through `/api/hive/broker/*` on Nexus. `HIVE_COLLABORATION_TABLE` can select another table. `HIVE_NEXUS_BASE_URL` selects the broker. `HIVE_ASSERTION_KEYS_SECRET` defaults to `citadel/hive/assertion-keys`. Tests can use `HIVE_ASSERTION_KEYS_JSON`. Isolated local development uses the same broker contract. Set `HIVE_NEXUS_BASE_URL` to a local Citadel broker. Missing or invalid configuration fails closed.
 
 Do not restore into active dispatch. Restore keeps independent credential, ACL, agent, and subscription revocation records. It keeps the greatest epoch and the earliest nonzero credential expiry. It never inserts an older active row after a revocation. See the Citadel Hive identity runbook for local enrollment and rotation commands.

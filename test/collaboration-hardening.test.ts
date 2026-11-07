@@ -11,7 +11,7 @@ import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
 import { createServer } from '../web/server.js';
 import {
   AGENT_CREDENTIAL, ASSERTION_KEYS, agentEnv, agentHeaders, assertion, authHeaders,
-  configureSecurity, registryItems, securityFile, writeSecurity,
+  configureSecurity, registryItems, startTestRegistry,
 } from './security-fixture.js';
 
 const servers: Server[] = [];
@@ -25,21 +25,14 @@ async function fixture(collaboration = true) {
   await writeJson(hubPath(root, 'hub.json'), { name: 'hub' });
   await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
   await appendTaskEvent(root, { id: 'demo-2', project: 'demo', event: 'asked', at: new Date().toISOString() });
-  await writeSecurity(root);
-  configureSecurity(root);
-  if (!collaboration) delete process.env.HIVE_COLLABORATION_ENABLED;
-  const server = createServer(root);
+  const items = registryItems();
+  const { broker, registry } = await startTestRegistry(items);
+  servers.push(broker);
+  configureSecurity(collaboration);
+  const server = createServer(root, registry);
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  return { root, home, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
-}
-
-async function rows(root: string): Promise<Record<string, unknown>[]> {
-  return JSON.parse(await fs.readFile(securityFile(root), 'utf8')).items;
-}
-
-async function replaceRows(root: string, values: Record<string, unknown>[]): Promise<void> {
-  await fs.writeFile(securityFile(root), JSON.stringify({ items: values }, null, 2));
+  return { root, home, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, items, registry };
 }
 
 async function post(base: string, pathname: string, body: unknown, headers: Record<string, string>) {
@@ -64,7 +57,6 @@ function removeAgentProjectGrant(values: Record<string, unknown>[], replacement?
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   delete process.env.HIVE_COLLABORATION_ENABLED;
-  delete process.env.HIVE_REGISTRY_FILE;
   delete process.env.HIVE_ASSERTION_KEYS_JSON;
 });
 
@@ -104,29 +96,26 @@ describe('default-off compatibility', () => {
 
 describe('stored-target authorization', () => {
   it('allows task-only reads and includes their project without a project-wide grant', async () => {
-    const { root, base } = await fixture();
-    const values = await rows(root);
+    const { base, items } = await fixture();
+    const values = items;
     removeAgentProjectGrant(values, taskGrant());
-    await replaceRows(root, values);
     const view = await (await fetch(`${base}/api/view`, { headers: agentHeaders() })).json();
     expect(view.projects.map((project: { name: string }) => project.name)).toEqual(['demo']);
     expect(view.tasks.map((task: { id: string }) => task.id)).toEqual(['demo-1']);
   });
 
   it('requires project administration for task creation and execute for dialog answers', async () => {
-    const { root, base } = await fixture();
-    const values = await rows(root);
+    const { base, items } = await fixture();
+    const values = items;
     removeAgentProjectGrant(values, taskGrant('demo-1', ['read', 'write']));
-    await replaceRows(root, values);
     expect((await post(base, '/api/task', { project: 'demo', text: 'not task-granted' }, agentHeaders())).status).toBe(404);
     expect((await post(base, '/api/answer', { project: 'demo', choice: '1', fingerprint: 'x' }, agentHeaders())).status).toBe(404);
   });
 
   it('derives scope from the stored task and rejects caller thread substitution or an unknown task', async () => {
-    const { root, base } = await fixture();
-    const values = await rows(root);
+    const { base, items } = await fixture();
+    const values = items;
     removeAgentProjectGrant(values, taskGrant());
-    await replaceRows(root, values);
     expect((await post(base, '/api/progress', {
       project: 'demo', task: 'demo-1', checkpoint: 'a', status: 'ok', thread: 'other',
     }, agentHeaders())).status).toBe(404);
@@ -136,7 +125,7 @@ describe('stored-target authorization', () => {
   });
 
   it('uses the stored log target task before reading and filters decisions and questions by that task', async () => {
-    const { root, home, base } = await fixture();
+    const { root, home, base, items } = await fixture();
     await writeJson(hivePath(home, 'team.json'), { agents: [{ name: 'builder', task: 'demo-1' }] });
     await createQuestionBatch(root, { project: 'demo', agent: 'builder' }, {
       context: 'task-scoped', questions: [{
@@ -144,9 +133,8 @@ describe('stored-target authorization', () => {
         choices: [{ label: 'Yes', description: 'continue' }, { label: 'No', description: 'stop' }],
       }],
     });
-    const values = await rows(root);
+    const values = items;
     removeAgentProjectGrant(values, taskGrant());
-    await replaceRows(root, values);
     const view = await (await fetch(`${base}/api/view`, { headers: agentHeaders() })).json();
     expect(view.questions).toHaveLength(1);
     expect((await fetch(`${base}/api/log?project=demo&agent=builder`, { headers: agentHeaders() })).status).not.toBe(404);
@@ -154,43 +142,36 @@ describe('stored-target authorization', () => {
 });
 
 describe('wake write boundaries and key/expiry validation', () => {
-  it('rejects an agent managing a subscription outside its registered project', async () => {
-    const { root, base } = await fixture();
-    const values = await rows(root);
-    values.push({
-      pk: 'AGENT#other', sk: 'PROFILE', agentId: 'other', ownerSubject: 'user:bob', project: 'other',
-      revokedAt: null, aclEpoch: 1, credentialEpoch: 1, ownerExecutionGrantId: 'owner:other',
-    });
-    await replaceRows(root, values);
+  it('maps a broker cross-project denial', async () => {
+    const { base } = await fixture();
     expect((await post(base, '/api/wake-subscriptions', {
       agentId: 'other', executionGrantId: 'agent-grant',
     }, agentHeaders())).status).toBe(404);
   });
 
   it('requires finite bounded key retirement and rejects malformed account expiry', async () => {
-    const { root, base } = await fixture();
+    const { base, items } = await fixture();
     process.env.HIVE_ASSERTION_KEYS_JSON = JSON.stringify({
       current: 'new',
       keys: { new: ASSERTION_KEYS.keys.new, old: { secret: ASSERTION_KEYS.keys.old.secret } },
     });
     const old = assertion('user:alice', {}, 'old');
     expect((await fetch(`${base}/api/view`, { headers: { authorization: `Bearer ${old}` } })).status).toBe(401);
-    const values = await rows(root);
+    const values = items;
     const account = values.find((row) => row.pk === 'SUBJECT#user:alice')!;
     account.expiresAt = 'invalid';
-    await replaceRows(root, values);
     expect((await fetch(`${base}/api/view`, { headers: authHeaders() })).status).toBe(401);
   });
 });
 
 describe('MCP cancellation fences', () => {
   it('does not create a batch or emit a late answer when cancelled during authentication', async () => {
-    const { root } = await fixture();
+    const { root, registry } = await fixture();
     const input = new PassThrough();
     let output = '';
     const mcp = serveMcp({ input, output: new Writable({ write(chunk, _encoding, callback) {
       output += chunk.toString(); callback();
-    } }), env: agentEnv(root), pollMs: 5 });
+    } }), env: agentEnv(root), registry, pollMs: 5 });
     input.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
       name: 'ask_operator', arguments: { context: 'cancel me', questions: [{
         question: 'Continue?', context: 'cancel', priority: 1, recommended: 'c1',

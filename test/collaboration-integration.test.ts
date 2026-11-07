@@ -11,7 +11,7 @@ import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
 import type { QuestionBatch } from '../src/types.js';
 import { createServer } from '../web/server.js';
 import {
-  AGENT_CREDENTIAL, agentHeaders, configureSecurity, registryItems, securityFile, writeSecurity,
+  AGENT_CREDENTIAL, agentHeaders, configureSecurity, registryItems, startTestRegistry,
 } from './security-fixture.js';
 
 const servers: Server[] = [];
@@ -32,20 +32,13 @@ async function fixture() {
       row.task = null;
     }
   }
-  await writeSecurity(root, items);
-  configureSecurity(root);
-  const server = createServer(root);
+  const { broker, registry } = await startTestRegistry(items);
+  servers.push(broker);
+  configureSecurity();
+  const server = createServer(root, registry);
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  return { root, home, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
-}
-
-async function rows(root: string): Promise<Record<string, unknown>[]> {
-  return JSON.parse(await fs.readFile(securityFile(root), 'utf8')).items;
-}
-
-async function replaceRows(root: string, values: Record<string, unknown>[]): Promise<void> {
-  await fs.writeFile(securityFile(root), JSON.stringify({ items: values }, null, 2));
+  return { root, home, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, items };
 }
 
 async function post(base: string, pathname: string, body: unknown) {
@@ -83,22 +76,20 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   delete process.env.HIVE_COLLABORATION_ENABLED;
-  delete process.env.HIVE_REGISTRY_FILE;
   delete process.env.HIVE_ASSERTION_KEYS_JSON;
 });
 
 describe('integration authorization and revocation', () => {
   it('redacts project metadata when a narrower task grant is revoked despite project read', async () => {
-    const { root, home, base } = await fixture();
+    const { root, home, base, items } = await fixture();
     await team(home);
-    const values = await rows(root);
+    const values = items;
     values.push({
       pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#agent:builder', project: 'demo', task: 'demo-1',
       principal: 'agent:builder', grantId: 'revoked-task', actions: ['read'], aclEpoch: 2, revokedAt: 1,
     }, {
       pk: 'REVOCATION#ACL#demo#demo-1#*', sk: 'PRINCIPAL#agent:builder', epoch: 2, revokedAt: 1,
     });
-    await replaceRows(root, values);
     const view = await (await fetch(`${base}/api/view`, { headers: agentHeaders() })).json();
     expect(view.tasks.map((task: { id: string }) => task.id)).toEqual(['demo-2']);
     expect(view.projects).toHaveLength(1);
@@ -110,22 +101,21 @@ describe('integration authorization and revocation', () => {
   });
 
   it('filters wake rows with independent ledger tombstones', async () => {
-    const { root, base } = await fixture();
-    const values = await rows(root);
+    const { base, items } = await fixture();
+    const values = items;
     values.push({
       pk: 'AGENT#builder', sk: 'WAKE#abc', subscriptionId: 'abc', agentId: 'builder',
       executionGrantId: 'agent-grant', createdBy: 'agent:builder', createdAt: 1, revokedAt: null, aclEpoch: 1,
     }, {
       pk: 'REVOCATION#AGENT#builder', sk: 'WAKE#abc', epoch: 2, revokedAt: 2,
     });
-    await replaceRows(root, values);
     const response = await fetch(`${base}/api/wake-subscriptions?agentId=builder`, { headers: agentHeaders() });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual([]);
   });
 
   it('requires execute only for execution-granting push approvals', async () => {
-    const { root, home, base } = await fixture();
+    const { root, home, base, items } = await fixture();
     const { authHeaders } = await import('./security-fixture.js');
     const postAsOwner = (id: string, answers: unknown) => fetch(`${base}/api/questions/answer`, {
       method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
@@ -133,7 +123,7 @@ describe('integration authorization and revocation', () => {
     });
     await team(home);
     const batch = await pushBatch(root);
-    const values = await rows(root);
+    const values = items;
     for (const subject of ['user:alice', 'agent:builder']) {
       const row = values.find((candidate) => candidate.sk === `PRINCIPAL#${subject}`)!;
       row.pk = 'ACL#demo#demo-1#*';
@@ -141,7 +131,6 @@ describe('integration authorization and revocation', () => {
     }
     const grant = values.find((row) => row.sk === 'PRINCIPAL#user:alice')!;
     grant.actions = ['read', 'write'];
-    await replaceRows(root, values);
     expect((await postAsOwner(batch.id, [{ question: 'q1', choice: 'c2' }])).status).toBe(404);
 
     const general = await createQuestionBatch(root, { project: 'demo', agent: 'builder@one' }, {
@@ -155,7 +144,6 @@ describe('integration authorization and revocation', () => {
     )).status).toBe(200);
 
     grant.actions = ['read', 'write', 'execute'];
-    await replaceRows(root, values);
     const approved = await postAsOwner(batch.id, [{ question: 'q1', choice: 'c2' }]);
     expect(approved.status).toBe(200);
     const body = await approved.json();
@@ -168,15 +156,14 @@ describe('integration authorization and revocation', () => {
   });
 
   it('rejects a project-only consumer grant during execution approval creation', async () => {
-    const { root, home, base } = await fixture();
+    const { root, home, base, items } = await fixture();
     const { authHeaders } = await import('./security-fixture.js');
     await team(home);
     const batch = await pushBatch(root);
-    const values = await rows(root);
+    const values = items;
     const approver = values.find((row) => row.sk === 'PRINCIPAL#user:alice')!;
     approver.pk = 'ACL#demo#demo-1#*';
     approver.task = 'demo-1';
-    await replaceRows(root, values);
     const response = await fetch(`${base}/api/questions/answer`, {
       method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ id: batch.id, answers: [{ question: 'q1', choice: 'c2' }] }),
@@ -186,15 +173,14 @@ describe('integration authorization and revocation', () => {
   });
 
   it('rejects a project-only approver grant during execution approval creation', async () => {
-    const { root, home, base } = await fixture();
+    const { root, home, base, items } = await fixture();
     const { authHeaders } = await import('./security-fixture.js');
     await team(home);
     const batch = await pushBatch(root);
-    const values = await rows(root);
+    const values = items;
     const consumer = values.find((row) => row.sk === 'PRINCIPAL#agent:builder')!;
     consumer.pk = 'ACL#demo#demo-1#*';
     consumer.task = 'demo-1';
-    await replaceRows(root, values);
     const response = await fetch(`${base}/api/questions/answer`, {
       method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ id: batch.id, answers: [{ question: 'q1', choice: 'c2' }] }),
@@ -204,14 +190,13 @@ describe('integration authorization and revocation', () => {
   });
 
   it('rejects an agent principal for an execution approval', async () => {
-    const { root, home, base } = await fixture();
+    const { root, home, base, items } = await fixture();
     await team(home);
     const batch = await pushBatch(root);
-    const values = await rows(root);
+    const values = items;
     const approver = values.find((row) => row.sk === 'PRINCIPAL#agent:builder')!;
     approver.pk = 'ACL#demo#demo-1#*';
     approver.task = 'demo-1';
-    await replaceRows(root, values);
     expect((await post(base, '/api/questions/answer', {
       id: batch.id, answers: [{ question: 'q1', choice: 'c2' }],
     })).status).toBe(400);
@@ -219,13 +204,12 @@ describe('integration authorization and revocation', () => {
   });
 
   it('blocks project fallback and redacts metadata for a restored ledger-only task revocation', async () => {
-    const { root, home, base } = await fixture();
+    const { root, home, base, items } = await fixture();
     await team(home);
-    const values = await rows(root);
+    const values = items;
     values.push({
       pk: 'REVOCATION#ACL#demo#demo-1#*', sk: 'PRINCIPAL#agent:builder', epoch: 2, revokedAt: 1,
     });
-    await replaceRows(root, values);
     const view = await (await fetch(`${base}/api/view`, { headers: agentHeaders() })).json();
     expect(view.tasks.map((task: { id: string }) => task.id)).toEqual(['demo-2']);
     expect(view.projects[0].home).toBe('');
@@ -235,14 +219,13 @@ describe('integration authorization and revocation', () => {
   });
 
   it('redacts metadata for an active narrower grant that denies read', async () => {
-    const { root, home, base } = await fixture();
+    const { root, home, base, items } = await fixture();
     await team(home);
-    const values = await rows(root);
+    const values = items;
     values.push({
       pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#agent:builder', project: 'demo', task: 'demo-1',
       principal: 'agent:builder', grantId: 'write-only-task', actions: ['write'], aclEpoch: 1, revokedAt: null,
     });
-    await replaceRows(root, values);
     const view = await (await fetch(`${base}/api/view`, { headers: agentHeaders() })).json();
     expect(view.tasks.map((task: { id: string }) => task.id)).toEqual(['demo-2']);
     expect(view.projects[0].home).toBe('');

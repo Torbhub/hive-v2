@@ -8,8 +8,7 @@ import { AGENT_CREDENTIAL } from './security-fixture.js';
 const tmux = await import('../src/tmux.js');
 const { launchWindow } = await import('../src/spawn.js');
 const { authenticateBearer } = await import('../src/security.js');
-const { FileRegistry } = await import('../src/registry.js');
-const { registryItems, securityFile, writeSecurity } = await import('./security-fixture.js');
+const { MemoryRegistry, registryItems } = await import('./security-fixture.js');
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -59,8 +58,7 @@ describe('enabled spawn credential files', () => {
     credentialRow.credentialId = 'fedcba9876543210';
     credentialRow.credentialHash = createHash('sha256')
       .update(`${credentialRow.salt}:replacement-secret-with-high-entropy`).digest('hex');
-    await writeSecurity(root, values);
-    const registry = new FileRegistry(securityFile(root));
+    const registry = new MemoryRegistry(values);
     await expect(authenticateBearer(replacement, registry)).resolves.toMatchObject({
       kind: 'agent', agentId: 'builder', project: 'demo',
     });
