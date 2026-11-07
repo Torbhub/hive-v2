@@ -8,25 +8,8 @@ import tempfile
 import types
 from unittest.mock import patch
 
-import yaml
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'infra/t01-smoke'))
-
-
-class CloudFormationLoader(yaml.SafeLoader):
-    pass
-
-
-def construct_tag(loader, tag_suffix, node):
-    if isinstance(node, yaml.MappingNode):
-        return loader.construct_mapping(node)
-    if isinstance(node, yaml.SequenceNode):
-        return loader.construct_sequence(node)
-    return loader.construct_scalar(node)
-
-
-yaml.add_multi_constructor('!', construct_tag, CloudFormationLoader)
 
 
 def load_module(name, path):
@@ -140,53 +123,24 @@ with tempfile.TemporaryDirectory() as directory:
     assert 'synthetic-issue-key' not in output_path.read_text()
     assert 't01h-0123456789abcdef' in stdout.getvalue()
 
-TEMPLATE = yaml.load(
-    (ROOT / 'infra/t01-smoke/broker_template.yaml').read_text(), CloudFormationLoader,
+runtime_module = load_module('t01_runtime_health', ROOT / 'infra/t01-smoke/runtime.py')
+
+assert runtime_module.valid_health(secret, '123', NOW + 1)
+assert not runtime_module.valid_health(secret, '999', NOW + 1)
+assert not runtime_module.valid_health(secret, '123', secret['expiresAt'])
+assert not runtime_module.valid_health(dict(secret, apiKey=''), '123', NOW + 1)
+assert not runtime_module.valid_health(dict(secret, healthyProbes=0), '123', NOW + 1)
+assert not runtime_module.valid_health(dict(secret, healthyProbes=2), '123', NOW + 1)
+assert not runtime_module.valid_health(
+    dict(secret, probeFinishedAt=secret['attestedAt'] + 1), '123', NOW + 1,
 )
-code = TEMPLATE['Resources']['HealthFunction']['Properties']['Code']['ZipFile']
-secret_value = json.dumps(secret)
-
-
-class FakeSecrets:
-    def get_secret_value(self, SecretId):
-        assert SecretId == 'arn:test:health-secret'
-        return {'SecretString': secret_value}
-
-
-fake_boto3 = types.SimpleNamespace(client=lambda name: FakeSecrets())
-namespace = {}
-with patch.dict(sys.modules, {'boto3': fake_boto3}):
-    exec(compile(code, 'broker_template.yaml', 'exec'), namespace)
-handler = namespace['handler']
-
-
-def event(path='/health', method='GET', authorization='Bearer synthetic-only-key'):
-    return {
-        'rawPath': path,
-        'requestContext': {'http': {'method': method}},
-        'headers': {'authorization': authorization},
-    }
-
-
-with patch.dict(os.environ, {'SECRET_ARN': 'arn:test:health-secret', 'RUN_ID': '123'}):
-    with patch.object(namespace['time'], 'time', return_value=NOW + 1):
-        assert handler(event(), None)['statusCode'] == 204
-        assert handler(event(authorization='Bearer wrong'), None)['statusCode'] == 401
-        assert handler(event(path='/v1/messages', method='POST'), None)['statusCode'] == 404
-        assert handler(event(path='/teamkimi/status'), None)['statusCode'] == 404
-    secret_value = json.dumps(dict(
-        secret, attestedAt=secret['expiresAt'], probeFinishedAt=secret['expiresAt'],
-    ))
-    with patch.object(namespace['time'], 'time', return_value=secret['expiresAt']):
-        assert handler(event(), None)['statusCode'] == 401
-    secret_value = json.dumps(secret)
-    with patch.dict(os.environ, {'RUN_ID': '999'}):
-        assert handler(event(), None)['statusCode'] == 503
 
 for field in ('attestedAt', 'probeFinishedAt'):
     for offset in (-601, 62):
-        secret_value = json.dumps(dict(secret, **{field: NOW + offset}))
-        with patch.dict(os.environ, {'SECRET_ARN': 'arn:test:health-secret', 'RUN_ID': '123'}):
-            with patch.object(namespace['time'], 'time', return_value=NOW + 1):
-                assert handler(event(), None)['statusCode'] == 503, (field, offset)
-secret_value = json.dumps(secret)
+        wrong = dict(secret, **{field: NOW + offset})
+        assert not runtime_module.valid_health(wrong, '123', NOW + 1), (field, offset)
+
+for field in ('runId', 'activeAccounts', 'healthyProbes', 'attestedAt', 'probeFinishedAt', 'expiresAt', 'apiKey'):
+    wrong = dict(secret)
+    wrong.pop(field)
+    assert not runtime_module.valid_health(wrong, '123', NOW + 1), field

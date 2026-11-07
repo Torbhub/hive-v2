@@ -6,16 +6,6 @@ HERMES_VERSION=v0.22.6
 HERMES_COMMIT=f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab
 HERMES_ARCHIVE_SHA256=551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae2efa81
 EVIDENCE=/var/lib/t01/evidence/preflight.jsonl
-TEAMKIMI_IP=
-
-mkdir -p /opt/t01/source /opt/t01/fixtures /opt/t01/tools /opt/t01/pm-home
-mkdir -p /var/lib/t01/evidence /var/lib/t01/hermes /etc/t01/broker
-chown root:root /opt/t01 /var/lib/t01 /etc/t01
-chmod 0711 /opt/t01 /var/lib/t01 /etc/t01
-chmod 0700 /var/lib/t01/evidence /opt/t01/pm-home
-: > "$EVIDENCE"
-chmod 0600 /var/lib/t01/evidence/preflight.jsonl
-shutdown -h +"${LIFETIME_MINUTES}"
 
 emit() {
   local check="$1" status="$2" details="${3:-}" record
@@ -45,9 +35,6 @@ lock_down() {
   iptables -A OUTPUT -p udp --dport 53 -j REJECT
   iptables -A OUTPUT -p tcp --dport 53 -j REJECT
   iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  if [ -n "$TEAMKIMI_IP" ]; then
-    iptables -A OUTPUT -p tcp -d "$TEAMKIMI_IP" --dport 443 -m owner --uid-owner 10001 -j ACCEPT
-  fi
   iptables -A OUTPUT -j REJECT
   ip6tables -P INPUT DROP
   ip6tables -P FORWARD DROP
@@ -67,12 +54,10 @@ on_error() {
   set +e
   lock_down
   local category=unknown origin=unknown:0
-  case "${BOOTSTRAP_STAGE:-}" in
-    python-binary|pm-build)
-      category="failure:$BOOTSTRAP_STAGE"
-      origin="$BOOTSTRAP_STAGE:$status"
-      ;;
-  esac
+  if [ -n "${BOOTSTRAP_STAGE:-}" ]; then
+    category="failure:$BOOTSTRAP_STAGE"
+    origin="$BOOTSTRAP_STAGE:$status"
+  fi
   if [[ "$status" =~ ^(124|137)$ ]] && [ -n "${BOOTSTRAP_STAGE:-}" ]; then
     category="timeout:$BOOTSTRAP_STAGE"
     origin="$BOOTSTRAP_STAGE:$status"
@@ -93,6 +78,16 @@ on_error() {
 }
 trap on_error ERR
 
+BOOTSTRAP_STAGE=filesystem-init
+mkdir -p /opt/t01/source /opt/t01/fixtures /opt/t01/tools /opt/t01/pm-home
+mkdir -p /var/lib/t01/evidence /var/lib/t01/hermes /etc/t01/broker
+chown root:root /opt/t01 /var/lib/t01 /etc/t01
+chmod 0711 /opt/t01 /var/lib/t01 /etc/t01
+chmod 0700 /var/lib/t01/evidence /opt/t01/pm-home
+: > "$EVIDENCE"
+chmod 0600 /var/lib/t01/evidence/preflight.jsonl
+shutdown -h +"${LIFETIME_MINUTES}"
+
 require_value() {
   if [ -z "${!1:-}" ]; then
     emit "missing_$1" failed
@@ -100,19 +95,23 @@ require_value() {
   fi
 }
 
-for name in TEAMKIMI_URL TEAMKIMI_SECRET_ARN TEAMKIMI_SECRET_KEY TEAMKIMI_CONNECTIVITY_PATH SCENARIO MATRIX LIFETIME_MINUTES RUN_ID RUNTIME_SCRIPT_URL RUNTIME_SCRIPT_SHA256; do
+BOOTSTRAP_STAGE=input-validation
+for name in TEAMKIMI_SECRET_ARN SCENARIO MATRIX LIFETIME_MINUTES RUN_ID RUNTIME_SCRIPT_URL RUNTIME_SCRIPT_SHA256; do
   require_value "$name"
 done
 [ "$SCENARIO" = preflight ]
 [ "$MATRIX" = none ]
 [ "$MAX_PAID_ADMISSIONS" = 0 ]
 
+BOOTSTRAP_STAGE=system-packages
 dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables
+BOOTSTRAP_STAGE=runtime-download
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --max-redirs 0 --connect-timeout 10 --max-time 60 \
   "$RUNTIME_SCRIPT_URL" --output /opt/t01/runtime.py
 printf '%s  %s\n' "$RUNTIME_SCRIPT_SHA256" /opt/t01/runtime.py | sha256sum -c -
 chmod 0555 /opt/t01/runtime.py
+BOOTSTRAP_STAGE=source-download
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --max-redirs 0 --connect-timeout 10 --max-time 180 \
   "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/$HERMES_COMMIT" \
@@ -163,7 +162,7 @@ export UV_OFFLINE=1
 [ -f /opt/t01/source/uv.lock ]
 [ -x /opt/t01/hermes/bin/hermes ]
 emit frozen_hash_lock_install passed
-BOOTSTRAP_STAGE=
+BOOTSTRAP_STAGE=credential-config
 
 cat > /var/lib/t01/hermes/config.yaml <<'EOF'
 security:
@@ -186,23 +185,6 @@ aws secretsmanager get-secret-value --secret-id "$TEAMKIMI_SECRET_ARN" \
 chown t01broker:t01broker /etc/t01/broker/teamkimi.json
 chmod 0400 /etc/t01/broker/teamkimi.json
 
-read -r TEAMKIMI_HOST TEAMKIMI_IP < <(python3 - "$TEAMKIMI_URL" <<'PY'
-import socket
-import sys
-from urllib.parse import urlsplit
-url = urlsplit(sys.argv[1])
-if url.scheme != "https" or url.username or url.password or url.query or url.fragment:
-    raise SystemExit("TeamKimi URL must be an HTTPS origin without credentials, query, or fragment")
-if url.path or url.port not in (None, 443):
-    raise SystemExit("TeamKimi URL must use only the origin and port 443")
-addresses = socket.getaddrinfo(url.hostname, 443, socket.AF_INET, socket.SOCK_STREAM)
-if not addresses:
-    raise SystemExit("TeamKimi IPv4 resolution failed")
-print(url.hostname, addresses[0][4][0])
-PY
-)
-printf '%s %s\n' "$TEAMKIMI_IP" "$TEAMKIMI_HOST" >> /etc/hosts
-
 python3 - <<'PY'
 import json
 import os
@@ -214,9 +196,6 @@ names = (
 )
 config = {name.lower(): os.environ[name] for name in names}
 config.update({
-    "teamkimi_url": os.environ["TEAMKIMI_URL"],
-    "teamkimi_secret_key": os.environ["TEAMKIMI_SECRET_KEY"],
-    "teamkimi_connectivity_path": os.environ["TEAMKIMI_CONNECTIVITY_PATH"],
     "teamkimi_model_id": "Kimi 3.1 Pro",
     "paid_admission": False,
 })
@@ -250,7 +229,6 @@ PrivateDevices=yes
 ReadOnlyPaths=/etc/t01/broker /opt/t01/runtime.py
 IPAddressDeny=any
 IPAddressAllow=127.0.0.0/8
-IPAddressAllow=${TEAMKIMI_IP}/32
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 StandardOutput=null
 StandardError=null
@@ -291,14 +269,17 @@ StandardError=null
 EOF
 chmod 0444 /etc/systemd/system/t01-broker.service /etc/systemd/system/t01-hermes-check.service
 
+BOOTSTRAP_STAGE=default-deny-lockdown
 systemctl daemon-reload
 lock_down
 emit default_deny_lockdown passed
+BOOTSTRAP_STAGE=broker-access
 command -v curl runuser timeout >/dev/null
 runuser -u t01broker -- test -r /opt/t01/runtime.py
 runuser -u t01broker -- test -r /etc/t01/broker/config.json
 runuser -u t01broker -- test -r /etc/t01/broker/teamkimi.json
 runuser -u t01broker -- test ! -w /etc/t01/broker/teamkimi.json
+BOOTSTRAP_STAGE=hermes-access
 runuser -u t01hermes -- test -x /opt/t01/hermes/bin
 runuser -u t01hermes -- test -r /opt/t01/fixtures/query.txt
 runuser -u t01hermes -- test -r /var/lib/t01/hermes/config.yaml
@@ -309,9 +290,13 @@ fi
 if runuser -u t01hermes -- test -x /etc/t01/broker; then
   false
 fi
+BOOTSTRAP_STAGE=broker-start
 systemctl start t01-broker.service
+BOOTSTRAP_STAGE=broker-health
 runuser -u t01hermes -- env -i PATH=/usr/bin:/bin /usr/bin/python3 /opt/t01/runtime.py wait-for-broker
+BOOTSTRAP_STAGE=hermes-check
 systemctl start t01-hermes-check.service
+BOOTSTRAP_STAGE=runtime-version
 read -r RUNTIME_VERSION RUNTIME_COMMIT < <(python3 - <<'PY'
 import json
 with open('/var/lib/t01/hermes/runtime-check.json', encoding='utf-8') as source:
@@ -357,14 +342,17 @@ expect_allowed() {
   emit "$name" passed
 }
 
+BOOTSTRAP_STAGE=network-negative
 expect_denied direct_ip curl -4 --fail --silent https://192.0.2.1/
 expect_denied unapproved_dns curl -4 --fail --silent https://example.com/
 expect_denied redirect curl -4 --fail --silent --location http://127.0.0.1:8765/redirect-fixture
 expect_denied ipv6 curl -6 --fail --silent 'https://[2606:4700:4700::1111]/'
-expect_denied alternate_port curl -4 --fail --silent "https://${TEAMKIMI_HOST}:8443/"
+expect_denied alternate_port curl -4 --fail --silent https://192.0.2.1:8443/
 expect_denied metadata curl -4 --fail --silent http://169.254.169.254/latest/meta-data/
 expect_denied container_credentials curl -4 --fail --silent http://169.254.170.2/
+BOOTSTRAP_STAGE=teamkimi-no-model
 expect_allowed teamkimi_no_model curl -4 --fail --silent http://127.0.0.1:8765/health
+BOOTSTRAP_STAGE=broker-stop
 systemctl stop t01-broker.service
 emit paid_admission_disabled passed
 emit complete passed

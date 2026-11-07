@@ -3,7 +3,6 @@ set -euo pipefail
 umask 077
 
 STACK_NAME=hive-v2-t01-smoke
-BROKER_STACK_NAME=hive-v2-t01-broker
 HEALTH_SECRET_NAME="hive-v2-t01-smoke-health-${GITHUB_RUN_ID:-manual}"
 OWNER="hive-v2-t01-smoke/${GITHUB_RUN_ID:-manual}"
 
@@ -138,35 +137,12 @@ health_secret_arn() {
   aws secretsmanager describe-secret --secret-id "$HEALTH_SECRET_NAME" --query ARN --output text
 }
 
-broker_teamkimi_url() {
-  local url
-  url="$(aws cloudformation describe-stacks --stack-name "$BROKER_STACK_NAME" \
-    --query 'Stacks[0].Outputs[?OutputKey==`HealthUrl`].OutputValue | [0]' --output text)"
-  url="${url%/}"
-  [[ "$url" == https://*.on.aws ]] || { echo "broker returned an invalid HTTPS origin" >&2; exit 1; }
-  printf '%s\n' "$url"
-}
-
-deploy_broker() {
-  require_env GITHUB_RUN_ID
-  local secret_arn
-  secret_arn="$(health_secret_arn)"
-  aws cloudformation deploy \
-    --stack-name "$BROKER_STACK_NAME" \
-    --template-file infra/t01-smoke/broker_template.yaml \
-    --capabilities CAPABILITY_NAMED_IAM \
-    --parameter-overrides \
-      "SecretArn=$secret_arn" \
-      "RunId=$GITHUB_RUN_ID"
-}
-
 deploy_stack() {
   local name
-  for name in VPC_ID SUBNET_ID RESOLVER_IP AMI_ID TEAMKIMI_SECRET_KEY TEAMKIMI_CONNECTIVITY_PATH GITHUB_REPOSITORY GITHUB_SHA; do
+  for name in VPC_ID SUBNET_ID RESOLVER_IP AMI_ID GITHUB_REPOSITORY GITHUB_SHA; do
     require_env "$name"
   done
   local script_sha runtime_sha
-  TEAMKIMI_URL="$(broker_teamkimi_url)"
   TEAMKIMI_SECRET_ARN="$(health_secret_arn)"
   script_sha="$(sha256sum infra/t01-smoke/provision.sh | cut -d' ' -f1)"
   runtime_sha="$(sha256sum infra/t01-smoke/runtime.py | cut -d' ' -f1)"
@@ -179,10 +155,7 @@ deploy_stack() {
       "SubnetId=$SUBNET_ID" \
       "ResolverIp=$RESOLVER_IP" \
       "AmiId=$AMI_ID" \
-      "TeamKimiUrl=$TEAMKIMI_URL" \
       "TeamKimiSecretArn=$TEAMKIMI_SECRET_ARN" \
-      "TeamKimiSecretKey=$TEAMKIMI_SECRET_KEY" \
-      "TeamKimiConnectivityPath=$TEAMKIMI_CONNECTIVITY_PATH" \
       "Scenario=$SCENARIO" \
       "Matrix=$MATRIX" \
       "MaxInputTokens=$MAX_INPUT_TOKENS" \
@@ -201,33 +174,34 @@ deploy_stack() {
 }
 
 handle_evidence_candidate() {
-  local console="$1" candidate="$2" evidence_dir="$3" line
+  local console="$1" candidate="$2" evidence_dir="$3" line classification
   : > "$candidate"
   while IFS= read -r line; do
     case "$line" in
       T01_EVIDENCE\ *) printf '%s\n' "${line#T01_EVIDENCE }" >> "$candidate" ;;
     esac
   done < "$console"
-  if ! python3 infra/t01-smoke/runtime.py sanitize-evidence "$candidate"; then
-    echo "console produced rejected evidence; it was not copied to the artifact" >&2
-    exit 1
-  fi
-  if grep -q '"check":"complete"' "$candidate"; then
-    if python3 infra/t01-smoke/runtime.py validate-evidence "$candidate"; then
+  classification="$(python3 infra/t01-smoke/runtime.py classify-evidence "$candidate")"
+  case "$classification" in
+    passed)
       cp "$candidate" "$evidence_dir/preflight.jsonl"
       exit 0
-    fi
-    if grep -qE '"check":"complete"[^}]*"status":"failed"|"status":"failed"[^}]*"check":"complete"' "$candidate"; then
+      ;;
+    failed)
       cp "$candidate" "$evidence_dir/preflight.jsonl"
       echo "preflight failed; review only the sanitized artifact" >&2
-    else
-      echo "complete evidence failed strict validation; it was not copied to the artifact" >&2
-    fi
-    exit 1
-  fi
-  if [ -s "$candidate" ]; then
-    cp "$candidate" "$evidence_dir/preflight.jsonl"
-  fi
+      exit 1
+      ;;
+    incomplete)
+      if [ -s "$candidate" ]; then
+        cp "$candidate" "$evidence_dir/preflight.jsonl"
+      fi
+      ;;
+    invalid)
+      echo "console produced rejected evidence; it was not copied to the artifact" >&2
+      exit 1
+      ;;
+  esac
 }
 
 collect_evidence() {
@@ -310,15 +284,7 @@ cleanup() {
   CLEANUP_OUTPUT="$(mktemp)"
   CLEANUP_ERROR="$(mktemp)"
   trap "rm -f $CLEANUP_OUTPUT $CLEANUP_ERROR" EXIT
-  delete_stack "$STACK_NAME" || rc=$?
-  if (( rc != 0 )); then
-    status=$rc
-  fi
-  rc=0
-  delete_stack "$BROKER_STACK_NAME" || rc=$?
-  if (( status == 0 && rc != 0 )); then
-    status=$rc
-  fi
+  delete_stack "$STACK_NAME" || status=$?
   if (( status == 0 )); then
     rc=0
     delete_health_secret || rc=$?
@@ -339,9 +305,8 @@ case "${1:-}" in
   validate-inputs) validate_inputs ;;
   acquire) acquire_mutex ;;
   issue-health-credential) with_mutex_renewal issue_health_credential ;;
-  deploy-broker) with_mutex_renewal deploy_broker ;;
   deploy) with_mutex_renewal deploy_stack ;;
   collect) with_mutex_renewal collect_evidence ;;
   cleanup) with_mutex_renewal cleanup ;;
-  *) echo "usage: $0 validate-inputs|acquire|issue-health-credential|deploy-broker|deploy|collect|cleanup" >&2; exit 2 ;;
+  *) echo "usage: $0 validate-inputs|acquire|issue-health-credential|deploy|collect|cleanup" >&2; exit 2 ;;
 esac

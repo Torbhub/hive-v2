@@ -3,91 +3,10 @@ import json
 import os
 from pathlib import Path
 import shutil
-import stat
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / 'infra/t01-smoke/workflow.sh'
-RUNTIME = ROOT / 'infra/t01-smoke/runtime.py'
-PROVISION = ROOT / 'infra/t01-smoke/provision.sh'
-BROKER_TEMPLATE = ROOT / 'infra/t01-smoke/broker_template.yaml'
-SMOKE_TEMPLATE = ROOT / 'infra/t01-smoke/template.yaml'
-COMMIT = 'f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab'
-MANDATORY_PASSED = [
-    'uv_install', 'python_install', 'frozen_hash_lock_install',
-    'lazy_install_disabled', 'service_filesystem_access',
-    'default_deny_lockdown', 'direct_ip', 'unapproved_dns', 'redirect', 'ipv6',
-    'alternate_port', 'metadata', 'container_credentials', 'teamkimi_no_model',
-    'paid_admission_disabled',
-]
-
-
-def evidence_records():
-    records = [
-        {'check': 'hermes_version', 'status': 'passed', 'version': '0.22.6', 'commit': COMMIT},
-        {'check': 'source_sha256', 'status': 'passed', 'sha256': '551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae2efa81'},
-    ]
-    records.extend({'check': name, 'status': 'passed'} for name in MANDATORY_PASSED)
-    records.append({'check': 'complete', 'status': 'passed'})
-    return records
-
-
-def write_executable(path, content):
-    path.write_text(content)
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
-
-
-def workspace():
-    temporary = tempfile.TemporaryDirectory()
-    root = Path(temporary.name)
-    (root / 'infra/t01-smoke').mkdir(parents=True)
-    shutil.copy(WORKFLOW, root / 'infra/t01-smoke/workflow.sh')
-    if RUNTIME.exists():
-        shutil.copy(RUNTIME, root / 'infra/t01-smoke/runtime.py')
-    for template in (PROVISION, BROKER_TEMPLATE, SMOKE_TEMPLATE):
-        if template.exists():
-            shutil.copy(template, root / 'infra/t01-smoke' / template.name)
-    (root / 'bin').mkdir()
-    write_executable(root / 'infra/deploy-mutex.sh', '''#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$MOCK_CALLS"
-case "$1" in
-  renew)
-    if [ -f "$MOCK_RELEASED" ]; then
-      printf 'renewal after release\n' >> "$MOCK_RENEW_AFTER_RELEASE"
-      exit 99
-    fi
-    exit "${MOCK_RENEW_RC:-0}"
-    ;;
-  release)
-    : > "$MOCK_RELEASED"
-    /bin/sleep 0.05
-    exit "${MOCK_RELEASE_RC:-0}"
-    ;;
-esac
-exit 0
-''')
-    return temporary, root
-
-
-def run(root, command, extra_env=None):
-    env = {
-        'PATH': f'{root}/bin:{os.environ["PATH"]}',
-        'MOCK_CALLS': str(root / 'calls'),
-        'MOCK_RELEASED': str(root / 'released'),
-        'MOCK_RENEW_AFTER_RELEASE': str(root / 'renew-after-release'),
-        'GITHUB_RUN_ID': '123',
-    }
-    if extra_env:
-        env.update(extra_env)
-    return subprocess.run(
-        ['bash', 'infra/t01-smoke/workflow.sh', command], cwd=root, env=env,
-        capture_output=True, text=True, timeout=20,
-    )
-
-
-def mock_aws(root, content):
-    write_executable(root / 'bin/aws', content)
+from t01_workflow_harness import ROOT, evidence_records, mock_aws, run, workspace, write_executable
 
 
 def mock_long_collect(root, valid_evidence):
@@ -227,10 +146,8 @@ if [ -n "${MOCK_RENEWER_PID_FILE:-}" ]; then
 fi
 case "$1 $2" in
   'cloudformation describe-stacks')
-    case "$4" in
-      hive-v2-t01-broker) printf 'https://id.lambda-url.us-east-1.on.aws/\n' ;;
-      *) printf 'ValidationError: Stack with id hive-v2-t01-smoke does not exist\n' >&2; exit 254 ;;
-    esac
+    printf 'ValidationError: Stack with id hive-v2-t01-smoke does not exist\n' >&2
+    exit 254
     ;;
   'cloudformation deploy'|'cloudformation delete-stack'|'cloudformation wait') /bin/sleep 0.05; exit 0 ;;
   'secretsmanager describe-secret')
@@ -260,8 +177,6 @@ DEPLOY_ENV = {
     'SUBNET_ID': 'subnet-test',
     'RESOLVER_IP': '10.0.0.2',
     'AMI_ID': 'ami-test',
-    'TEAMKIMI_SECRET_KEY': 'apiKey',
-    'TEAMKIMI_CONNECTIVITY_PATH': '/health',
     'GITHUB_REPOSITORY': 'Torbhub/hive-v2',
     'GITHUB_SHA': 'a' * 40,
     'SCENARIO': 'preflight',
@@ -295,7 +210,8 @@ def lifecycle_success_case(command):
         assert result.returncode == 0, (command, result.stdout, result.stderr)
         calls = (root / 'calls').read_text()
         renewals = [line for line in calls.splitlines() if line.startswith('renew aws-acts')]
-        assert len(renewals) >= 3, (command, calls)
+        expected_renewals = 1 if command == 'cleanup' else 3
+        assert len(renewals) >= expected_renewals, (command, calls)
         if command == 'cleanup':
             subprocess.run(['/bin/sleep', '0.1'], check=True)
             assert calls.count('release aws-acts hive-v2-t01-smoke/123') == 1, calls
@@ -310,7 +226,7 @@ def lifecycle_success_case(command):
 
 
 with ThreadPoolExecutor(max_workers=3) as pool:
-    list(pool.map(lifecycle_success_case, ('deploy-broker', 'deploy', 'cleanup')))
+    list(pool.map(lifecycle_success_case, ('deploy', 'cleanup')))
 
 temporary, root = workspace()
 with temporary:
@@ -370,11 +286,11 @@ wait
 
 
 with ThreadPoolExecutor(max_workers=8) as pool:
-    list(pool.map(renewal_failure_case, ('issue-health-credential', 'deploy-broker', 'deploy', 'collect', 'cleanup')))
+    list(pool.map(renewal_failure_case, ('issue-health-credential', 'deploy', 'collect', 'cleanup')))
 
 temporary, root = workspace()
 with temporary:
     mock_lifecycle(root)
-    result = run(root, 'deploy-broker', {**DEPLOY_ENV, 'MOCK_SECRET_ERROR': '1'})
+    result = run(root, 'deploy', {**DEPLOY_ENV, 'MOCK_SECRET_ERROR': '1'})
     assert result.returncode != 0, (result.stdout, result.stderr)
     assert 'cloudformation deploy' not in (root / 'calls').read_text()

@@ -97,9 +97,6 @@ jobs:
           T01_HEALTH_ATTESTATION: ${{ vars.T01_HEALTH_ATTESTATION }}
           LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
         run: bash infra/t01-smoke/workflow.sh issue-health-credential
-      - name: Create the disposable health-only broker stack
-        id: broker
-        run: bash infra/t01-smoke/workflow.sh deploy-broker
       - name: Create the disposable preflight stack
         id: deploy
         env:
@@ -107,8 +104,6 @@ jobs:
           SUBNET_ID: ${{ vars.T01_SUBNET_ID }}
           RESOLVER_IP: ${{ vars.T01_RESOLVER_IP }}
           AMI_ID: ${{ vars.T01_AMI_ID }}
-          TEAMKIMI_SECRET_KEY: ${{ vars.T01_TEAMKIMI_SECRET_KEY || 'apiKey' }}
-          TEAMKIMI_CONNECTIVITY_PATH: ${{ vars.T01_TEAMKIMI_CONNECTIVITY_PATH || '/health' }}
           SCENARIO: ${{ inputs.scenario }}
           MATRIX: ${{ inputs.matrix }}
           MAX_INPUT_TOKENS: ${{ inputs.max_input_tokens }}
@@ -134,7 +129,7 @@ jobs:
           path: t01-evidence/preflight.jsonl
           if-no-files-found: error
           retention-days: 7
-      - name: Delete both stacks, revoke the health credential, and release the fleet deploy mutex
+      - name: Delete the stack, revoke the health credential, and release the fleet deploy mutex
         if: always() && steps.acquire.outcome == 'success'
         run: bash infra/t01-smoke/workflow.sh cleanup
       - name: Fail after evidence and cleanup finish

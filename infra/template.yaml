@@ -182,27 +182,10 @@ Resources:
             Action: secretsmanager:GetSecretValue
             Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-*
 
-  T01BrokerHealthBoundary:
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: root-owned immutable boundary for the disposable health role
-        must:
-          - Allow only run-scoped health secret reads
-    DependsOn: DeployRole
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      ManagedPolicyName: hive-v2-t01-broker-health-boundary
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Action: secretsmanager:GetSecretValue
-            Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-*
-
   T01SmokeRole:
     Metadata:
       com.aws.cloudformation.Context:
-        why: protected main-only dispatch owns the disposable preflight and health broker stacks
+        why: protected main-only dispatch owns the disposable preflight stack and run health credential
         must:
           - Create tags only during RunInstances or CreateSecurityGroup
           - Operate on existing resources only when they carry the T01 role tag
@@ -358,20 +341,6 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: ec2.amazonaws.com
-              - Sid: T01HealthBrokerCloudFormation
-                Effect: Allow
-                Action:
-                  - cloudformation:CreateChangeSet
-                  - cloudformation:ExecuteChangeSet
-                  - cloudformation:DeleteChangeSet
-                  - cloudformation:DeleteStack
-                  - cloudformation:DescribeChangeSet
-                  - cloudformation:DescribeStacks
-                  - cloudformation:DescribeStackEvents
-                  - cloudformation:DescribeStackResources
-                  - cloudformation:GetTemplate
-                  - cloudformation:GetTemplateSummary
-                Resource: arn:aws:cloudformation:us-east-1:594552273052:stack/hive-v2-t01-broker/*
               - Sid: T01HealthCredentialLifecycle
                 Effect: Allow
                 Action:
@@ -379,54 +348,6 @@ Resources:
                   - secretsmanager:DescribeSecret
                   - secretsmanager:DeleteSecret
                 Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-*
-              - Sid: T01HealthFunctionLifecycle
-                Effect: Allow
-                Action:
-                  - lambda:CreateFunction
-                  - lambda:DeleteFunction
-                  - lambda:GetFunction
-                  - lambda:GetFunctionConfiguration
-                  - lambda:UpdateFunctionCode
-                  - lambda:UpdateFunctionConfiguration
-                  - lambda:CreateFunctionUrlConfig
-                  - lambda:DeleteFunctionUrlConfig
-                  - lambda:GetFunctionUrlConfig
-                  - lambda:UpdateFunctionUrlConfig
-                  - lambda:AddPermission
-                  - lambda:RemovePermission
-                Resource: arn:aws:lambda:us-east-1:594552273052:function:hive-v2-t01-broker-health
-              - Sid: T01HealthCreateRole
-                Effect: Allow
-                Action: iam:CreateRole
-                Resource: arn:aws:iam::594552273052:role/hive-v2-t01-broker-health
-                Condition:
-                  StringEquals:
-                    iam:PermissionsBoundary: arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary
-              - Sid: T01HealthRoleLifecycle
-                Effect: Allow
-                Action:
-                  - iam:DeleteRole
-                  - iam:GetRole
-                  - iam:GetRolePolicy
-                  - iam:PutRolePolicy
-                  - iam:DeleteRolePolicy
-                  - iam:TagRole
-                  - iam:UntagRole
-                Resource: arn:aws:iam::594552273052:role/hive-v2-t01-broker-health
-              - Sid: T01HealthUpdateBoundary
-                Effect: Allow
-                Action: iam:PutRolePermissionsBoundary
-                Resource: arn:aws:iam::594552273052:role/hive-v2-t01-broker-health
-                Condition:
-                  StringEquals:
-                    iam:PermissionsBoundary: arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary
-              - Sid: T01HealthPassRole
-                Effect: Allow
-                Action: iam:PassRole
-                Resource: arn:aws:iam::594552273052:role/hive-v2-t01-broker-health
-                Condition:
-                  StringEquals:
-                    iam:PassedToService: lambda.amazonaws.com
               - Sid: T01SmokeDeployMutex
                 Effect: Allow
                 Action:
