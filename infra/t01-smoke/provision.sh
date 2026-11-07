@@ -8,7 +8,7 @@ HERMES_ARCHIVE_SHA256=551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae
 EVIDENCE=/var/lib/t01/evidence/preflight.jsonl
 TEAMKIMI_IP=
 
-mkdir -p /opt/t01/source /opt/t01/fixtures /opt/t01/hermes /opt/t01/tools /opt/t01/pm-home
+mkdir -p /opt/t01/source /opt/t01/fixtures /opt/t01/tools /opt/t01/pm-home
 mkdir -p /var/lib/t01/evidence /var/lib/t01/hermes /etc/t01/broker
 chown root:root /opt/t01 /var/lib/t01 /etc/t01
 chmod 0711 /opt/t01 /var/lib/t01 /etc/t01
