@@ -323,7 +323,7 @@ temporary, root = workspace()
 with temporary:
     result = run(root, 'cleanup', {'SCENARIO': 'matrix', 'PAID_EVIDENCE_VERIFIED': 'no'})
     assert result.returncode != 0, (result.stdout, result.stderr)
-    calls = (root / 'calls').read_text()
+    calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
     assert 'delete-stack' not in calls and 'delete-secret' not in calls and 's3 rm' not in calls, calls
     assert 'release aws-acts' not in calls, calls
 
