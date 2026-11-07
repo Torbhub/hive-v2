@@ -56,7 +56,6 @@ acquire_mutex() {
 }
 
 mutex_renewer() {
-  trap 'status=$?; printf "%s\n" "$status" > "$RENEWAL_STATUS_FILE.tmp"; mv "$RENEWAL_STATUS_FILE.tmp" "$RENEWAL_STATUS_FILE"' EXIT
   while [ ! -e "$RENEWAL_STOP_FILE" ]; do
     bash infra/deploy-mutex.sh renew aws-acts "$OWNER" || return $?
     sleep 600
@@ -73,10 +72,6 @@ stop_mutex_renewal() {
     kill -TERM -- "-$MUTEX_RENEWER_PID" 2>/dev/null || true
   fi
   wait "$MUTEX_RENEWER_PID" 2>/dev/null || rc=$?
-  while [ ! -f "$RENEWAL_STATUS_FILE" ]; do
-    sleep 0.01
-  done
-  rc="$(cat "$RENEWAL_STATUS_FILE")"
   case "$rc" in
     0|143) rc=0 ;;
   esac
@@ -85,41 +80,46 @@ stop_mutex_renewal() {
 }
 
 with_mutex_renewal() {
-  local command="$1" command_rc=0 renewal_rc=0 command_pid
+  local command="$1" command_rc=0 renewal_rc=0 command_pid wait_n_rc finished_pid
   shift
   RENEWAL_DIR="$(mktemp -d)"
   RENEWAL_STOP_FILE="$RENEWAL_DIR/stop"
-  RENEWAL_STATUS_FILE="$RENEWAL_DIR/status"
   set -m
   mutex_renewer &
   MUTEX_RENEWER_PID=$!
-  export RENEWAL_STOP_FILE RENEWAL_STATUS_FILE RENEWAL_DIR MUTEX_RENEWER_PID
+  export RENEWAL_STOP_FILE RENEWAL_DIR MUTEX_RENEWER_PID
   ( "$command" "$@" ) &
   command_pid=$!
   set +m
   while true; do
-    wait -n "$command_pid" "$MUTEX_RENEWER_PID" || true
-    if ! jobs -p | grep -q "^$command_pid$"; then
-      wait "$command_pid" || command_rc=$?
-      stop_mutex_renewal || renewal_rc=$?
-      break
-    fi
-    if ! jobs -p | grep -q "^$MUTEX_RENEWER_PID$"; then
-      wait "$MUTEX_RENEWER_PID" || renewal_rc=$?
-      if [ -f "$RENEWAL_STATUS_FILE" ]; then
-        renewal_rc="$(cat "$RENEWAL_STATUS_FILE")"
-      fi
-      if [ -e "$RENEWAL_STOP_FILE" ] && [ "$renewal_rc" -eq 143 ]; then
-        renewal_rc=0
-      fi
-      if [ "$renewal_rc" -ne 0 ]; then
-        kill -TERM -- "-$command_pid" 2>/dev/null || true
-      fi
-      wait "$command_pid" || command_rc=$?
-      break
-    fi
+    wait_n_rc=0 finished_pid=
+    wait -n -p finished_pid "$command_pid" "$MUTEX_RENEWER_PID" || wait_n_rc=$?
+    case "$finished_pid" in
+      "$command_pid")
+        command_rc="$wait_n_rc"
+        stop_mutex_renewal || renewal_rc=$?
+        break
+        ;;
+      "$MUTEX_RENEWER_PID")
+        renewal_rc="$wait_n_rc"
+        if [ -e "$RENEWAL_STOP_FILE" ] && [ "$renewal_rc" -eq 143 ]; then
+          renewal_rc=0
+        fi
+        if [ "$renewal_rc" -ne 0 ]; then
+          kill -TERM -- "-$command_pid" 2>/dev/null || true
+        fi
+        wait "$command_pid" || command_rc=$?
+        break
+        ;;
+      *)
+        return 127
+        ;;
+    esac
   done
   rm -rf "$RENEWAL_DIR"
+  if [ "$command" = cleanup ] && (( command_rc == 0 && renewal_rc == 0 )); then
+    bash infra/deploy-mutex.sh release aws-acts "$OWNER" || return $?
+  fi
   if (( renewal_rc != 0 )); then
     return "$renewal_rc"
   fi
@@ -291,12 +291,6 @@ cleanup() {
     if (( rc != 0 )); then
       status=$rc
     fi
-  fi
-  if (( status == 0 )); then
-    stop_mutex_renewal || status=$?
-  fi
-  if (( status == 0 )); then
-    bash infra/deploy-mutex.sh release aws-acts "$OWNER" || status=$?
   fi
   return "$status"
 }

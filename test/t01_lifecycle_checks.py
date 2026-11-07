@@ -199,12 +199,6 @@ def lifecycle_success_case(command):
             'MOCK_SECRET_PRESENT': '0' if command == 'cleanup' else '1',
         }
         if command == 'cleanup':
-            workflow = root / 'infra/t01-smoke/workflow.sh'
-            source = workflow.read_text()
-            trap = '''trap 'status=$?; printf "%s\\n" "$status" > "$RENEWAL_STATUS_FILE.tmp"; mv "$RENEWAL_STATUS_FILE.tmp" "$RENEWAL_STATUS_FILE"' EXIT'''
-            delayed_trap = '''trap 'status=$?; /bin/sleep 0.05; printf "%s\\n" "$status" > "$RENEWAL_STATUS_FILE.tmp"; mv "$RENEWAL_STATUS_FILE.tmp" "$RENEWAL_STATUS_FILE"' EXIT'''
-            assert trap in source
-            workflow.write_text(source.replace(trap, delayed_trap))
             environment['MOCK_RENEWER_PID_FILE'] = str(root / 'renewer.pid')
         result = run(root, command, environment)
         assert result.returncode == 0, (command, result.stdout, result.stderr)
@@ -285,6 +279,101 @@ wait
             assert 'create-secret' not in calls, calls
 
 
+def assert_inner_cleanup_ownership(root):
+    source = (root / 'infra/t01-smoke/workflow.sh').read_text()
+    cleanup_source = source.split('cleanup() {', 1)[1].split('\ncase ', 1)[0]
+    assert 'stop_mutex_renewal' not in cleanup_source
+    assert 'deploy-mutex.sh release' not in cleanup_source
+
+
+def mock_renewer_wait(root, rc, forever):
+    workflow = root / 'infra/t01-smoke/workflow.sh'
+    workflow.write_text(f'''jobs() {{ :; }}
+wait() {{
+  if [ "$1" = "$MUTEX_RENEWER_PID" ]; then
+    return {rc}
+  fi
+  builtin wait "$@"
+}}
+''' + workflow.read_text())
+    if forever:
+        mutex = root / 'infra/deploy-mutex.sh'
+        source = mutex.read_text()
+        source = source.replace(
+            'exit "${MOCK_RENEW_RC:-0}"',
+            'if [ "${MOCK_RENEW_FOREVER:-0}" = 1 ]; then\n'
+            '  while true; do /bin/sleep 600; done\n'
+            'fi\n'
+            'exit "${MOCK_RENEW_RC:-0}"',
+        )
+        mutex.write_text(source)
+
+
+def genuine_renewer_status_after_command_case(rc):
+    temporary, root = workspace()
+    with temporary:
+        mock_lifecycle(root)
+        mock_renewer_wait(root, rc, True)
+        result = run(root, 'cleanup', {
+            **DEPLOY_ENV,
+            'MOCK_SECRET_PRESENT': '0',
+            'MOCK_RENEW_FOREVER': '1',
+        })
+        assert result.returncode == rc, (result.stdout, result.stderr)
+        assert 'release aws-acts' not in (root / 'calls').read_text()
+
+
+def already_reaped_renewal_success_case():
+    temporary, root = workspace()
+    with temporary:
+        mock_lifecycle(root)
+        result = run(root, 'cleanup', {**DEPLOY_ENV, 'MOCK_SECRET_PRESENT': '0'})
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert (root / 'calls').read_text().count('release aws-acts hive-v2-t01-smoke/123') == 1
+
+
+genuine_renewer_status_after_command_case(23)
+genuine_renewer_status_after_command_case(127)
+already_reaped_renewal_success_case()
+
+
+def renewal_failure_before_inner_cleanup_case():
+    temporary, root = workspace()
+    with temporary:
+        assert_inner_cleanup_ownership(root)
+        mock_lifecycle(root)
+        result = run(root, 'cleanup', {**DEPLOY_ENV, 'MOCK_SECRET_PRESENT': '0', 'MOCK_RENEW_RC': '23'})
+        assert result.returncode == 23, (result.stdout, result.stderr)
+        calls = (root / 'calls').read_text()
+        assert 'release aws-acts' not in calls, calls
+
+
+def inner_subshell_cannot_reap_outer_case():
+    temporary, root = workspace()
+    with temporary:
+        assert_inner_cleanup_ownership(root)
+        mock_lifecycle(root)
+        result = run(root, 'cleanup', {
+            **DEPLOY_ENV,
+            'MOCK_SECRET_PRESENT': '0',
+            'MOCK_RENEWER_PID_FILE': str(root / 'renewer.pid'),
+        })
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        calls = (root / 'calls').read_text()
+        assert calls.count('release aws-acts hive-v2-t01-smoke/123') == 1, calls
+        renewer_pid = int((root / 'renewer.pid').read_text())
+        try:
+            os.kill(renewer_pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError(f'renewer {renewer_pid} survived release')
+
+
+renewal_failure_before_inner_cleanup_case()
+inner_subshell_cannot_reap_outer_case()
+
+
 with ThreadPoolExecutor(max_workers=8) as pool:
     list(pool.map(renewal_failure_case, ('issue-health-credential', 'deploy', 'collect', 'cleanup')))
 
@@ -294,3 +383,60 @@ with temporary:
     result = run(root, 'deploy', {**DEPLOY_ENV, 'MOCK_SECRET_ERROR': '1'})
     assert result.returncode != 0, (result.stdout, result.stderr)
     assert 'cloudformation deploy' not in (root / 'calls').read_text()
+
+
+def missing_renewal_status_case():
+    temporary, root = workspace()
+    with temporary:
+        mock_aws(root, '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+case "$1 $2" in
+  'cloudformation describe-stacks') printf 'i-test\n' ;;
+  'ec2 get-console-output') printf 'T01_EVIDENCE not-json\n' ;;
+esac
+''')
+        write_executable(root / 'bin/sleep', '''#!/usr/bin/env bash
+if [ "${1:-}" = 600 ]; then
+  /bin/sleep 0.01
+fi
+''')
+        (root / 'console').write_text('not-json\n')
+        (root / 'artifact').mkdir()
+        workflow = root / 'infra/t01-smoke/workflow.sh'
+        source = workflow.read_text()
+        trap = '''trap 'status=$?; printf "%s\\n" "$status" > "$RENEWAL_STATUS_FILE.tmp"; mv "$RENEWAL_STATUS_FILE.tmp" "$RENEWAL_STATUS_FILE"' EXIT'''
+        workflow.write_text(source.replace(trap, ''))
+        env = {
+            'PATH': f'{root}/bin:{os.environ["PATH"]}',
+            'MOCK_CALLS': str(root / 'calls'),
+            'MOCK_RELEASED': str(root / 'released'),
+            'MOCK_RENEW_AFTER_RELEASE': str(root / 'renew-after-release'),
+            'MOCK_CONSOLE': str(root / 'console'),
+            'GITHUB_RUN_ID': '123',
+            'LIFETIME_MINUTES': '5',
+            'EVIDENCE_DIR': str(root / 'artifact'),
+        }
+        process = subprocess.Popen(
+            ['bash', 'infra/t01-smoke/workflow.sh', 'collect'], cwd=root, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            state = subprocess.check_output(
+                ['ps', '-o', 'pid=,ppid=,pgid=,sid=,stat=,args=', '--sid', str(process.pid)],
+                text=True,
+            )
+            print(state)
+            for line in state.splitlines()[1:]:
+                try:
+                    os.kill(int(line.split()[0]), 15)
+                except ProcessLookupError:
+                    pass
+            process.wait()
+            raise AssertionError('renewal completion depended on the status file')
+        assert process.returncode == 1, (stdout, stderr)
+        assert 'console produced rejected evidence' in stderr, stderr
+
+
+missing_renewal_status_case()
