@@ -58,7 +58,7 @@ read_hermes_check_metadata() {
   candidate_category="$(cat "$category_file")"
   candidate_origin="$(cat "$origin_file")"
   case "$candidate_category" in
-    runtime-version-check-failed|runtime-identity-check-failed|lazy-install-config-check-failed|lazy-install-request-accepted|hermes-check-timeout|hermes-check-os-error|hermes-check-json-error|hermes-check-runtime-error|hermes-check-value-error) ;;
+    runtime-version-check-failed|runtime-version-exit-failed|runtime-version-format-failed|runtime-identity-check-failed|lazy-install-config-check-failed|lazy-install-request-accepted|hermes-check-timeout|hermes-check-os-error|hermes-check-json-error|hermes-check-runtime-error|hermes-check-value-error) ;;
     *) return 0 ;;
   esac
   [ "$candidate_origin" = hermes-check:1 ] || return 0
