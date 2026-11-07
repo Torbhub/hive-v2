@@ -273,6 +273,7 @@ Environment=HOME=/var/lib/t01/hermes
 Environment=PATH=/opt/t01/hermes/bin:/usr/bin:/bin
 Environment=HERMES_HOME=/var/lib/t01/hermes
 Environment=HERMES_INSTALL_ROOT=/opt/t01/source
+Environment=PYTHONPATH=/opt/t01/source
 Environment=HERMES_RUNTIME_DIR=/opt/t01/tools
 Environment=TEAMKIMI_OPENAI_COMPATIBLE_URL=http://127.0.0.1:8765/v1
 Environment=TEAMKIMI_MODEL_ID=Kimi 3.1 Pro

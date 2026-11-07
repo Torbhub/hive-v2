@@ -101,6 +101,11 @@ describe('T01 disposable smoke infrastructure', () => {
 
   it('uses the provisioned Hermes runtime store in the sealed service', () => {
     const provision = read('provision');
+    expect(provision).toContain(
+      `Environment=HERMES_INSTALL_ROOT=/opt/t01/source
+Environment=PYTHONPATH=/opt/t01/source
+Environment=HERMES_RUNTIME_DIR=/opt/t01/tools`,
+    );
     expect(provision).toContain('Environment=HERMES_RUNTIME_DIR=/opt/t01/tools');
     expect(provision).toContain('ReadOnlyPaths=/opt/t01/fixtures /opt/t01/hermes /opt/t01/source /opt/t01/tools');
   });
