@@ -10,7 +10,7 @@ import { authenticateBearer } from '../src/security.js';
 import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
 import { createServer } from '../web/server.js';
 import {
-  AGENT_CREDENTIAL, agentHeaders, configureSecurity, registryItems, securityFile, writeSecurity,
+  AGENT_CREDENTIAL, agentHeaders, configureSecurity, registryItems, startTestRegistry,
 } from './security-fixture.js';
 
 const servers: Server[] = [];
@@ -24,20 +24,14 @@ async function fixture() {
   await writeJson(hubPath(root, 'hub.json'), { name: 'hub' });
   await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
   await appendTaskEvent(root, { id: 'demo-2', project: 'demo', event: 'asked', at: new Date().toISOString() });
-  await writeSecurity(root);
-  configureSecurity(root);
-  const server = createServer(root);
+  const items = registryItems();
+  const { broker, registry } = await startTestRegistry(items);
+  servers.push(broker);
+  configureSecurity();
+  const server = createServer(root, registry);
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  return { root, home, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
-}
-
-async function rows(root: string): Promise<Record<string, unknown>[]> {
-  return JSON.parse(await fs.readFile(securityFile(root), 'utf8')).items;
-}
-
-async function replaceRows(root: string, values: Record<string, unknown>[]): Promise<void> {
-  await fs.writeFile(securityFile(root), JSON.stringify({ items: values }, null, 2));
+  return { root, home, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, items };
 }
 
 async function post(base: string, pathname: string, body: unknown) {
@@ -57,16 +51,14 @@ function taskGrant(task = 'demo-1') {
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   delete process.env.HIVE_COLLABORATION_ENABLED;
-  delete process.env.HIVE_REGISTRY_FILE;
   delete process.env.HIVE_ASSERTION_KEYS_JSON;
 });
 
 describe('project-level authority and metadata', () => {
   it('does not allow task-scoped grants for wake continue mode approvals or project deletion', async () => {
-    const { root, base } = await fixture();
-    const values = await rows(root);
+    const { base, items } = await fixture();
+    const values = items;
     values.splice(values.findIndex((row) => row.sk === 'PRINCIPAL#agent:builder'), 1, taskGrant());
-    await replaceRows(root, values);
     for (const [pathname, body] of [
       ['/api/wake', { project: 'demo', task: 'demo-1' }],
       ['/api/continue', { project: 'demo', task: 'demo-1' }],
@@ -79,7 +71,7 @@ describe('project-level authority and metadata', () => {
   });
 
   it('filters other agents repo orchestrator and count metadata for task-only reads', async () => {
-    const { root, home, base } = await fixture();
+    const { root, home, base, items } = await fixture();
     await writeJson(hivePath(home, 'team.json'), { agents: [
       { name: 'demo-orchestrator', orchestrator: true },
       { name: 'builder', task: 'demo-1', worktree: 'one' },
@@ -92,9 +84,8 @@ describe('project-level authority and metadata', () => {
         choices: [{ label: 'Yes', description: 'continue' }, { label: 'No', description: 'stop' }],
       }],
     });
-    const values = await rows(root);
+    const values = items;
     values.splice(values.findIndex((row) => row.sk === 'PRINCIPAL#agent:builder'), 1, taskGrant());
-    await replaceRows(root, values);
     const view = await (await fetch(`${base}/api/view`, { headers: agentHeaders() })).json();
     expect(view.tasks.map((task: { id: string }) => task.id)).toEqual(['demo-1']);
     expect(view.projects).toHaveLength(1);
@@ -107,15 +98,14 @@ describe('project-level authority and metadata', () => {
   });
 
   it('rejects an ambiguous bare duplicate agent and honors an exact worktree', async () => {
-    const { root, home, base } = await fixture();
+    const { root, home, base, items } = await fixture();
     await writeJson(hivePath(home, 'team.json'), { agents: [
       { name: 'demo-orchestrator', orchestrator: true },
       { name: 'builder', task: 'demo-1', worktree: 'one' },
       { name: 'builder', task: 'demo-2', worktree: 'two' },
     ] });
-    const values = await rows(root);
+    const values = items;
     values.splice(values.findIndex((row) => row.sk === 'PRINCIPAL#agent:builder'), 1, taskGrant());
-    await replaceRows(root, values);
     expect((await post(base, '/api/answer', {
       project: 'demo', agent: 'builder', choice: '1', fingerprint: 'x',
     })).status).toBe(404);
@@ -127,17 +117,15 @@ describe('project-level authority and metadata', () => {
 
 describe('independent revocation and broker status', () => {
   it('denies credentials profiles ACLs and wakes with revocation records', async () => {
-    const { root, base } = await fixture();
-    const values = await rows(root);
+    const { base, items } = await fixture();
+    const values = items;
     values.push({
       pk: 'REVOCATION#AGENT#builder', sk: 'PROFILE', epoch: 2, revokedAt: 1,
     });
-    await replaceRows(root, values);
     expect((await fetch(`${base}/api/agent/identity`, { headers: agentHeaders() })).status).toBe(401);
     values.push({
       pk: 'REVOCATION#ACL#demo#*#*', sk: 'PRINCIPAL#agent:builder', epoch: 2, revokedAt: 1,
     });
-    await replaceRows(root, values);
     expect((await post(base, '/api/wake-subscriptions', {
       agentId: 'builder', executionGrantId: 'agent-grant',
     })).status).toBe(401);
@@ -155,11 +143,9 @@ describe('independent revocation and broker status', () => {
     await new Promise<void>((resolve) => broker.listen(0, '127.0.0.1', resolve));
     const registry = new DynamoCliRegistry('unused', `http://127.0.0.1:${(broker.address() as AddressInfo).port}`);
     await expect(registry.currentAccount('user:alice', AGENT_CREDENTIAL)).rejects.toMatchObject({ status: 401 });
-    await expect(registry.put({
-      pk: 'AGENT#builder', sk: 'WAKE#abc', agentId: 'builder', revokedAt: null,
-    }, AGENT_CREDENTIAL)).rejects.toMatchObject({ status: 500 });
-    await expect(registry.put({
-      pk: 'AGENT#builder', sk: 'WAKE#abc', agentId: 'builder', revokedAt: 1,
-    }, AGENT_CREDENTIAL)).rejects.toMatchObject({ status: 404 });
+    await expect(registry.createWakeSubscription('builder', AGENT_CREDENTIAL, 'agent-grant'))
+      .rejects.toMatchObject({ status: 500 });
+    await expect(registry.revokeWakeSubscription('builder', AGENT_CREDENTIAL, 'abc'))
+      .rejects.toMatchObject({ status: 404 });
   });
 });

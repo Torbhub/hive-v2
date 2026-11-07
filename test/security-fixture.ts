@@ -1,6 +1,9 @@
 import { createHash, createHmac } from 'node:crypto';
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import {
+  DynamoCliRegistry, type DelegatedApprovalRequest, type Registry, type RegistryRow, type WakeSubscription,
+} from '../src/registry.js';
 
 export const ASSERTION_KEYS = {
   current: 'new',
@@ -16,11 +19,41 @@ export const CREDENTIAL_ID = '0123456789abcdef';
 export const AGENT_CREDENTIAL = `hva1.builder.${CREDENTIAL_ID}.test-agent-secret-with-high-entropy`;
 const SALT = 'test-only-salt';
 
-export function securityFile(root: string): string {
-  return path.join(root, '.hive-hub', 'security.json');
+export class MemoryRegistry implements Registry {
+  private readonly broker: DynamoCliRegistry;
+
+  constructor(readonly items: RegistryRow[], brokerUrl = 'http://127.0.0.1:9') {
+    this.broker = new DynamoCliRegistry('unused', brokerUrl);
+  }
+
+  async get(pk: string, sk: string): Promise<RegistryRow | undefined> {
+    return this.items.find((row) => row.pk === pk && row.sk === sk);
+  }
+
+  async currentAccount(subject: string): Promise<RegistryRow | undefined> {
+    return this.get(`SUBJECT#${subject}`, 'PROFILE');
+  }
+
+  async delegatedApprovalAccount(agentId: string, credential: string,
+    request: DelegatedApprovalRequest): Promise<RegistryRow | undefined> {
+    return this.broker.delegatedApprovalAccount(agentId, credential, request);
+  }
+
+  async createWakeSubscription(agentId: string, credential: string,
+    executionGrantId: string): Promise<WakeSubscription> {
+    return this.broker.createWakeSubscription(agentId, credential, executionGrantId);
+  }
+
+  async revokeWakeSubscription(agentId: string, credential: string, subscriptionId: string): Promise<void> {
+    return this.broker.revokeWakeSubscription(agentId, credential, subscriptionId);
+  }
+
+  async query(pk: string, skPrefix: string): Promise<RegistryRow[]> {
+    return this.items.filter((row) => row.pk === pk && row.sk.startsWith(skPrefix));
+  }
 }
 
-export function registryItems(project = 'demo'): Record<string, unknown>[] {
+export function registryItems(project = 'demo'): RegistryRow[] {
   const actions = ['read', 'write', 'execute', 'admin'];
   const rows = [
     { pk: 'SUBJECT#user:alice', sk: 'PROFILE', subject: 'user:alice', accountStatus: 'active', accountEpoch: 1 },
@@ -56,16 +89,50 @@ export function registryItems(project = 'demo'): Record<string, unknown>[] {
   return rows;
 }
 
-export async function writeSecurity(root: string, items = registryItems()): Promise<void> {
-  const file = securityFile(root);
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, JSON.stringify({ items }, null, 2));
+export async function startTestRegistry(items = registryItems()): Promise<{ broker: http.Server; registry: MemoryRegistry }> {
+  const broker = http.createServer((req, res) => {
+    void (async () => {
+      let text = '';
+      for await (const chunk of req) text += chunk;
+      const body = text ? JSON.parse(text) : {};
+      let status = 200;
+      let result: Record<string, unknown> = {};
+      if (req.url === '/api/hive/broker/delegated-approval') {
+        const account = items.find((row) => row.pk === `SUBJECT#${body.approverSubject}` && row.sk === 'PROFILE');
+        if (account?.accountStatus !== 'active') status = 401;
+        else {
+          result = {
+            subject: body.approverSubject, accountStatus: 'active',
+            accountEpoch: account.accountEpoch, expiresAt: account.expiresAt ?? null,
+          };
+        }
+      } else if (req.url === '/api/hive/broker/wake-subscriptions') {
+        if (body.agentId !== 'builder' || body.executionGrantId === 'bob-write') status = 404;
+        else {
+          result = {
+            subscriptionId: 'wake-test', agentId: body.agentId, executionGrantId: body.executionGrantId,
+            createdBy: 'user:alice', createdAt: 1, revokedAt: null, aclEpoch: 1,
+          };
+        }
+      } else if (req.url === '/api/hive/broker/wake-subscriptions/revoke') {
+        result = { ok: true };
+      } else {
+        status = 404;
+      }
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(result));
+    })().catch(() => {
+      res.writeHead(500).end();
+    });
+  });
+  await new Promise<void>((resolve) => broker.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(broker.address() as AddressInfo).port}`;
+  return { broker, registry: new MemoryRegistry(items, url) };
 }
 
-export function configureSecurity(root: string, collaboration = true): void {
+export function configureSecurity(collaboration = true): void {
   if (collaboration) process.env.HIVE_COLLABORATION_ENABLED = '1';
   else delete process.env.HIVE_COLLABORATION_ENABLED;
-  process.env.HIVE_REGISTRY_FILE = securityFile(root);
   process.env.HIVE_ASSERTION_KEYS_JSON = JSON.stringify(ASSERTION_KEYS);
 }
 

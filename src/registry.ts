@@ -1,6 +1,4 @@
 import { execFile } from 'node:child_process';
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -15,89 +13,29 @@ export type DelegatedApprovalRequest = {
   approverGrantId: string;
 };
 
+export type WakeSubscription = {
+  subscriptionId: string;
+  agentId: string;
+  executionGrantId: string;
+  createdBy: string;
+  createdAt: number;
+  revokedAt: number | null;
+  aclEpoch: number;
+};
+
 export interface Registry {
   get(pk: string, sk: string): Promise<RegistryRow | undefined>;
   currentAccount(subject: string, credential: string): Promise<RegistryRow | undefined>;
   delegatedApprovalAccount(agentId: string, credential: string,
     request: DelegatedApprovalRequest): Promise<RegistryRow | undefined>;
-  put(row: RegistryRow, credential: string): Promise<RegistryRow>;
+  createWakeSubscription(agentId: string, credential: string, executionGrantId: string): Promise<WakeSubscription>;
+  revokeWakeSubscription(agentId: string, credential: string, subscriptionId: string): Promise<void>;
   query(pk: string, skPrefix: string): Promise<RegistryRow[]>;
 }
 
 export class RegistryUnavailable extends Error {
   constructor(message: string, readonly status = 503) {
     super(message);
-  }
-}
-
-export class FileRegistry implements Registry {
-  private writes: Promise<void> = Promise.resolve();
-
-  constructor(private readonly file: string) {}
-
-  private async read(): Promise<RegistryRow[]> {
-    let raw: string;
-    try {
-      raw = await fs.readFile(this.file, 'utf8');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw new RegistryUnavailable('registry read failed');
-    }
-    try {
-      const document = JSON.parse(raw) as { items?: RegistryRow[] };
-      if (!Array.isArray(document.items)) throw new Error();
-      return document.items;
-    } catch {
-      throw new RegistryUnavailable('registry read failed');
-    }
-  }
-
-  async get(pk: string, sk: string): Promise<RegistryRow | undefined> {
-    return (await this.read()).find((row) => row.pk === pk && row.sk === sk);
-  }
-
-  async currentAccount(subject: string, _credential: string): Promise<RegistryRow | undefined> {
-    return this.get(`SUBJECT#${subject}`, 'PROFILE');
-  }
-
-  async delegatedApprovalAccount(agentId: string, _credential: string,
-    request: DelegatedApprovalRequest): Promise<RegistryRow | undefined> {
-    const rows = await this.read();
-    const allowed = (principal: string, grantId: string): boolean => {
-      const pk = `ACL#${request.project}#${request.task ?? '*'}#*`;
-      const sk = `PRINCIPAL#${principal}`;
-      const row = rows.find((candidate) => candidate.pk === pk && candidate.sk === sk);
-      if (!row) return false;
-      const ledger = rows.some((candidate) => candidate.pk === `REVOCATION#${pk}` && candidate.sk === sk);
-      const wrongScope = request.task !== undefined && row.task !== request.task;
-      if (row.revokedAt !== null && row.revokedAt !== undefined || ledger || wrongScope) return false;
-      return row.grantId === grantId && Array.isArray(row.actions) && row.actions.includes('execute');
-    };
-    if (!allowed(`agent:${agentId}`, request.consumerGrantId)
-      || !allowed(request.approverSubject, request.approverGrantId)) {
-      return undefined;
-    }
-    const account = rows.find((row) => row.pk === `SUBJECT#${request.approverSubject}` && row.sk === 'PROFILE');
-    return account?.accountStatus === 'active' ? account : undefined;
-  }
-
-  async query(pk: string, skPrefix: string): Promise<RegistryRow[]> {
-    return (await this.read()).filter((row) => row.pk === pk && row.sk.startsWith(skPrefix));
-  }
-
-  async put(row: RegistryRow, _credential: string): Promise<RegistryRow> {
-    this.writes = this.writes.then(async () => {
-      const rows = await this.read();
-      const index = rows.findIndex((current) => current.pk === row.pk && current.sk === row.sk);
-      if (index < 0) rows.push(row);
-      else rows[index] = row;
-      await fs.mkdir(path.dirname(this.file), { recursive: true });
-      const temporary = `${this.file}.tmp.${process.pid}`;
-      await fs.writeFile(temporary, JSON.stringify({ items: rows }, null, 2) + '\n', { mode: 0o600 });
-      await fs.rename(temporary, this.file);
-    });
-    await this.writes;
-    return row;
   }
 }
 
@@ -173,19 +111,15 @@ export class DynamoCliRegistry implements Registry {
     return { ...row, pk: `SUBJECT#${request.approverSubject}`, sk: 'PROFILE' };
   }
 
-  async put(row: RegistryRow, credential: string): Promise<RegistryRow> {
-    if (!row.sk.startsWith('WAKE#') || typeof row.agentId !== 'string') {
-      throw new RegistryUnavailable('only wake writes use the broker');
-    }
-    const revoked = row.revokedAt !== null && row.revokedAt !== undefined;
-    const result = await this.broker(
-      revoked ? '/api/hive/broker/wake-subscriptions/revoke' : '/api/hive/broker/wake-subscriptions',
-      credential,
-      revoked
-        ? { agentId: row.agentId, subscriptionId: row.subscriptionId }
-        : { agentId: row.agentId, executionGrantId: row.executionGrantId },
-    );
-    return revoked ? row : result as RegistryRow;
+  async createWakeSubscription(agentId: string, credential: string,
+    executionGrantId: string): Promise<WakeSubscription> {
+    return this.broker('/api/hive/broker/wake-subscriptions', credential, {
+      agentId, executionGrantId,
+    }) as Promise<WakeSubscription>;
+  }
+
+  async revokeWakeSubscription(agentId: string, credential: string, subscriptionId: string): Promise<void> {
+    await this.broker('/api/hive/broker/wake-subscriptions/revoke', credential, { agentId, subscriptionId });
   }
 
   async query(pk: string, skPrefix: string): Promise<RegistryRow[]> {
@@ -199,7 +133,6 @@ export class DynamoCliRegistry implements Registry {
 }
 
 export function registryFromEnv(env: NodeJS.ProcessEnv = process.env): Registry {
-  if (env.HIVE_REGISTRY_FILE) return new FileRegistry(env.HIVE_REGISTRY_FILE);
   return new DynamoCliRegistry(
     env.HIVE_COLLABORATION_TABLE ?? 'nexus-hive-collaboration',
     env.HIVE_NEXUS_BASE_URL ?? 'https://nexus.dexima.ai',

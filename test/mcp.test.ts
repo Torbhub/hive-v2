@@ -8,11 +8,10 @@ import { serveMcp, sleep } from '../src/mcp.js';
 import * as questionModule from '../src/questions.js';
 import { answerQuestionBatch, cancelQuestionBatch, listOpenQuestionBatches } from '../src/questions.js';
 import { appendTaskEvent, hivePath, writeJson, writeProjects } from '../src/state.js';
-import { AGENT_CREDENTIAL, agentEnv, configureSecurity, writeSecurity } from './security-fixture.js';
+import { AGENT_CREDENTIAL, MemoryRegistry, agentEnv, configureSecurity, registryItems } from './security-fixture.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
-  delete process.env.HIVE_REGISTRY_FILE;
   delete process.env.HIVE_ASSERTION_KEYS_JSON;
 });
 
@@ -29,7 +28,7 @@ const GOOD_BATCH = {
 
 type Client = ReturnType<typeof connect>;
 
-function connect(env: NodeJS.ProcessEnv, extra: { timeoutMs?: number } = {}) {
+function connect(env: NodeJS.ProcessEnv, extra: { timeoutMs?: number; registry?: MemoryRegistry } = {}) {
   const input = new PassThrough();
   let out = '';
   const output = new Writable({
@@ -56,8 +55,7 @@ function envFor(root: string): NodeJS.ProcessEnv {
 
 async function root(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), 'hive-mcp-'));
-  await writeSecurity(root);
-  configureSecurity(root, false);
+  configureSecurity(false);
   return root;
 }
 
@@ -332,16 +330,15 @@ describe('authenticated MCP integration', () => {
     ] });
     await appendTaskEvent(r, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
     await appendTaskEvent(r, { id: 'demo-2', project: 'demo', event: 'asked', at: new Date().toISOString() });
-    const { registryItems } = await import('./security-fixture.js');
     const items = registryItems().map((row) => row.sk === 'PRINCIPAL#agent:builder'
       ? { ...row, pk: 'ACL#demo#demo-2#*', task: 'demo-2' } : row);
-    await writeSecurity(r, items);
     const file = path.join(r, 'credential.env');
     await writeFile(file, `HIVE_AGENT_CREDENTIAL='${AGENT_CREDENTIAL}'\n`, { mode: 0o600 });
+    const registry = new MemoryRegistry(items);
     const c = connect({
       HIVE_HUB_ROOT: r, HIVE_COLLABORATION_ENABLED: '1',
       HIVE_AGENT_CREDENTIAL_FILE: file, HIVE_AGENT_REF: `builder@${two}`,
-    });
+    }, { registry });
     c.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
     await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 1);
     const [batch] = await listOpenQuestionBatches(r);
@@ -353,7 +350,7 @@ describe('authenticated MCP integration', () => {
     const attack = connect({
       HIVE_HUB_ROOT: r, HIVE_COLLABORATION_ENABLED: '1',
       HIVE_AGENT_CREDENTIAL_FILE: file, HIVE_AGENT_REF: `mallory@${two}`,
-    });
+    }, { registry });
     attack.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
     await attack.waitFor(() => attack.messages().length === 1);
     expect(attack.messages()[0].result).toMatchObject({ isError: true });
@@ -363,9 +360,7 @@ describe('authenticated MCP integration', () => {
 
   it('creates a question card for an enabled named orchestrator', async () => {
     const r = await root();
-    const { registryItems } = await import('./security-fixture.js');
     const rows = registryItems().map((row) => JSON.parse(JSON.stringify(row).replaceAll('builder', 'demo-orchestrator')));
-    await writeSecurity(r, rows);
     const home = path.join(r, 'demo');
     await writeProjects(r, { projects: [{ name: 'demo', home, repos: [] }] });
     await writeJson(hivePath(home, 'team.json'), {
@@ -378,7 +373,7 @@ describe('authenticated MCP integration', () => {
     const c = connect({
       HIVE_HUB_ROOT: r, HIVE_COLLABORATION_ENABLED: '1',
       HIVE_AGENT_CREDENTIAL_FILE: file, HIVE_AGENT_REF: `demo-orchestrator@${home}`,
-    });
+    }, { registry: new MemoryRegistry(rows) });
     c.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
     await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 1);
     const [batch] = await listOpenQuestionBatches(r);

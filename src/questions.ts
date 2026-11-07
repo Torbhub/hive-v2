@@ -10,7 +10,7 @@ import {
 import { decisionFingerprint, repositoryFingerprint, verifyDecisionFacts, verifyExecutionRepository } from './decision-verification.js';
 import { credentialFromEnvironment } from './collaboration-credentials.js';
 import { storedAgentTask } from './agent-target.js';
-import { registryFromEnv } from './registry.js';
+import { registryFromEnv, type Registry } from './registry.js';
 import { authenticateBearer, authorizeExact, exactGrant } from './security.js';
 
 export const QUESTION_LIMITS = {
@@ -257,11 +257,10 @@ async function authorizePushConsumption(root: string, batch: QuestionBatch,
   grant: {
     agent?: string; task?: string; grantId?: string; profileAclEpoch?: number;
     approverSubject?: string; approverGrantId?: string; approverAclEpoch?: number;
-  }, env: NodeJS.ProcessEnv): Promise<void> {
+  }, env: NodeJS.ProcessEnv, registry: Registry): Promise<void> {
   if (env.HIVE_COLLABORATION_ENABLED !== '1') return;
   const credential = await credentialFromEnvironment(env);
   if (!credential) throw new Refusal('consuming agent credential required');
-  const registry = registryFromEnv(env);
   const principal = await authenticateBearer(credential, registry, env);
   if (principal.kind !== 'agent' || !principal.agentId) throw new Refusal('consuming agent required');
   const agentRef = env.HIVE_AGENT_REF ?? principal.agentId;
@@ -303,6 +302,7 @@ export async function consumePushApproval(
   cwd: string,
   now = Date.now(),
   env: NodeJS.ProcessEnv = process.env,
+  registry: Registry = registryFromEnv(env),
 ): Promise<string> {
   return withHubLock(root, async () => {
     const [open, closed] = await Promise.all([
@@ -327,7 +327,7 @@ export async function consumePushApproval(
     if (grant.consumedAt) throw new Refusal('approval is already consumed');
     const expiresAt = Date.parse(grant.expiresAt);
     if (!Number.isFinite(expiresAt) || now >= expiresAt) throw new Refusal('approval is expired');
-    await authorizePushConsumption(root, batch, grant, env);
+    await authorizePushConsumption(root, batch, grant, env, registry);
     const fresh = await verifyDecisionFacts(root, { project: batch.project, agent: batch.agent }, {
       ...decision.facts, action: 'push',
     }, now);
