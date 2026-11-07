@@ -149,6 +149,37 @@ def hermes_check():
         output_file.write('\n')
 
 
+HERMES_CHECK_CATEGORIES = {
+    'runtime version check failed': 'runtime-version-check-failed',
+    'runtime identity check failed': 'runtime-identity-check-failed',
+    'lazy-install config check failed': 'lazy-install-config-check-failed',
+    'lazy-install request was accepted': 'lazy-install-request-accepted',
+}
+
+
+def write_hermes_check_metadata(path, content):
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as output_file:
+        output_file.write(content)
+
+
+def record_hermes_check_error(error):
+    if isinstance(error, subprocess.TimeoutExpired):
+        category = 'hermes-check-timeout'
+    elif isinstance(error, json.JSONDecodeError):
+        category = 'hermes-check-json-error'
+    elif isinstance(error, OSError):
+        category = 'hermes-check-os-error'
+    elif isinstance(error, RuntimeError):
+        category = HERMES_CHECK_CATEGORIES.get(str(error), 'hermes-check-runtime-error')
+    else:
+        category = 'hermes-check-value-error'
+    output_path = Path(os.environ.get('T01_RUNTIME_CHECK_OUT', '/var/lib/t01/hermes/runtime-check.json'))
+    write_hermes_check_metadata(output_path.parent / 'bootstrap-category', category)
+    write_hermes_check_metadata(output_path.parent / 'bootstrap-origin', 'hermes-check:1')
+
+
 MAX_EVIDENCE_BYTES = 65_536
 FAILURE_CHECKS = {'bootstrap_error', 'provisioning', 'complete'}
 
@@ -230,7 +261,8 @@ def main():
         try:
             hermes_check()
             return 0
-        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+            record_hermes_check_error(error)
             return 1
     if sys.argv[1] == 'classify-evidence' and len(sys.argv) == 3:
         print(classify_evidence(sys.argv[2]))

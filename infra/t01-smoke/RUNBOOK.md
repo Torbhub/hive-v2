@@ -35,7 +35,7 @@ The workflow uses only the `t01-smoke` environment role. It has no push, pull-re
 ## Evidence review
 
 1. Wait for the connectivity checks and cleanup steps to finish.
-2. Download `t01-preflight-<run-id>`. Every console candidate passes schema-only sanitization before it reaches the artifact. Rejected or oversized input is never uploaded.
+2. Download `t01-preflight-<run-id>`. Every console candidate passes schema-only sanitization before it reaches the artifact. Rejected or oversized input is never uploaded. A runtime-check `bootstrap_error.category` names only the fixed internal subcheck and never contains raw Hermes output.
 3. Check the Hermes commit, source hash, frozen install, and disabled lazy-install records.
 4. Check that every direct-IP, DNS, redirect, IPv6, alternate-port, metadata, and container-credential check passed.
 5. Check that `teamkimi_no_model` passed. This check uses the local health validator and sends no model request.
