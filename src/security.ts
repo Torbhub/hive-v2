@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
-import { randomBytes } from 'node:crypto';
 import type http from 'node:http';
 import { RegistryUnavailable, registryFromEnv, type Registry, type RegistryRow } from './registry.js';
 
@@ -221,53 +220,6 @@ export async function authorize(principal: Principal, registry: Registry, action
     throw new AuthorizationError('not found');
   }
   return grant;
-}
-
-export async function createWakeSubscription(registry: Registry, principal: Principal,
-  agentId: string, executionGrantId: string, credential: string): Promise<RegistryRow> {
-  const profile = await registry.get(`AGENT#${agentId}`, 'PROFILE');
-  if (!profile || await revoked(registry, profile) || typeof profile.project !== 'string' || typeof profile.ownerSubject !== 'string') {
-    throw new AuthorizationError('not found');
-  }
-  if (principal.kind === 'agent' && principal.project !== profile.project) {
-    throw new AuthorizationError('not found');
-  }
-  const owner = principal.kind === 'human' && principal.subject === profile.ownerSubject
-    && executionGrantId === profile.ownerExecutionGrantId;
-  if (!owner) {
-    const grant = await currentGrant(registry, profile.project, principal.subject);
-    if (!grant || grant.grantId !== executionGrantId || !Array.isArray(grant.actions) || !grant.actions.includes('execute')) {
-      throw new AuthorizationError('not found');
-    }
-  }
-  const subscriptionId = randomBytes(16).toString('hex');
-  const row: RegistryRow = {
-    pk: `AGENT#${agentId}`, sk: `WAKE#${subscriptionId}`, subscriptionId, agentId,
-    executionGrantId, createdBy: principal.subject, createdAt: Math.floor(Date.now() / 1000),
-    revokedAt: null, aclEpoch: number(profile, 'aclEpoch', 1),
-  };
-  return registry.put(row, credential);
-}
-
-export async function revokeWakeSubscription(registry: Registry, principal: Principal,
-  agentId: string, subscriptionId: string, credential: string): Promise<void> {
-  const profile = await registry.get(`AGENT#${agentId}`, 'PROFILE');
-  const row = await registry.get(`AGENT#${agentId}`, `WAKE#${subscriptionId}`);
-  if (!profile || !row || await revoked(registry, profile) || await revoked(registry, row)) throw new AuthorizationError('not found');
-  if (principal.kind === 'agent' && principal.project !== profile.project) {
-    throw new AuthorizationError('not found');
-  }
-  const owner = principal.kind === 'human' && principal.subject === profile.ownerSubject;
-  if (!owner) {
-    const grant = await currentGrant(registry, String(profile.project), principal.subject);
-    if (!grant || grant.grantId !== row.executionGrantId
-      || !Array.isArray(grant.actions) || !grant.actions.includes('execute')) {
-      throw new AuthorizationError('not found');
-    }
-  }
-  await registry.put({
-    ...row, revokedAt: Math.floor(Date.now() / 1000), aclEpoch: number(row, 'aclEpoch') + 1,
-  }, credential);
 }
 
 export function publicAgentIdentity(principal: Principal): Record<string, unknown> {

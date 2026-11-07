@@ -1,11 +1,10 @@
 import http from 'node:http';
-import { registryFromEnv } from '../src/registry.js';
+import { registryFromEnv, type Registry } from '../src/registry.js';
 import { authenticateRequest } from '../src/security.js';
 import { errorResponse, routeRequest, type RequestContext } from './authorized.js';
 import { HttpError } from './http-error.js';
 
-export function createServer(root: string): http.Server {
-  const registry = registryFromEnv();
+export function createServer(root: string, registry: Registry = registryFromEnv()): http.Server {
   const server = http.createServer((req, res) => {
     const secret = process.env.HIVE_WEB_SECRET;
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
