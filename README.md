@@ -128,8 +128,10 @@ itself (a systemd timer, `hive-v2-daily-scan.timer`, provisioned from
 `infra/box/` — never made by hand). The orchestrator that picks it up
 follows the experiment skill (`skills/experiment/SKILL.md`): a news-scout
 crawls the standing sources in `docs/crawl-sources.md` plus one web-search
-pass and writes a dated findings note in `docs/crawl/` with at most three
-candidate experiments. The orchestrator tries at most one, in its own lane,
+pass and writes a dated findings note in `docs/crawl/` with a Reddit/AI
+digest and at most three candidate experiments. The digest includes useful
+AI/LLM findings even when they suggest no Hive experiment. The orchestrator
+tries at most one, in its own lane,
 through the gate and a PR. The deslop-reviewer reviews that PR. Only a
 CLEAN verdict earns the `deslop-clean` label that lets auto-merge land it.
 An experiment that touches the loop's control plane never auto-merges:
