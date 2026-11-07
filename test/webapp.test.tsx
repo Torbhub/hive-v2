@@ -203,7 +203,8 @@ describe('instant click feedback', () => {
     expect(vi.mocked(fetch).mock.calls.filter(([i]) => String(i).endsWith('api/start'))).toHaveLength(1);
   });
 
-  it('a dialog answer shows cyan answering… immediately', async () => {
+  it('a long dialog option wraps and retains its answer behavior', async () => {
+    const longLabel = 'Approve this extraordinarily long dialog option without overflowing the narrow mobile viewport';
     const dialogView: HubView = {
       ...VIEW,
       projects: [{
@@ -212,8 +213,8 @@ describe('instant click feedback', () => {
       }],
       dialogs: {
         demo: {
-          kind: 'numbered', text: 'Run this command?\n 1. Approve once', cursor: null, esc: true,
-          options: [{ n: 1, label: 'Approve once', detail: '', offered: true, saves_rule: false }],
+          kind: 'numbered', text: `Run this command?\n 1. ${longLabel}`, cursor: null, esc: true,
+          options: [{ n: 1, label: longLabel, detail: '', offered: true, saves_rule: false }],
           fingerprint: 'fp',
         },
       },
@@ -231,8 +232,12 @@ describe('instant click feedback', () => {
       [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
     });
     const option = [...container.querySelectorAll('button')]
-      .find((b) => b.textContent?.includes('Approve once'));
+      .find((b) => b.textContent?.includes(longLabel));
     if (!option) throw new Error('no dialog option button rendered');
+    expect(option.classList.contains('h-auto')).toBe(true);
+    expect(option.classList.contains('max-w-full')).toBe(true);
+    expect(option.classList.contains('whitespace-normal')).toBe(true);
+    expect(option.classList.contains('text-left')).toBe(true);
     act(() => {
       option.click();
     });
@@ -241,11 +246,11 @@ describe('instant click feedback', () => {
     expect(option.getAttribute('data-pressed')).toBe('true');
     await act(async () => {
       resolveAction!(new Response(
-        JSON.stringify({ ok: true, option: 'Approve once', dialog_gone: true }),
+        JSON.stringify({ ok: true, option: longLabel, dialog_gone: true }),
         { status: 200 },
       ));
     });
-    expect(container.textContent).toContain('answered "Approve once"');
+    expect(container.textContent).toContain(`answered "${longLabel}"`);
   });
 });
 

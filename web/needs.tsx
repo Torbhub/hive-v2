@@ -38,7 +38,7 @@ function DialogBlock({
       {(offered.length > 0 || dialog.esc) && (
         <div className="flex flex-wrap gap-1.5">
           {offered.map((o) => (
-            <Btn key={o.n} id={`${idPrefix}-${o.n}`} onPress={() => onAnswer(String(o.n))}>
+            <Btn key={o.n} id={`${idPrefix}-${o.n}`} className="h-auto max-w-full whitespace-normal text-left" onPress={() => onAnswer(String(o.n))}>
               <Kbd>{o.n}</Kbd>
               {`${o.label}${o.saves_rule ? ' (saves a rule)' : ''}`}
             </Btn>
