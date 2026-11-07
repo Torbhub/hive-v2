@@ -48,31 +48,12 @@ lock_down() {
   ip6tables -A OUTPUT -j REJECT
 }
 
-read_hermes_check_metadata() {
-  local directory="${hermes_check_output%/*}" candidate_category candidate_origin
-  local category_file="$directory/bootstrap-category" origin_file="$directory/bootstrap-origin"
-  [ -f "$category_file" ] && [ ! -L "$category_file" ] || return 0
-  [ -f "$origin_file" ] && [ ! -L "$origin_file" ] || return 0
-  [ "$(stat -c %s "$category_file")" -le 64 ] || return 0
-  [ "$(stat -c %s "$origin_file")" -le 64 ] || return 0
-  candidate_category="$(cat "$category_file")"
-  candidate_origin="$(cat "$origin_file")"
-  case "$candidate_category" in
-    runtime-version-check-failed|runtime-identity-check-failed|lazy-install-config-check-failed|lazy-install-request-accepted|hermes-check-timeout|hermes-check-os-error|hermes-check-json-error|hermes-check-runtime-error|hermes-check-value-error) ;;
-    *) return 0 ;;
-  esac
-  [ "$candidate_origin" = hermes-check:1 ] || return 0
-  category="$candidate_category"
-  origin="$candidate_origin"
-}
-
 on_error() {
   local status=$?
   trap - ERR
   set +e
   lock_down
   local category=unknown origin=unknown:0
-  local hermes_check_output="${T01_RUNTIME_CHECK_OUT:-/var/lib/t01/hermes/runtime-check.json}"
   if [ -n "${BOOTSTRAP_STAGE:-}" ]; then
     category="failure:$BOOTSTRAP_STAGE"
     origin="$BOOTSTRAP_STAGE:$status"
@@ -87,7 +68,6 @@ on_error() {
   if [ -f /var/lib/t01/evidence/bootstrap-origin ]; then
     origin="$(cat /var/lib/t01/evidence/bootstrap-origin)"
   fi
-  read_hermes_check_metadata
   [[ "$category" =~ ^[A-Za-z][A-Za-z0-9_.:-]*$ ]] || category=unknown
   [[ "$origin" =~ ^[A-Za-z0-9_.-]+:[0-9]+$ ]] || origin=unknown:0
   emit bootstrap_error failed "\"category\":\"$category\",\"origin\":\"$origin\""
