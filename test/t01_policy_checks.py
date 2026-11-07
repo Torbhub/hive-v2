@@ -165,7 +165,9 @@ assert not allows('ssm:StartSession', HOST, health_policy)
 assert not allows('ssm:TerminateSession', '*', health_policy)
 assert not allows('ssm:StartSession', DOCUMENT_ARN)
 assert not allows('ssm:StartSession', HOST, **{'ssm:resourceTag/Role': 'nexus-kimi-session'})
-assert DOCUMENT['documentType'] == 'Session'
+assert TEMPLATE['Resources']['T01TeamKimiPortForwardDocument']['Properties']['DocumentType'] == 'Session'
+assert DOCUMENT['sessionType'] == 'Port'
+assert 'documentType' not in DOCUMENT
 assert DOCUMENT['schemaVersion'] == '1.0'
 assert DOCUMENT['properties']['type'] == 'LocalPortForwarding'
 assert DOCUMENT['properties']['portNumber'] == '8765'

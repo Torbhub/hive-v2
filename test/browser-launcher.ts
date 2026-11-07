@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-const STARTUP_MS = 15_000;
+const STARTUP_MS = 30_000;
 const STDERR_CAP = 16_000;
 
 export function chromeArguments(profile: string): string[] {
