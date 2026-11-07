@@ -38,8 +38,8 @@ def resource_matches(statement, resource):
     return any(fnmatch.fnmatchcase(resource, candidate) for candidate in resources)
 
 
-def allows(action, resource, **context):
-    for statement in STATEMENTS:
+def allows(action, resource, statements=STATEMENTS, **context):
+    for statement in statements:
         if statement['Effect'] != 'Allow':
             continue
         if not action_matches(statement, action) or not resource_matches(statement, resource):
@@ -102,6 +102,11 @@ assert not allows('iam:PassRole', 'arn:aws:iam::594552273052:role/hive-v2-t01-br
 assert allows('secretsmanager:CreateSecret', HEALTH_SECRET)
 assert allows('secretsmanager:DeleteSecret', HEALTH_SECRET)
 assert not allows('secretsmanager:DeleteSecret', HEALTH_SECRET.replace('health-', 'other-'))
+PROXY_SECRET = 'arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-proxy-123-AbCdEf'
+assert allows('secretsmanager:CreateSecret', PROXY_SECRET)
+assert allows('secretsmanager:DescribeSecret', PROXY_SECRET)
+assert allows('secretsmanager:DeleteSecret', PROXY_SECRET)
+assert not allows('secretsmanager:DeleteSecret', PROXY_SECRET.replace('proxy-', 'other-'))
 
 
 def deploy_allows(action, resource):
@@ -147,6 +152,25 @@ for resource_name in ('InstanceRole', 'InstanceProfile', 'SecurityGroup', 'Insta
     assert context['why'].strip(), resource_name
     assert context['must'], resource_name
 health_policy = SMOKE_TEMPLATE['Resources']['InstanceRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
+proxy_condition = health_policy[1]
+assert proxy_condition[0] == 'Matrix' and proxy_condition[2] == 'AWS::NoValue'
+health_policy = [health_policy[0], proxy_condition[1], *health_policy[2:]]
+HOST = 'arn:aws:ec2:us-east-1:594552273052:instance/*'
+DOCUMENT_ARN = 'arn:aws:ssm:us-east-1:594552273052:document/hive-v2-t01-teamkimi-port-forward'
+DOCUMENT = TEMPLATE['Resources']['T01TeamKimiPortForwardDocument']['Properties']['Content']
+assert not any('ssm:SendCommand' in str(statement) for statement in (*STATEMENTS, *health_policy))
+assert allows('ssm:StartSession', DOCUMENT_ARN, health_policy)
+assert allows('ssm:StartSession', HOST, health_policy, **{'ssm:resourceTag/Role': 'nexus-kimi-session'})
+assert not allows('ssm:StartSession', HOST, health_policy)
+assert not allows('ssm:TerminateSession', '*', health_policy)
+assert not allows('ssm:StartSession', DOCUMENT_ARN)
+assert not allows('ssm:StartSession', HOST, **{'ssm:resourceTag/Role': 'nexus-kimi-session'})
+assert DOCUMENT['documentType'] == 'Session'
+assert DOCUMENT['properties']['type'] == 'LocalPortForwarding'
+assert DOCUMENT['properties']['portNumber'] == '8765'
+assert DOCUMENT['properties']['localPortNumber'] == '8765'
+assert 'remoteHost' not in DOCUMENT['properties']
+assert TEMPLATE['Resources']['T01TeamKimiPortForwardDocument']['DependsOn'] == 'DeployRole'
 assert health_policy[0]['Action'] == 'secretsmanager:GetSecretValue'
 assert health_policy[0]['Resource'] == 'TeamKimiSecretArn'
 assert TEMPLATE['Resources']['T01SmokeRole']['Properties']['Description'] == (
@@ -183,7 +207,19 @@ role = SMOKE_TEMPLATE['Resources']['InstanceRole']
 boundary = TEMPLATE['Resources']['T01SmokeHealthBoundary']
 assert role['Properties']['PermissionsBoundary'] == INSTANCE_BOUNDARY
 statements = boundary['Properties']['PolicyDocument']['Statement']
-assert len(statements) == 1
+assert len(statements) == 5
+assert 'ssm:SendCommand' not in str(statements)
+proxy_boundary = next(statement for statement in statements if statement.get('Sid') == 'ReadRunTeamKimiControlKey')
+proxy_inline = next(statement for statement in health_policy if statement.get('Sid') == 'ReadRunTeamKimiControlKey')
+assert proxy_inline['Action'] == 'secretsmanager:GetSecretValue'
+assert proxy_inline['Resource'] == 'TeamKimiProxySecretArn'
+resolved_inline = {**proxy_inline, 'Resource': PROXY_SECRET}
+assert effective_permission(proxy_boundary, resolved_inline, 'secretsmanager:GetSecretValue', PROXY_SECRET)
+assert not effective_permission(
+    proxy_boundary, resolved_inline, 'secretsmanager:GetSecretValue',
+    'arn:aws:secretsmanager:us-east-1:594552273052:secret:other-secret',
+)
+assert SMOKE_TEMPLATE['Parameters']['TeamKimiProxySecretArn']['NoEcho'] is True
 statement = statements[0]
 assert statement['Effect'] == 'Allow'
 assert statement['Action'] == 'secretsmanager:GetSecretValue'
@@ -203,3 +239,23 @@ assert all(rule['ToPort'] == 53 for rule in resolver_rules)
 assert all(rule['CidrIp'] == '${ResolverIp}/32' for rule in resolver_rules)
 assert all(rule['CidrIp'] != '0.0.0.0/0' for rule in resolver_rules)
 assert any(rule['FromPort'] == 443 and rule['CidrIp'] == '0.0.0.0/0' for rule in resolver_egress)
+
+bucket = TEMPLATE['Resources']['T01EvidenceBucket']['Properties']
+assert bucket['BucketEncryption']['ServerSideEncryptionConfiguration'][0]['ServerSideEncryptionByDefault']['SSEAlgorithm'] == 'AES256'
+assert bucket['LifecycleConfiguration']['Rules'][0]['ExpirationInDays'] == 7
+assert bucket['PublicAccessBlockConfiguration']['RestrictPublicBuckets'] is True
+smoke_s3 = [statement for statement in STATEMENTS if statement.get('Sid') == 'T01PaidEvidenceReadback']
+assert len(smoke_s3) == 1
+assert smoke_s3[0]['Action'] == ['s3:GetObject', 's3:DeleteObject']
+assert smoke_s3[0]['Resource'] == 'arn:aws:s3:::hive-v2-t01-evidence-594552273052/hive-v2-t01-smoke/*'
+instance_s3 = [statement for statement in health_policy if statement.get('Sid') == 'WriteRunEvidence']
+assert len(instance_s3) == 1
+assert instance_s3[0]['Action'] == 's3:PutObject'
+assert instance_s3[0]['Resource'] == 'arn:aws:s3:::hive-v2-t01-evidence-594552273052/hive-v2-t01-smoke/${RunId}/*'
+EVIDENCE_BUCKET = 'arn:aws:s3:::hive-v2-t01-evidence-594552273052'
+assert allows('s3:ListBucket', EVIDENCE_BUCKET, **{'s3:prefix': 'hive-v2-t01-smoke/*'})
+assert not allows('s3:ListBucket', EVIDENCE_BUCKET)
+assert not allows('s3:ListBucket', EVIDENCE_BUCKET, **{'s3:prefix': 'other/*'})
+assert deploy_allows('s3:PutBucketTagging', EVIDENCE_BUCKET)
+assert not deploy_allows('s3:PutBucketTagging', 'arn:aws:s3:::other-evidence')
+assert TEMPLATE['Resources']['T01EvidenceBucket']['DependsOn'] == 'DeployRole'

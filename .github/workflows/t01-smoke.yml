@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: Explicit smoke scenario
+        description: Explicit preflight, count-only, or paid matrix scenario
         required: true
         type: choice
-        options: [preflight]
+        options: [preflight, count, matrix]
       matrix:
         description: Explicit paid matrix selection
         required: true
         type: choice
-        options: [none]
+        options: [none, full]
       paid_admission:
-        description: Paid admission stays blocked until the broker PR lands
+        description: Paid admission requires the exact reviewed full-matrix inputs
         required: true
         default: false
         type: boolean
@@ -31,19 +31,19 @@ on:
         required: true
         type: string
       max_total_tokens:
-        description: Total-token cap for each invocation, maximum 22000
+        description: Scenario cap up to 22000, or exactly 132000 for the full matrix
         required: true
         type: string
       max_api_calls:
-        description: API-call cap for each invocation, maximum 1
+        description: Scenario cap up to 1, or exactly 12 for the full matrix
         required: true
         type: string
       max_estimated_cost_usd:
-        description: Estimated dollar cap for each invocation, maximum 0.50
+        description: Scenario cap up to 0.50, or exactly 5 for the full matrix
         required: true
         type: string
       max_paid_admissions:
-        description: Whole-matrix admission cap, required to be 0 for preflight
+        description: Zero for preflight and count, exactly 12 for the full matrix
         required: true
         type: string
       lifetime_minutes:
@@ -68,9 +68,20 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
-      - name: Validate the no-spend contract before AWS access
+      - if: inputs.scenario == 'matrix'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - if: inputs.scenario == 'matrix'
+        name: Build only the locked evidence runner
+        run: npm ci --ignore-scripts && node ./node_modules/typescript/bin/tsc -p tools/hermes-live/tsconfig.json
+      - name: Validate the reviewed dispatch contract before AWS access
         id: validate
         env:
+          T01_TEAMKIMI_HOST_ID: ${{ vars.KIMI_BOX_ID }}
+          EXPECTED_POLICY_HASH: ${{ vars.T01_EXPECTED_POLICY_HASH }}
+          PRICING_ATTESTATION: ${{ vars.T01_PRICING_ATTESTATION }}
           SCENARIO: ${{ inputs.scenario }}
           MATRIX: ${{ inputs.matrix }}
           PAID_ADMISSION: ${{ inputs.paid_admission }}
@@ -97,15 +108,26 @@ jobs:
           T01_HEALTH_ATTESTATION: ${{ vars.T01_HEALTH_ATTESTATION }}
           LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
         run: bash infra/t01-smoke/workflow.sh issue-health-credential
+      - name: Issue the run-scoped TeamKimi control credential
+        id: proxy
+        if: inputs.scenario == 'matrix'
+        env:
+          TEAMKIMI_PROXY_KEY: ${{ secrets.TEAMKIMI_PROXY_KEY }}
+        run: bash infra/t01-smoke/workflow.sh issue-proxy-credential
       - name: Create the disposable preflight stack
         id: deploy
         env:
+          TEAMKIMI_PROXY_SECRET_ARN: ${{ steps.proxy.outputs.arn }}
           VPC_ID: ${{ vars.T01_VPC_ID }}
           SUBNET_ID: ${{ vars.T01_SUBNET_ID }}
           RESOLVER_IP: ${{ vars.T01_RESOLVER_IP }}
           AMI_ID: ${{ vars.T01_AMI_ID }}
+          T01_TEAMKIMI_HOST_ID: ${{ vars.KIMI_BOX_ID }}
+          EXPECTED_POLICY_HASH: ${{ vars.T01_EXPECTED_POLICY_HASH }}
+          PRICING_ATTESTATION: ${{ vars.T01_PRICING_ATTESTATION }}
           SCENARIO: ${{ inputs.scenario }}
           MATRIX: ${{ inputs.matrix }}
+          PAID_ADMISSION: ${{ inputs.paid_admission }}
           MAX_INPUT_TOKENS: ${{ inputs.max_input_tokens }}
           MAX_OUTPUT_TOKENS: ${{ inputs.max_output_tokens }}
           MAX_REASONING_TOKENS: ${{ inputs.max_reasoning_tokens }}
@@ -120,18 +142,27 @@ jobs:
         continue-on-error: true
         env:
           LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
+          EXPECTED_POLICY_HASH: ${{ vars.T01_EXPECTED_POLICY_HASH }}
+          PRICING_ATTESTATION: ${{ vars.T01_PRICING_ATTESTATION }}
+          SCENARIO: ${{ inputs.scenario }}
         run: bash infra/t01-smoke/workflow.sh collect
       - name: Retain reviewed evidence for seven days
+        id: upload
         if: always() && steps.collect.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: t01-preflight-${{ github.run_id }}
-          path: t01-evidence/preflight.jsonl
+          path: |
+            t01-evidence/preflight.jsonl
+            t01-evidence/export
           if-no-files-found: error
           retention-days: 7
-      - name: Delete the stack, revoke the health credential, and release the fleet deploy mutex
+      - name: Delete the stack and run secrets, then release the fleet deploy mutex
         if: always() && steps.acquire.outcome == 'success'
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+          PAID_EVIDENCE_VERIFIED: ${{ steps.collect.outcome == 'success' && steps.upload.outcome == 'success' && 'yes' || 'no' }}
         run: bash infra/t01-smoke/workflow.sh cleanup
       - name: Fail after evidence and cleanup finish
-        if: steps.collect.outcome == 'failure'
+        if: steps.collect.outcome == 'failure' || steps.upload.outcome == 'failure'
         run: exit 1

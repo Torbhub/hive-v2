@@ -341,3 +341,70 @@ with tempfile.TemporaryDirectory() as directory:
     ):
         result = runtime.main()
     assert_diagnostic(root, 'hermes-check-timeout', subprocess.CompletedProcess('hermes-check', result, stdout='', stderr=''))
+
+
+def executable(root, name, content):
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    path.chmod(0o755)
+
+
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    capture = root / 'captured-secret'
+    source = root / 'source-path'
+    executable(root, 'bin/aws', '''#!/usr/bin/env bash
+if [ "$1 $2" = 'secretsmanager create-secret' ]; then
+  for argument in "$@"; do
+    case "$argument" in
+      file://*)
+        source_path="${argument#file://}"
+        cp "$source_path" "$MOCK_CAPTURE"
+        printf '%s' "$source_path" > "$MOCK_SOURCE"
+        ;;
+    esac
+  done
+  printf '{"ARN":"%s"}\n' "$MOCK_ARN"
+  exit 0
+fi
+exit 99
+''')
+    output = root / 'github-output'
+    env = {
+        'PATH': f'{root}/bin:{os.environ["PATH"]}', 'TEAMKIMI_PROXY_KEY': 'synthetic-proxy-secret',
+        'GITHUB_RUN_ID': '123', 'GITHUB_OUTPUT': str(output), 'MOCK_CAPTURE': str(capture),
+        'MOCK_SOURCE': str(source), 'MOCK_ARN': 'arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-proxy-123',
+    }
+    result = subprocess.run(
+        ['python3', str(RUNTIME), 'create-proxy-secret'], env=env, capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert capture.read_text() == 'synthetic-proxy-secret'
+    assert not Path(source.read_text()).exists(), 'the temporary secret file survived creation'
+    assert output.read_text() == 'arn=arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-proxy-123\n'
+    assert 'synthetic-proxy-secret' not in result.stdout + result.stderr
+
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    executable(root, 'bin/aws', '''#!/usr/bin/env bash
+if [ "$1 $2" = 'secretsmanager get-secret-value' ]; then
+  printf 'synthetic-proxy-secret\n'
+  exit 0
+fi
+exit 99
+''')
+    environment = root / 'proxy.env'
+    result = subprocess.run(
+        ['python3', str(RUNTIME), 'write-proxy-environment'],
+        env={
+            'PATH': f'{root}/bin:{os.environ["PATH"]}',
+            'TEAMKIMI_PROXY_SECRET_ARN': 'arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-proxy-123',
+            'T01_PROXY_ENVIRONMENT': str(environment),
+        },
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert environment.read_text() == 'HIVE_T01_PROXY_KEY=synthetic-proxy-secret\n'
+    assert environment.stat().st_mode & 0o777 == 0o400
+    assert 'synthetic-proxy-secret' not in result.stdout + result.stderr

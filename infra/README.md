@@ -50,10 +50,21 @@ before routing, so `/hive/api/view` and `/api/view` are the same endpoint.
   `citadel-deploy-mutex`) before the SSM box deploy (the stack self-update
   is exempt) and releases it in cleanup. Any hand AWS act must acquire it
   too — see the deploy-discipline skill.
-- `t01-smoke/` — the disposable Hermes preflight stack and local health
-  broker with their explicit dispatch workflow. They have no paid model
-  route and no automatic trigger. The health credential contains no TeamKimi
-  account credential. The live-only procedure and credential controls are in
+- `template.yaml` also owns the fixed `hive-v2-t01-teamkimi-port-forward`
+  SSM document. The normal `deploy` workflow creates, updates, or rolls back
+  that document, the T01 boundaries, and the encrypted evidence bucket. T01
+  roles can only start a session with that document on the existing tagged
+  TeamKimi host. They cannot send commands or open a public listener.
+- `t01-smoke/` — the disposable Hermes preflight stack, local health broker,
+  and explicit count/full-matrix workflow. Preflight and count keep paid
+  admission at zero. The count probe revokes its count-only credential before
+  any generation credential can be issued. The full matrix requires the exact
+  reviewed attestation hash, 12 admissions, 132,000 total tokens, and $5.
+  The workflow verifies the external manifest and every scenario receipt
+  before stack destruction. Hermes cannot call smoke control routes while
+  the broker retains them. There is no automatic trigger or broad proxy key
+  copy. The health credential contains no TeamKimi account credential.
+  Evidence order, normal rollback, and live-only gates are in
   `t01-smoke/RUNBOOK.md`.
 
 ## Bootstrap ceremony (once, by the operator)

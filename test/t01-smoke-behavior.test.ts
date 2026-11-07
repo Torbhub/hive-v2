@@ -9,6 +9,7 @@ const checks = [
   't01_workflow_checks.py',
   't01_lifecycle_checks.py',
   't01_health_broker_checks.py',
+  't01_paid_infra_checks.py',
 ];
 
 describe('T01 behavior regressions', () => {
@@ -19,7 +20,7 @@ describe('T01 behavior regressions', () => {
       expect(result.stdout).toBe('');
       expect(result.stderr).toBe('');
       expect(result.status).toBe(0);
-    });
+    }, 30_000);
   }
 
   it('keeps the unrelated spawn timeout at its original budget', () => {

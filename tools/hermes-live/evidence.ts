@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { EXPECTED_MODEL, type T01Report } from './runner.js';
+import { EXPECTED_MODEL, SCENARIOS, type T01Report } from './runner.js';
+import { sameCountedInput, smokeAttestation, smokePolicyHash, usageCostMicros, usageEvidence } from './policy.js';
 
 const SAFE_TOOLS = new Set(['read_file', 't01:echo', 't01:sleep']);
 const SAFE_ACTIVITIES = new Set(['t01_observer', 't01_pre_tool']);
@@ -41,9 +42,12 @@ const ALLOWED_KEYS = new Set([
   'admissionAllowed', 'blockedReason', 'isolation', 'disposable', 'readOnlyFixtures', 'confinedWorkingDirectories',
   'noPrivilegedMode', 'noHostNetwork', 'noHostPid', 'noContainerSockets', 'noCredentialMounts', 'noWritableHostPaths',
   'noOnDemandInstalls', 'coreDumpsDisabled', 'debuggingDisabled', 'ceilings', 'scenario', 'matrix', 'admissions',
-  'inputTokens', 'outputTokens', 'reasoningTokens', 'totalTokens', 'costMicros', 'egress', 'defaultDeny',
+  'inputTokens', 'baseInputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens',
+  'cacheCreation5mInputTokens', 'cacheCreation1hInputTokens', 'countedInput', 'providerSemantics',
+  'maxTokens', 'thinking', 'outputTokens', 'reasoningTokens', 'totalTokens', 'costMicros', 'egress', 'defaultDeny',
   'approvedDestination', 'directIpDenied', 'unapprovedDnsDenied', 'redirectDenied', 'ipv6Denied', 'alternatePortDenied',
   'metadataDenied', 'files', 'path', 'workspace', 'review', 'reviewer', 'reviewedAt', 'createdAt', 'deleteAfter', 'cleanupAfter', 'proof',
+  'credentialId', 'revokedAt', 'scope', 'verified',
   'P01', 'P02', 'P03', 'P04', 'P05', 'P06', 'P07', 'P08', 'P09', 'P10', 'P11', 'P12',
 ]);
 const HASH_KEYS = new Set([
@@ -54,7 +58,7 @@ const HASH_KEYS = new Set([
 const OBJECT_KEYS = new Set([
   'pin', 'preflight', 'installation', 'registryHashes', 'readiness', 'revocation', 'stdout', 'stderr', 'usage',
   'usageFile', 'receipt', 'session', 'process', 'cancellation', 'result', 'tokens', 'credential', 'reconciliation',
-  'isolation', 'enforcement', 'ceilings', 'scenario', 'matrix', 'egress', 'review', 'workspace',
+  'countedInput', 'providerSemantics', 'isolation', 'enforcement', 'ceilings', 'scenario', 'matrix', 'egress', 'review', 'workspace',
 ]);
 const COLLECTION_CAPS: Record<string, number> = {
   runs: 12, trace: 8192, events: 4096, parserErrors: 64, activities: 128, signals: 32, files: 32,
@@ -80,7 +84,8 @@ function stringValue(key: string, value: string) {
     case 'version': if (value !== '0.22.6') throw new Error('unsafe-version'); return { key, value };
     case 'commit': if (!/^[a-f0-9]{40}$/.test(value)) throw new Error('unsafe-commit'); return { key, value };
     case 'scenarioId': if (!/^P(0[1-9]|1[0-2])$/.test(value)) throw new Error('unsafe-scenario'); return { key, value };
-    case 'admissionId': case 'receiptId': if (!/^[A-Za-z0-9._:-]{1,256}$/.test(value)) throw new Error('unsafe-identifier'); return { key, value };
+    case 'admissionId': case 'receiptId': case 'credentialId': if (!/^[A-Za-z0-9._:-]{1,256}$/.test(value)) throw new Error('unsafe-identifier'); return { key, value };
+    case 'scope': if (!['generation', 'count-only'].includes(value)) throw new Error('unsafe-credential-scope'); return { key, value };
     case 'reviewer': if (!/^[A-Za-z0-9._-]{1,128}$/.test(value)) throw new Error('unsafe-reviewer'); return { key, value };
     case 'path': if (!/^(manifest|preflight|P(0[1-9]|1[0-2]))\.json$/.test(value) && !(value.startsWith('/') && !value.includes('..'))) throw new Error('unsafe-path'); return { key, value };
     case 'createdAt': case 'deleteAfter': case 'reviewedAt': case 'updatedAt': case 'cleanupAfter': if (!Number.isFinite(Date.parse(value))) throw new Error('unsafe-time'); return { key, value };
@@ -89,10 +94,11 @@ function stringValue(key: string, value: string) {
   }
 }
 
-function sanitized(value: unknown, parent?: string, depth = 0): unknown {
+function sanitized(value: unknown, parent?: string, depth = 0, grandparent?: string): unknown {
   if (value === undefined) return undefined;
   if (depth > 16) throw new Error('evidence-nesting-too-deep');
-  if (parent && OBJECT_KEYS.has(parent) && (typeof value !== 'object' || value === null || Array.isArray(value))) throw new Error('invalid-evidence-object');
+  const semanticsUsage = parent === 'usage' && grandparent === 'providerSemantics' && typeof value === 'string';
+  if (!semanticsUsage && parent && OBJECT_KEYS.has(parent) && (typeof value !== 'object' || value === null || Array.isArray(value))) throw new Error('invalid-evidence-object');
   if (parent && HASH_KEYS.has(parent) && (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value))) throw new Error('invalid-evidence-hash');
   if (parent === 'registryHashes' && typeof value === 'string' && !/^[a-f0-9]{64}$/.test(value)) throw new Error('invalid-registry-hash');
   if (value === null || typeof value === 'boolean') return value;
@@ -105,7 +111,7 @@ function sanitized(value: unknown, parent?: string, depth = 0): unknown {
     const cap = COLLECTION_CAPS[parent ?? ''] ?? 128;
     if (value.length > cap) throw new Error('evidence-collection-too-large');
     return value.map((entry) => {
-      const clean = sanitized(entry, parent, depth + 1);
+      const clean = sanitized(entry, parent, depth + 1, grandparent);
       if (typeof clean === 'object' && clean !== null && 'key' in clean && 'value' in clean) {
         return (clean as { value: string }).value;
       }
@@ -118,7 +124,7 @@ function sanitized(value: unknown, parent?: string, depth = 0): unknown {
   const output: Record<string, unknown> = {};
   for (const [key, entry] of entries) {
     if (!ALLOWED_KEYS.has(key)) throw new Error(`non-allowlisted-evidence:${key}`);
-    const clean = sanitized(entry, key, depth + 1);
+    const clean = sanitized(entry, key, depth + 1, parent);
     if (clean === undefined) continue;
     if (typeof clean === 'object' && clean !== null && 'key' in clean && 'value' in clean) {
       const transformed = clean as { key: string; value: string };
@@ -162,6 +168,59 @@ export async function exportEvidence(root: string, report: T01Report) {
     review: { status: 'pending' },
   });
   return manifestPath;
+}
+
+export type VerifyEvidenceOptions = { attestation: unknown; expectedPolicyHash: string; credentialId: string };
+
+export function verifyEvidenceReport(report: T01Report, options: VerifyEvidenceOptions) {
+  const attestation = smokeAttestation(options.attestation, Date.now());
+  if (smokePolicyHash(attestation) !== options.expectedPolicyHash
+    || report.preflight.readiness?.enforcement.policyHash !== options.expectedPolicyHash) throw new Error('policy-hash-mismatch');
+  if (report.schemaVersion !== 1 || report.state !== 'completed' || report.runs.length !== SCENARIOS.length) throw new Error('scenario-outcome');
+  const scenarioIds = new Set(report.runs.map((run) => run.scenarioId));
+  for (const scenario of SCENARIOS) {
+    if (!scenarioIds.has(scenario.id)) throw new Error('scenario-outcome');
+    const run = report.runs.find((entry) => entry.scenarioId === scenario.id)!;
+    const expectedState = scenario.id === 'P07' ? 'failed' : ['P08', 'P09', 'P10'].includes(scenario.id) ? 'cancelled' : 'succeeded';
+    const expectedReceipt = scenario.id === 'P07' ? 'failed' : ['P08', 'P09', 'P10'].includes(scenario.id) ? 'interrupted' : 'completed';
+    if (run.state !== expectedState || run.receipt?.status !== expectedReceipt) throw new Error('scenario-outcome');
+    const usage = run.receipt.usage;
+    if (run.receipt.policyHash !== options.expectedPolicyHash || run.receipt.inputVerified !== true || !usage
+      || !sameCountedInput(run.receipt.countedInput, usage)) throw new Error('receipt-accounting-mismatch');
+    usageEvidence(usage);
+    if (usageCostMicros(usage, attestation.rates) !== usage.costMicros) throw new Error('receipt-cost-mismatch');
+  }
+  const revocation = report.revocation;
+  if (!revocation || revocation.revoked !== true || revocation.verified !== true || revocation.scope !== 'generation'
+    || revocation.credentialId !== options.credentialId || revocation.receiptId !== options.credentialId
+    || !/^[a-f0-9]{32}$/.test(revocation.credentialId || '') || !/^[a-f0-9]{64}$/.test(revocation.proof)
+    || !Number.isSafeInteger(revocation.revokedAt) || (revocation.revokedAt ?? -1) < 0) throw new Error('revocation-not-proven');
+  return { verified: true as const };
+}
+
+export async function verifyEvidenceExport(manifestPath: string, options: VerifyEvidenceOptions) {
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+    state: string; review: { status: string }; files: { path: string; sha256: string }[];
+  };
+  if (manifest.state !== 'completed' || manifest.review.status !== 'pending') throw new Error('evidence-not-complete');
+  const root = join(manifestPath, '..');
+  const expected = new Set(['manifest.json', 'preflight.json', ...SCENARIOS.map((scenario) => `${scenario.id}.json`)]);
+  const entries = await readdir(root, { withFileTypes: true });
+  if (entries.length !== expected.size || entries.some((entry) => !entry.isFile() || !expected.has(entry.name)
+    || entry.name !== 'manifest.json' && !manifest.files.some((file) => file.path === entry.name))) {
+    throw new Error('evidence-manifest-membership-mismatch');
+  }
+  for (const file of [{ path: 'manifest.json', sha256: hashed(await readFile(manifestPath)) }, ...manifest.files]) {
+    const path = join(root, file.path);
+    const details = await lstat(path);
+    if (!details.isFile() || details.isSymbolicLink() || (details.mode & 0o777) !== 0o600) throw new Error('unsafe-evidence-artifact');
+    const bytes = await readFile(path);
+    if (file.path !== 'manifest.json' && hashed(bytes) !== file.sha256) throw new Error('evidence-hash-mismatch');
+    sanitized(JSON.parse(bytes.toString('utf8')));
+  }
+  const preflight = JSON.parse(await readFile(join(root, 'preflight.json'), 'utf8'));
+  const runs = await Promise.all(SCENARIOS.map(async (scenario) => JSON.parse(await readFile(join(root, `${scenario.id}.json`), 'utf8'))));
+  return verifyEvidenceReport({ ...preflight, runs } as T01Report, options);
 }
 
 export async function approveEvidenceExport(manifestPath: string, reviewer: string) {
@@ -238,6 +297,7 @@ export async function cleanupWorkspace(root: string, now = Date.now()) {
     }
   };
   await visit(root);
+  for (const directory of directories) await chmod(directory, 0o700);
   for (const file of files) {
     if (!file.symlink) await overwrite(file.path, file.size);
     await unlink(file.path);
