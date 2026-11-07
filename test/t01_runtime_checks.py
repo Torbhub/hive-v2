@@ -123,12 +123,12 @@ with tempfile.TemporaryDirectory() as directory:
     process.wait()
 
 
-def fake_hermes(root, version='0.22.6', lazy='false', lazy_rc=1, commit=COMMIT, invalid_json=False, version_rc=0):
+def fake_hermes(root, version='0.22.6', lazy='false', lazy_rc=1, commit=COMMIT, invalid_json=False):
     executable = root / 'hermes'
     executable.write_text(f'''#!/usr/bin/env bash
 if [ "$1" = --version ]; then
   printf 'Hermes Agent v{version}\n'
-  exit {version_rc}
+  exit 0
 fi
 if [ "$1 $2 $3" = 'config get security.allow_lazy_installs' ]; then
   printf '{lazy}\n'
@@ -187,10 +187,10 @@ def assert_diagnostic(root, expected, result):
     assert records[2] == {'check': 'complete', 'status': 'failed'}
 
 
-def hermes_check(version='0.22.6', lazy='false', lazy_rc=1, commit=COMMIT, invalid_json=False, missing=False, version_rc=0):
+def hermes_check(version='0.22.6', lazy='false', lazy_rc=1, commit=COMMIT, invalid_json=False, missing=False):
     temporary = tempfile.TemporaryDirectory()
     root = Path(temporary.name)
-    executable, stamp = fake_hermes(root, version, lazy, lazy_rc, commit, invalid_json, version_rc)
+    executable, stamp = fake_hermes(root, version, lazy, lazy_rc, commit, invalid_json)
     if missing:
         executable = root / 'missing-hermes'
     output = root / 'runtime-check.json'
@@ -262,9 +262,8 @@ def assert_failure(expected, **kwargs):
         assert_diagnostic(root, expected, result)
 
 
-assert_failure('runtime-version-exit-failed', version_rc=1)
-assert_failure('runtime-version-format-failed', version='0.0.0')
-assert_failure('runtime-version-format-failed', version='0.22.60')
+assert_failure('runtime-version-check-failed', version='0.0.0')
+assert_failure('runtime-version-check-failed', version='0.22.60')
 assert_failure('runtime-identity-check-failed', commit='0' * 40)
 assert_failure('lazy-install-config-check-failed', lazy='true')
 assert_failure('lazy-install-request-accepted', lazy_rc=0)

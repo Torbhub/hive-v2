@@ -128,13 +128,11 @@ def hermes_check():
     output = f'{result.stdout}\n{result.stderr}'
     version_line = f'Hermes Agent v{VERSION}'
     matching_lines = [line.strip() for line in output.splitlines() if line.strip().startswith(version_line)]
-    if result.returncode != 0:
-        raise RuntimeError('runtime version exit failed')
-    if not any(
+    if result.returncode != 0 or not any(
         line == version_line or line[len(version_line):].startswith((' ', '('))
         for line in matching_lines
     ):
-        raise RuntimeError('runtime version format failed')
+        raise RuntimeError('runtime version check failed')
     stamp = read_json(stamp_path)
     if stamp.get('baseVersion') != VERSION or stamp.get('commit') != COMMIT:
         raise RuntimeError('runtime identity check failed')
@@ -153,8 +151,6 @@ def hermes_check():
 
 HERMES_CHECK_CATEGORIES = {
     'runtime version check failed': 'runtime-version-check-failed',
-    'runtime version exit failed': 'runtime-version-exit-failed',
-    'runtime version format failed': 'runtime-version-format-failed',
     'runtime identity check failed': 'runtime-identity-check-failed',
     'lazy-install config check failed': 'lazy-install-config-check-failed',
     'lazy-install request was accepted': 'lazy-install-request-accepted',
