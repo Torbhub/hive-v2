@@ -83,6 +83,8 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision).toContain('551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae2efa81');
     expect(provision).toContain('v0.22.6');
     expect(provision).toContain('"baseVersion":"0.22.6"');
+    expect(provision).toContain('"$HERMES_COMMIT" > /opt/t01/source/install-stamp.json');
+    expect(provision).toContain('Environment=HERMES_INSTALL_ROOT=/opt/t01/source');
     expect(provision).toContain('uv.lock');
     expect(provision).toContain('dnf install -y');
     expect(provision).toContain('python3.11 python3.11-devel');
