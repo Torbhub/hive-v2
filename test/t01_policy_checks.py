@@ -95,7 +95,6 @@ assert allows(
 MUTEX_TABLE = 'arn:aws:dynamodb:us-east-1:594552273052:table/citadel-deploy-mutex'
 assert allows('dynamodb:UpdateItem', MUTEX_TABLE), 'owner-only renewal requires UpdateItem'
 OTHER_STACK = 'arn:aws:cloudformation:us-east-1:594552273052:stack/other/*'
-RETIRED_BROKER_BOUNDARY = 'arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary'
 HEALTH_SECRET = 'arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-123-AbCdEf'
 assert not allows('cloudformation:DeleteStack', OTHER_STACK)
 assert not allows('lambda:CreateFunction', 'arn:aws:lambda:us-east-1:594552273052:function:hive-v2-t01-broker-health')
@@ -170,14 +169,13 @@ for action in ('iam:CreateRole', 'iam:PutRolePermissionsBoundary'):
     assert not allows(action, INSTANCE_ROLE_ARN, **{'iam:PermissionsBoundary': 'arn:aws:iam::594552273052:policy/other-boundary'})
 for context in ({}, {'iam:PermissionsBoundary': INSTANCE_BOUNDARY}, {'iam:PermissionsBoundary': 'arn:aws:iam::594552273052:policy/other-boundary'}):
     assert not allows('iam:DeleteRolePermissionsBoundary', INSTANCE_ROLE_ARN, **context), 'T01 must never detach a runtime boundary'
-for boundary_arn in (INSTANCE_BOUNDARY, RETIRED_BROKER_BOUNDARY):
-    for action in BOUNDARY_LIFECYCLE_ACTIONS:
-        assert not allows(action, boundary_arn), 'T01 must not mutate boundary policy documents'
-        assert deploy_allows(action, boundary_arn), 'the root deploy role owns boundary lifecycle and retired-boundary deletion'
-        assert not deploy_allows(action, 'arn:aws:iam::594552273052:policy/other-policy')
+for action in BOUNDARY_LIFECYCLE_ACTIONS:
+    assert not allows(action, INSTANCE_BOUNDARY), 'T01 must not mutate boundary policy documents'
+    assert deploy_allows(action, INSTANCE_BOUNDARY), 'the root deploy role owns boundary lifecycle'
+    assert not deploy_allows(action, 'arn:aws:iam::594552273052:policy/other-policy')
 boundary_statement = next(statement for statement in DEPLOY_STATEMENTS if statement['Sid'] == 'ManageHiveBoundaryPolicies')
 assert set(boundary_statement['Action']) == BOUNDARY_LIFECYCLE_ACTIONS
-assert set(boundary_statement['Resource']) == {INSTANCE_BOUNDARY, RETIRED_BROKER_BOUNDARY}
+assert set(boundary_statement['Resource']) == {INSTANCE_BOUNDARY}
 for resource_name in ('T01SmokeHealthBoundary', 'T01SmokeRole'):
     assert TEMPLATE['Resources'][resource_name]['DependsOn'] == 'DeployRole'
 
