@@ -3,15 +3,21 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createQuestionBatch } from '../src/questions.js';
 import { DynamoCliRegistry, RegistryUnavailable } from '../src/registry.js';
 import { authenticateBearer } from '../src/security.js';
 import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
+import { buildView } from '../src/view.js';
 import { createServer } from '../web/server.js';
 import {
-  AGENT_CREDENTIAL, agentHeaders, configureSecurity, registryItems, startTestRegistry,
+  AGENT_CREDENTIAL, agentHeaders, authHeaders, configureSecurity, registryItems, startTestRegistry,
 } from './security-fixture.js';
+
+vi.mock('../src/view.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/view.js')>();
+  return { ...actual, buildView: vi.fn(actual.buildView) };
+});
 
 const servers: Server[] = [];
 
@@ -113,9 +119,40 @@ describe('project-level authority and metadata', () => {
       project: 'demo', agent: 'builder@one', choice: '1', fingerprint: 'x',
     })).status).toBe(400);
   });
+
+  it('keeps authorized orchestrator and worktree-qualified dialogs with duplicate names', async () => {
+    const { root, home, base } = await fixture();
+    await writeJson(hivePath(home, 'team.json'), { agents: [
+      { name: 'demo-orchestrator', orchestrator: true, task: 'demo-1' },
+      { name: 'builder', task: 'demo-2', worktree: '/wt/a' },
+      { name: 'builder', task: 'demo-1', worktree: '/wt/b' },
+    ] });
+    const dialog = {
+      kind: 'menu', text: 'Run this command?', options: [], cursor: null, esc: true,
+      fingerprint: 'fp', project: 'demo', session: 'builder', pane: '%2',
+    };
+    vi.mocked(buildView).mockResolvedValueOnce({
+      root, hubName: 'hub', projects: [], tasks: [], decisions: [], questions: [], questionsTotal: 0,
+      dialogs: {
+        demo: { ...dialog, session: 'demo-orchestrator', pane: '%1' },
+        'demo/builder@/wt/b': dialog,
+      },
+      updatedAt: 1, error: '',
+    } as never);
+    const response = await fetch(`${base}/api/view`, { headers: agentHeaders() });
+    expect(response.status).toBe(200);
+    const view = await response.json();
+    expect(Object.keys(view.dialogs)).toEqual(['demo', 'demo/builder@/wt/b']);
+  });
 });
 
 describe('independent revocation and broker status', () => {
+  it('accepts null broker account expiry for human and agent authentication', async () => {
+    const { base } = await fixture();
+    expect((await fetch(`${base}/api/view`, { headers: authHeaders() })).status).toBe(200);
+    expect((await fetch(`${base}/api/agent/identity`, { headers: agentHeaders() })).status).toBe(200);
+  });
+
   it('denies credentials profiles ACLs and wakes with revocation records', async () => {
     const { base, items } = await fixture();
     const values = items;

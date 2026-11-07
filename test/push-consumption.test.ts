@@ -98,6 +98,31 @@ describe('authenticated push consumption', () => {
     expect((await readQuestionBatch(root, batch.id)).answers![0].decision?.grant?.consumedAt).toBeTruthy();
   });
 
+  it('enforces delegated approver expiry before recording consumption', async () => {
+    const { root, remote, home, commit, registry } = await setup();
+    registry.items.push({
+      pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#user:bob', project: 'demo', task: 'demo-1', principal: 'user:bob',
+      grantId: 'bob-grant', actions: ['execute'], aclEpoch: 2, revokedAt: null,
+    });
+    const account = registry.items.find((row) => row.pk === 'SUBJECT#user:bob')!;
+    const now = Math.floor(Date.now() / 1000);
+    for (const [expiresAt, valid] of [
+      [now - 1, false], ['invalid', false], [undefined, true], [null, true], [0, true], [now + 60, true],
+    ] as const) {
+      if (expiresAt === undefined) delete account.expiresAt;
+      else account.expiresAt = expiresAt;
+      const batch = await approved(root, commit, 'user:bob', 'bob-grant');
+      const result = consumePushApproval(
+        root, { project: 'demo', batch: batch.id, question: 'q1' },
+        'origin', commit, 'feat/t16', home, Date.now(), environment(root, home), registry,
+      );
+      if (valid) await expect(result).resolves.toBe(remote);
+      else await expect(result).rejects.toThrow(/approver account|delegated approval/);
+      const stored = await readQuestionBatch(root, batch.id);
+      expect(Boolean(stored.answers![0].decision?.grant?.consumedAt)).toBe(valid);
+    }
+  });
+
   it('rejects a revoked consuming credential', async () => {
     const { root, home, commit, registry } = await setup();
     const batch = await approved(root, commit);

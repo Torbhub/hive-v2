@@ -1,3 +1,4 @@
+import concurrent.futures
 import http.client
 import importlib.util
 import json
@@ -279,34 +280,47 @@ def assert_failure(expected, **kwargs):
         assert_diagnostic(root, expected, result)
 
 
-assert_failure('runtime-version-system-exit-1', version_rc=1)
-assert_failure('runtime-version-system-exit-2', version_rc=2)
-assert_failure('runtime-version-system-exit-255', version_rc=255)
-assert_failure('runtime-version-signal-15', version_signal='TERM')
-assert_failure(
-    'runtime-version-dependency-bootstrap-failed', version_rc=1,
-    version_output='hermes: no dependency environment is committed for this install; run `hermes pm repair`\n',
-)
-assert_failure(
-    'runtime-version-dependency-bootstrap-failed', version_rc=1,
-    version_output='hermes: cannot read dependency environment: /secret/state; run `hermes pm repair`\n',
-)
-assert_failure(
-    'runtime-version-permission-denied', version_rc=1,
-    version_output='hermes: install state is not writable by this user (/secret/path); run as the install owner\n',
-)
-assert_failure(
-    'runtime-version-missing-module-openai', version_rc=1,
-    version_output="ModuleNotFoundError: No module named 'openai'\n",
-)
-assert_failure(
-    'runtime-version-missing-module', version_rc=1,
-    version_output="ModuleNotFoundError: No module named 'unreviewed_secret'\n",
-)
-assert_failure(
-    'runtime-version-import-failed', version_rc=1,
-    version_output="ImportError: cannot import name 'secret' from 'openai' (/secret/path)\n",
-)
+version_exit_cases = [
+    ('runtime-version-system-exit-1', {'version_rc': 1}),
+    ('runtime-version-system-exit-2', {'version_rc': 2}),
+    ('runtime-version-system-exit-255', {'version_rc': 255}),
+    ('runtime-version-signal-15', {'version_signal': 'TERM'}),
+    (
+        'runtime-version-dependency-bootstrap-failed',
+        {
+            'version_rc': 1,
+            'version_output': 'hermes: no dependency environment is committed for this install; run `hermes pm repair`\n',
+        },
+    ),
+    (
+        'runtime-version-dependency-bootstrap-failed',
+        {
+            'version_rc': 1,
+            'version_output': 'hermes: cannot read dependency environment: /secret/state; run `hermes pm repair`\n',
+        },
+    ),
+    (
+        'runtime-version-permission-denied',
+        {
+            'version_rc': 1,
+            'version_output': 'hermes: install state is not writable by this user (/secret/path); run as the install owner\n',
+        },
+    ),
+    (
+        'runtime-version-missing-module-openai',
+        {'version_rc': 1, 'version_output': "ModuleNotFoundError: No module named 'openai'\n"},
+    ),
+    (
+        'runtime-version-missing-module',
+        {'version_rc': 1, 'version_output': "ModuleNotFoundError: No module named 'unreviewed_secret'\n"},
+    ),
+    (
+        'runtime-version-import-failed',
+        {'version_rc': 1, 'version_output': "ImportError: cannot import name 'secret' from 'openai' (/secret/path)\n"},
+    ),
+]
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    list(executor.map(lambda case: assert_failure(case[0], **case[1]), version_exit_cases))
 assert_failure('runtime-version-format-failed', version='0.0.0')
 assert_failure('runtime-version-format-failed', version='0.22.60')
 assert_failure('runtime-identity-check-failed', commit='0' * 40)

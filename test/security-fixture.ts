@@ -20,32 +20,32 @@ export const AGENT_CREDENTIAL = `hva1.builder.${CREDENTIAL_ID}.test-agent-secret
 const SALT = 'test-only-salt';
 
 export class MemoryRegistry implements Registry {
-  private readonly broker: DynamoCliRegistry;
+  private readonly broker?: DynamoCliRegistry;
 
-  constructor(readonly items: RegistryRow[], brokerUrl = 'http://127.0.0.1:9') {
-    this.broker = new DynamoCliRegistry('unused', brokerUrl);
+  constructor(readonly items: RegistryRow[], brokerUrl?: string) {
+    if (brokerUrl) this.broker = new DynamoCliRegistry('unused', brokerUrl);
   }
 
   async get(pk: string, sk: string): Promise<RegistryRow | undefined> {
     return this.items.find((row) => row.pk === pk && row.sk === sk);
   }
 
-  async currentAccount(subject: string): Promise<RegistryRow | undefined> {
-    return this.get(`SUBJECT#${subject}`, 'PROFILE');
+  async currentAccount(subject: string, credential: string): Promise<RegistryRow | undefined> {
+    return this.broker ? this.broker.currentAccount(subject, credential) : this.get(`SUBJECT#${subject}`, 'PROFILE');
   }
 
   async delegatedApprovalAccount(agentId: string, credential: string,
     request: DelegatedApprovalRequest): Promise<RegistryRow | undefined> {
-    return this.broker.delegatedApprovalAccount(agentId, credential, request);
+    return this.broker!.delegatedApprovalAccount(agentId, credential, request);
   }
 
   async createWakeSubscription(agentId: string, credential: string,
     executionGrantId: string): Promise<WakeSubscription> {
-    return this.broker.createWakeSubscription(agentId, credential, executionGrantId);
+    return this.broker!.createWakeSubscription(agentId, credential, executionGrantId);
   }
 
   async revokeWakeSubscription(agentId: string, credential: string, subscriptionId: string): Promise<void> {
-    return this.broker.revokeWakeSubscription(agentId, credential, subscriptionId);
+    return this.broker!.revokeWakeSubscription(agentId, credential, subscriptionId);
   }
 
   async query(pk: string, skPrefix: string): Promise<RegistryRow[]> {
@@ -97,13 +97,32 @@ export async function startTestRegistry(items = registryItems()): Promise<{ brok
       const body = text ? JSON.parse(text) : {};
       let status = 200;
       let result: Record<string, unknown> = {};
-      if (req.url === '/api/hive/broker/delegated-approval') {
+      if (req.url === '/api/hive/broker/account-status') {
+        const credential = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
+        let subject = '';
+        if (credential.startsWith('hva1.')) {
+          const agentId = credential.split('.')[1];
+          subject = String(items.find((row) => row.pk === `AGENT#${agentId}` && row.sk === 'PROFILE')?.ownerSubject ?? '');
+        } else {
+          try {
+            subject = JSON.parse(Buffer.from(credential.split('.')[1], 'base64url').toString('utf8')).sub;
+          } catch {}
+        }
+        const account = items.find((row) => row.pk === `SUBJECT#${subject}` && row.sk === 'PROFILE');
+        if (!account) status = 401;
+        else {
+          result = {
+            subject, accountStatus: account.accountStatus,
+            accountEpoch: account.accountEpoch, expiresAt: account.expiresAt ?? null,
+          };
+        }
+      } else if (req.url === '/api/hive/broker/delegated-approval') {
         const account = items.find((row) => row.pk === `SUBJECT#${body.approverSubject}` && row.sk === 'PROFILE');
         if (account?.accountStatus !== 'active') status = 401;
         else {
           result = {
-            subject: body.approverSubject, accountStatus: 'active',
-            accountEpoch: account.accountEpoch, expiresAt: account.expiresAt ?? null,
+            subject: body.approverSubject, accountStatus: 'active', accountEpoch: account.accountEpoch,
+            ...(account.expiresAt === undefined ? {} : { expiresAt: account.expiresAt }),
           };
         }
       } else if (req.url === '/api/hive/broker/wake-subscriptions') {

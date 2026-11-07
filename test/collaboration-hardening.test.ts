@@ -139,6 +139,52 @@ describe('stored-target authorization', () => {
     expect(view.questions).toHaveLength(1);
     expect((await fetch(`${base}/api/log?project=demo&agent=builder`, { headers: agentHeaders() })).status).not.toBe(404);
   });
+
+  it('redacts agent credentials and source-truncated fragments from authorized log responses', async () => {
+    const { root, home, base, items } = await fixture();
+    items.find((row) => row.pk === 'SUBJECT#user:alice')!.expiresAt = 0;
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', task: 'demo-1', session_id: 'session_credentials' }],
+    });
+    const sessionHome = await fs.mkdtemp(path.join(tmpdir(), 'hive-log-home-'));
+    const wireDir = path.join(
+      sessionHome, '.kimi-code', 'sessions', 'wd_test', 'session_credentials', 'agents', 'main',
+    );
+    await fs.mkdir(wireDir, { recursive: true });
+    const prefix = AGENT_CREDENTIAL.split('.').slice(0, 3).join('.');
+    const secret31 = 'a'.repeat(31);
+    const secret32 = 'b'.repeat(32);
+    const textEvent = (text: string) => JSON.stringify({
+      type: 'context.append_loop_event', time: 1,
+      event: { type: 'content.part', part: { type: 'text', text } },
+    });
+    const lines = [
+      JSON.stringify({
+        type: 'context.append_loop_event', time: 1,
+        event: { type: 'tool.call', name: 'Bash', args: { command: `HIVE_AGENT_CREDENTIAL=${AGENT_CREDENTIAL}` } },
+      }),
+      textEvent(`source ${prefix}.${secret31}`),
+      textEvent(`${'x'.repeat(480)}${prefix}.${secret32}`),
+    ];
+    await fs.writeFile(path.join(wireDir, 'wire.jsonl'), `${lines.join('\n')}\n`);
+    const previousHome = process.env.HOME;
+    process.env.HOME = sessionHome;
+    try {
+      const response = await fetch(`${base}/api/log?project=demo&agent=builder`, { headers: agentHeaders() });
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).not.toContain(AGENT_CREDENTIAL);
+      expect(body).not.toContain('test-agent-secret-with-high-entropy');
+      expect(body).not.toContain('hva1.');
+      expect(body).not.toContain(secret31);
+      expect(body).not.toContain(secret32);
+      expect(body).toContain('[redacted-agent-credential]');
+      expect(body).toContain('source ');
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
 });
 
 describe('wake write boundaries and key/expiry validation', () => {

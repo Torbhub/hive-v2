@@ -68,7 +68,9 @@ async function filteredView(root: string, view: HubView, principal: Principal, r
   }
   const dialogs = [];
   for (const entry of Object.entries(view.dialogs)) {
-    const [project, agent] = entry[0].split('/');
+    const separator = entry[0].indexOf('/');
+    const project = separator === -1 ? entry[0] : entry[0].slice(0, separator);
+    const agent = separator === -1 ? undefined : entry[0].slice(separator + 1);
     const task = await agentTask(project, agent);
     if (task !== null && await allowed(project, task)) dialogs.push(entry);
   }

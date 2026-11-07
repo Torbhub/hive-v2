@@ -118,11 +118,11 @@ export async function revoked(registry: Registry, row: RegistryRow): Promise<boo
 
 function validExpiry(row: RegistryRow, now: number): boolean {
   const value = row.expiresAt;
-  if (value === undefined) return true;
+  if (value === undefined || value === null) return true;
   return integer(value) && value >= 0 && (value === 0 || value > now);
 }
 
-function accountActive(account: RegistryRow | undefined, now: number): account is RegistryRow {
+export function accountActive(account: RegistryRow | undefined, now: number): account is RegistryRow {
   return Boolean(account && account.accountStatus === 'active' && validExpiry(account, now));
 }
 
