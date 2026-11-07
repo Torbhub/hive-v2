@@ -120,7 +120,6 @@ Resources:
                   - iam:SetDefaultPolicyVersion
                 Resource:
                   - arn:aws:iam::594552273052:policy/hive-v2-t01-smoke-health-boundary
-                  - arn:aws:iam::594552273052:policy/hive-v2-t01-broker-health-boundary
               # The fleet-wide deploy mutex lives in citadel's nexus stack;
               # the workflow acquires it before the SSM box deploy.
               - Sid: DeployMutex
