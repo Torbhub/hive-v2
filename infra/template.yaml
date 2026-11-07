@@ -237,7 +237,7 @@ Resources:
       DocumentType: Session
       DocumentFormat: YAML
       Content:
-        schemaVersion: '2.0'
+        schemaVersion: '1.0'
         description: Fixed T01 loopback forwarding to the TeamKimi smoke listener.
         documentType: Session
         properties:
