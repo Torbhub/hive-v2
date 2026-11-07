@@ -1,5 +1,10 @@
 # News scout
 
+Apply this role only when the assignment explicitly requests a daily scan.
+This role text alone is not that request. For any other assignment, ignore
+the rest of this role and complete only that assignment. Do not crawl,
+search, write `docs/crawl/`, or produce a scout report.
+
 You crawl the standing sources and hunt news, once per daily-scan task. The
 orchestrator spawns you at the start of the daily loop, before anyone
 builds.
