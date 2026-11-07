@@ -3,12 +3,10 @@ import json
 import os
 from pathlib import Path
 import re
-import ssl
 import subprocess
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
 
 VERSION = '0.22.6'
 COMMIT = 'f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab'
@@ -27,6 +25,25 @@ ALLOWED_FIELDS = {'check', 'status', 'version', 'commit', 'sha256', 'category', 
 def read_json(path):
     with open(path, encoding='utf-8') as source:
         return json.load(source)
+
+
+def valid_health(secret, run_id, now):
+    try:
+        return (
+            secret['runId'] == run_id
+            and type(secret['activeAccounts']) is int and secret['activeAccounts'] > 0
+            and type(secret['healthyProbes']) is int and secret['healthyProbes'] > 0
+            and secret['healthyProbes'] <= secret['activeAccounts']
+            and type(secret['attestedAt']) is int
+            and secret['attestedAt'] <= now + 60 and now - secret['attestedAt'] <= 600
+            and type(secret['probeFinishedAt']) is int
+            and secret['probeFinishedAt'] <= now + 60 and now - secret['probeFinishedAt'] <= 600
+            and secret['probeFinishedAt'] <= secret['attestedAt']
+            and type(secret['expiresAt']) is int and now < secret['expiresAt']
+            and isinstance(secret['apiKey'], str) and bool(secret['apiKey'])
+        )
+    except (KeyError, TypeError):
+        return False
 
 
 class BrokerHandler(BaseHTTPRequestHandler):
@@ -66,27 +83,12 @@ class BrokerHandler(BaseHTTPRequestHandler):
             return
         try:
             config, secret = self.broker_values()
-            api_key = secret[config['teamkimi_secret_key']]
-            if not isinstance(api_key, str) or not api_key:
-                raise ValueError('invalid credential shape')
-            target = urlsplit(config['teamkimi_url'])
-            connection = http.client.HTTPSConnection(
-                target.hostname, 443, timeout=10, context=ssl.create_default_context()
-            )
-            connection.request('GET', config['teamkimi_connectivity_path'], headers={
-                'Authorization': f'Bearer {api_key}',
-                'Accept': 'application/json',
-                'Connection': 'close',
-            })
-            response = connection.getresponse()
-            response.read(1024)
-            connection.close()
-            if 200 <= response.status < 300:
+            if valid_health(secret, config['run_id'], int(time.time())):
                 self.reply(200, {'status': 'ok'})
             else:
-                self.reply(502, {'status': 'upstream_rejected', 'upstream_status': response.status})
-        except (OSError, ValueError, KeyError, json.JSONDecodeError, ssl.SSLError, http.client.HTTPException):
-            self.reply(502, {'status': 'connectivity_failed'})
+                self.reply(502, {'status': 'health_unavailable'})
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            self.reply(502, {'status': 'health_unavailable'})
 
 
 def broker():
@@ -162,9 +164,12 @@ def valid_record(record):
     if not isinstance(record, dict) or set(record) - ALLOWED_FIELDS:
         return False
     check = record.get('check')
-    if check not in ALLOWED_CHECKS or record.get('status') not in {'passed', 'failed'}:
+    status = record.get('status')
+    if not isinstance(check, str) or not isinstance(status, str):
         return False
-    if record['status'] == 'failed' and check not in FAILURE_CHECKS:
+    if check not in ALLOWED_CHECKS or status not in {'passed', 'failed'}:
+        return False
+    if status == 'failed' and check not in FAILURE_CHECKS:
         return False
     if check == 'bootstrap_error':
         category = record.get('category')
@@ -186,37 +191,28 @@ def valid_record(record):
     return True
 
 
-def sanitize_evidence(path):
-    try:
-        records = read_evidence(path)
-    except (OSError, ValueError):
-        return 1
+def classify_records(records):
     seen = set()
     for record in records:
         check = record.get('check') if isinstance(record, dict) else None
-        if check in seen or not valid_record(record):
-            return 1
+        if not valid_record(record) or check in seen:
+            return 'invalid'
         seen.add(check)
-    return 0
+    if 'complete' not in seen:
+        return 'incomplete'
+    if records[-1] == {'check': 'complete', 'status': 'passed'}:
+        required = SIMPLE_CHECKS | {'hermes_version', 'source_sha256', 'complete'}
+        return 'passed' if seen == required else 'invalid'
+    if records[-1] == {'check': 'complete', 'status': 'failed'}:
+        return 'failed'
+    return 'invalid'
 
 
-def validate_evidence(path):
+def classify_evidence(path):
     try:
-        records = read_evidence(path)
+        return classify_records(read_evidence(path))
     except (OSError, ValueError):
-        return 1
-    if not records or records[-1] != {'check': 'complete', 'status': 'passed'}:
-        return 1
-    seen = set()
-    for record in records:
-        if not isinstance(record, dict):
-            return 1
-        check = record.get('check')
-        if check in seen or record.get('status') != 'passed' or not valid_record(record):
-            return 1
-        seen.add(check)
-    required = SIMPLE_CHECKS | {'hermes_version', 'source_sha256', 'complete'}
-    return 0 if seen == required else 1
+        return 'invalid'
 
 
 def main():
@@ -236,10 +232,9 @@ def main():
             return 0
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
             return 1
-    if sys.argv[1] == 'validate-evidence' and len(sys.argv) == 3:
-        return validate_evidence(sys.argv[2])
-    if sys.argv[1] == 'sanitize-evidence' and len(sys.argv) == 3:
-        return sanitize_evidence(sys.argv[2])
+    if sys.argv[1] == 'classify-evidence' and len(sys.argv) == 3:
+        print(classify_evidence(sys.argv[2]))
+        return 0
     return 2
 
 

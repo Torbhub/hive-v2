@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 
 const paths = {
   template: '../infra/t01-smoke/template.yaml',
-  brokerTemplate: '../infra/t01-smoke/broker_template.yaml',
   provision: '../infra/t01-smoke/provision.sh',
   workflowScript: '../infra/t01-smoke/workflow.sh',
   healthCredential: '../infra/t01-smoke/health_credential.py',
@@ -100,10 +99,17 @@ describe('T01 disposable smoke infrastructure', () => {
 
   it('reports the active stage and exit status for generic bootstrap failures', () => {
     const provision = read('provision');
-    expect(provision).toContain('BOOTSTRAP_STAGE=python-binary');
-    expect(provision).toContain('BOOTSTRAP_STAGE=pm-build');
+    for (const stage of [
+      'filesystem-init', 'input-validation', 'system-packages', 'runtime-download', 'source-download',
+      'python-binary', 'pm-build', 'credential-config', 'default-deny-lockdown',
+      'broker-access', 'hermes-access', 'broker-start', 'broker-health',
+      'hermes-check', 'runtime-version', 'network-negative', 'teamkimi-no-model', 'broker-stop',
+    ]) {
+      expect(provision).toContain(`BOOTSTRAP_STAGE=${stage}`);
+    }
     expect(provision).toContain('category="failure:$BOOTSTRAP_STAGE"');
     expect(provision).toContain('origin="$BOOTSTRAP_STAGE:$status"');
+    expect(provision).not.toContain('systemctl show');
   });
 
   it('leaves the pm build destination absent before the fresh build', () => {
@@ -147,10 +153,12 @@ describe('T01 disposable smoke infrastructure', () => {
       '--dport 53', 'expect_denied direct_ip', 'expect_denied unapproved_dns',
       'expect_denied redirect', 'expect_denied ipv6', 'expect_denied alternate_port',
       'expect_denied metadata', 'expect_denied container_credentials',
-      'expect_allowed teamkimi_no_model', 'TEAMKIMI_IP', '6|7|28|124',
+      'expect_allowed teamkimi_no_model', '6|7|28|124',
     ]) {
       expect(provision).toContain(control);
     }
+    expect(provision).not.toContain('TEAMKIMI_IP');
+    expect(provision).not.toContain('TEAMKIMI_URL');
     expect(provision).toContain('IPAddressDeny=any');
     expect(provision).toContain('127.0.0.1:8765/health');
   });
@@ -205,23 +213,18 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(read('runbook')).toContain('T01_AMI_ID');
   });
 
-  it('deploys a health-only broker with an expiring run credential and no model route', () => {
-    const broker = read('brokerTemplate');
+  it('keeps health validation on the instance with an expiring run credential and no model route', () => {
     const script = read('workflowScript');
     const workflow = read('workflow');
-    expect(broker).toContain('AWS::Lambda::Url');
-    expect(broker).toContain("event.get('rawPath') != '/health'");
-    expect(broker).toContain("method != 'GET'");
-    expect(broker).toContain('hmac.compare_digest');
-    expect(broker).toContain('secretsmanager:GetSecretValue');
-    expect(broker).not.toContain('/v1/messages');
-    expect(broker).not.toContain('/teamkimi/status');
     expect(script).toContain('hive-v2-t01-smoke-health-${GITHUB_RUN_ID');
-    expect(script).toContain('broker_teamkimi_url');
     expect(script).toContain('health_secret_arn');
     expect(script).toContain('--force-delete-without-recovery');
+    expect(script).not.toContain('deploy_broker');
+    expect(script).not.toContain('BROKER_STACK_NAME');
     expect(workflow).toContain('workflow.sh issue-health-credential');
-    expect(workflow).toContain('workflow.sh deploy-broker');
+    expect(workflow).not.toContain('deploy-broker');
+    expect(read('template')).not.toContain('TeamKimiUrl');
+    expect(read('provision')).not.toContain('/v1/messages');
     expect(read('healthCredential')).toContain('secrets.token_urlsafe(32)');
     expect(read('attestation')).toContain("teamkimi status --json --color=never");
   });
@@ -237,10 +240,10 @@ describe('T01 disposable smoke infrastructure', () => {
     const workflow = read('workflow');
     const script = read('workflowScript');
     expect(workflow).toContain('role-duration-seconds: 9000');
-    for (const command of ['issue_health_credential', 'deploy_broker', 'deploy_stack', 'collect_evidence', 'cleanup']) {
+    for (const command of ['issue_health_credential', 'deploy_stack', 'collect_evidence', 'cleanup']) {
       expect(script).toContain(`with_mutex_renewal ${command}`);
     }
-    expect(script).toContain('python3 infra/t01-smoke/runtime.py sanitize-evidence "$candidate"');
+    expect(script).toContain('python3 infra/t01-smoke/runtime.py classify-evidence "$candidate"');
     expect(script).toContain('console_error');
     expect(script).toContain('RequestTimeout');
   });
@@ -267,7 +270,7 @@ describe('T01 disposable smoke infrastructure', () => {
     }
     expect(runbook).toContain('max_paid_admissions=0');
     expect(read('infraReadme')).toContain('t01-smoke/RUNBOOK.md');
-    const validation = 'cfn-lint infra/template.yaml infra/t01-smoke/template.yaml infra/t01-smoke/broker_template.yaml';
+    const validation = 'cfn-lint infra/template.yaml infra/t01-smoke/template.yaml';
     expect(read('deployWorkflow')).toContain(validation);
     expect(read('prePush')).toContain(validation);
   });

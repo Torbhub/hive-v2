@@ -24,21 +24,9 @@ Parameters:
   AmiId:
     Type: AWS::EC2::Image::Id
     Description: Reviewed Amazon Linux 2023 x86_64 image for this bounded run.
-  TeamKimiUrl:
-    Type: String
-    AllowedPattern: '^https://[A-Za-z0-9.-]+(?::443)?$'
-    Description: Approved TeamKimi origin. No path, credentials, query, or alternate port.
   TeamKimiSecretArn:
     Type: String
     AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:hive-v2-t01-smoke-[A-Za-z0-9/_+=.@-]+$'
-  TeamKimiSecretKey:
-    Type: String
-    Default: apiKey
-    AllowedPattern: '^[A-Za-z0-9_.-]+$'
-  TeamKimiConnectivityPath:
-    Type: String
-    Default: /health
-    AllowedPattern: '^/[A-Za-z0-9/_-]{1,128}$'
   Scenario:
     Type: String
     AllowedValues: [preflight]
@@ -204,10 +192,7 @@ Resources:
             '${ProvisionScriptUrl}' --output /opt/t01-provision.sh
           printf '%s  %s\n' '${ProvisionScriptSha256}' /opt/t01-provision.sh | sha256sum -c -
           chmod 0700 /opt/t01-provision.sh
-          export TEAMKIMI_URL='${TeamKimiUrl}'
           export TEAMKIMI_SECRET_ARN='${TeamKimiSecretArn}'
-          export TEAMKIMI_SECRET_KEY='${TeamKimiSecretKey}'
-          export TEAMKIMI_CONNECTIVITY_PATH='${TeamKimiConnectivityPath}'
           export SCENARIO='${Scenario}' MATRIX='${Matrix}'
           export MAX_INPUT_TOKENS='${MaxInputTokens}'
           export MAX_OUTPUT_TOKENS='${MaxOutputTokens}'
@@ -233,7 +218,7 @@ Outputs:
     Description: Disposable instance used by the evidence collector and cleanup step.
     Value: !Ref Instance
   BrokerSecretArn:
-    Description: Reference to the broker-only TeamKimi account secret. The value is never exposed.
+    Description: Reference to the run-scoped synthetic health secret. The value is never exposed.
     Value: !Ref TeamKimiSecretArn
   BrokerEndpoint:
     Description: Loopback-only no-model endpoint available to Hermes during preflight.

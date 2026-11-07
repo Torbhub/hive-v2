@@ -18,9 +18,9 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def request(port):
+def request(port, path='/access-check'):
     connection = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
-    connection.request('GET', '/access-check')
+    connection.request('GET', path)
     response = connection.getresponse()
     response.read()
     connection.close()
@@ -99,6 +99,25 @@ with tempfile.TemporaryDirectory() as directory:
         capture_output=True, text=True, timeout=5,
     )
     assert permanent.returncode == 1, 'permanent refusal was accepted'
+
+    now = int(time.time())
+    config.write_text(json.dumps({'run_id': '123'}))
+    secret.chmod(0o600)
+    secret.write_text(json.dumps({
+        'apiKey': 'synthetic-only', 'runId': '123',
+        'activeAccounts': 1, 'healthyProbes': 1,
+        'attestedAt': now, 'probeFinishedAt': now, 'expiresAt': now + 60,
+    }))
+    port = free_port()
+    process, status = start_broker(config, secret, port)
+    assert status == 200
+    assert request(port, '/health') == 200
+    assert request(port, '/v1/messages') == 404
+    assert request(port, '/teamkimi/status') == 404
+    config.write_text(json.dumps({'run_id': '999'}))
+    assert request(port, '/health') == 502
+    process.kill()
+    process.wait()
 
 
 def fake_hermes(root, version='0.22.6', lazy='false', lazy_rc=1):
