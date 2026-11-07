@@ -112,6 +112,27 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(initialDirectories).toBe('mkdir -p /opt/t01/source /opt/t01/fixtures /opt/t01/tools /opt/t01/pm-home');
   });
 
+  it('covers remaining stages with sanitized errors and preserves precedence', () => {
+    const provision = read('provision');
+    for (const stage of [
+      'credential-config', 'default-deny-lockdown', 'broker-access', 'hermes-access',
+      'broker-start', 'broker-health', 'hermes-check', 'runtime-version',
+      'network-negative', 'teamkimi-no-model', 'broker-stop',
+    ]) {
+      expect(provision).toContain(`BOOTSTRAP_STAGE=${stage}`);
+    }
+    expect(provision).toContain('systemctl show "$unit" --property Result --value');
+    expect(provision).toContain('systemctl show "$unit" --property ExecMainStatus --value');
+    expect(provision).not.toContain('journalctl');
+    const generic = provision.indexOf('category="failure:$BOOTSTRAP_STAGE"');
+    const systemd = provision.indexOf('capture_systemd_error t01-broker.service');
+    const timeout = provision.indexOf('category="timeout:$BOOTSTRAP_STAGE"');
+    const packageError = provision.indexOf('if [ -f /var/lib/t01/evidence/bootstrap-category ]');
+    expect(generic).toBeLessThan(systemd);
+    expect(systemd).toBeLessThan(timeout);
+    expect(timeout).toBeLessThan(packageError);
+  });
+
   it('separates broker credentials from the sanitized Hermes context', () => {
     const provision = read('provision');
     expect(provision).toContain('t01broker');

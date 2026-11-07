@@ -61,17 +61,34 @@ lock_down() {
   ip6tables -A OUTPUT -j REJECT
 }
 
+capture_systemd_error() {
+  local unit="$1" result exec_status
+  result="$(systemctl show "$unit" --property Result --value 2>/dev/null)"
+  exec_status="$(systemctl show "$unit" --property ExecMainStatus --value 2>/dev/null)"
+  case "$result" in
+    failed|exit-code|signal|timeout|start-limit-hit)
+      category="systemd:$BOOTSTRAP_STAGE:$result"
+      case "$exec_status" in
+        ''|*[!0-9]*) ;;
+        *) origin="$BOOTSTRAP_STAGE:$exec_status" ;;
+      esac
+      ;;
+  esac
+}
+
 on_error() {
   local status=$?
   trap - ERR
   set +e
   lock_down
   local category=unknown origin=unknown:0
+  if [ -n "${BOOTSTRAP_STAGE:-}" ]; then
+    category="failure:$BOOTSTRAP_STAGE"
+    origin="$BOOTSTRAP_STAGE:$status"
+  fi
   case "${BOOTSTRAP_STAGE:-}" in
-    python-binary|pm-build)
-      category="failure:$BOOTSTRAP_STAGE"
-      origin="$BOOTSTRAP_STAGE:$status"
-      ;;
+    broker-start|broker-health) capture_systemd_error t01-broker.service ;;
+    hermes-check|runtime-version) capture_systemd_error t01-hermes-check.service ;;
   esac
   if [[ "$status" =~ ^(124|137)$ ]] && [ -n "${BOOTSTRAP_STAGE:-}" ]; then
     category="timeout:$BOOTSTRAP_STAGE"
@@ -163,7 +180,7 @@ export UV_OFFLINE=1
 [ -f /opt/t01/source/uv.lock ]
 [ -x /opt/t01/hermes/bin/hermes ]
 emit frozen_hash_lock_install passed
-BOOTSTRAP_STAGE=
+BOOTSTRAP_STAGE=credential-config
 
 cat > /var/lib/t01/hermes/config.yaml <<'EOF'
 security:
@@ -291,14 +308,17 @@ StandardError=null
 EOF
 chmod 0444 /etc/systemd/system/t01-broker.service /etc/systemd/system/t01-hermes-check.service
 
+BOOTSTRAP_STAGE=default-deny-lockdown
 systemctl daemon-reload
 lock_down
 emit default_deny_lockdown passed
+BOOTSTRAP_STAGE=broker-access
 command -v curl runuser timeout >/dev/null
 runuser -u t01broker -- test -r /opt/t01/runtime.py
 runuser -u t01broker -- test -r /etc/t01/broker/config.json
 runuser -u t01broker -- test -r /etc/t01/broker/teamkimi.json
 runuser -u t01broker -- test ! -w /etc/t01/broker/teamkimi.json
+BOOTSTRAP_STAGE=hermes-access
 runuser -u t01hermes -- test -x /opt/t01/hermes/bin
 runuser -u t01hermes -- test -r /opt/t01/fixtures/query.txt
 runuser -u t01hermes -- test -r /var/lib/t01/hermes/config.yaml
@@ -309,9 +329,13 @@ fi
 if runuser -u t01hermes -- test -x /etc/t01/broker; then
   false
 fi
+BOOTSTRAP_STAGE=broker-start
 systemctl start t01-broker.service
+BOOTSTRAP_STAGE=broker-health
 runuser -u t01hermes -- env -i PATH=/usr/bin:/bin /usr/bin/python3 /opt/t01/runtime.py wait-for-broker
+BOOTSTRAP_STAGE=hermes-check
 systemctl start t01-hermes-check.service
+BOOTSTRAP_STAGE=runtime-version
 read -r RUNTIME_VERSION RUNTIME_COMMIT < <(python3 - <<'PY'
 import json
 with open('/var/lib/t01/hermes/runtime-check.json', encoding='utf-8') as source:
@@ -357,6 +381,7 @@ expect_allowed() {
   emit "$name" passed
 }
 
+BOOTSTRAP_STAGE=network-negative
 expect_denied direct_ip curl -4 --fail --silent https://192.0.2.1/
 expect_denied unapproved_dns curl -4 --fail --silent https://example.com/
 expect_denied redirect curl -4 --fail --silent --location http://127.0.0.1:8765/redirect-fixture
@@ -364,7 +389,9 @@ expect_denied ipv6 curl -6 --fail --silent 'https://[2606:4700:4700::1111]/'
 expect_denied alternate_port curl -4 --fail --silent "https://${TEAMKIMI_HOST}:8443/"
 expect_denied metadata curl -4 --fail --silent http://169.254.169.254/latest/meta-data/
 expect_denied container_credentials curl -4 --fail --silent http://169.254.170.2/
+BOOTSTRAP_STAGE=teamkimi-no-model
 expect_allowed teamkimi_no_model curl -4 --fail --silent http://127.0.0.1:8765/health
+BOOTSTRAP_STAGE=broker-stop
 systemctl stop t01-broker.service
 emit paid_admission_disabled passed
 emit complete passed
