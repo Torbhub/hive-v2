@@ -106,6 +106,12 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision).toContain('origin="$BOOTSTRAP_STAGE:$status"');
   });
 
+  it('leaves the pm build destination absent before the fresh build', () => {
+    const provision = read('provision');
+    const initialDirectories = provision.split('\n').find((line) => line.startsWith('mkdir -p /opt/t01/source'));
+    expect(initialDirectories).toBe('mkdir -p /opt/t01/source /opt/t01/fixtures /opt/t01/tools /opt/t01/pm-home');
+  });
+
   it('separates broker credentials from the sanitized Hermes context', () => {
     const provision = read('provision');
     expect(provision).toContain('t01broker');
