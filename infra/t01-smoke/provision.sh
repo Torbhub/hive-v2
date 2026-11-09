@@ -9,6 +9,8 @@ NODE_VERSION=22.23.2
 NODE_ARCHIVE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
 EVIDENCE=/var/lib/t01/evidence/preflight.jsonl
 EVIDENCE_IP=
+SSM_IP=
+SSMMESSAGES_IP=
 TUNNEL_PID=
 BROKER_PORT=8765
 if [ "$SCENARIO" != preflight ]; then
@@ -99,6 +101,10 @@ lock_down() {
   iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
   if [ -n "$EVIDENCE_IP" ]; then
     iptables -A OUTPUT -p tcp -d "$EVIDENCE_IP" --dport 443 -m owner --uid-owner 0 -j ACCEPT
+  fi
+  if [ "$SCENARIO" != preflight ] && [ -n "$SSM_IP" ] && [ -n "$SSMMESSAGES_IP" ]; then
+    iptables -A OUTPUT -p tcp -d "$SSM_IP" --dport 443 -m owner --uid-owner 10001 -j ACCEPT
+    iptables -A OUTPUT -p tcp -d "$SSMMESSAGES_IP" --dport 443 -m owner --uid-owner 10001 -j ACCEPT
   fi
   iptables -A OUTPUT -j REJECT
   ip6tables -P INPUT DROP
@@ -350,6 +356,28 @@ print(addresses[0][4][0])
 PY
 )"
   printf '%s %s\n' "$EVIDENCE_IP" s3.us-east-1.amazonaws.com >> /etc/hosts
+fi
+
+BOOTSTRAP_STAGE=tunnel-endpoints
+if [ "$SCENARIO" != preflight ]; then
+  SSM_ENDPOINT_IPS="$(python3 - <<'PY'
+import socket
+endpoints = (
+    'ssm.us-east-1.amazonaws.com',
+    'ssmmessages.us-east-1.amazonaws.com',
+)
+addresses = []
+for endpoint in endpoints:
+    resolved = socket.getaddrinfo(endpoint, 443, socket.AF_INET, socket.SOCK_STREAM)
+    if not resolved:
+        raise SystemExit(f'endpoint resolution failed: {endpoint}')
+    addresses.append(resolved[0][4][0])
+print(*addresses)
+PY
+)"
+  read -r SSM_IP SSMMESSAGES_IP <<< "$SSM_ENDPOINT_IPS"
+  printf '%s %s\n' "$SSM_IP" ssm.us-east-1.amazonaws.com >> /etc/hosts
+  printf '%s %s\n' "$SSMMESSAGES_IP" ssmmessages.us-east-1.amazonaws.com >> /etc/hosts
 fi
 
 BOOTSTRAP_STAGE=broker-config

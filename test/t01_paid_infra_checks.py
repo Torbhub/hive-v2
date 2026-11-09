@@ -149,6 +149,35 @@ assert CONTROL_RULE in PROVISION
 assert PROVISION.index(CONTROL_RULE) < PROVISION.index('iptables -A OUTPUT -o lo -j ACCEPT')
 LOCK_DOWN = PROVISION.split('lock_down() {', 1)[1].split('\n}', 1)[0]
 assert f'if [ "$SCENARIO" != preflight ]; then\n    {CONTROL_RULE}\n  fi' in LOCK_DOWN
+TUNNEL_ENDPOINTS = {
+    'ssm.us-east-1.amazonaws.com': 'SSM_IP',
+    'ssmmessages.us-east-1.amazonaws.com': 'SSMMESSAGES_IP',
+}
+FINAL_REJECT = 'iptables -A OUTPUT -j REJECT'
+INITIAL_TUNNEL = '  start_tunnel\n  wait_for_teamkimi\n  emit trusted_tunnel_ready passed'
+TUNNEL_RESOLUTION = PROVISION.split('BOOTSTRAP_STAGE=tunnel-endpoints', 1)[1].split('BOOTSTRAP_STAGE=broker-config', 1)[0]
+assert """endpoints = (
+    'ssm.us-east-1.amazonaws.com',
+    'ssmmessages.us-east-1.amazonaws.com',
+)""" in TUNNEL_RESOLUTION
+RESOLUTION = 'read -r SSM_IP SSMMESSAGES_IP <<< "$SSM_ENDPOINT_IPS"'
+assert RESOLUTION in TUNNEL_RESOLUTION
+assert PROVISION.index(RESOLUTION) < PROVISION.index(INITIAL_TUNNEL)
+for endpoint, variable in TUNNEL_ENDPOINTS.items():
+    host_pin = f'printf \'%s %s\\n\' "${variable}" {endpoint} >> /etc/hosts'
+    rule = f'iptables -A OUTPUT -p tcp -d "${variable}" --dport 443 -m owner --uid-owner 10001 -j ACCEPT'
+    assert host_pin in PROVISION
+    assert PROVISION.index(host_pin) < PROVISION.index(INITIAL_TUNNEL)
+    assert LOCK_DOWN.count(rule) == 1
+    assert LOCK_DOWN.index('iptables -A OUTPUT -d 169.254.169.254 -j REJECT') < LOCK_DOWN.index(rule)
+    assert LOCK_DOWN.index('iptables -A OUTPUT -d 169.254.170.2 -j REJECT') < LOCK_DOWN.index(rule)
+    assert LOCK_DOWN.index(rule) < LOCK_DOWN.index(FINAL_REJECT)
+assert LOCK_DOWN.count('--uid-owner 10001 -j ACCEPT') == len(TUNNEL_ENDPOINTS)
+assert '--uid-owner 10000 -j ACCEPT' not in LOCK_DOWN
+assert 'if [ "$SCENARIO" != preflight ] && [ -n "$SSM_IP" ] && [ -n "$SSMMESSAGES_IP" ]; then' in LOCK_DOWN
+EVIDENCE_RULE = 'iptables -A OUTPUT -p tcp -d "$EVIDENCE_IP" --dport 443 -m owner --uid-owner 0 -j ACCEPT'
+assert LOCK_DOWN.count(EVIDENCE_RULE) == 1
+assert LOCK_DOWN.index(EVIDENCE_RULE) < LOCK_DOWN.index(FINAL_REJECT)
 assert 'expect_denied teamkimi_control_port' in PROVISION
 assert 'expect_broker_allowed teamkimi_control_broker' in PROVISION
 assert 'aws s3 cp' in PAID_SERVICE
