@@ -83,6 +83,7 @@ import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep, tm
 import { withTimeout } from '../src/view.js';
 import { appendDecision, hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, writePendingPane, hivePath } from '../src/state.js';
 import { loadProcessedKeys, recordProcessedKey } from '../src/watch-persist.js';
+import { disableExecution } from '../src/rollout.js';
 import {
   extractCommand, neverApprove, tier1Approves, watch, watchCycle, WAKE_MAX_ATTEMPTS,
 } from '../src/watch.js';
@@ -726,6 +727,22 @@ describe('watchCycle auto-approver', () => {
     const decisions = await readDecisions(root);
     expect(decisions[0]).toMatchObject({ by: 'watch', project: 'demo' });
     expect(decisions[0].summary).toContain('auto-approved "Approve once"');
+  });
+
+  it('skips a paused smart approval before the classifier', async () => {
+    const { root } = await setupProject({ approvals: 'smart' });
+    await disableExecution(root, 'demo');
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    try {
+      withQuestion();
+      vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 paused_probe.py') as never);
+      vi.mocked(run).mockClear();
+      await cycle(root, freshApprover());
+      expect(answerDialog).not.toHaveBeenCalled();
+      expect(vi.mocked(run).mock.calls.filter((call) => call[0] === 'kimi')).toEqual([]);
+    } finally {
+      delete process.env.HIVE_COLLABORATION_ENABLED;
+    }
   });
 
   it('destructive text is never approved, even in smart mode (no kimi call)', async () => {

@@ -150,8 +150,13 @@ export async function startTestRegistry(items = registryItems()): Promise<{ brok
 }
 
 export function configureSecurity(collaboration = true): void {
-  if (collaboration) process.env.HIVE_COLLABORATION_ENABLED = '1';
-  else delete process.env.HIVE_COLLABORATION_ENABLED;
+  if (collaboration) {
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    process.env.HIVE_WAKE_SUBSCRIPTION_WRITES_ENABLED = '1';
+  } else {
+    delete process.env.HIVE_COLLABORATION_ENABLED;
+    delete process.env.HIVE_WAKE_SUBSCRIPTION_WRITES_ENABLED;
+  }
   process.env.HIVE_ASSERTION_KEYS_JSON = JSON.stringify(ASSERTION_KEYS);
 }
 

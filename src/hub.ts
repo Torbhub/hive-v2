@@ -20,6 +20,7 @@ import type { QuestionBatch } from './types.js';
 import { orchestratorName, typeLine } from './spawn.js';
 import { planVerdict } from './taskgate.js';
 import { taskScope } from './scope.js';
+import { assertExecutionAllowed } from './rollout.js';
 
 export { Refusal } from './state.js';
 export { hubAccept, hubLog, hubProgress, ledgerCommand } from './taskgate.js';
@@ -30,8 +31,10 @@ export async function hubInit(root: string, name = 'hub'): Promise<void> {
   await fs.mkdir(hubPath(root, 'panes'), { recursive: true });
   const existing = await readJson<{ name?: string }>(hubPath(root, 'hub.json'));
   await writeJson(hubPath(root, 'hub.json'), { name: existing?.name ?? name });
-  const pf = await readProjects(root);
-  await writeProjects(root, pf);
+  await withHubLock(root, async () => {
+    const pf = await readProjects(root);
+    await writeProjects(root, pf);
+  });
 }
 
 export async function hubAdd(
@@ -44,24 +47,36 @@ export async function setProjectMode(root: string, project: string, mode: string
   if (!(PROJECT_MODES as readonly string[]).includes(mode)) {
     throw new Refusal(`a mode is ask|yolo|auto: ${mode}`);
   }
-  const pf = await readProjects(root);
-  const p = pf.projects.find((x) => x.name === project);
-  if (!p) throw new Refusal(`unknown project: ${project}`);
-  p.mode = mode as ProjectMode;
-  await writeProjects(root, pf);
-  return p.mode;
+  return withHubLock(root, async () => {
+    const pf = await readProjects(root);
+    const current = pf.projects.find((candidate) => candidate.name === project);
+    if (!current) throw new Refusal(`unknown project: ${project}`);
+    await writeProjects(root, {
+      ...pf,
+      projects: pf.projects.map((candidate) => candidate.name === project
+        ? { ...candidate, mode: mode as ProjectMode }
+        : candidate),
+    });
+    return mode as ProjectMode;
+  });
 }
 
 export async function setProjectApprovals(root: string, project: string, approvals: string): Promise<Approvals> {
   if (!(APPROVALS_MODES as readonly string[]).includes(approvals)) {
     throw new Refusal(`approvals is manual|safe|smart: ${approvals}`);
   }
-  const pf = await readProjects(root);
-  const p = pf.projects.find((x) => x.name === project);
-  if (!p) throw new Refusal(`unknown project: ${project}`);
-  p.approvals = approvals as Approvals;
-  await writeProjects(root, pf);
-  return p.approvals;
+  return withHubLock(root, async () => {
+    const pf = await readProjects(root);
+    const current = pf.projects.find((candidate) => candidate.name === project);
+    if (!current) throw new Refusal(`unknown project: ${project}`);
+    await writeProjects(root, {
+      ...pf,
+      projects: pf.projects.map((candidate) => candidate.name === project
+        ? { ...candidate, approvals: approvals as Approvals }
+        : candidate),
+    });
+    return approvals as Approvals;
+  });
 }
 
 export async function hubTask(root: string, project: string, text: string): Promise<string> {
@@ -310,11 +325,13 @@ export async function answerDialog(
   choice: string,
   seen: string,
 ): Promise<{ answered: true; session: string; choice: string; option: string; dialog_gone: boolean }> {
+  await assertExecutionAllowed(root, project);
   const dialog = await readDialogFor(root, project, agentRefArg);
   if (!dialog) throw new Refusal('no dialog is on that screen');
   if (dialog.fingerprint !== seen) {
     throw new Refusal('the dialog changed since it was read; read it again before answering');
   }
+  await assertExecutionAllowed(root, project);
   let option = 'Esc';
   if (choice === 'esc') {
     await sendEscape(dialog.pane);

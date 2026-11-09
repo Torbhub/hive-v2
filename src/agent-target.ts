@@ -1,9 +1,22 @@
 import { AuthorizationError } from './security.js';
-import { readProjects, readTeam } from './state.js';
+import { RolloutPaused } from './rollout.js';
+import { readProjects, readTeam, type ProjectsFile } from './state.js';
 
-export async function storedAgentTask(root: string, project: string, agentRef: unknown): Promise<string | undefined> {
-  const registration = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
-  if (!registration) throw new AuthorizationError('not found');
+export async function storedAgentTask(
+  root: string, project: string, agentRef: unknown, pauseOnConfigFailure = false,
+): Promise<string | undefined> {
+  let registration: ProjectsFile['projects'][number] | undefined;
+  try {
+    const pf = await readProjects(root);
+    registration = pf.projects.find((candidate) => candidate.name === project);
+  } catch (error) {
+    if (pauseOnConfigFailure) throw new RolloutPaused(project);
+    throw error;
+  }
+  if (!registration) {
+    if (pauseOnConfigFailure) throw new RolloutPaused(project);
+    throw new AuthorizationError('not found');
+  }
   const team = await readTeam(registration.home);
   const ref = agentRef === undefined || agentRef === '' ? undefined : String(agentRef);
   const [name, worktree] = ref?.split('@') ?? [];

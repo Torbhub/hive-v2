@@ -36,6 +36,16 @@ Wake subscriptions require the agent owner or a principal with an explicit execu
 
 Execution approvals require a human approver. Agent principals cannot create them. Consumption also rejects persisted approvals with agent approvers. A supplied task requires exact task-scoped delegated grants. Project-wide grants do not authorize delegated approval. Push consumption uses the delegated-approval proof at `/api/hive/broker/delegated-approval`. The broker authenticates the consuming agent and validates its exact execute grant and task plus the recorded approver subject and execute grant identity. Only then does it return the approver's current account status, epoch, and expiry. It never substitutes the consumer owner's account. Invalid scopes, revoked or substituted grants, and disabled accounts fail closed.
 
+## Execution pause
+
+Run `hive hub execution <project> off` to pause one project. The command stores `collaboration_execution_disabled_at` in `.hive-hub/projects.json`. A second `off` command keeps the first timestamp. Run `hive hub execution <project> status` to read the pause state. This slice has no `on` command.
+
+The pause applies only when collaboration is enabled. It blocks worker spawn, respawn, orchestrator launch, watchdog wake, continue, and execution answers for that project. Other projects stay unchanged. Launch checks run at entry and immediately before pane creation or pending input. Automatic approvals skip paused projects before classifiers. Enabled execution returns HTTP 409 when the project is paused or its config is missing or corrupt. A malformed pause marker is corrupt config. Status and repeated `off` fail closed instead of reporting enabled. Legacy execution does not read the pause setting.
+
+The pause does not stop existing panes. Reads, progress, cancellation, ordinary answers, interrupt, and kill remain available. Wake-subscription listing and revocation also remain available.
+
+Set `HIVE_WAKE_SUBSCRIPTION_WRITES_ENABLED=1` to allow `POST /api/wake-subscriptions`. This flag controls subscription creation only. It does not admit or dispatch a wake.
+
 ## Configuration and restore
 
 The session box has read-only access to `nexus-hive-collaboration`. It has no `nexus-users` access and no table write access. Canonical account status, delegated approval, and wake writes go through `/api/hive/broker/*` on Nexus. `HIVE_COLLABORATION_TABLE` can select another table. `HIVE_NEXUS_BASE_URL` selects the broker. `HIVE_ASSERTION_KEYS_SECRET` defaults to `citadel/hive/assertion-keys`. Tests can use `HIVE_ASSERTION_KEYS_JSON`. Isolated local development uses the same broker contract. Set `HIVE_NEXUS_BASE_URL` to a local Citadel broker. Missing or invalid configuration fails closed.
