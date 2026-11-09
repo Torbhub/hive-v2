@@ -11,7 +11,7 @@ import { usageCostMicros } from '../tools/hermes-live/policy.js';
 import { attestation, controls, policyHash, wireCounted, wireUsage } from './hermes-live-fixtures.js';
 
 const source = process.env.TEAMKIMI_SMOKE_SOURCE;
-const TESTED_TEAMKIMI_COMMIT = '87e5ed7dc1fd7af3a234ac4e4f24b9c7286126b6';
+const TESTED_TEAMKIMI_COMMIT = '935104a1936a603467c91e14acc1aa0b6715c2f3';
 const attemptKey = 'a'.repeat(64);
 const proxyApiKey = 'ordinary-proxy-key';
 const describeWire = source ? describe : describe.skip;
@@ -140,7 +140,7 @@ describe('Anthropic canonicalization', () => {
   });
 });
 
-describeWire('TeamKimi PR18 no-paid HTTP wire contract', () => {
+describeWire('TeamKimi PR19 no-paid HTTP wire contract', () => {
   it('injects credentials, forwards the exact Anthropic request, and maps usage and revocation', async () => {
     const wire = await fixture();
     const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', {
@@ -181,7 +181,7 @@ describeWire('TeamKimi PR18 no-paid HTTP wire contract', () => {
     expect(upstream.headers.authorization).toBe('Bearer wire-broker-account');
     expect(upstream.headers['x-api-key']).toBeUndefined();
     expect(JSON.parse(upstream.body)).toMatchObject({
-      model: 'kimi-code/k3.1-pro', max_tokens: 2000,
+      model: 'k3.1-pro', max_tokens: 2000,
       thinking: { type: 'enabled', budget_tokens: 4000 },
     });
     expect(JSON.parse(upstream.body).output_config).toBeUndefined();
