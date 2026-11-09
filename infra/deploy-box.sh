@@ -23,7 +23,12 @@ bash infra/provision-box.sh </dev/null
 systemctl restart hive-v2-web hive-v2-watch
 
 SECRET=$(sed -n 's/^HIVE_WEB_SECRET=//p' /etc/hive-v2/web.env)
+COLLABORATION=$(sed -n 's/^HIVE_COLLABORATION_ENABLED=//p' /etc/hive-v2/web.env)
 URL=http://127.0.0.1:7684/api/view
+EXPECTED_AUTH=200
+if [ "$COLLABORATION" = 1 ]; then
+  EXPECTED_AUTH=401
+fi
 
 fail=0
 
@@ -31,13 +36,13 @@ fail=0
 code_auth=""
 for _ in $(seq 1 6); do
   code_auth=$(curl -s -o /dev/null -w '%{http_code}' -H "x-hive-auth: $SECRET" "$URL" || true)
-  [ "$code_auth" = 200 ] && break
+  [ "$code_auth" = "$EXPECTED_AUTH" ] && break
   sleep 5
 done
-if [ "$code_auth" = 200 ]; then
-  echo "PASS: auth header -> 200"
+if [ "$code_auth" = "$EXPECTED_AUTH" ]; then
+  echo "PASS: auth header -> $EXPECTED_AUTH"
 else
-  echo "FAIL: auth header -> $code_auth (want 200)"
+  echo "FAIL: auth header -> $code_auth (want $EXPECTED_AUTH)"
   fail=1
 fi
 
