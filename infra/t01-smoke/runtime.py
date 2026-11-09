@@ -412,42 +412,42 @@ def manifest_credential(path):
     print(revocation['credentialId'])
 
 
-def valid_record(record):
+def record_schema_error(record):
     if not isinstance(record, dict) or set(record) - ALLOWED_FIELDS:
-        return False
+        return 'record'
     check = record.get('check')
     status = record.get('status')
     if not isinstance(check, str) or not isinstance(status, str):
-        return False
-    if check not in ALLOWED_CHECKS or status not in {'passed', 'failed'}:
-        return False
-    if status == 'failed' and check not in FAILURE_CHECKS:
-        return False
+        return 'record'
+    if check not in ALLOWED_CHECKS:
+        return 'check'
+    if status not in {'passed', 'failed'} or status == 'failed' and check not in FAILURE_CHECKS:
+        return 'status'
     if check == 'bootstrap_error':
         category = record.get('category')
         origin = record.get('origin')
         if set(record) != {'check', 'status', 'category', 'origin'}:
-            return False
+            return 'fields'
         if not isinstance(category, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.:-]*', category):
-            return False
+            return 'category'
         if category.startswith('runtime-version-') and not valid_runtime_version_category(category):
-            return False
+            return 'category'
         if not isinstance(origin, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+:[0-9]+', origin):
-            return False
+            return 'origin'
     elif check == 'hermes_version':
         if record != {'check': check, 'status': 'passed', 'version': VERSION, 'commit': COMMIT}:
-            return False
+            return 'identity'
     elif check == 'source_sha256':
         if record != {'check': check, 'status': 'passed', 'sha256': SOURCE_SHA256}:
-            return False
+            return 'identity'
     elif check == 'node_runtime_locked':
         if record != {'check': check, 'status': 'passed', 'version': '22.23.2'}:
-            return False
+            return 'identity'
     elif check == 'paid_evidence_export':
         if set(record) != {'check', 'status', 'sha256', 'credentialId'} \
                 or not re.fullmatch(r'[a-f0-9]{64}', record.get('sha256', '')) \
                 or not re.fullmatch(r'[a-f0-9]{32}', record.get('credentialId', '')):
-            return False
+            return 'fields'
     elif check == 'count_only_no_generation':
         expected = {
             'check', 'status', 'sha256', 'requestHash', 'model', *COUNT_INPUT_FIELDS,
@@ -459,15 +459,20 @@ def valid_record(record):
                 or not re.fullmatch(r'[a-f0-9]{64}', record['requestHash']) \
                 or not re.fullmatch(r'[a-f0-9]{64}', record['proof']) \
                 or any(type(record[key]) is not int or record[key] < 0 for key in ('timestamp', 'revokedAt')) \
-                or type(record['generationRequests']) is not int or record['generationRequests'] != 0 \
-                or not valid_counted_input(record):
-            return False
+                or type(record['generationRequests']) is not int or record['generationRequests'] != 0:
+            return 'fields'
+        if not valid_counted_input(record):
+            return 'count-input'
     elif check == 'paid_matrix_completed':
         if set(record) != {'check', 'status', 'policyHash'} or not re.fullmatch(r'[a-f0-9]{64}', record.get('policyHash', '')):
-            return False
+            return 'fields'
     elif set(record) != {'check', 'status'}:
-        return False
-    return True
+        return 'fields'
+    return None
+
+
+def valid_record(record):
+    return record_schema_error(record) is None
 
 
 def sanitize_evidence(path):
@@ -495,8 +500,10 @@ def classify_records_with_reason(records):
     seen = set()
     for record in records:
         check = record.get('check') if isinstance(record, dict) else None
-        if not valid_record(record):
-            return 'invalid', 'bad-schema'
+        schema_error = record_schema_error(record)
+        if schema_error is not None:
+            check_name = check if isinstance(check, str) and check in ALLOWED_CHECKS else 'unknown'
+            return 'invalid', f'bad-schema:{check_name}:{schema_error}'
         if check in seen:
             return 'invalid', 'duplicate-check'
         seen.add(check)

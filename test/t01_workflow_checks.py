@@ -114,7 +114,7 @@ def classify_with_reason(records, expected_classification, expected_reason):
     assert runtime.classify_records_with_reason(records) == (expected_classification, expected_reason), records
 
 
-classify_with_reason([{'check': 'unknown', 'status': 'passed'}], 'invalid', 'bad-schema')
+classify_with_reason([{'check': 'sensitive-check-name', 'status': 'passed'}], 'invalid', 'bad-schema:unknown:check')
 duplicate_check = evidence_records()
 duplicate_check.insert(1, duplicate_check[0])
 classify_with_reason(duplicate_check, 'invalid', 'duplicate-check')
@@ -192,7 +192,10 @@ fi
 
 
 console_failure_case('not-json\n')
-console_failure_case('{"check":"complete","status":"passed","unknown":"synthetic-sensitive-value"}\n')
+console_failure_case(
+    '{"check":"complete","status":"passed","unknown":"synthetic-sensitive-value"}\n',
+    expected_reason='bad-schema:complete:record',
+)
 console_failure_case(
     '{"check":"uv_install","status":"passed"}\n{"check":"uv_install","status":"passed"}\n',
     expected_reason='duplicate-check',
@@ -204,14 +207,14 @@ console_failure_case(
     '{"status":"failed","check":"complete"}\n{"status":"failed","check":"provisioning"}\n',
     expected_reason='wrong-record-set',
 )
-for record in (
-    {'check': ['complete'], 'status': 'failed'},
-    {'check': {'name': 'complete'}, 'status': 'failed'},
-    {'check': 'complete', 'status': ['failed']},
-    {'check': 'complete', 'status': {'state': 'failed'}},
+for record, expected_reason in (
+    ({'check': ['complete'], 'status': 'failed'}, 'bad-schema:unknown:record'),
+    ({'check': {'name': 'complete'}, 'status': 'failed'}, 'bad-schema:unknown:record'),
+    ({'check': 'complete', 'status': ['failed']}, 'bad-schema:complete:record'),
+    ({'check': 'complete', 'status': {'state': 'failed'}}, 'bad-schema:complete:record'),
 ):
     classify_cli([record], 'invalid')
-    console_failure_case(json.dumps(record, separators=(',', ':')) + '\n')
+    console_failure_case(json.dumps(record, separators=(',', ':')) + '\n', expected_reason=expected_reason)
 
 
 incomplete_records = [source_record, {'check': 'uv_install', 'status': 'passed'}]
@@ -327,9 +330,54 @@ def paid_console_records(manifest_sha, marker=True):
     return records
 
 
+classify_with_reason([None], 'invalid', 'bad-schema:unknown:record')
+classify_with_reason([{'check': 'uv_install', 'status': 'failed'}], 'invalid', 'bad-schema:uv_install:status')
+classify_with_reason(
+    [{'check': 'uv_install', 'status': 'passed', 'version': 'unexpected'}],
+    'invalid', 'bad-schema:uv_install:fields',
+)
+for record, expected_reason in (
+    (
+        {'check': 'bootstrap_error', 'status': 'failed', 'category': 'TypeError:unknown'},
+        'bad-schema:bootstrap_error:fields',
+    ),
+    (
+        {'check': 'bootstrap_error', 'status': 'failed', 'category': 'unsafe message', 'origin': 'client.py:1'},
+        'bad-schema:bootstrap_error:category',
+    ),
+    (
+        {'check': 'bootstrap_error', 'status': 'failed', 'category': 'TypeError:unknown', 'origin': '/secret/path:1'},
+        'bad-schema:bootstrap_error:origin',
+    ),
+    (
+        {'check': 'source_sha256', 'status': 'passed', 'sha256': '0' * 64},
+        'bad-schema:source_sha256:identity',
+    ),
+    (
+        {'check': 'node_runtime_locked', 'status': 'passed', 'version': '0.0.0'},
+        'bad-schema:node_runtime_locked:identity',
+    ),
+    (
+        {'check': 'paid_evidence_export', 'status': 'passed', 'sha256': 'invalid', 'credentialId': '0' * 32},
+        'bad-schema:paid_evidence_export:fields',
+    ),
+    (
+        {'check': 'paid_matrix_completed', 'status': 'passed', 'policyHash': 'invalid'},
+        'bad-schema:paid_matrix_completed:fields',
+    ),
+):
+    classify_with_reason([record], 'invalid', expected_reason)
+wrong_version = evidence_records()[0]
+wrong_version['version'] = '0.0.0'
+classify_with_reason([wrong_version], 'invalid', 'bad-schema:hermes_version:identity')
+
 bad_count_schema = paid_console_records('a' * 64)
 next(record for record in bad_count_schema if record['check'] == 'count_only_no_generation')['sha256'] = ['not-a-string']
-classify_with_reason(bad_count_schema, 'invalid', 'bad-schema')
+classify_with_reason(bad_count_schema, 'invalid', 'bad-schema:count_only_no_generation:fields')
+for field, value in (('cacheCreation5mInputTokens', 2), ('inputTokens', 11)):
+    bad_count_input = paid_console_records('a' * 64)
+    next(record for record in bad_count_input if record['check'] == 'count_only_no_generation')[field] = value
+    classify_with_reason(bad_count_input, 'invalid', 'bad-schema:count_only_no_generation:count-input')
 
 
 def paid_collect_case(manifest_sha='match', verify_rc=0):
