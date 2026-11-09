@@ -307,6 +307,32 @@ assert downloads == [download], downloads
 assert digests == [digest], digests
 assert removals == ['-f /opt/t01/session-manager-plugin.rpm'], removals
 
+
+def source_download_path_case():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+        path_line = next(
+            line for line in source.splitlines()
+            if line.startswith('export PATH=/opt/t01/node/bin:')
+        )
+        exported_path = path_line.removeprefix('export PATH=')
+        directories = exported_path.split(':')
+        assert directories[0] == '/opt/t01/node/bin', exported_path
+        for name, parent in (('useradd', 'usr/sbin'), ('runuser', 'usr/sbin'), ('iptables', 'sbin')):
+            executable = root / parent / name
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            write_executable(executable, '#!/bin/sh\nexit 0\n')
+        path = ':'.join(str(root / entry.lstrip('/')) for entry in directories)
+        result = subprocess.run(
+            ['/bin/bash', '-c', 'command -v useradd runuser iptables'],
+            env={'PATH': path}, capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, (exported_path, result.stdout, result.stderr)
+
+
+source_download_path_case()
+
 provision = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
 stages = [
     provision.index(f'BOOTSTRAP_STAGE={stage}')
