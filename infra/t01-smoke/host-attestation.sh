@@ -14,7 +14,7 @@ fail() {
 command_id="$(aws ssm send-command \
   --instance-ids "$T01_TEAMKIMI_HOST_ID" \
   --document-name AWS-RunShellScript \
-  --parameters '{"commands":["/usr/bin/python3 /home/ubuntu/hive-v2/infra/t01-smoke/teamkimi_attestation.py"]}' \
+  --parameters '{"commands":["runuser -u ubuntu -- env -i HOME=/home/ubuntu PATH=/opt/node22/bin:/usr/local/bin:/usr/bin:/bin /usr/bin/python3 /home/ubuntu/hive-v2/infra/t01-smoke/teamkimi_attestation.py"]}' \
   --query Command.CommandId --output text 2>"$work/send-error")" || fail send
 [[ "$command_id" =~ ^[A-Za-z0-9-]+$ ]] || fail command_id
 aws ssm wait command-executed --instance-id "$T01_TEAMKIMI_HOST_ID" \

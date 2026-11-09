@@ -9,6 +9,7 @@ NODE_VERSION=22.23.2
 NODE_ARCHIVE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
 EVIDENCE=/var/lib/t01/evidence/preflight.jsonl
 EVIDENCE_IP=
+SECRETS_MANAGER_IP=
 TUNNEL_PID=
 BROKER_PORT=8765
 if [ "$SCENARIO" != preflight ]; then
@@ -63,6 +64,7 @@ lock_down() {
   iptables -A OUTPUT -p udp --dport 53 -j REJECT
   iptables -A OUTPUT -p tcp --dport 53 -j REJECT
   iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A OUTPUT -p tcp -d "$SECRETS_MANAGER_IP" --dport 443 -m owner --uid-owner 0 -j ACCEPT
   if [ -n "$EVIDENCE_IP" ]; then
     iptables -A OUTPUT -p tcp -d "$EVIDENCE_IP" --dport 443 -m owner --uid-owner 0 -j ACCEPT
   fi
@@ -280,11 +282,35 @@ chown root:root /var/lib/t01/hermes/config.yaml
 chmod 0444 /var/lib/t01/hermes/config.yaml
 
 BOOTSTRAP_STAGE=credential-secret
+SECRETS_MANAGER_IP="$(python3 - <<'PY'
+import socket
+addresses = socket.getaddrinfo('secretsmanager.us-east-1.amazonaws.com', 443, socket.AF_INET, socket.SOCK_STREAM)
+if not addresses:
+    raise SystemExit('Secrets Manager endpoint resolution failed')
+print(addresses[0][4][0])
+PY
+)"
+printf '%s %s\n' "$SECRETS_MANAGER_IP" secretsmanager.us-east-1.amazonaws.com >> /etc/hosts
 command -v aws >/dev/null
 aws secretsmanager get-secret-value --secret-id "$TEAMKIMI_SECRET_ARN" \
   --query SecretString --output text > /etc/t01/broker/teamkimi.json
 chown t01broker:t01broker /etc/t01/broker/teamkimi.json
 chmod 0400 /etc/t01/broker/teamkimi.json
+
+refresh_teamkimi_secret() {
+  local refreshed
+  refreshed="$(mktemp /etc/t01/broker/teamkimi.json.XXXXXX)"
+  if ! aws secretsmanager get-secret-value --secret-id "$TEAMKIMI_SECRET_ARN" \
+    --query SecretString --output text > "$refreshed" 2>/dev/null; then
+    rm -f "$refreshed"
+    return 1
+  fi
+  if ! chown t01broker:t01broker "$refreshed" || ! chmod 0400 "$refreshed"; then
+    rm -f "$refreshed"
+    return 1
+  fi
+  mv -f "$refreshed" /etc/t01/broker/teamkimi.json
+}
 
 if [ "$SCENARIO" = matrix ]; then
   python3 /opt/t01/runtime.py write-proxy-environment
@@ -539,6 +565,7 @@ expect_denied alternate_port curl -4 --fail --silent https://192.0.2.1:8443/
 expect_denied metadata curl -4 --fail --silent http://169.254.169.254/latest/meta-data/
 expect_denied container_credentials curl -4 --fail --silent http://169.254.170.2/
 BOOTSTRAP_STAGE=teamkimi-no-model
+refresh_teamkimi_secret
 expect_allowed teamkimi_no_model curl -4 --fail --silent "http://127.0.0.1:$BROKER_PORT/health"
 expect_broker_allowed() {
   local name="$1" attempt code previous_stage="${BOOTSTRAP_STAGE:-}"

@@ -246,7 +246,14 @@ with temporary:
     assert (root / 'github-output').read_text() == f'attestation={canonical}\n'
     calls = (root / 'calls').read_text()
     assert '--instance-ids i-abcdef12' in calls
-    assert '/usr/bin/python3 /home/ubuntu/hive-v2/infra/t01-smoke/teamkimi_attestation.py' in calls
+    expected_command = (
+        'runuser -u ubuntu -- env -i HOME=/home/ubuntu '
+        'PATH=/opt/node22/bin:/usr/local/bin:/usr/bin:/bin '
+        '/usr/bin/python3 /home/ubuntu/hive-v2/infra/t01-smoke/teamkimi_attestation.py'
+    )
+    assert expected_command in calls
+    assert 'HOME=/root' not in calls
+    assert 'synthetic-sensitive-value' not in result.stdout + result.stderr + calls
 
 invalid_outputs = [
     'raw-account-secret\n',
@@ -277,14 +284,16 @@ workflow_yaml = (ROOT / '.github/workflows/t01-smoke.yml').read_text()
 deploy_position = workflow_yaml.index('workflow.sh deploy')
 collect_position = workflow_yaml.index('workflow.sh collect', deploy_position)
 refresh_segment = workflow_yaml[deploy_position:collect_position]
-ssm_position = refresh_segment.index('host-attestation.sh')
+ssm_position = refresh_segment.index('workflow.sh refresh-host-attestation')
 secret_position = refresh_segment.index('workflow.sh refresh-health-credential')
 assert refresh_segment.index('HIVE_DEPLOY_ROLE_ARN') < ssm_position < secret_position
 assert refresh_segment.index('HIVE_T01_SMOKE_ROLE_ARN', ssm_position) < secret_position
+assert 'run: bash infra/t01-smoke/host-attestation.sh' not in refresh_segment
 assert 'if: inputs.scenario' not in refresh_segment
 assert refresh_segment.split('role-duration-seconds: ', 1)[1].splitlines()[0] == '3600'
 assert refresh_segment.split('role-duration-seconds: 9000', 1)[1]
 workflow_shell = (ROOT / 'infra/t01-smoke/workflow.sh').read_text()
+assert 'refresh-host-attestation) with_mutex_renewal refresh_host_attestation ;;' in workflow_shell
 assert 'refresh-health-credential) with_mutex_renewal refresh_health_credential ;;' in workflow_shell
 
 

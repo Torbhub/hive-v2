@@ -172,7 +172,7 @@ jobs:
         if: steps.acquire.outcome == 'success'
         env:
           T01_TEAMKIMI_HOST_ID: ${{ vars.KIMI_BOX_ID }}
-        run: bash infra/t01-smoke/host-attestation.sh
+        run: bash infra/t01-smoke/workflow.sh refresh-host-attestation
       - name: Restore the T01 smoke role after host health attestation
         if: always() && steps.acquire.outcome == 'success' && steps.deploy.outcome == 'success'
         uses: aws-actions/configure-aws-credentials@v4
