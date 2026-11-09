@@ -47,12 +47,13 @@ The Anthropic body has this exact policy:
 ```json
 {
   "model": "kimi-code/k3.1-pro",
-  "max_tokens": 2000,
+  "max_tokens": 6000,
   "thinking": { "type": "enabled", "budget_tokens": 4000 },
   "messages": []
 }
 ```
 
+The 6000-token total and 4000-token reasoning budget leave a separate 2000-token output ceiling. TeamKimi accounts for output as `max_tokens - budget_tokens`.
 The adapter replaces the incoming model, output budget, and thinking configuration with this exact policy before forwarding.
 It removes adaptive-only fields, including `output_config`, and hashes the canonical forwarded bytes plus the admission policy.
 It streams successful responses back to Hermes.
@@ -166,8 +167,8 @@ Run `cleanup --manifest /operator/export/manifest.json` from the scheduled opera
 
 ## No-paid cross-repo wire test
 
-`test/hermes-live-wire.test.ts` starts TeamKimi PR #19's real proxy and a synthetic loopback upstream.
-Set `TEAMKIMI_SMOKE_SOURCE` to a read-only checkout of TeamKimi commit `935104a1936a603467c91e14acc1aa0b6715c2f3`.
+`test/hermes-live-wire.test.ts` starts TeamKimi PR #20's real proxy and a synthetic loopback upstream.
+Set `TEAMKIMI_SMOKE_SOURCE` to a read-only checkout of TeamKimi commit `35b0d0d9b2e124b3418e3c049bd79c2f857b8cfe`.
 The test verifies that commit before starting the proxy and uses `test/fixtures/hermes-smoke-http.json` for count-token and message examples.
 The upstream request uses `k3.1-pro`. Local policy and evidence keep `kimi-code/k3.1-pro`.
 The test uses the real Hive adapter and checks canonicalization, request headers, Anthropic policy, count-before-generation order, `inputVerified`, exact usage, provider errors, malformed SSE, missing final usage, detachment, and revocation.

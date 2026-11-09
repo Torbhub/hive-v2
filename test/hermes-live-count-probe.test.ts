@@ -90,6 +90,13 @@ afterEach(async () => {
 });
 
 describe('T01 count-only probe', () => {
+  it('preserves separate output and reasoning ceilings in a valid total budget', () => {
+    const body = JSON.parse(requestBody.toString('utf8'));
+    expect(body.max_tokens).toBe(6000);
+    expect(body.thinking.budget_tokens).toBe(4000);
+    expect(body.max_tokens - body.thinking.budget_tokens).toBe(2000);
+  });
+
   it('mints, counts once, proves zero generation, revokes, and exports no credential', async () => {
     const result = await runProbe();
     expect(result.stderr).toBe('');
