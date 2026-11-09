@@ -170,7 +170,7 @@ curl --fail --silent --show-error --location --proto '=https' --proto-redir '=ht
   --output /opt/t01/session-manager-plugin.rpm
 printf '%s  %s\n' "$SESSION_MANAGER_PLUGIN_SHA256" /opt/t01/session-manager-plugin.rpm | sha256sum -c -
 for attempt in 1 2 3; do
-  if dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables /opt/t01/session-manager-plugin.rpm; then
+  if dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables awscli /opt/t01/session-manager-plugin.rpm; then
     break
   fi
   if [ "$attempt" = 3 ]; then
@@ -258,7 +258,7 @@ export UV_OFFLINE=1
 [ -f /opt/t01/source/uv.lock ]
 [ -x /opt/t01/hermes/bin/hermes ]
 emit frozen_hash_lock_install passed
-BOOTSTRAP_STAGE=credential-config
+BOOTSTRAP_STAGE=credential-users
 
 cat > /var/lib/t01/hermes/config.yaml <<'EOF'
 security:
@@ -279,6 +279,8 @@ chmod 0700 /var/lib/t01/workspace /var/lib/t01/workspace/home /var/lib/t01/works
 chown root:root /var/lib/t01/hermes/config.yaml
 chmod 0444 /var/lib/t01/hermes/config.yaml
 
+BOOTSTRAP_STAGE=credential-secret
+command -v aws >/dev/null
 aws secretsmanager get-secret-value --secret-id "$TEAMKIMI_SECRET_ARN" \
   --query SecretString --output text > /etc/t01/broker/teamkimi.json
 chown t01broker:t01broker /etc/t01/broker/teamkimi.json
@@ -288,6 +290,7 @@ if [ "$SCENARIO" = matrix ]; then
   python3 /opt/t01/runtime.py write-proxy-environment
 fi
 
+BOOTSTRAP_STAGE=evidence-endpoint
 if [ "$SCENARIO" != preflight ]; then
   EVIDENCE_IP="$(python3 - <<'PY'
 import socket
@@ -300,6 +303,7 @@ PY
   printf '%s %s\n' "$EVIDENCE_IP" s3.us-east-1.amazonaws.com >> /etc/hosts
 fi
 
+BOOTSTRAP_STAGE=broker-config
 python3 - <<'PY'
 import json
 import os

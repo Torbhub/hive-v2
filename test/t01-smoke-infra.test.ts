@@ -127,7 +127,8 @@ Environment=HERMES_RUNTIME_DIR=/opt/t01/tools`,
     const provision = read('provision');
     for (const stage of [
       'filesystem-init', 'input-validation', 'system-packages', 'runtime-download', 'source-download',
-      'python-binary', 'pm-build', 'credential-config', 'default-deny-lockdown',
+      'python-binary', 'pm-build', 'credential-users', 'credential-secret', 'evidence-endpoint',
+      'broker-config', 'default-deny-lockdown',
       'broker-access', 'hermes-access', 'broker-start', 'broker-health',
       'hermes-check', 'runtime-version', 'network-negative', 'teamkimi-no-model', 'broker-stop',
     ]) {
