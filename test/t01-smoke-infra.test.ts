@@ -99,6 +99,20 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision.indexOf('lock_down')).toBeLessThan(provision.lastIndexOf('hermes-check'));
   });
 
+  it('installs a pinned Session Manager plugin only for tunnel scenarios', () => {
+    const provision = read('provision');
+    const systemPackages = provision.split('BOOTSTRAP_STAGE=system-packages')[1].split('BOOTSTRAP_STAGE=runtime-download')[0];
+    const repositoryInstall = systemPackages.split('\n').find((line) => line.startsWith('dnf install -y gcc'));
+    expect(repositoryInstall).not.toContain('session-manager-plugin');
+    expect(provision).toContain('SESSION_MANAGER_PLUGIN_VERSION=1.2.764.0');
+    expect(provision).toContain('SESSION_MANAGER_PLUGIN_SHA256=27ae57f75e625c39ab6b75a114508f6a2bc27d03a8d9eff92806cb37a7ee9170');
+    expect(systemPackages).toContain('https://s3.amazonaws.com/session-manager-downloads/plugin/$SESSION_MANAGER_PLUGIN_VERSION/linux_64bit/session-manager-plugin.rpm');
+    expect(systemPackages).toContain('printf \'%s  %s\\n\' "$SESSION_MANAGER_PLUGIN_SHA256" /opt/t01/session-manager-plugin.rpm | sha256sum -c -');
+    expect(systemPackages).toContain('dnf install -y /opt/t01/session-manager-plugin.rpm');
+    expect(systemPackages).toContain('test -x /usr/local/sessionmanagerplugin/bin/session-manager-plugin');
+    expect(systemPackages).toMatch(/if \[ "\$SCENARIO" != preflight \]; then[\s\S]*session-manager-plugin\.rpm[\s\S]*\nfi/);
+  });
+
   it('uses the provisioned Hermes runtime store in the sealed service', () => {
     const provision = read('provision');
     expect(provision).toContain(

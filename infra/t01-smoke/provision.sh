@@ -7,6 +7,8 @@ HERMES_COMMIT=f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab
 HERMES_ARCHIVE_SHA256=551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae2efa81
 NODE_VERSION=22.23.2
 NODE_ARCHIVE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
+SESSION_MANAGER_PLUGIN_VERSION=1.2.764.0
+SESSION_MANAGER_PLUGIN_SHA256=27ae57f75e625c39ab6b75a114508f6a2bc27d03a8d9eff92806cb37a7ee9170
 EVIDENCE=/var/lib/t01/evidence/preflight.jsonl
 EVIDENCE_IP=
 TUNNEL_PID=
@@ -162,7 +164,17 @@ case "$SCENARIO/$MATRIX/$PAID_ADMISSION/$MAX_PAID_ADMISSIONS" in
 esac
 
 BOOTSTRAP_STAGE=system-packages
-dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables session-manager-plugin
+dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables
+if [ "$SCENARIO" != preflight ]; then
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --max-redirs 0 --connect-timeout 10 --max-time 60 \
+    "https://s3.amazonaws.com/session-manager-downloads/plugin/$SESSION_MANAGER_PLUGIN_VERSION/linux_64bit/session-manager-plugin.rpm" \
+    --output /opt/t01/session-manager-plugin.rpm
+  printf '%s  %s\n' "$SESSION_MANAGER_PLUGIN_SHA256" /opt/t01/session-manager-plugin.rpm | sha256sum -c -
+  dnf install -y /opt/t01/session-manager-plugin.rpm
+  rm -f /opt/t01/session-manager-plugin.rpm
+  test -x /usr/local/sessionmanagerplugin/bin/session-manager-plugin
+fi
 BOOTSTRAP_STAGE=runtime-download
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --max-redirs 0 --connect-timeout 10 --max-time 60 \
