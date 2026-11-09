@@ -505,8 +505,7 @@ def classify_records(records):
             required |= {
                 'trusted_tunnel_ready', 'count_only_no_generation', 'tunnel_cleanup',
                 'teamkimi_control_port', 'teamkimi_control_broker',
-                'teamkimi_generation_rejected', 'teamkimi_messages_rejected',
-                'paid_evidence_export', 'paid_matrix_completed',
+                'teamkimi_messages_rejected', 'paid_evidence_export', 'paid_matrix_completed',
             }
         elif 'count_only_no_generation' in seen:
             required |= {

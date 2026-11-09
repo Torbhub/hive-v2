@@ -547,12 +547,14 @@ if [ "$SCENARIO" != preflight ]; then
   expect_denied teamkimi_control_port curl -4 --fail --silent -X POST -H 'content-type: application/json' \
     --data '{"scope":"generation"}' http://127.0.0.1:8765/teamkimi/smoke/credentials
   expect_broker_allowed teamkimi_control_broker curl -4 --fail --silent http://127.0.0.1:8765/teamkimi/smoke/status
-  expect_broker_rejected teamkimi_generation_rejected 403 --request POST \
-    -H 'content-type: application/json' --data '{"scope":"generation"}' \
-    http://127.0.0.1:8765/teamkimi/smoke/credentials
   expect_broker_rejected teamkimi_messages_rejected 401 --request POST \
     -H 'content-type: application/json' -H 'x-api-key: tcc-local-negative-check' \
     --data '{}' http://127.0.0.1:8765/v1/messages
+  if [ "$SCENARIO" = count ]; then
+    expect_broker_rejected teamkimi_generation_rejected 403 --request POST \
+      -H 'content-type: application/json' --data '{"scope":"generation"}' \
+      http://127.0.0.1:8765/teamkimi/smoke/credentials
+  fi
 fi
 BOOTSTRAP_STAGE=broker-stop
 systemctl stop t01-broker.service

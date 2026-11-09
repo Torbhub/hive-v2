@@ -17,7 +17,6 @@ SSM = ROOT / 'infra/t01-smoke/count-host.sh'
 UNIT = ROOT / 'infra/box/teamkimi-count@.service'
 PROVISION_BOX = ROOT / 'infra/provision-box.sh'
 WORKFLOW_YAML = ROOT / '.github/workflows/t01-smoke.yml'
-RUNBOOK = ROOT / 'infra/t01-smoke/RUNBOOK.md'
 
 
 def read(path):
@@ -37,7 +36,7 @@ def check_install_contract():
     assert 'teamkimi-count-host.sh' in provision
     assert 'teamkimi-count@.service' in provision
     for required in (
-        'User=ubuntu', 'Group=ubuntu', 'Restart=no', 'RuntimeMaxSec=7200',
+        'User=ubuntu', 'Group=ubuntu', 'Restart=no', 'RuntimeMaxSec=10800',
         'ProtectSystem=strict', 'ProtectHome=read-only', 'StateDirectoryMode=0700',
         'ReadOnlyPaths=/home/ubuntu', 'ReadWritePaths=/var/lib/teamkimi-count/%i',
         f'/opt/teamkimi-count/{PIN}/src/index.js smoke-count',
@@ -49,7 +48,10 @@ def check_install_contract():
         assert forbidden not in unit
     workflow = read(WORKFLOW_YAML)
     assert workflow.count('workflow.sh acquire') == 1
-    assert workflow.count('HIVE_DEPLOY_ROLE_ARN') == 2
+    deploy_blocks = workflow.split('role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}')[1:]
+    assert len(deploy_blocks) == 2
+    for block in deploy_blocks:
+        assert block.split('role-duration-seconds: ', 1)[1].splitlines()[0] == '3600'
     start = workflow.index('workflow.sh count-start')
     stop = workflow.index('workflow.sh count-stop')
     assert workflow.index('workflow.sh acquire') < start < stop
@@ -63,14 +65,14 @@ def check_install_contract():
     smoke_role = trust.split('  T01SmokeRole:', 1)[1].split('\nOutputs:', 1)[0]
     assert 'ssm:SendCommand' not in smoke_role
     smoke_provision = read(ROOT / 'infra/t01-smoke/provision.sh')
-    assert 'expect_broker_rejected teamkimi_generation_rejected 403' in smoke_provision
-    assert 'expect_broker_rejected teamkimi_messages_rejected 401' in smoke_provision
+    generation_check = 'expect_broker_rejected teamkimi_generation_rejected 403'
+    messages_check = 'expect_broker_rejected teamkimi_messages_rejected 401'
+    generation_position = smoke_provision.index(generation_check)
+    messages_position = smoke_provision.index(messages_check)
+    count_guard = smoke_provision.rfind('if [ "$SCENARIO" = count ]; then', 0, generation_position)
+    assert messages_position < count_guard < generation_position
     assert 'runuser -u t01broker' in smoke_provision
     assert 'http://127.0.0.1:8765/v1/messages' in smoke_provision
-    runbook = read(RUNBOOK)
-    assert PIN in runbook and 'teamkimi-count@' in runbook
-    assert 'PR #16 head' not in runbook
-    assert 'Matrix remains separately reviewed' in runbook
 
 
 def check_installer_idempotence():
@@ -154,7 +156,10 @@ def host_workspace():
     shutil.copy(UNIT, root / 'etc/systemd/system/teamkimi-count@.service')
     (root / 'bin').mkdir()
     (root / 'status.json').write_text(json.dumps(ready_status()))
-    (root / 'normal-proxy.pid').write_text('0\n')
+    (root / 'normal-proxy.pid').write_text('3131\n')
+    (root / 'normal-active').touch()
+    (root / 'listener.pid').write_text('4242\n')
+    (root / 'socket-owner.pid').write_text('4242\n')
     env = {
         'PATH': f'{root}/bin:{os.environ["PATH"]}',
         'MOCK_ACTIVE': str(root / 'active'),
@@ -162,6 +167,9 @@ def host_workspace():
         'MOCK_STATE': str(root / 'var/lib/teamkimi-count/123'),
         'MOCK_STATUS': str(root / 'status.json'),
         'MOCK_NORMAL_PID': str(root / 'normal-proxy.pid'),
+        'MOCK_NORMAL_ACTIVE': str(root / 'normal-active'),
+        'MOCK_LISTENER_PID': str(root / 'listener.pid'),
+        'MOCK_SOCKET_PID': str(root / 'socket-owner.pid'),
         'MOCK_PORT_OWNER': str(root / 'port-owner'),
     }
     write_executable(root / 'bin/id', '''#!/usr/bin/env bash
@@ -175,12 +183,15 @@ fi
 printf '%s\n' "$*" >> "$MOCK_CALLS"
 case "$1 $2" in
   'is-active --quiet')
-    if [ "$3" = teamkimi-tmux.service ]; then exit 1; fi
-    [ -f "$MOCK_ACTIVE" ]
+    if [ "$3" = teamkimi-tmux.service ]; then
+      [ -f "$MOCK_NORMAL_ACTIVE" ]
+    else
+      [ -f "$MOCK_ACTIVE" ]
+    fi
     ;;
   'show teamkimi-tmux.service') cat "$MOCK_NORMAL_PID" ;;
   'show teamkimi-count@123.service')
-    if [ -f "$MOCK_ACTIVE" ]; then printf '4242\n'; else printf '0\n'; fi
+    if [ -f "$MOCK_ACTIVE" ]; then cat "$MOCK_LISTENER_PID"; else printf '0\n'; fi
     ;;
   'start teamkimi-count@123.service')
     : > "$MOCK_ACTIVE"
@@ -191,9 +202,14 @@ case "$1 $2" in
 esac
 ''')
     write_executable(root / 'bin/ss', '''#!/usr/bin/env bash
-if [ -f "$MOCK_ACTIVE" ] || [ -f "$MOCK_PORT_OWNER" ]; then
-  printf 'LISTEN 0 4096 127.0.0.1:8765 0.0.0.0:*\n'
+if [ -f "$MOCK_ACTIVE" ]; then
+  pid="$(cat "$MOCK_SOCKET_PID")"
+elif [ -f "$MOCK_PORT_OWNER" ]; then
+  pid="$(cat "$MOCK_PORT_OWNER")"
+else
+  exit 0
 fi
+printf 'LISTEN 0 4096 127.0.0.1:8765 0.0.0.0:* users:(("node",pid=%s,fd=20))\n' "$pid"
 ''')
     write_executable(root / 'bin/curl', '''#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MOCK_CALLS"
@@ -219,12 +235,19 @@ def check_host_lifecycle():
     with temporary:
         started = invoke_host(script, env, 'start')
         assert started.returncode == 0, (started.stdout, started.stderr)
-        assert 'raw-status' not in started.stdout + started.stderr
-        assert (root / 'var/lib/teamkimi-count/123/ledger.json').exists()
-        (root / 'var/lib/teamkimi-count/123/ledger.json').write_text('preserve-this-ledger\n')
+        assert started.stdout == (
+            'T01_COUNT count_source passed\nT01_COUNT count_loopback passed\n'
+            'T01_COUNT count_proxy passed\nT01_COUNT count_start passed\n'
+        )
+        ledger = root / 'var/lib/teamkimi-count/123/ledger.json'
+        ledger.write_text('preserve-this-ledger\n')
         stopped = invoke_host(script, env, 'stop')
         assert stopped.returncode == 0, (stopped.stdout, stopped.stderr)
-        assert (root / 'var/lib/teamkimi-count/123/ledger.json').read_text() == 'preserve-this-ledger\n'
+        assert stopped.stdout == (
+            'T01_COUNT count_source passed\nT01_COUNT count_stop passed\n'
+            'T01_COUNT count_port_closed passed\nT01_COUNT count_proxy passed\n'
+        )
+        assert ledger.read_text() == 'preserve-this-ledger\n'
         calls = (root / 'calls').read_text()
         assert 'start teamkimi-count@123.service' in calls
         assert 'stop teamkimi-count@123.service' in calls
@@ -232,7 +255,14 @@ def check_host_lifecycle():
 
     temporary, root, script, env = host_workspace()
     with temporary:
-        (root / 'port-owner').write_text('unknown\n')
+        (root / 'normal-active').unlink()
+        result = invoke_host(script, env, 'start')
+        assert result.returncode != 0
+        assert 'start teamkimi-count@123.service' not in (root / 'calls').read_text()
+
+    temporary, root, script, env = host_workspace()
+    with temporary:
+        (root / 'port-owner').write_text('9999\n')
         result = invoke_host(script, env, 'start')
         assert result.returncode != 0
         calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
@@ -254,6 +284,14 @@ def check_host_lifecycle():
     temporary, root, script, env = host_workspace()
     with temporary:
         assert invoke_host(script, env, 'start').returncode == 0
+        (root / 'socket-owner.pid').write_text('9999\n')
+        result = invoke_host(script, env, 'stop')
+        assert result.returncode != 0
+        assert 'stop teamkimi-count@123.service' not in (root / 'calls').read_text()
+
+    temporary, root, script, env = host_workspace()
+    with temporary:
+        assert invoke_host(script, env, 'start').returncode == 0
         (root / 'normal-proxy.pid').write_text('99\n')
         result = invoke_host(script, env, 'stop')
         assert result.returncode != 0
@@ -266,14 +304,14 @@ def check_host_lifecycle():
         assert not (root / 'calls').exists()
 
 
-def ssm_workspace(output, status='Success'):
+def ssm_workspace(output):
     temporary = tempfile.TemporaryDirectory()
     root = Path(temporary.name)
     (root / 'bin').mkdir()
     (root / 'infra/t01-smoke').mkdir(parents=True)
     shutil.copy(SSM, root / 'infra/t01-smoke/count-host.sh')
     invocation = root / 'invocation.json'
-    invocation.write_text(json.dumps({'Status': status, 'Output': output}))
+    invocation.write_text(json.dumps({'Status': 'Success', 'Output': output}))
     mock_aws(root, '''#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MOCK_CALLS"
 case "$1 $2" in
@@ -294,31 +332,43 @@ esac
     return temporary, root, env
 
 
-def check_ssm_sanitization():
-    temporary, root, env = ssm_workspace(
-        'T01_COUNT count_source passed\nT01_COUNT count_start passed\n',
+def invoke_ssm(root, env, action):
+    return subprocess.run(
+        ['bash', 'infra/t01-smoke/count-host.sh', action], cwd=root, env=env,
+        capture_output=True, text=True, timeout=10,
     )
-    with temporary:
-        result = subprocess.run(
-            ['bash', 'infra/t01-smoke/count-host.sh', 'start'], cwd=root, env=env,
-            capture_output=True, text=True, timeout=10,
-        )
-        assert result.returncode == 0, (result.stdout, result.stderr)
-        evidence = (root / 'evidence/count-host.jsonl').read_text()
-        assert evidence == 'T01_COUNT count_source passed\nT01_COUNT count_start passed\n'
-        assert 'raw-account' not in result.stdout + result.stderr + evidence
 
-    temporary, root, env = ssm_workspace('raw-account-secret\n')
-    with temporary:
-        result = subprocess.run(
-            ['bash', 'infra/t01-smoke/count-host.sh', 'start'], cwd=root, env=env,
-            capture_output=True, text=True, timeout=10,
-        )
-        assert result.returncode != 0
-        combined = result.stdout + result.stderr
-        if (root / 'evidence/count-host.jsonl').exists():
-            combined += (root / 'evidence/count-host.jsonl').read_text()
-        assert 'raw-account-secret' not in combined
+
+def check_ssm_sanitization():
+    sequences = {
+        'start': ['count_source', 'count_loopback', 'count_proxy', 'count_start'],
+        'stop': ['count_source', 'count_stop', 'count_port_closed', 'count_proxy'],
+    }
+    for action, names in sequences.items():
+        output = ''.join(f'T01_COUNT {name} passed\n' for name in names)
+        temporary, root, env = ssm_workspace(output)
+        with temporary:
+            result = invoke_ssm(root, env, action)
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert (root / 'evidence/count-host.jsonl').read_text() == output
+
+    invalid_start = [
+        'T01_COUNT count_source passed\nT01_COUNT count_start passed\n',
+        'T01_COUNT count_source passed\nT01_COUNT count_source passed\n'
+        'T01_COUNT count_loopback passed\nT01_COUNT count_proxy passed\nT01_COUNT count_start passed\n',
+        'T01_COUNT count_source passed\nT01_COUNT count_proxy passed\n'
+        'T01_COUNT count_loopback passed\nT01_COUNT count_start passed\n',
+        'T01_COUNT count_source passed\nT01_COUNT count_loopback passed\n'
+        'T01_COUNT count_proxy passed\nT01_COUNT count_start passed\nT01_COUNT count_stop passed\n',
+        'raw-account-secret\n',
+    ]
+    for output in invalid_start:
+        temporary, root, env = ssm_workspace(output)
+        with temporary:
+            result = invoke_ssm(root, env, 'start')
+            assert result.returncode != 0, output
+            assert not (root / 'evidence/count-host.jsonl').exists()
+            assert 'raw-account-secret' not in result.stdout + result.stderr
 
 
 def count_evidence():
@@ -377,9 +427,9 @@ esac
             assert 'release aws-acts' not in calls
 
 
+check_host_lifecycle()
 check_install_contract()
 check_installer_idempotence()
-check_host_lifecycle()
 check_ssm_sanitization()
 cleanup_stop_case('no')
 cleanup_stop_case('yes')

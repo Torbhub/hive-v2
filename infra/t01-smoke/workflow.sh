@@ -393,21 +393,16 @@ cleanup() {
   return "$status"
 }
 
-count_start() {
+count_host() {
   [ "${SCENARIO:-}" = count ] || return 2
-  bash infra/t01-smoke/count-host.sh start
-}
-
-count_stop() {
-  [ "${SCENARIO:-}" = count ] || return 2
-  bash infra/t01-smoke/count-host.sh stop
+  bash infra/t01-smoke/count-host.sh "$1"
 }
 
 case "${1:-}" in
   validate-inputs) validate_inputs ;;
   acquire) acquire_mutex ;;
-  count-start) with_mutex_renewal count_start ;;
-  count-stop) with_mutex_renewal count_stop ;;
+  count-start) with_mutex_renewal count_host start ;;
+  count-stop) with_mutex_renewal count_host stop ;;
   issue-health-credential) with_mutex_renewal issue_health_credential ;;
   issue-proxy-credential) with_mutex_renewal issue_proxy_credential ;;
   deploy) with_mutex_renewal deploy_stack ;;

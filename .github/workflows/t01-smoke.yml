@@ -108,7 +108,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
-          role-duration-seconds: 9000
+          role-duration-seconds: 3600
       - name: Start only the run-scoped count listener
         if: inputs.scenario == 'count' && steps.acquire.outcome == 'success'
         id: count_start
@@ -173,7 +173,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
-          role-duration-seconds: 9000
+          role-duration-seconds: 3600
       - name: Stop only the run-scoped count listener
         if: always() && inputs.scenario == 'count' && steps.acquire.outcome == 'success'
         id: count_stop

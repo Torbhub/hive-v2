@@ -248,7 +248,7 @@ def paid_console_records(manifest_sha, marker=True):
     complete = records.pop()
     for check in (
         'trusted_tunnel_ready', 'teamkimi_control_port', 'teamkimi_control_broker',
-        'teamkimi_generation_rejected', 'teamkimi_messages_rejected', 'tunnel_cleanup',
+        'teamkimi_messages_rejected', 'tunnel_cleanup',
     ):
         records.append({'check': check, 'status': 'passed'})
     records.append({

@@ -26,22 +26,22 @@ normal_proxy_pid() {
   systemctl show "$NORMAL_UNIT" -p MainPID --value 2>/dev/null
 }
 
-NORMAL_PID="$(normal_proxy_pid)"
-[[ "$NORMAL_PID" =~ ^[0-9]+$ ]] || fail count_proxy
-[ "$NORMAL_PID" = 0 ] || fail count_proxy
-if systemctl is-active --quiet "$NORMAL_UNIT" 2>/dev/null; then
-  fail count_proxy
+NORMAL_PID=
+if [ "$ACTION" = stop ]; then
+  [ -f "$STATE/normal-proxy.pid" ] && [ ! -L "$STATE/normal-proxy.pid" ] || fail count_proxy
+  NORMAL_PID="$(cat "$STATE/normal-proxy.pid")"
 fi
-
 verify_normal_proxy() {
+  systemctl is-active --quiet "$NORMAL_UNIT" 2>/dev/null || fail count_proxy
   local current
   current="$(normal_proxy_pid)"
-  [[ "$current" =~ ^[0-9]+$ ]] || fail count_proxy
-  [ "$current" = "$NORMAL_PID" ] || fail count_proxy
-  if systemctl is-active --quiet "$NORMAL_UNIT" 2>/dev/null; then
-    fail count_proxy
+  [[ "$current" =~ ^[1-9][0-9]*$ ]] || fail count_proxy
+  if [ -n "$NORMAL_PID" ]; then
+    [ "$current" = "$NORMAL_PID" ] || fail count_proxy
   fi
+  NORMAL_PID="$current"
 }
+verify_normal_proxy
 
 verify_source() {
   [ -d "$SOURCE" ] && [ ! -L "$SOURCE" ] && [ ! -L "${SOURCE%/*}" ] || fail count_source
@@ -76,6 +76,32 @@ port_unused() {
   [ -z "$listeners" ]
 }
 
+unit_pid() {
+  systemctl is-active --quiet "$UNIT" 2>/dev/null || return 1
+  local pid
+  pid="$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null)" || return 1
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+verify_listener() {
+  local expected="$1" listeners
+  listeners="$(ss -ltnpH 'sport = :8765' 2>/dev/null)" || return 1
+  python3 - "$expected" "$listeners" <<'PY'
+import re
+import sys
+
+lines = [line for line in sys.argv[2].splitlines() if line.strip()]
+if len(lines) != 1:
+    raise SystemExit(1)
+fields = lines[0].split()
+if len(fields) < 4 or fields[3] != '127.0.0.1:8765':
+    raise SystemExit(1)
+if not re.search(r'\bpid=' + re.escape(sys.argv[1]) + r'\b', lines[0]):
+    raise SystemExit(1)
+PY
+}
+
 verify_status() {
   python3 - "$1" <<'PY'
 import json
@@ -107,6 +133,8 @@ fetch_status() {
 
 [ ! -L "${STATE%/*}" ] || fail count_state
 verify_source
+status_file="$(mktemp)"
+trap 'rm -f "$status_file"' EXIT
 case "$ACTION" in
   start)
     if systemctl is-active --quiet "$UNIT" 2>/dev/null; then
@@ -115,12 +143,13 @@ case "$ACTION" in
     [ ! -e "$STATE" ] && [ ! -L "$STATE" ] || fail count_state
     port_unused || fail count_port_owner
     install -d -m 0700 -o ubuntu -g ubuntu "$STATE"
+    printf '%s\n' "$NORMAL_PID" > "$STATE/normal-proxy.pid"
+    chmod 0600 "$STATE/normal-proxy.pid"
     systemctl start "$UNIT" >/dev/null 2>&1 || fail count_start
-    status_file="$(mktemp)"
-    trap 'rm -f "$status_file"' EXIT
     ready=no
     for _ in {1..30}; do
-      if fetch_status "$status_file" && verify_status "$status_file"; then
+      if UNIT_PID="$(unit_pid)" && verify_listener "$UNIT_PID" \
+          && fetch_status "$status_file" && verify_status "$status_file"; then
         ready=yes
         break
       fi
@@ -133,13 +162,12 @@ case "$ACTION" in
     printf 'T01_COUNT count_start passed\n'
     ;;
   stop)
-    systemctl is-active --quiet "$UNIT" 2>/dev/null || fail count_stop
+    UNIT_PID="$(unit_pid)" || fail count_stop
+    verify_listener "$UNIT_PID" || fail count_port_owner
     [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail count_state
     [ "$(stat -c %U "$STATE")" = ubuntu ] || fail count_state
     [ "$(stat -c %a "$STATE")" = 700 ] || fail count_state
     [ -f "$STATE/ledger.json" ] || fail count_state
-    status_file="$(mktemp)"
-    trap 'rm -f "$status_file"' EXIT
     fetch_status "$status_file" || fail count_status
     verify_status "$status_file" || fail count_active_state
     verify_normal_proxy

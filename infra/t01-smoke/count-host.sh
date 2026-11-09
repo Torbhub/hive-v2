@@ -42,19 +42,14 @@ except (OSError, UnicodeError, json.JSONDecodeError):
     raise SystemExit('json') from None
 if invocation.get('Status') != 'Success':
     raise SystemExit('status')
-allowed = {
-    'T01_COUNT count_source passed',
-    'T01_COUNT count_loopback passed',
-    'T01_COUNT count_proxy passed',
-    'T01_COUNT count_start passed',
-    'T01_COUNT count_stop passed',
-    'T01_COUNT count_port_closed passed',
+sequences = {
+    'start': ['count_source', 'count_loopback', 'count_proxy', 'count_start'],
+    'stop': ['count_source', 'count_stop', 'count_port_closed', 'count_proxy'],
 }
 lines = invocation.get('Output', '').splitlines()
-if not lines or len(lines) > 4 or any(line not in allowed for line in lines):
+expected = [f'T01_COUNT {name} passed' for name in sequences[action]]
+if lines != expected:
     raise SystemExit('markers')
-if f'T01_COUNT count_{action} passed' not in lines:
-    raise SystemExit('completion')
 with Path(evidence_path).open('a', encoding='utf-8') as evidence:
     for line in lines:
         print(line)
