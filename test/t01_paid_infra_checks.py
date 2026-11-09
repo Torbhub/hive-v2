@@ -229,6 +229,83 @@ with tempfile.TemporaryDirectory() as directory:
         capture_output=True, timeout=5,
     ).returncode != 0
 
+
+def paid_count_case(node_status=0, runtime_status=0, missing=None):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        bin_dir = root / 'bin'
+        runner = root / 'runner'
+        evidence = root / 'evidence'
+        bin_dir.mkdir()
+        runner.mkdir()
+        evidence.mkdir()
+        if missing != 'count-probe.mjs':
+            (runner / 'count-probe.mjs').write_text('')
+        if missing != 'policy.js':
+            (runner / 'policy.js').write_text('')
+        node = bin_dir / 'node'
+        node.write_text(f'''#!/usr/bin/env bash
+printf '%s\n' 'raw-node-stdout tcc-synthetic-only {root}'
+printf '%s\n' 'raw-node-stderr synthetic-prompt {root}' >&2
+exit {node_status}
+''')
+        node.chmod(0o755)
+        runtime = bin_dir / 'runtime'
+        runtime.write_text(f'''#!/usr/bin/env bash
+printf '%s\n' 'raw-runtime-stderr response-body {root}' >&2
+if [ "{runtime_status}" = 0 ]; then
+  printf '%s\n' '{{"check":"count_only_no_generation","status":"passed"}}'
+fi
+exit {runtime_status}
+''')
+        runtime.chmod(0o755)
+        source = PAID_SERVICE.replace('NODE=/opt/t01/node/bin/node', f'NODE={node}')
+        source = source.replace('RUNNER=/opt/t01/runner-source/dist-t01/tools/hermes-live', f'RUNNER={runner}')
+        source = source.replace('EVIDENCE=/var/lib/t01/evidence', f'EVIDENCE={evidence}')
+        source = source.replace('/usr/bin/python3 /opt/t01/runtime.py', str(runtime))
+        script = root / 'paid.sh'
+        script.write_text(source)
+        result = subprocess.run(
+            ['bash', str(script)], env={'PATH': os.environ['PATH'], 'SCENARIO': 'count'},
+            capture_output=True, text=True, timeout=5,
+        )
+        category_path = evidence / 'bootstrap-category'
+        origin_path = evidence / 'bootstrap-origin'
+        category = category_path.read_text() if category_path.exists() else None
+        origin = origin_path.read_text() if origin_path.exists() else None
+        artifact_path = evidence / 'preflight.jsonl'
+        artifact = artifact_path.read_text() if artifact_path.exists() else ''
+        exposed = result.stdout + result.stderr + artifact + (category or '') + (origin or '')
+        for sentinel in (str(root), 'raw-node-stdout', 'raw-node-stderr', 'raw-runtime-stderr',
+                         'tcc-synthetic-only', 'synthetic-prompt', 'response-body'):
+            assert sentinel not in exposed, sentinel
+        if category_path.exists():
+            assert category_path.stat().st_mode & 0o777 == 0o600
+            assert origin_path.stat().st_mode & 0o777 == 0o600
+        return result, category, origin, artifact
+
+
+result, category, origin, artifact = paid_count_case(node_status=17)
+assert result.returncode != 0
+assert (category, origin) == ('node-count-runner-failed\n', 'count-probe:1\n')
+assert artifact == ''
+
+for missing in ('count-probe.mjs', 'policy.js'):
+    result, category, origin, artifact = paid_count_case(missing=missing)
+    assert result.returncode != 0
+    assert (category, origin) == ('count-runner-missing\n', 'count-runner:1\n')
+    assert artifact == ''
+
+result, category, origin, artifact = paid_count_case(runtime_status=1)
+assert result.returncode != 0
+assert (category, origin) == ('runtime-count-evidence-invalid\n', 'count-evidence:1\n')
+assert artifact == ''
+
+result, category, origin, artifact = paid_count_case()
+assert result.returncode == 0
+assert category is None and origin is None
+assert artifact == '{"check":"count_only_no_generation","status":"passed"}\n'
+
 with tempfile.TemporaryDirectory() as directory:
     marker = Path(directory) / 'aws-called'
     bin_dir = Path(directory) / 'bin'
