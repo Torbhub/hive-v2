@@ -249,7 +249,7 @@ PY
 }
 
 handle_evidence_candidate() {
-  local console="$1" candidate="$2" evidence_dir="$3" line classification
+  local console="$1" candidate="$2" evidence_dir="$3" line classification reason
   : > "$candidate"
   while IFS= read -r line; do
     case "$line" in
@@ -257,6 +257,7 @@ handle_evidence_candidate() {
     esac
   done < "$console"
   classification="$(python3 infra/t01-smoke/runtime.py classify-evidence "$candidate")"
+  reason="$(python3 infra/t01-smoke/runtime.py evidence-rejection-reason "$candidate")"
   case "$classification" in
     passed)
       cp "$candidate" "$evidence_dir/preflight.jsonl"
@@ -267,7 +268,7 @@ handle_evidence_candidate() {
       ;;
     failed)
       cp "$candidate" "$evidence_dir/preflight.jsonl"
-      echo "preflight failed; review only the sanitized artifact" >&2
+      echo "preflight failed; reason=$reason; review only the sanitized artifact" >&2
       exit 1
       ;;
     incomplete)
@@ -276,7 +277,7 @@ handle_evidence_candidate() {
       fi
       ;;
     invalid)
-      echo "console produced rejected evidence; it was not copied to the artifact" >&2
+      echo "console produced rejected evidence; reason=$reason; it was not copied to the artifact" >&2
       exit 1
       ;;
   esac
