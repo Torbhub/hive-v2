@@ -12,6 +12,7 @@ const { launchWindow, respawnAgent, spawnAgent } = await import('../src/spawn.js
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   delete process.env.HIVE_COLLABORATION_ENABLED;
 });
@@ -184,6 +185,63 @@ describe('project execution rollout control', () => {
     expect(killWindow).not.toHaveBeenCalled();
     const team = await (await import('../src/state.js')).readTeam(home);
     expect(team.agents[0].closed_at).toBeUndefined();
+  });
+
+  it('rechecks worker spawn after waitIdleForMode before typing', async () => {
+    const { root } = await projectRoot();
+    const idle = await fs.readFile(path.join(repository, 'test', 'fixtures', 'idle-empty-prompt.txt'), 'utf8');
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    vi.useFakeTimers();
+    const credentials = await import('../src/collaboration-credentials.js');
+    vi.spyOn(credentials, 'requireAgentCredential').mockResolvedValue();
+    vi.spyOn(tmux, 'run').mockImplementation(async (command) => ({
+      code: command === 'teamkimi' ? 0 : 1, stdout: '', stderr: '',
+    }));
+    vi.spyOn(tmux, 'newWindow').mockResolvedValue('%9');
+    vi.spyOn(tmux, 'paneIdentity').mockResolvedValue({ pid: 1, started: 'now' });
+    vi.spyOn(tmux, 'paneIs').mockResolvedValue(true);
+    vi.spyOn(tmux, 'sleep').mockImplementation((ms) => vi.advanceTimersByTimeAsync(ms));
+    vi.spyOn(tmux, 'capturePane').mockImplementation(async () => {
+      await disableExecution(root, 'demo');
+      return idle;
+    });
+    vi.spyOn(tmux, 'sendEnter').mockResolvedValue();
+    const sendLiteral = vi.spyOn(tmux, 'sendLiteral').mockResolvedValue();
+    await expect(spawnAgent(root, 'demo', {
+      agent: 'builder',
+      assignment: 'Complete the bounded rollout test assignment.',
+      deliverable: 'Return evidence that no input followed the pause.',
+    })).rejects.toThrow('rollout paused for demo');
+    expect(sendLiteral).not.toHaveBeenCalled();
+  });
+
+  it('rechecks respawn after waitIdleForMode before typing', async () => {
+    const { root, home } = await projectRoot();
+    const idle = await fs.readFile(path.join(repository, 'test', 'fixtures', 'idle-empty-prompt.txt'), 'utf8');
+    const handoff = hivePath(home, 'handoffs', 'builder.md');
+    await fs.mkdir(path.dirname(handoff), { recursive: true });
+    await fs.writeFile(handoff, '# builder\n\n## START HERE\n### Assignment\nComplete the bounded rollout assignment.\n\n### Deliverable\nReturn the bounded rollout evidence.\n');
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 1, pane_started: 'now', worktree: home, handoff }],
+    });
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    vi.useFakeTimers();
+    const credentials = await import('../src/collaboration-credentials.js');
+    vi.spyOn(credentials, 'requireAgentCredential').mockResolvedValue();
+    vi.spyOn(tmux, 'run').mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+    vi.spyOn(tmux, 'killWindow').mockResolvedValue();
+    vi.spyOn(tmux, 'newWindow').mockResolvedValue('%9');
+    vi.spyOn(tmux, 'paneIdentity').mockResolvedValue({ pid: 1, started: 'now' });
+    vi.spyOn(tmux, 'paneIs').mockResolvedValue(true);
+    vi.spyOn(tmux, 'sleep').mockImplementation((ms) => vi.advanceTimersByTimeAsync(ms));
+    vi.spyOn(tmux, 'capturePane').mockImplementation(async () => {
+      await disableExecution(root, 'demo');
+      return idle;
+    });
+    vi.spyOn(tmux, 'sendEnter').mockResolvedValue();
+    const sendLiteral = vi.spyOn(tmux, 'sendLiteral').mockResolvedValue();
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow('rollout paused for demo');
+    expect(sendLiteral).not.toHaveBeenCalled();
   });
 
   it('fails closed on malformed pause markers in status and repeated off', async () => {

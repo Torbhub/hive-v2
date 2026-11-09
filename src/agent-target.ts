@@ -5,14 +5,14 @@ import { readProjects, readTeam, type ProjectsFile } from './state.js';
 export async function storedAgentTask(
   root: string, project: string, agentRef: unknown, pauseOnConfigFailure = false,
 ): Promise<string | undefined> {
-  let pf: ProjectsFile;
+  let registration: ProjectsFile['projects'][number] | undefined;
   try {
-    pf = await readProjects(root);
+    const pf = await readProjects(root);
+    registration = pf.projects.find((candidate) => candidate.name === project);
   } catch (error) {
     if (pauseOnConfigFailure) throw new RolloutPaused(project);
     throw error;
   }
-  const registration = pf.projects.find((candidate) => candidate.name === project);
   if (!registration) {
     if (pauseOnConfigFailure) throw new RolloutPaused(project);
     throw new AuthorizationError('not found');

@@ -331,6 +331,7 @@ export async function answerDialog(
   if (dialog.fingerprint !== seen) {
     throw new Refusal('the dialog changed since it was read; read it again before answering');
   }
+  await assertExecutionAllowed(root, project);
   let option = 'Esc';
   if (choice === 'esc') {
     await sendEscape(dialog.pane);

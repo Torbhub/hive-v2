@@ -311,6 +311,21 @@ describe('answerDialog on menus', () => {
     expect(vi.mocked(sendEnter)).not.toHaveBeenCalled();
   });
 
+  it('rechecks a pause during dialog read before sending keys', async () => {
+    const root = await setupOrchestrator(MENU);
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    vi.mocked(capturePane).mockImplementation(async () => {
+      await disableExecution(root, 'demo');
+      return MENU;
+    });
+    vi.mocked(sendArrow).mockClear();
+    vi.mocked(sendEnter).mockClear();
+    const fp = parseDialog(lines(MENU)).fingerprint;
+    await expect(answerDialog(root, 'demo', undefined, '1', fp)).rejects.toThrow('rollout paused for demo');
+    expect(vi.mocked(sendArrow)).not.toHaveBeenCalled();
+    expect(vi.mocked(sendEnter)).not.toHaveBeenCalled();
+  });
+
   it('a stale fingerprint refuses before any key is sent', async () => {
     const root = await setupOrchestrator(MENU);
     await expect(answerDialog(root, 'demo', undefined, '1', 'bogus')).rejects.toThrow(/dialog changed/);

@@ -512,7 +512,10 @@ async function spawnRegisteredAgent(
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
       : `${pane} never went idle; nothing was typed`);
   }
-  await typeLine(pane, pickupLine(root, project, agent), identity);
+  await withProjectLock(root, project, async () => {
+    await assertExecutionAllowed(root, project);
+    await typeLine(pane, pickupLine(root, project, agent), identity);
+  });
   const sid = await findLatestSession(worktree, agent);
   if (sid) await withProjectLock(root, project, () => upsertTeamEntry(home, { name: agent, session_id: sid }));
   return pane;
@@ -567,7 +570,10 @@ async function relaunchRegisteredAgent(
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
       : `${pane} never went idle; nothing was typed`);
   }
-  await typeLine(pane, pickupLine(root, p.name, old.name, old.handoff), identity);
+  await withProjectLock(root, p.name, async () => {
+    await assertExecutionAllowed(root, p.name);
+    await typeLine(pane, pickupLine(root, p.name, old.name, old.handoff), identity);
+  });
   const sid = await findLatestSession(worktree, old.name);
   if (sid) await withProjectLock(root, p.name, () => upsertTeamEntry(home, { name: old.name, session_id: sid }));
   return pane;

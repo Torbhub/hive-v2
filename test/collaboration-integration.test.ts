@@ -335,7 +335,7 @@ describe('integration authorization and revocation', () => {
   });
 
   it('normalizes missing and corrupt project config for scoped dialog execution', async () => {
-    for (const contents of [null, '{"projects": [']) {
+    for (const contents of [null, '{"projects": [', '{}', '{"projects":null}']) {
       const { root, home, base } = await fixture();
       await team(home);
       if (contents === null) await fs.rm(hubPath(root, 'projects.json'));
@@ -355,21 +355,23 @@ describe('integration authorization and revocation', () => {
   });
 
   it('normalizes corrupt scope config for execution-granting answers only', async () => {
-    const { root, home, base, items } = await fixture();
-    await team(home);
-    for (const subject of ['user:alice', 'agent:builder']) {
-      const row = items.find((candidate) => candidate.sk === `PRINCIPAL#${subject}`)!;
-      row.pk = 'ACL#demo#demo-1#*';
-      row.task = 'demo-1';
+    for (const contents of ['{"projects": [', '{}', '{"projects":null}']) {
+      const { root, home, base, items } = await fixture();
+      await team(home);
+      for (const subject of ['user:alice', 'agent:builder']) {
+        const row = items.find((candidate) => candidate.sk === `PRINCIPAL#${subject}`)!;
+        row.pk = 'ACL#demo#demo-1#*';
+        row.task = 'demo-1';
+      }
+      const batch = await pushBatch(root);
+      await fs.writeFile(hubPath(root, 'projects.json'), contents);
+      const { authHeaders } = await import('./security-fixture.js');
+      const response = await fetch(`${base}/api/questions/answer`, {
+        method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ id: batch.id, answers: [{ question: 'q1', choice: 'c2' }] }),
+      });
+      expect(response.status).toBe(409);
+      expect((await readQuestionBatch(root, batch.id)).status).toBe('open');
     }
-    const batch = await pushBatch(root);
-    await fs.writeFile(hubPath(root, 'projects.json'), '{"projects": [');
-    const { authHeaders } = await import('./security-fixture.js');
-    const response = await fetch(`${base}/api/questions/answer`, {
-      method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ id: batch.id, answers: [{ question: 'q1', choice: 'c2' }] }),
-    });
-    expect(response.status).toBe(409);
-    expect((await readQuestionBatch(root, batch.id)).status).toBe('open');
   });
 });
