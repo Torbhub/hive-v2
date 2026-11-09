@@ -244,12 +244,10 @@ def credential_secret_case(aws_content=None):
         (root / 'bin').mkdir()
         if aws_content is not None:
             write_executable(root / 'bin/aws', aws_content)
-        write_executable(root / 'bin/python3', '#!/bin/bash\nprintf \'192.0.2.10\\n\'\n')
         source = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
         start = source.index('BOOTSTRAP_STAGE=credential-secret')
         stage = source[start:source.index('BOOTSTRAP_STAGE=evidence-endpoint', start)]
         stage = stage.replace('/etc/t01/broker/teamkimi.json', str(root / 'teamkimi.json'))
-        stage = stage.replace('/etc/hosts', str(root / 'hosts'))
         start = source.index('read_hermes_check_metadata() {')
         on_error = source[start:source.index('\ntrap on_error ERR', start)]
         result = subprocess.run(
@@ -419,16 +417,28 @@ assert raw_secret_error not in result.stdout + result.stderr
 provision = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
 assert provision.count('aws secretsmanager get-secret-value') == 2
 assert (
-    'BOOTSTRAP_STAGE=teamkimi-no-model\n'
+    '  emit trusted_tunnel_ready passed\n'
+    'fi\n'
+    'BOOTSTRAP_STAGE=credential-refresh\n'
     'refresh_teamkimi_secret\n'
-    'expect_allowed teamkimi_no_model'
+    'BOOTSTRAP_STAGE=default-deny-lockdown\n'
+    'lock_down\n'
+    'emit default_deny_lockdown passed'
 ) in provision
-assert provision.index('SECRETS_MANAGER_IP="$(') < provision.index('lock_down\nemit default_deny_lockdown')
-assert 'printf \'%s %s\\n\' "$SECRETS_MANAGER_IP" secretsmanager.us-east-1.amazonaws.com >> /etc/hosts' in provision
-secrets_manager_rule = 'iptables -A OUTPUT -p tcp -d "$SECRETS_MANAGER_IP" --dport 443 -m owner --uid-owner 0 -j ACCEPT'
+lockdown_call = provision.index('lock_down\nemit default_deny_lockdown')
+assert 'aws secretsmanager get-secret-value' not in provision[lockdown_call:]
+assert 'BOOTSTRAP_STAGE=teamkimi-no-model\nexpect_allowed teamkimi_no_model' in provision
+assert 'SECRETS_MANAGER_IP' not in provision
+assert 'secretsmanager.us-east-1.amazonaws.com' not in provision
 lock_down = provision.split('lock_down() {', 1)[1].split('\n}', 1)[0]
-assert secrets_manager_rule in lock_down
-assert lock_down.index(secrets_manager_rule) < lock_down.index('iptables -A OUTPUT -j REJECT')
+assert 'iptables -A OUTPUT -d 169.254.169.254 -j REJECT' in lock_down
+assert 'iptables -A OUTPUT -d 169.254.170.2 -j REJECT' in lock_down
+for rule in lock_down.splitlines():
+    if 'ACCEPT' in rule:
+        assert '169.254.169.254' not in rule
+        assert '169.254.170.2' not in rule
+        assert 'SECRETS_MANAGER' not in rule
+        assert 'secretsmanager' not in rule
 
 
 def assert_diagnostic(root, expected, result):
