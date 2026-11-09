@@ -162,7 +162,15 @@ case "$SCENARIO/$MATRIX/$PAID_ADMISSION/$MAX_PAID_ADMISSIONS" in
 esac
 
 BOOTSTRAP_STAGE=system-packages
-dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables session-manager-plugin
+for attempt in 1 2 3; do
+  if dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables session-manager-plugin; then
+    break
+  fi
+  if [ "$attempt" = 3 ]; then
+    false
+  fi
+  sleep 5
+done
 BOOTSTRAP_STAGE=runtime-download
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --max-redirs 0 --connect-timeout 10 --max-time 60 \
