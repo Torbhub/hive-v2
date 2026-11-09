@@ -199,7 +199,7 @@ printf '%s  %s\n' "$RUNNER_ARCHIVE_SHA256" /opt/t01/runner.tar.gz | sha256sum -c
 tar -xzf /opt/t01/runner.tar.gz -C /opt/t01/runner-source --strip-components=1
 rm -f /opt/t01/runner.tar.gz
 cd /opt/t01/runner-source
-export PATH=/opt/t01/node/bin:/usr/local/bin:/usr/bin:/bin
+export PATH=/opt/t01/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 /opt/t01/node/bin/npm ci --ignore-scripts
 /opt/t01/node/bin/node ./node_modules/typescript/bin/tsc -p tools/hermes-live/tsconfig.json
 cp tools/hermes-live/hermes_preflight_probe.py tools/hermes-live/count-probe.mjs dist-t01/tools/hermes-live/
