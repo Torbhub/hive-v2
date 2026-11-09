@@ -529,10 +529,30 @@ expect_broker_allowed() {
   fi
   emit "$name" passed
 }
+expect_broker_rejected() {
+  local name="$1" expected="$2" code
+  shift 2
+  if ! code="$(runuser -u t01broker -- env -i PATH=/usr/bin:/bin \
+      timeout 15 curl --silent --output /dev/null --write-out '%{http_code}' "$@" 2>/dev/null)"; then
+    emit "$name" failed
+    return 1
+  fi
+  if [ "$code" != "$expected" ]; then
+    emit "$name" failed
+    return 1
+  fi
+  emit "$name" passed
+}
 if [ "$SCENARIO" != preflight ]; then
   expect_denied teamkimi_control_port curl -4 --fail --silent -X POST -H 'content-type: application/json' \
     --data '{"scope":"generation"}' http://127.0.0.1:8765/teamkimi/smoke/credentials
   expect_broker_allowed teamkimi_control_broker curl -4 --fail --silent http://127.0.0.1:8765/teamkimi/smoke/status
+  expect_broker_rejected teamkimi_generation_rejected 403 --request POST \
+    -H 'content-type: application/json' --data '{"scope":"generation"}' \
+    http://127.0.0.1:8765/teamkimi/smoke/credentials
+  expect_broker_rejected teamkimi_messages_rejected 401 --request POST \
+    -H 'content-type: application/json' -H 'x-api-key: tcc-local-negative-check' \
+    --data '{}' http://127.0.0.1:8765/v1/messages
 fi
 BOOTSTRAP_STAGE=broker-stop
 systemctl stop t01-broker.service

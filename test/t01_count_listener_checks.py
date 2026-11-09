@@ -1,9 +1,10 @@
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
-import stat
 import subprocess
+import tarfile
 import tempfile
 
 from t01_workflow_harness import ROOT, evidence_records, mock_aws, run, workspace, write_executable
@@ -36,7 +37,7 @@ def check_install_contract():
     assert 'teamkimi-count-host.sh' in provision
     assert 'teamkimi-count@.service' in provision
     for required in (
-        'User=ubuntu', 'Group=ubuntu', 'Restart=no', 'RuntimeMaxSec=900',
+        'User=ubuntu', 'Group=ubuntu', 'Restart=no', 'RuntimeMaxSec=7200',
         'ProtectSystem=strict', 'ProtectHome=read-only', 'StateDirectoryMode=0700',
         'ReadOnlyPaths=/home/ubuntu', 'ReadWritePaths=/var/lib/teamkimi-count/%i',
         f'/opt/teamkimi-count/{PIN}/src/index.js smoke-count',
@@ -61,10 +62,57 @@ def check_install_contract():
     trust = read(ROOT / 'infra/template.yaml')
     smoke_role = trust.split('  T01SmokeRole:', 1)[1].split('\nOutputs:', 1)[0]
     assert 'ssm:SendCommand' not in smoke_role
+    smoke_provision = read(ROOT / 'infra/t01-smoke/provision.sh')
+    assert 'expect_broker_rejected teamkimi_generation_rejected 403' in smoke_provision
+    assert 'expect_broker_rejected teamkimi_messages_rejected 401' in smoke_provision
+    assert 'runuser -u t01broker' in smoke_provision
+    assert 'http://127.0.0.1:8765/v1/messages' in smoke_provision
     runbook = read(RUNBOOK)
     assert PIN in runbook and 'teamkimi-count@' in runbook
     assert 'PR #16 head' not in runbook
     assert 'Matrix remains separately reviewed' in runbook
+
+
+def check_installer_idempotence():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        fixture = root / 'fixture'
+        (fixture / 'src').mkdir(parents=True)
+        (fixture / 'src/index.js').write_text('synthetic-count-cli\n')
+        archive = root / 'source.tar.gz'
+        with tarfile.open(archive, 'w:gz') as output:
+            output.add(fixture, arcname='Torbhub-teamkimi-ab0dcf76')
+        archive_sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+        source = read(INSTALL).replace('/opt/teamkimi-count', str(root / 'opt/teamkimi-count'))
+        source = source.replace(ARCHIVE_SHA256, archive_sha)
+        source = source.replace('.st_uid != 0', f'.st_uid != {os.getuid()}')
+        source = source.replace('.st_gid != 0', f'.st_gid != {os.getgid()}')
+        source = source.replace('-o root -g root ', '')
+        script = root / 'install.sh'
+        script.write_text(source)
+        (root / 'opt').mkdir()
+        (root / 'bin').mkdir()
+        write_executable(root / 'bin/id', '#!/usr/bin/env bash\nprintf "0\\n"\n')
+        write_executable(root / 'bin/chown', '#!/usr/bin/env bash\nexit 0\n')
+        write_executable(root / 'bin/runuser', '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+cat "$MOCK_ARCHIVE"
+''')
+        env = {
+            'PATH': f'{root}/bin:{os.environ["PATH"]}',
+            'MOCK_ARCHIVE': str(archive),
+            'MOCK_CALLS': str(root / 'calls'),
+        }
+        first = subprocess.run(['bash', str(script)], env=env, capture_output=True, text=True, timeout=10)
+        assert first.returncode == 0, (first.stdout, first.stderr)
+        installed = root / f'opt/teamkimi-count/{PIN}'
+        stamp = json.loads((installed / 'provenance.json').read_text())
+        assert stamp['commit'] == PIN and stamp['archiveSha256'] == archive_sha
+        assert all(not path.stat().st_mode & 0o222 for path in installed.rglob('*'))
+        second = subprocess.run(['bash', str(script)], env=env, capture_output=True, text=True, timeout=10)
+        assert second.returncode == 0, (second.stdout, second.stderr)
+        assert 'kept:' in second.stdout
+        assert (root / 'calls').read_text().count('tarball') == 1
 
 
 def ready_status():
@@ -98,6 +146,8 @@ def host_workspace():
     (source_dir / 'provenance.json').write_text(json.dumps({
         'commit': PIN, 'archiveSha256': ARCHIVE_SHA256,
     }))
+    for path in (source_dir, source_dir / 'src', source_dir / 'src/index.js', source_dir / 'provenance.json'):
+        path.chmod(0o555 if path.is_dir() else 0o444)
     (root / 'etc/systemd/system').mkdir(parents=True)
     shutil.copy(UNIT, root / 'etc/systemd/system/teamkimi-count@.service')
     (root / 'bin').mkdir()
@@ -221,7 +271,7 @@ def ssm_workspace(output, status='Success'):
     (root / 'infra/t01-smoke').mkdir(parents=True)
     shutil.copy(SSM, root / 'infra/t01-smoke/count-host.sh')
     invocation = root / 'invocation.json'
-    invocation.write_text(json.dumps({'Status': status, 'StandardOutputContent': output}))
+    invocation.write_text(json.dumps({'Status': status, 'Output': output}))
     mock_aws(root, '''#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MOCK_CALLS"
 case "$1 $2" in
@@ -326,6 +376,7 @@ esac
 
 
 check_install_contract()
+check_installer_idempotence()
 check_host_lifecycle()
 check_ssm_sanitization()
 cleanup_stop_case('no')

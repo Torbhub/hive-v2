@@ -238,7 +238,7 @@ Environment=HERMES_RUNTIME_DIR=/opt/t01/tools`,
     expect(workflow).toContain('workflow.sh issue-health-credential');
     expect(workflow).not.toContain('deploy-broker');
     expect(read('template')).not.toContain('TeamKimiUrl');
-    expect(read('provision')).not.toContain('/v1/messages');
+    expect(read('provision')).toContain('expect_broker_rejected teamkimi_messages_rejected 401');
     expect(read('healthCredential')).toContain('secrets.token_urlsafe(32)');
     expect(read('attestation')).toContain("teamkimi status --json --color=never");
   });

@@ -102,6 +102,27 @@ jobs:
       - name: Acquire the fleet deploy mutex
         id: acquire
         run: bash infra/t01-smoke/workflow.sh acquire
+      - name: Switch to the deploy role only for count host start
+        if: inputs.scenario == 'count' && steps.acquire.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 9000
+      - name: Start only the run-scoped count listener
+        if: inputs.scenario == 'count' && steps.acquire.outcome == 'success'
+        id: count_start
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+          T01_TEAMKIMI_HOST_ID: ${{ vars.KIMI_BOX_ID }}
+        run: bash infra/t01-smoke/workflow.sh count-start
+      - name: Restore the T01 smoke role after count host start
+        if: always() && inputs.scenario == 'count' && steps.acquire.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 9000
       - name: Issue the expiring no-spend health credential
         id: health
         env:
@@ -146,14 +167,37 @@ jobs:
           PRICING_ATTESTATION: ${{ vars.T01_PRICING_ATTESTATION }}
           SCENARIO: ${{ inputs.scenario }}
         run: bash infra/t01-smoke/workflow.sh collect
+      - name: Switch to the deploy role only for count host stop
+        if: always() && inputs.scenario == 'count' && steps.acquire.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 9000
+      - name: Stop only the run-scoped count listener
+        if: always() && inputs.scenario == 'count' && steps.acquire.outcome == 'success'
+        id: count_stop
+        continue-on-error: true
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+          T01_TEAMKIMI_HOST_ID: ${{ vars.KIMI_BOX_ID }}
+        run: bash infra/t01-smoke/workflow.sh count-stop
+      - name: Restore the T01 smoke role after count host stop
+        if: always() && inputs.scenario == 'count' && steps.acquire.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 9000
       - name: Retain reviewed evidence for seven days
         id: upload
-        if: always() && steps.collect.outcome != 'skipped'
+        if: always() && steps.acquire.outcome == 'success' && (steps.collect.outcome != 'skipped' || inputs.scenario == 'count')
         uses: actions/upload-artifact@v4
         with:
           name: t01-preflight-${{ github.run_id }}
           path: |
             t01-evidence/preflight.jsonl
+            t01-evidence/count-host.jsonl
             t01-evidence/export
           if-no-files-found: error
           retention-days: 7
@@ -162,7 +206,8 @@ jobs:
         env:
           SCENARIO: ${{ inputs.scenario }}
           PAID_EVIDENCE_VERIFIED: ${{ steps.collect.outcome == 'success' && steps.upload.outcome == 'success' && 'yes' || 'no' }}
+          T01_COUNT_STOP_VERIFIED: ${{ steps.count_stop.outcome == 'success' && 'yes' || 'no' }}
         run: bash infra/t01-smoke/workflow.sh cleanup
       - name: Fail after evidence and cleanup finish
-        if: steps.collect.outcome == 'failure' || steps.upload.outcome == 'failure'
+        if: always() && (steps.collect.outcome == 'failure' || steps.upload.outcome == 'failure' || steps.count_start.outcome == 'failure' || steps.count_stop.outcome == 'failure')
         run: exit 1

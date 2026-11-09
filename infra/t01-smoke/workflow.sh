@@ -386,16 +386,32 @@ cleanup() {
       status=1
     fi
   fi
+  if (( status == 0 )) && [ "${SCENARIO:-preflight}" = count ] && [ "${T01_COUNT_STOP_VERIFIED:-no}" != yes ]; then
+    echo "count host stop is not proven; retaining the fleet mutex and run state" >&2
+    status=1
+  fi
   return "$status"
+}
+
+count_start() {
+  [ "${SCENARIO:-}" = count ] || return 2
+  bash infra/t01-smoke/count-host.sh start
+}
+
+count_stop() {
+  [ "${SCENARIO:-}" = count ] || return 2
+  bash infra/t01-smoke/count-host.sh stop
 }
 
 case "${1:-}" in
   validate-inputs) validate_inputs ;;
   acquire) acquire_mutex ;;
+  count-start) with_mutex_renewal count_start ;;
+  count-stop) with_mutex_renewal count_stop ;;
   issue-health-credential) with_mutex_renewal issue_health_credential ;;
   issue-proxy-credential) with_mutex_renewal issue_proxy_credential ;;
   deploy) with_mutex_renewal deploy_stack ;;
   collect) with_mutex_renewal collect_evidence ;;
   cleanup) with_mutex_renewal cleanup ;;
-  *) echo "usage: $0 validate-inputs|acquire|issue-health-credential|issue-proxy-credential|deploy|collect|cleanup" >&2; exit 2 ;;
+  *) echo "usage: $0 validate-inputs|acquire|count-start|count-stop|issue-health-credential|issue-proxy-credential|deploy|collect|cleanup" >&2; exit 2 ;;
 esac

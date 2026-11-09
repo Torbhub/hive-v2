@@ -22,6 +22,7 @@ BASE_SIMPLE_CHECKS = {
 SIMPLE_CHECKS = BASE_SIMPLE_CHECKS | {
     'paid_admission_disabled', 'trusted_tunnel_ready', 'count_only_no_generation',
     'teamkimi_control_port', 'teamkimi_control_broker',
+    'teamkimi_generation_rejected', 'teamkimi_messages_rejected',
     'tunnel_cleanup', 'paid_evidence_export', 'paid_matrix_completed',
 }
 ALLOWED_CHECKS = SIMPLE_CHECKS | {'bootstrap_error', 'hermes_version', 'source_sha256', 'provisioning', 'complete'}
@@ -504,12 +505,14 @@ def classify_records(records):
             required |= {
                 'trusted_tunnel_ready', 'count_only_no_generation', 'tunnel_cleanup',
                 'teamkimi_control_port', 'teamkimi_control_broker',
+                'teamkimi_generation_rejected', 'teamkimi_messages_rejected',
                 'paid_evidence_export', 'paid_matrix_completed',
             }
         elif 'count_only_no_generation' in seen:
             required |= {
                 'trusted_tunnel_ready', 'count_only_no_generation', 'tunnel_cleanup',
-                'teamkimi_control_port', 'teamkimi_control_broker', 'paid_admission_disabled',
+                'teamkimi_control_port', 'teamkimi_control_broker',
+                'teamkimi_generation_rejected', 'teamkimi_messages_rejected', 'paid_admission_disabled',
             }
         else:
             required.add('paid_admission_disabled')

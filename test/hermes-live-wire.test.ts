@@ -11,7 +11,7 @@ import { usageCostMicros } from '../tools/hermes-live/policy.js';
 import { attestation, controls, policyHash, wireCounted, wireUsage } from './hermes-live-fixtures.js';
 
 const source = process.env.TEAMKIMI_SMOKE_SOURCE;
-const TESTED_TEAMKIMI_COMMIT = 'faeb27d2be4e07ac1a9d063c7ac326aec7373183';
+const TESTED_TEAMKIMI_COMMIT = 'ab0dcf76cc96a31e2376677a915990d011c5c807';
 const attemptKey = 'a'.repeat(64);
 const proxyApiKey = 'ordinary-proxy-key';
 const describeWire = source ? describe : describe.skip;
