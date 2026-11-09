@@ -285,7 +285,7 @@ handle_evidence_candidate() {
 
 collect_evidence() {
   require_env LIFETIME_MINUTES
-  local instance_id console console_error candidate evidence_dir rc
+  local instance_id console console_error candidate evidence_dir rc reason
   instance_id="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
     --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue | [0]' --output text)"
   [ -n "$instance_id" ] && [ "$instance_id" != None ] || { echo "stack has no instance output" >&2; exit 1; }
@@ -309,7 +309,8 @@ collect_evidence() {
     fi
     sleep 30
   done
-  echo "preflight did not complete before the lifetime deadline" >&2
+  reason="$(python3 infra/t01-smoke/runtime.py evidence-rejection-reason "$candidate")"
+  echo "preflight did not complete before the lifetime deadline; reason=$reason" >&2
   exit 1
 }
 

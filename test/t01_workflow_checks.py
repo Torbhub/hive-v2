@@ -213,6 +213,38 @@ for record in (
     classify_cli([record], 'invalid')
     console_failure_case(json.dumps(record, separators=(',', ':')) + '\n')
 
+
+incomplete_records = [source_record, {'check': 'uv_install', 'status': 'passed'}]
+incomplete = ''.join(json.dumps(record, separators=(',', ':')) + '\n' for record in incomplete_records)
+temporary, root = workspace()
+with temporary:
+    mock_aws(root, '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+case "$1 $2" in
+  'cloudformation describe-stacks') printf 'i-test\n' ;;
+  'ec2 get-console-output')
+    printf 'synthetic-sensitive-value\n'
+    while IFS= read -r line; do printf 'T01_EVIDENCE %s\n' "$line"; done < "$MOCK_CONSOLE"
+    ;;
+esac
+''')
+    (root / 'console').write_text(incomplete)
+    write_executable(root / 'bin/sleep', '#!/usr/bin/env bash\nexit 0\n')
+    artifact_dir = root / 'artifact'
+    artifact_dir.mkdir()
+    (artifact_dir / 'preflight.jsonl').write_text('sentinel\n')
+    result = run(root, 'collect', {
+        'LIFETIME_MINUTES': '5',
+        'EVIDENCE_DIR': str(artifact_dir),
+        'MOCK_CONSOLE': str(root / 'console'),
+    })
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert 'preflight did not complete before the lifetime deadline; reason=missing-complete' in result.stderr, result.stderr
+    assert 'synthetic-sensitive-value' not in result.stdout + result.stderr
+    assert (artifact_dir / 'preflight.jsonl').read_text() == incomplete
+    assert (root / 'calls').read_text().count('ec2 get-console-output') == 10
+
+
 temporary, root = workspace()
 with temporary:
     mock_aws(root, '''#!/usr/bin/env bash
