@@ -1,0 +1,332 @@
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import tempfile
+
+from t01_workflow_harness import ROOT, evidence_records, mock_aws, run, workspace, write_executable
+
+PIN = 'ab0dcf76cc96a31e2376677a915990d011c5c807'
+ARCHIVE_SHA256 = '87b6648a0ec932da74c3a3e383d9209c34dafaff5b3a1f6b4373d6ac11f9f3f4'
+INSTALL = ROOT / 'infra/t01-smoke/teamkimi-count-install.sh'
+HOST = ROOT / 'infra/t01-smoke/teamkimi-count-host.sh'
+SSM = ROOT / 'infra/t01-smoke/count-host.sh'
+UNIT = ROOT / 'infra/box/teamkimi-count@.service'
+PROVISION_BOX = ROOT / 'infra/provision-box.sh'
+WORKFLOW_YAML = ROOT / '.github/workflows/t01-smoke.yml'
+RUNBOOK = ROOT / 'infra/t01-smoke/RUNBOOK.md'
+
+
+def read(path):
+    return path.read_text() if path.exists() else ''
+
+
+def check_install_contract():
+    installer = read(INSTALL)
+    unit = read(UNIT)
+    provision = read(PROVISION_BOX)
+    assert PIN in installer and ARCHIVE_SHA256 in installer
+    assert 'repos/Torbhub/teamkimi/tarball' in installer
+    assert 'provenance.json' in installer
+    assert 'systemctl start' not in installer and 'systemctl restart' not in installer
+    assert 'systemctl enable' not in installer and 'teamkimi-tmux' not in installer
+    assert 'teamkimi-count-install.sh' in provision
+    assert 'teamkimi-count-host.sh' in provision
+    assert 'teamkimi-count@.service' in provision
+    for required in (
+        'User=ubuntu', 'Group=ubuntu', 'Restart=no', 'RuntimeMaxSec=900',
+        'ProtectSystem=strict', 'ProtectHome=read-only', 'StateDirectoryMode=0700',
+        'ReadOnlyPaths=/home/ubuntu', 'ReadWritePaths=/var/lib/teamkimi-count/%i',
+        f'/opt/teamkimi-count/{PIN}/src/index.js smoke-count',
+        '--state-path /var/lib/teamkimi-count/%i/ledger.json',
+    ):
+        assert required in unit, required
+    assert '[Install]' not in unit
+    for forbidden in ('TEAMKIMI_PROXY_KEY', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN'):
+        assert forbidden not in unit
+    workflow = read(WORKFLOW_YAML)
+    assert workflow.count('workflow.sh acquire') == 1
+    assert workflow.count('HIVE_DEPLOY_ROLE_ARN') == 2
+    start = workflow.index('workflow.sh count-start')
+    stop = workflow.index('workflow.sh count-stop')
+    assert workflow.index('workflow.sh acquire') < start < stop
+    assert workflow.index('HIVE_DEPLOY_ROLE_ARN') < start
+    assert workflow.index('HIVE_T01_SMOKE_ROLE_ARN', start) < stop
+    assert workflow.index('HIVE_DEPLOY_ROLE_ARN', start) < stop
+    assert workflow.index('HIVE_T01_SMOKE_ROLE_ARN', stop) > stop
+    assert 'vars.KIMI_BOX_ID' in workflow
+    assert 't01-evidence/count-host.jsonl' in workflow
+    trust = read(ROOT / 'infra/template.yaml')
+    smoke_role = trust.split('  T01SmokeRole:', 1)[1].split('\nOutputs:', 1)[0]
+    assert 'ssm:SendCommand' not in smoke_role
+    runbook = read(RUNBOOK)
+    assert PIN in runbook and 'teamkimi-count@' in runbook
+    assert 'PR #16 head' not in runbook
+    assert 'Matrix remains separately reviewed' in runbook
+
+
+def ready_status():
+    return {
+        'enabled': True,
+        'countOnly': True,
+        'pricingVerified': False,
+        'admissionAllowed': False,
+        'blockedReason': None,
+        'credentials': [],
+        'reservations': [],
+        'totals': {'admissions': 0},
+    }
+
+
+def host_workspace():
+    temporary = tempfile.TemporaryDirectory()
+    root = Path(temporary.name)
+    source = read(HOST)
+    for prefix in ('/opt/teamkimi-count', '/var/lib/teamkimi-count', '/etc/systemd/system'):
+        source = source.replace(prefix, str(root / prefix.lstrip('/')))
+    source = source.replace('SOURCE_OWNER=0', f'SOURCE_OWNER={os.getuid()}')
+    source = source.replace('SOURCE_GROUP=0', f'SOURCE_GROUP={os.getgid()}')
+    source = source.replace('install -d -m 0700 -o ubuntu -g ubuntu', 'install -d -m 0700')
+    script = root / 'host.sh'
+    script.write_text(source)
+    script.chmod(0o755)
+    source_dir = root / f'opt/teamkimi-count/{PIN}'
+    (source_dir / 'src').mkdir(parents=True)
+    (source_dir / 'src/index.js').write_text('synthetic-source\n')
+    (source_dir / 'provenance.json').write_text(json.dumps({
+        'commit': PIN, 'archiveSha256': ARCHIVE_SHA256,
+    }))
+    (root / 'etc/systemd/system').mkdir(parents=True)
+    shutil.copy(UNIT, root / 'etc/systemd/system/teamkimi-count@.service')
+    (root / 'bin').mkdir()
+    (root / 'status.json').write_text(json.dumps(ready_status()))
+    (root / 'normal-proxy.pid').write_text('0\n')
+    env = {
+        'PATH': f'{root}/bin:{os.environ["PATH"]}',
+        'MOCK_ACTIVE': str(root / 'active'),
+        'MOCK_CALLS': str(root / 'calls'),
+        'MOCK_STATE': str(root / 'var/lib/teamkimi-count/123'),
+        'MOCK_STATUS': str(root / 'status.json'),
+        'MOCK_NORMAL_PID': str(root / 'normal-proxy.pid'),
+        'MOCK_PORT_OWNER': str(root / 'port-owner'),
+    }
+    write_executable(root / 'bin/id', '''#!/usr/bin/env bash
+if [ "$#" = 1 ] && [ "$1" = -u ]; then
+  printf '0\n'
+else
+  /usr/bin/id "$@"
+fi
+''')
+    write_executable(root / 'bin/systemctl', '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+case "$1 $2" in
+  'is-active --quiet')
+    if [ "$3" = teamkimi-tmux.service ]; then exit 1; fi
+    [ -f "$MOCK_ACTIVE" ]
+    ;;
+  'show teamkimi-tmux.service') cat "$MOCK_NORMAL_PID" ;;
+  'show teamkimi-count@123.service')
+    if [ -f "$MOCK_ACTIVE" ]; then printf '4242\n'; else printf '0\n'; fi
+    ;;
+  'start teamkimi-count@123.service')
+    : > "$MOCK_ACTIVE"
+    printf 'preserve-this-ledger\n' > "$MOCK_STATE/ledger.json"
+    ;;
+  'stop teamkimi-count@123.service') rm -f "$MOCK_ACTIVE" ;;
+  *) exit 2 ;;
+esac
+''')
+    write_executable(root / 'bin/ss', '''#!/usr/bin/env bash
+if [ -f "$MOCK_ACTIVE" ] || [ -f "$MOCK_PORT_OWNER" ]; then
+  printf 'LISTEN 0 4096 127.0.0.1:8765 0.0.0.0:*\n'
+fi
+''')
+    write_executable(root / 'bin/curl', '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+out=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then out="$2"; shift 2; else shift; fi
+done
+cat "$MOCK_STATUS" > "$out"
+''')
+    write_executable(root / 'bin/sleep', '#!/usr/bin/env bash\nexit 0\n')
+    return temporary, root, script, env
+
+
+def invoke_host(script, env, action, run_id='123'):
+    return subprocess.run(
+        ['bash', str(script), action, run_id], env=env,
+        capture_output=True, text=True, timeout=10,
+    )
+
+
+def check_host_lifecycle():
+    temporary, root, script, env = host_workspace()
+    with temporary:
+        started = invoke_host(script, env, 'start')
+        assert started.returncode == 0, (started.stdout, started.stderr)
+        assert 'raw-status' not in started.stdout + started.stderr
+        assert (root / 'var/lib/teamkimi-count/123/ledger.json').exists()
+        (root / 'var/lib/teamkimi-count/123/ledger.json').write_text('preserve-this-ledger\n')
+        stopped = invoke_host(script, env, 'stop')
+        assert stopped.returncode == 0, (stopped.stdout, stopped.stderr)
+        assert (root / 'var/lib/teamkimi-count/123/ledger.json').read_text() == 'preserve-this-ledger\n'
+        calls = (root / 'calls').read_text()
+        assert 'start teamkimi-count@123.service' in calls
+        assert 'stop teamkimi-count@123.service' in calls
+        assert 'teamkimi-tmux.service start' not in calls and 'teamkimi-tmux.service stop' not in calls
+
+    temporary, root, script, env = host_workspace()
+    with temporary:
+        (root / 'port-owner').write_text('unknown\n')
+        result = invoke_host(script, env, 'start')
+        assert result.returncode != 0
+        calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
+        assert 'start teamkimi-count@123.service' not in calls
+
+    temporary, root, script, env = host_workspace()
+    with temporary:
+        assert invoke_host(script, env, 'start').returncode == 0
+        active = ready_status()
+        active['credentials'] = [{'id': 'public-id', 'revokedAt': None}]
+        (root / 'status.json').write_text(json.dumps(active))
+        ledger = root / 'var/lib/teamkimi-count/123/ledger.json'
+        before = ledger.read_bytes()
+        result = invoke_host(script, env, 'stop')
+        assert result.returncode != 0
+        assert 'stop teamkimi-count@123.service' not in (root / 'calls').read_text()
+        assert ledger.read_bytes() == before
+
+    temporary, root, script, env = host_workspace()
+    with temporary:
+        assert invoke_host(script, env, 'start').returncode == 0
+        (root / 'normal-proxy.pid').write_text('99\n')
+        result = invoke_host(script, env, 'stop')
+        assert result.returncode != 0
+        assert 'stop teamkimi-count@123.service' not in (root / 'calls').read_text()
+
+    temporary, root, script, env = host_workspace()
+    with temporary:
+        result = invoke_host(script, env, 'start', 'not-numeric')
+        assert result.returncode != 0
+        assert not (root / 'calls').exists()
+
+
+def ssm_workspace(output, status='Success'):
+    temporary = tempfile.TemporaryDirectory()
+    root = Path(temporary.name)
+    (root / 'bin').mkdir()
+    (root / 'infra/t01-smoke').mkdir(parents=True)
+    shutil.copy(SSM, root / 'infra/t01-smoke/count-host.sh')
+    invocation = root / 'invocation.json'
+    invocation.write_text(json.dumps({'Status': status, 'StandardOutputContent': output}))
+    mock_aws(root, '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+case "$1 $2" in
+  'ssm send-command') printf 'command-123\n' ;;
+  'ssm wait') exit 0 ;;
+  'ssm get-command-invocation') cat "$MOCK_INVOCATION" ;;
+  *) exit 2 ;;
+esac
+''')
+    env = {
+        'PATH': f'{root}/bin:{os.environ["PATH"]}',
+        'MOCK_CALLS': str(root / 'calls'),
+        'MOCK_INVOCATION': str(invocation),
+        'GITHUB_RUN_ID': '123',
+        'T01_TEAMKIMI_HOST_ID': 'i-abcdef12',
+        'EVIDENCE_DIR': str(root / 'evidence'),
+    }
+    return temporary, root, env
+
+
+def check_ssm_sanitization():
+    temporary, root, env = ssm_workspace(
+        'T01_COUNT count_source passed\nT01_COUNT count_start passed\n',
+    )
+    with temporary:
+        result = subprocess.run(
+            ['bash', 'infra/t01-smoke/count-host.sh', 'start'], cwd=root, env=env,
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        evidence = (root / 'evidence/count-host.jsonl').read_text()
+        assert evidence == 'T01_COUNT count_source passed\nT01_COUNT count_start passed\n'
+        assert 'raw-account' not in result.stdout + result.stderr + evidence
+
+    temporary, root, env = ssm_workspace('raw-account-secret\n')
+    with temporary:
+        result = subprocess.run(
+            ['bash', 'infra/t01-smoke/count-host.sh', 'start'], cwd=root, env=env,
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode != 0
+        combined = result.stdout + result.stderr
+        if (root / 'evidence/count-host.jsonl').exists():
+            combined += (root / 'evidence/count-host.jsonl').read_text()
+        assert 'raw-account-secret' not in combined
+
+
+def count_evidence():
+    records = evidence_records()
+    complete = records.pop()
+    for check in (
+        'trusted_tunnel_ready', 'teamkimi_control_port', 'teamkimi_control_broker',
+        'teamkimi_generation_rejected', 'teamkimi_messages_rejected',
+    ):
+        records.append({'check': check, 'status': 'passed'})
+    records.extend([
+        {
+            'check': 'count_only_no_generation', 'status': 'passed', 'sha256': 'a' * 64,
+            'requestHash': 'b' * 64, 'model': 'kimi-code/k3.1-pro',
+            'inputTokens': 10, 'baseInputTokens': 2, 'cacheReadInputTokens': 3,
+            'cacheCreationInputTokens': 5, 'cacheCreation5mInputTokens': 1,
+            'cacheCreation1hInputTokens': 4, 'generationRequests': 0,
+            'timestamp': 1, 'revokedAt': 1, 'proof': 'c' * 64,
+        },
+        {'check': 'tunnel_cleanup', 'status': 'passed'},
+        complete,
+    ])
+    return ''.join(json.dumps(record, separators=(',', ':')) + '\n' for record in records)
+
+
+def cleanup_stop_case(stop_verified):
+    temporary, root = workspace()
+    with temporary:
+        artifact = root / 'artifact'
+        artifact.mkdir()
+        (artifact / 'preflight.jsonl').write_text(count_evidence())
+        mock_aws(root, '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+case "$1 $2" in
+  'cloudformation describe-stacks')
+    printf 'ValidationError: Stack with id hive-v2-t01-smoke does not exist\n' >&2
+    exit 254
+    ;;
+  'secretsmanager describe-secret')
+    printf 'ResourceNotFoundException: secret not found\n' >&2
+    exit 254
+    ;;
+esac
+''')
+        result = run(root, 'cleanup', {
+            'SCENARIO': 'count', 'EVIDENCE_DIR': str(artifact),
+            'T01_COUNT_STOP_VERIFIED': stop_verified,
+        })
+        calls = (root / 'calls').read_text()
+        assert 'secretsmanager describe-secret' in calls
+        if stop_verified == 'yes':
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert 'release aws-acts hive-v2-t01-smoke/123' in calls
+        else:
+            assert result.returncode != 0
+            assert 'release aws-acts' not in calls
+
+
+check_install_contract()
+check_host_lifecycle()
+check_ssm_sanitization()
+cleanup_stop_case('no')
+cleanup_stop_case('yes')

@@ -10,6 +10,7 @@ const checks = [
   't01_lifecycle_checks.py',
   't01_health_broker_checks.py',
   't01_paid_infra_checks.py',
+  't01_count_listener_checks.py',
 ];
 
 describe('T01 behavior regressions', () => {

@@ -246,7 +246,10 @@ fi
 def paid_console_records(manifest_sha, marker=True):
     records = [record for record in evidence_records() if record['check'] != 'paid_admission_disabled']
     complete = records.pop()
-    for check in ('trusted_tunnel_ready', 'teamkimi_control_port', 'teamkimi_control_broker', 'tunnel_cleanup'):
+    for check in (
+        'trusted_tunnel_ready', 'teamkimi_control_port', 'teamkimi_control_broker',
+        'teamkimi_generation_rejected', 'teamkimi_messages_rejected', 'tunnel_cleanup',
+    ):
         records.append({'check': check, 'status': 'passed'})
     records.append({
         'check': 'count_only_no_generation', 'status': 'passed', 'sha256': 'a' * 64,
