@@ -43,7 +43,10 @@ export async function writeJson(file: string, value: unknown, mode?: number): Pr
 }
 
 export type ProjectsFile = {
-  projects: { name: string; home: string; repos: { folder: string }[]; mode?: ProjectMode; approvals?: Approvals }[];
+  projects: {
+    name: string; home: string; repos: { folder: string }[]; mode?: ProjectMode; approvals?: Approvals;
+    collaboration_execution_disabled_at?: string;
+  }[];
 };
 
 export async function readProjects(root: string): Promise<ProjectsFile> {

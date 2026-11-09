@@ -9,6 +9,7 @@ const tmux = await import('../src/tmux.js');
 const { launchWindow } = await import('../src/spawn.js');
 const { authenticateBearer } = await import('../src/security.js');
 const { MemoryRegistry, registryItems } = await import('./security-fixture.js');
+const { hubPath, writeJson } = await import('../src/state.js');
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -25,6 +26,9 @@ describe('enabled spawn credential files', () => {
     await fs.mkdir(path.dirname(credentialFile), { recursive: true });
     const replacement = 'hva1.builder.fedcba9876543210.replacement-secret-with-high-entropy';
     await fs.writeFile(credentialFile, `HIVE_AGENT_CREDENTIAL='${replacement}'\n`, { mode: 0o600 });
+    await writeJson(hubPath(root, 'projects.json'), {
+      projects: [{ name: 'demo', home: cwd, repos: [{ folder: cwd }] }],
+    });
     process.env.HIVE_COLLABORATION_ENABLED = '1';
     process.env.HIVE_AGENT_CREDENTIAL = AGENT_CREDENTIAL;
     const fetchMock = vi.fn();

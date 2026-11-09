@@ -18,6 +18,7 @@ import { checkTaskScope } from './scope.js';
 import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 import { assertEntryAlive, killEntry, recordedIdentity } from './kill.js';
 import { requireAgentCredential } from './collaboration-credentials.js';
+import { assertExecutionAllowed } from './rollout.js';
 export { assertEntryAlive } from './kill.js';
 
 export function orchestratorName(project: string): string {
@@ -207,6 +208,7 @@ export async function launchWindow(
   mode: LaunchMode = 'ask',
   model?: string,
 ): Promise<{ pane: string; identity: PaneIdentity }> {
+  await assertExecutionAllowed(root, project);
   // HIVE_AGENT names the pane's own agent: a `hive spawn` run inside the pane
   // reads it to record its parent, and the memory CLI already reports with it.
   // HIVE_PROJECT + HIVE_HUB_ROOT route the agent's ask_operator MCP calls.
@@ -383,6 +385,7 @@ function envParent(self: string): string | undefined {
 }
 
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
+  await assertExecutionAllowed(root, project);
   if (!AGENT_NAME_RE.test(opts.agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${opts.agent}`);
   checkWorkerContract(opts);
   checkModel(opts.model);
@@ -572,6 +575,7 @@ async function relaunchRegisteredAgent(
 export async function respawnAgent(
   root: string, project: string, agent: string, options: Partial<WorkerContract> = {},
 ): Promise<string> {
+  await assertExecutionAllowed(root, project);
   const p = await projectEntry(root, project);
   const home = p.home;
   const team = await readTeam(home);
@@ -600,6 +604,7 @@ export async function respawnAgent(
 // The watchdog's agent ensure: a dead agent with a recorded session comes back
 // with that session resumed. A stamped close is never woken.
 export async function wakeAgent(root: string, project: string, agent: string): Promise<string> {
+  await assertExecutionAllowed(root, project);
   const p = await projectEntry(root, project);
   const team = await readTeam(p.home);
   const old = team.agents.find((a) => a.name === agent);

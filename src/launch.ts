@@ -13,6 +13,7 @@ import {
 import { withLaunchClaim, withProjectLock } from './project.js';
 import { settlePendingPane } from './taskgate.js';
 import { applyMemoryBlock, memoryBlockFor } from './memory.js';
+import { assertExecutionAllowed } from './rollout.js';
 
 type ProjectEntry = ProjectsFile['projects'][number];
 type LaunchKind = 'wake' | 'start';
@@ -32,6 +33,7 @@ async function launchOrchestrator(
   kind: LaunchKind,
   task?: string,
 ): Promise<string> {
+  await assertExecutionAllowed(root, project);
   return withLaunchClaim(root, project, (p) => launchRegisteredOrchestrator(root, p, kind, task));
 }
 
@@ -138,6 +140,7 @@ export async function startProject(root: string, project: string, task: string):
 }
 
 export async function continueProject(root: string, project: string): Promise<string> {
+  await assertExecutionAllowed(root, project);
   return withLaunchClaim(root, project, (p) => continueRegisteredProject(root, p));
 }
 
