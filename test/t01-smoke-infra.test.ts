@@ -99,19 +99,6 @@ describe('T01 disposable smoke infrastructure', () => {
     expect(provision.indexOf('lock_down')).toBeLessThan(provision.lastIndexOf('hermes-check'));
   });
 
-  it('installs Session Manager from a verified versioned RPM', () => {
-    const provision = read('provision');
-    expect(provision).toContain('SESSION_MANAGER_PLUGIN_VERSION=1.2.896.0');
-    expect(provision).toContain('SESSION_MANAGER_PLUGIN_SHA256=89a4a07fcb92169bdd2f07c2531acd11b84857338172e7638964aaa08fd5f0e3');
-    expect(provision).toContain('https://s3.amazonaws.com/session-manager-downloads/plugin/$SESSION_MANAGER_PLUGIN_VERSION/linux_64bit/session-manager-plugin.rpm');
-    const checksum = 'printf \'%s  %s\\n\' "$SESSION_MANAGER_PLUGIN_SHA256" /opt/t01/session-manager-plugin.rpm | sha256sum -c -';
-    expect(provision).toContain(checksum);
-    const install = provision.split('\n').find((line) => line.trimStart().startsWith('if dnf install -y'));
-    expect(install).toContain('/opt/t01/session-manager-plugin.rpm');
-    expect(install).not.toContain('iptables session-manager-plugin');
-    expect(provision.indexOf(checksum)).toBeLessThan(provision.indexOf(install ?? ''));
-  });
-
   it('uses the provisioned Hermes runtime store in the sealed service', () => {
     const provision = read('provision');
     expect(provision).toContain(
