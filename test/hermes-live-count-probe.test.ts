@@ -16,7 +16,7 @@ const counts = {
 };
 const closers: (() => Promise<void>)[] = [];
 
-async function runProbe(countStatus = 200, revokeStatus = 200) {
+async function runProbe(countStatus = 200, revokeStatus = 200, countResponse: Record<string, unknown> = {}) {
   const routes: string[] = [];
   let credential: Record<string, unknown> | undefined;
   const revokedAt = 1760000001000;
@@ -57,6 +57,7 @@ async function runProbe(countStatus = 200, revokeStatus = 200) {
           counts: countStatus === 200 ? counts : null,
           status: countStatus === 200 ? 'counted' : 'provider_input_accounting_unverified', timestamp: 1760000000000,
           diagnostic: countStatus === 200 ? undefined : 'raw-provider-response-secret',
+          account: 'synthetic-account-name', error: 'raw-provider-error-text', ...countResponse,
         }));
       });
       return;
@@ -103,26 +104,60 @@ describe('T01 count-only probe', () => {
     expect(JSON.stringify(evidence)).not.toContain('tcc-synthetic-only');
   });
 
-  it('revokes in finally after provider count failure and reports fixed sanitized diagnostics', async () => {
-    const result = await runProbe(503);
-    expect(result.status).not.toBe(0);
-    expect(result.stdout).toBe('');
-    expect(result.stderr).toBe('');
-    expect(result.routes.some((route) => route.endsWith('/teamkimi/smoke/revoke'))).toBe(true);
-    expect(result.routes.some((route) => route.endsWith('/v1/messages'))).toBe(false);
-    const evidence = JSON.parse(await readFile(result.output, 'utf8'));
-    expect(evidence.status).toBe('failed');
-    expect(evidence.counts).toBeNull();
-    expect(evidence.revocation.proof).toBe(result.proof);
-    const category = await readFile(join(result.root, 'bootstrap-category'), 'utf8');
-    const origin = await readFile(join(result.root, 'bootstrap-origin'), 'utf8');
-    expect(category).toBe('provider-count-evidence-invalid\n');
-    expect(origin).toBe('count-provider:1\n');
-    const exposed = result.stdout + result.stderr + category + origin + JSON.stringify(evidence);
-    for (const sentinel of ['tcc-synthetic-only', 'raw-provider-response-secret', result.root, probe]) {
-      expect(exposed).not.toContain(sentinel);
-    }
-  });
+  it.each([
+    { name: 'non-200 HTTP', httpStatus: 400, category: 'provider-count-http-400' },
+    {
+      name: 'allowlisted provider status', response: { status: 'provider_input_accounting_unverified' },
+      category: 'provider-count-status-provider_input_accounting_unverified',
+    },
+    {
+      name: 'unlisted provider status', response: { status: 'raw-provider-status-secret' },
+      category: 'provider-count-status-unclassified',
+    },
+    {
+      name: 'model mismatch', response: { model: 'raw-account-model' },
+      category: 'provider-count-model-mismatch',
+    },
+    {
+      name: 'request hash mismatch', response: { requestHash: '0'.repeat(64) },
+      category: 'provider-count-request-hash-mismatch',
+    },
+    {
+      name: 'missing count fields', response: { counts: { inputTokens: 10 } },
+      category: 'provider-count-fields-invalid',
+    },
+    {
+      name: 'invalid count fields', response: { counts: { ...counts, baseInputTokens: 'raw-count-field-secret' } },
+      category: 'provider-count-fields-invalid',
+    },
+    {
+      name: 'count arithmetic mismatch', response: { counts: { ...counts, baseInputTokens: 1 } },
+      category: 'provider-count-arithmetic-mismatch',
+    },
+  ] as { name: string; httpStatus?: number; response?: Record<string, unknown>; category: string }[])(
+    'revokes and reports $name with fixed sanitized diagnostics', async (testCase) => {
+      const result = await runProbe(testCase.httpStatus ?? 200, 200, testCase.response);
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('');
+      expect(result.routes.some((route) => route.endsWith('/teamkimi/smoke/revoke'))).toBe(true);
+      expect(result.routes.some((route) => route.endsWith('/v1/messages'))).toBe(false);
+      const evidence = JSON.parse(await readFile(result.output, 'utf8'));
+      expect(evidence.status).toBe('failed');
+      expect(evidence.counts).toBeNull();
+      expect(evidence.revocation.proof).toBe(result.proof);
+      const category = await readFile(join(result.root, 'bootstrap-category'), 'utf8');
+      const origin = await readFile(join(result.root, 'bootstrap-origin'), 'utf8');
+      expect(category).toBe(`${testCase.category}\n`);
+      expect(origin).toBe('count-provider:1\n');
+      const exposed = result.stdout + result.stderr + category + origin + JSON.stringify(evidence);
+      for (const sentinel of [
+        'tcc-synthetic-only', 'raw-provider-response-secret', 'synthetic-account-name', 'raw-provider-error-text',
+        'raw-provider-status-secret', 'raw-account-model', 'raw-count-field-secret', result.root, probe,
+      ]) {
+        expect(exposed).not.toContain(sentinel);
+      }
+    });
 
   it('reports revocation failure without raw output or count evidence', async () => {
     const result = await runProbe(200, 503);
