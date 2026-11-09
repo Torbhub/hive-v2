@@ -63,6 +63,8 @@ jobs:
     environment: t01-smoke
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    env:
+      DEPLOY_MUTEX_WAIT_SECONDS: 3600
     permissions:
       contents: read
       id-token: write
