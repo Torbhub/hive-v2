@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { chromeArguments, launchChrome } from './browser-launcher.js';
 
 const roots: string[] = [];
@@ -32,6 +32,32 @@ describe('Chrome launcher', () => {
     expect(Date.now() - started).toBeLessThan(2_000);
     await expect(launchChrome(process.execPath, directory, script)).rejects.toThrow('<profile>');
     await expect(launchChrome(process.execPath, directory, script)).rejects.not.toThrow(directory);
+  });
+
+  it('allows DevTools to become ready after 30 seconds', async () => {
+    const realNow = Date.now.bind(Date);
+    const started = realNow();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(
+      () => started + (realNow() - started) * 50,
+    );
+    try {
+      const directory = await root();
+      const script = path.join(directory, 'slow.mjs');
+      await fs.writeFile(script, `
+        import fs from 'node:fs';
+        import path from 'node:path';
+        const profile = path.dirname(process.argv[1]);
+        setTimeout(() => {
+          fs.writeFileSync(path.join(profile, 'DevToolsActivePort'), '12345\\n');
+        }, 800);
+        setInterval(() => {}, 1000);
+      `);
+      const launched = await launchChrome(process.execPath, directory, script);
+      children.push(launched.browser);
+      expect(launched.activePort).toBe(12345);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('returns the active DevTools port after a valid startup', async () => {

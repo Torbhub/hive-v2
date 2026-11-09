@@ -201,7 +201,7 @@ beforeAll(async () => {
   });
   await cdp.call('Page.navigate', { url: origin });
   await cdp.waitFor(`document.querySelector('input[aria-label="new task for demo"]')`);
-}, 45_000);
+}, 90_000);
 
 async function stopChrome(): Promise<void> {
   if (!browser || browser.exitCode !== null || browser.signalCode !== null) return;
