@@ -443,6 +443,8 @@ Resources:
                 Action:
                   - secretsmanager:CreateSecret
                   - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:UpdateSecret
                   - secretsmanager:DeleteSecret
                 Resource: arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-*
               - Sid: T01ProxyCredentialLifecycle

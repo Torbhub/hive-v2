@@ -160,6 +160,32 @@ jobs:
           MAX_PAID_ADMISSIONS: ${{ inputs.max_paid_admissions }}
           LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
         run: bash infra/t01-smoke/workflow.sh deploy
+      - name: Switch to the deploy role only for host health attestation
+        if: steps.acquire.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 3600
+      - name: Collect fresh host health attestation
+        id: host_attestation
+        if: steps.acquire.outcome == 'success'
+        env:
+          T01_TEAMKIMI_HOST_ID: ${{ vars.KIMI_BOX_ID }}
+        run: bash infra/t01-smoke/workflow.sh refresh-host-attestation
+      - name: Restore the T01 smoke role after host health attestation
+        if: always() && steps.acquire.outcome == 'success' && steps.deploy.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 9000
+      - name: Refresh the expiring no-spend health credential
+        id: health_refresh
+        if: steps.acquire.outcome == 'success'
+        env:
+          T01_HEALTH_ATTESTATION: ${{ steps.host_attestation.outputs.attestation }}
+        run: bash infra/t01-smoke/workflow.sh refresh-health-credential
       - name: Collect only sanitized preflight evidence
         id: collect
         continue-on-error: true

@@ -286,6 +286,21 @@ aws secretsmanager get-secret-value --secret-id "$TEAMKIMI_SECRET_ARN" \
 chown t01broker:t01broker /etc/t01/broker/teamkimi.json
 chmod 0400 /etc/t01/broker/teamkimi.json
 
+refresh_teamkimi_secret() {
+  local refreshed
+  refreshed="$(mktemp /etc/t01/broker/teamkimi.json.XXXXXX)"
+  if ! aws secretsmanager get-secret-value --secret-id "$TEAMKIMI_SECRET_ARN" \
+    --query SecretString --output text > "$refreshed" 2>/dev/null; then
+    rm -f "$refreshed"
+    return 1
+  fi
+  if ! chown t01broker:t01broker "$refreshed" || ! chmod 0400 "$refreshed"; then
+    rm -f "$refreshed"
+    return 1
+  fi
+  mv -f "$refreshed" /etc/t01/broker/teamkimi.json
+}
+
 if [ "$SCENARIO" = matrix ]; then
   python3 /opt/t01/runtime.py write-proxy-environment
 fi
@@ -456,6 +471,9 @@ if [ "$SCENARIO" != preflight ]; then
   runuser -u t01broker -- env -i PATH=/usr/bin:/bin /usr/bin/python3 /opt/t01/runtime.py wait-for-teamkimi
   emit trusted_tunnel_ready passed
 fi
+BOOTSTRAP_STAGE=credential-refresh
+refresh_teamkimi_secret
+BOOTSTRAP_STAGE=default-deny-lockdown
 lock_down
 emit default_deny_lockdown passed
 BOOTSTRAP_STAGE=broker-access

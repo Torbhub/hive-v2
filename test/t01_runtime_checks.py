@@ -363,6 +363,84 @@ assert records[0] == {
 }, records
 
 
+def broker_secret_refresh_case(aws_content):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / 'bin').mkdir()
+        target = root / 'teamkimi.json'
+        target.write_text('{"attestedAt":1,"apiKey":"original-key"}')
+        target.chmod(0o400)
+        write_executable(root / 'bin/aws', aws_content)
+        write_executable(root / 'bin/chown', '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CHOWN_CALLS"
+''')
+        source = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+        start = source.index('refresh_teamkimi_secret() {')
+        function = source[start:source.index('\n}\n', start) + 3]
+        function = function.replace('/etc/t01/broker/teamkimi.json', str(target))
+        result = subprocess.run(
+            ['/bin/bash', '-c', 'set -Eeuo pipefail\n' + function + '\nrefresh_teamkimi_secret'],
+            env={
+                'PATH': f'{root}/bin:{os.environ["PATH"]}',
+                'TEAMKIMI_SECRET_ARN': 'synthetic-secret-arn',
+                'CHOWN_CALLS': str(root / 'chown-calls'),
+            },
+            capture_output=True, text=True, timeout=5,
+        )
+        chown_calls = (root / 'chown-calls').read_text() if (root / 'chown-calls').exists() else ''
+        return result, target.read_text(), target.stat().st_mode & 0o777, chown_calls, list(root.glob('teamkimi.json.*'))
+
+
+updated_secret = '{"attestedAt":200,"apiKey":"original-key"}'
+result, content, mode, chown_calls, temporaries = broker_secret_refresh_case(
+    f'#!/usr/bin/env bash\nprintf \'%s\\n\' \'{updated_secret}\'\n',
+)
+assert result.returncode == 0, (result.stdout, result.stderr)
+assert content == updated_secret + '\n'
+assert mode == 0o400
+assert 't01broker:t01broker' in chown_calls
+assert temporaries == []
+assert updated_secret not in result.stdout + result.stderr
+
+original_secret = '{"attestedAt":1,"apiKey":"original-key"}'
+raw_secret_error = 'synthetic-secret-refresh-error'
+result, content, mode, chown_calls, temporaries = broker_secret_refresh_case(
+    f'#!/usr/bin/env bash\nprintf \'%s\\n\' \'{raw_secret_error}\'\nprintf \'%s\\n\' \'{raw_secret_error}\' >&2\nexit 1\n',
+)
+assert result.returncode != 0
+assert content == original_secret
+assert mode == 0o400
+assert chown_calls == ''
+assert temporaries == []
+assert raw_secret_error not in result.stdout + result.stderr
+
+provision = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+assert provision.count('aws secretsmanager get-secret-value') == 2
+assert (
+    '  emit trusted_tunnel_ready passed\n'
+    'fi\n'
+    'BOOTSTRAP_STAGE=credential-refresh\n'
+    'refresh_teamkimi_secret\n'
+    'BOOTSTRAP_STAGE=default-deny-lockdown\n'
+    'lock_down\n'
+    'emit default_deny_lockdown passed'
+) in provision
+lockdown_call = provision.index('lock_down\nemit default_deny_lockdown')
+assert 'aws secretsmanager get-secret-value' not in provision[lockdown_call:]
+assert 'BOOTSTRAP_STAGE=teamkimi-no-model\nexpect_allowed teamkimi_no_model' in provision
+assert 'SECRETS_MANAGER_IP' not in provision
+assert 'secretsmanager.us-east-1.amazonaws.com' not in provision
+lock_down = provision.split('lock_down() {', 1)[1].split('\n}', 1)[0]
+assert 'iptables -A OUTPUT -d 169.254.169.254 -j REJECT' in lock_down
+assert 'iptables -A OUTPUT -d 169.254.170.2 -j REJECT' in lock_down
+for rule in lock_down.splitlines():
+    if 'ACCEPT' in rule:
+        assert '169.254.169.254' not in rule
+        assert '169.254.170.2' not in rule
+        assert 'SECRETS_MANAGER' not in rule
+        assert 'secretsmanager' not in rule
+
+
 def assert_diagnostic(root, expected, result):
     assert result.returncode != 0, result.stderr
     assert result.stdout == '', result.stdout

@@ -49,7 +49,7 @@ def check_install_contract():
     workflow = read(WORKFLOW_YAML)
     assert workflow.count('workflow.sh acquire') == 1
     deploy_blocks = workflow.split('role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}')[1:]
-    assert len(deploy_blocks) == 2
+    assert len(deploy_blocks) == 3
     for block in deploy_blocks:
         assert block.split('role-duration-seconds: ', 1)[1].splitlines()[0] == '3600'
     start = workflow.index('workflow.sh count-start')
