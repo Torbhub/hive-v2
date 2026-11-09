@@ -11,7 +11,7 @@ import { usageCostMicros } from '../tools/hermes-live/policy.js';
 import { attestation, controls, policyHash, wireCounted, wireUsage } from './hermes-live-fixtures.js';
 
 const source = process.env.TEAMKIMI_SMOKE_SOURCE;
-const TESTED_TEAMKIMI_COMMIT = 'ab0dcf76cc96a31e2376677a915990d011c5c807';
+const TESTED_TEAMKIMI_COMMIT = '87e5ed7dc1fd7af3a234ac4e4f24b9c7286126b6';
 const attemptKey = 'a'.repeat(64);
 const proxyApiKey = 'ordinary-proxy-key';
 const describeWire = source ? describe : describe.skip;
@@ -140,7 +140,7 @@ describe('Anthropic canonicalization', () => {
   });
 });
 
-describeWire('TeamKimi PR16 no-paid HTTP wire contract', () => {
+describeWire('TeamKimi PR18 no-paid HTTP wire contract', () => {
   it('injects credentials, forwards the exact Anthropic request, and maps usage and revocation', async () => {
     const wire = await fixture();
     const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', {

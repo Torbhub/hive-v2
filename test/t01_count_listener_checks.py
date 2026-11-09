@@ -9,8 +9,8 @@ import tempfile
 
 from t01_workflow_harness import ROOT, evidence_records, mock_aws, run, workspace, write_executable
 
-PIN = 'ab0dcf76cc96a31e2376677a915990d011c5c807'
-ARCHIVE_SHA256 = '87b6648a0ec932da74c3a3e383d9209c34dafaff5b3a1f6b4373d6ac11f9f3f4'
+PIN = '87e5ed7dc1fd7af3a234ac4e4f24b9c7286126b6'
+ARCHIVE_SHA256 = 'd85df1db79405b0240ec5bc48a6441064dbbfbaf3cf95c54dd5355c3baddb19c'
 INSTALL = ROOT / 'infra/t01-smoke/teamkimi-count-install.sh'
 HOST = ROOT / 'infra/t01-smoke/teamkimi-count-host.sh'
 SSM = ROOT / 'infra/t01-smoke/count-host.sh'
@@ -83,7 +83,7 @@ def check_installer_idempotence():
         (fixture / 'src/index.js').write_text('synthetic-count-cli\n')
         archive = root / 'source.tar.gz'
         with tarfile.open(archive, 'w:gz') as output:
-            output.add(fixture, arcname='Torbhub-teamkimi-ab0dcf76')
+            output.add(fixture, arcname='teamkimi-87e5ed7dc1fd7af3a234ac4e4f24b9c7286126b6')
         archive_sha = hashlib.sha256(archive.read_bytes()).hexdigest()
         source = read(INSTALL).replace('/opt/teamkimi-count', str(root / 'opt/teamkimi-count'))
         source = source.replace(ARCHIVE_SHA256, archive_sha)

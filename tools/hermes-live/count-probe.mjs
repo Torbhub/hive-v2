@@ -7,13 +7,16 @@ import { COUNTED_INPUT_FIELDS, countedInput } from './policy.js';
 
 const BASE = 'http://127.0.0.1:8765';
 const PROVIDER_COUNT_STATUSES = new Set(['provider_input_accounting_unverified']);
+const PROVIDER_COUNT_ERROR_TYPES = new Set([
+  'invalid_request_error', 'authentication_error', 'rate_limit_error', 'api_error', 'unknown',
+]);
 const output = process.argv[2];
 
 function diagnose(error) {
   process.exitCode = 1;
   let category;
   let origin;
-  if (/^provider-count-(?:http-\d{3}|status-(?:provider_input_accounting_unverified|unclassified)|model-mismatch|request-hash-mismatch|fields-invalid|arithmetic-mismatch)$/.test(error?.message)) {
+  if (/^provider-count-(?:http-\d{3}(?:-(?:invalid_request_error|authentication_error|rate_limit_error|api_error|unknown))?|status-(?:provider_input_accounting_unverified|unclassified)|model-mismatch|request-hash-mismatch|fields-invalid|arithmetic-mismatch)$/.test(error?.message)) {
     category = error.message;
     origin = 'count-provider:1';
   } else if (['count-revocation-failed', 'count-revocation-not-attested'].includes(error?.message)) {
@@ -93,7 +96,11 @@ try {
   if (response.status !== 201 || issued?.scope !== 'count-only' || typeof issued.credential !== 'string'
     || !issued.credential.startsWith('tcc-') || typeof issued.id !== 'string') throw new Error('count-credential-issue-failed');
   counted = await request('POST', '/teamkimi/smoke/count-tokens', body, issued.credential);
-  if (counted.status !== 200) throw new Error(`provider-count-http-${counted.status}`);
+  if (counted.status !== 200) {
+    const errorType = counted.value?.upstreamErrorType;
+    const suffix = PROVIDER_COUNT_ERROR_TYPES.has(errorType) ? `-${errorType}` : '';
+    throw new Error(`provider-count-http-${counted.status}${suffix}`);
+  }
   if (counted.value?.status !== 'counted') {
     const providerStatus = PROVIDER_COUNT_STATUSES.has(counted.value?.status) ? counted.value.status : 'unclassified';
     throw new Error(`provider-count-status-${providerStatus}`);

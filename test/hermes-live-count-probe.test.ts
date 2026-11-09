@@ -98,6 +98,9 @@ describe('T01 count-only probe', () => {
     expect(result.routes.filter((route) => route.endsWith('/teamkimi/smoke/count-tokens'))).toHaveLength(1);
     expect(result.routes.some((route) => route.endsWith('/v1/messages'))).toBe(false);
     const evidence = JSON.parse(await readFile(result.output, 'utf8'));
+    expect(Object.keys(evidence).sort()).toEqual([
+      'counts', 'generationRequests', 'model', 'requestHash', 'revocation', 'schemaVersion', 'status', 'timestamp',
+    ]);
     expect(evidence.counts).toEqual(counts);
     expect(evidence.generationRequests).toBe(0);
     expect(evidence.revocation).toEqual({ id: '1123456789abcdef0123456789abcdef', revokedAt: result.revokedAt, proof: result.proof });
@@ -106,6 +109,40 @@ describe('T01 count-only probe', () => {
 
   it.each([
     { name: 'non-200 HTTP', httpStatus: 400, category: 'provider-count-http-400' },
+    {
+      name: 'invalid request upstream error', httpStatus: 503,
+      response: { upstreamStatus: 400, upstreamErrorType: 'invalid_request_error' },
+      category: 'provider-count-http-503-invalid_request_error',
+    },
+    {
+      name: 'authentication upstream error', httpStatus: 503,
+      response: { upstreamStatus: 401, upstreamErrorType: 'authentication_error' },
+      category: 'provider-count-http-503-authentication_error',
+    },
+    {
+      name: 'rate limit upstream error', httpStatus: 503,
+      response: { upstreamStatus: 429, upstreamErrorType: 'rate_limit_error' },
+      category: 'provider-count-http-503-rate_limit_error',
+    },
+    {
+      name: 'API upstream error', httpStatus: 503,
+      response: { upstreamStatus: 500, upstreamErrorType: 'api_error' },
+      category: 'provider-count-http-503-api_error',
+    },
+    {
+      name: 'explicit unknown upstream error', httpStatus: 503,
+      response: { upstreamStatus: 502, upstreamErrorType: 'unknown' },
+      category: 'provider-count-http-503-unknown',
+    },
+    {
+      name: 'unrecognized upstream error type', httpStatus: 503,
+      response: { upstreamStatus: 500, upstreamErrorType: 'raw-upstream-error-type-secret' },
+      category: 'provider-count-http-503',
+    },
+    {
+      name: 'missing upstream error type', httpStatus: 503,
+      response: { upstreamStatus: 503 }, category: 'provider-count-http-503',
+    },
     {
       name: 'allowlisted provider status', response: { status: 'provider_input_accounting_unverified' },
       category: 'provider-count-status-provider_input_accounting_unverified',
@@ -153,7 +190,8 @@ describe('T01 count-only probe', () => {
       const exposed = result.stdout + result.stderr + category + origin + JSON.stringify(evidence);
       for (const sentinel of [
         'tcc-synthetic-only', 'raw-provider-response-secret', 'synthetic-account-name', 'raw-provider-error-text',
-        'raw-provider-status-secret', 'raw-account-model', 'raw-count-field-secret', result.root, probe,
+        'raw-provider-status-secret', 'raw-account-model', 'raw-count-field-secret', 'raw-upstream-error-type-secret',
+        result.root, probe,
       ]) {
         expect(exposed).not.toContain(sentinel);
       }
