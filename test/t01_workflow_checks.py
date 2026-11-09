@@ -110,6 +110,26 @@ classify_cli([{
 }], 'invalid')
 
 
+def classify_with_reason(records, expected_classification, expected_reason):
+    assert runtime.classify_records_with_reason(records) == (expected_classification, expected_reason), records
+
+
+classify_with_reason([{'check': 'unknown', 'status': 'passed'}], 'invalid', 'bad-schema')
+duplicate_check = evidence_records()
+duplicate_check.insert(1, duplicate_check[0])
+classify_with_reason(duplicate_check, 'invalid', 'duplicate-check')
+classify_with_reason(evidence_records()[:-1], 'incomplete', 'missing-complete')
+wrong_record_set = [record for record in evidence_records() if record['check'] != 'lazy_install_disabled']
+classify_with_reason(wrong_record_set, 'invalid', 'wrong-record-set')
+classify_with_reason([
+    source_record,
+    {'check': 'bootstrap_error', 'status': 'failed', 'category': 'TypeError:unknown', 'origin': 'plugin_inputs.py:39'},
+    {'check': 'provisioning', 'status': 'failed'},
+    {'check': 'complete', 'status': 'failed'},
+], 'failed', 'completion-failed')
+classify_with_reason(evidence_records(), 'passed', 'none')
+
+
 temporary, root = workspace()
 with temporary:
     mock_aws(root, '''#!/usr/bin/env bash
@@ -135,7 +155,7 @@ fi
     assert (artifact_dir / 'preflight.jsonl').read_text() == 'sentinel\n'
 
 
-def console_failure_case(lines, expected_artifact='sentinel\n'):
+def console_failure_case(lines, expected_artifact='sentinel\n', expected_reason='bad-schema'):
     temporary, root = workspace()
     with temporary:
         mock_aws(root, '''#!/usr/bin/env bash
@@ -163,20 +183,27 @@ fi
         })
         assert result.returncode != 0, (result.stdout, result.stderr)
         assert 'Traceback' not in result.stderr, result.stderr
+        assert 'synthetic-sensitive-value' not in result.stdout + result.stderr
         if expected_artifact == 'sentinel\n':
-            assert 'console produced rejected evidence' in result.stderr, result.stderr
+            assert f'console produced rejected evidence; reason={expected_reason}; it was not copied to the artifact' in result.stderr, result.stderr
         else:
-            assert 'preflight failed; review only the sanitized artifact' in result.stderr, result.stderr
+            assert f'preflight failed; reason={expected_reason}; review only the sanitized artifact' in result.stderr, result.stderr
         assert (artifact_dir / 'preflight.jsonl').read_text() == expected_artifact
 
 
 console_failure_case('not-json\n')
-console_failure_case('{"check":"complete","status":"passed","unknown":"field"}\n')
-console_failure_case('{"check":"uv_install","status":"passed"}\n{"check":"uv_install","status":"passed"}\n')
+console_failure_case('{"check":"complete","status":"passed","unknown":"synthetic-sensitive-value"}\n')
+console_failure_case(
+    '{"check":"uv_install","status":"passed"}\n{"check":"uv_install","status":"passed"}\n',
+    expected_reason='duplicate-check',
+)
 console_failure_case('{"check":"bootstrap_error","status":"failed","category":"' + 'x' * 65_537 + '","origin":"client.py:1"}\n')
 reordered_failure = '{"status":"failed","check":"provisioning"}\n{"status":"failed","check":"complete"}\n'
-console_failure_case(reordered_failure, reordered_failure)
-console_failure_case('{"status":"failed","check":"complete"}\n{"status":"failed","check":"provisioning"}\n')
+console_failure_case(reordered_failure, reordered_failure, 'completion-failed')
+console_failure_case(
+    '{"status":"failed","check":"complete"}\n{"status":"failed","check":"provisioning"}\n',
+    expected_reason='wrong-record-set',
+)
 for record in (
     {'check': ['complete'], 'status': 'failed'},
     {'check': {'name': 'complete'}, 'status': 'failed'},
@@ -185,6 +212,38 @@ for record in (
 ):
     classify_cli([record], 'invalid')
     console_failure_case(json.dumps(record, separators=(',', ':')) + '\n')
+
+
+incomplete_records = [source_record, {'check': 'uv_install', 'status': 'passed'}]
+incomplete = ''.join(json.dumps(record, separators=(',', ':')) + '\n' for record in incomplete_records)
+temporary, root = workspace()
+with temporary:
+    mock_aws(root, '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+case "$1 $2" in
+  'cloudformation describe-stacks') printf 'i-test\n' ;;
+  'ec2 get-console-output')
+    printf 'synthetic-sensitive-value\n'
+    while IFS= read -r line; do printf 'T01_EVIDENCE %s\n' "$line"; done < "$MOCK_CONSOLE"
+    ;;
+esac
+''')
+    (root / 'console').write_text(incomplete)
+    write_executable(root / 'bin/sleep', '#!/usr/bin/env bash\nexit 0\n')
+    artifact_dir = root / 'artifact'
+    artifact_dir.mkdir()
+    (artifact_dir / 'preflight.jsonl').write_text('sentinel\n')
+    result = run(root, 'collect', {
+        'LIFETIME_MINUTES': '5',
+        'EVIDENCE_DIR': str(artifact_dir),
+        'MOCK_CONSOLE': str(root / 'console'),
+    })
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert 'preflight did not complete before the lifetime deadline; reason=missing-complete' in result.stderr, result.stderr
+    assert 'synthetic-sensitive-value' not in result.stdout + result.stderr
+    assert (artifact_dir / 'preflight.jsonl').read_text() == incomplete
+    assert (root / 'calls').read_text().count('ec2 get-console-output') == 10
+
 
 temporary, root = workspace()
 with temporary:
@@ -266,6 +325,11 @@ def paid_console_records(manifest_sha, marker=True):
     records.append({'check': 'paid_matrix_completed', 'status': 'passed', 'policyHash': 'd' * 64})
     records.append(complete)
     return records
+
+
+bad_count_schema = paid_console_records('a' * 64)
+next(record for record in bad_count_schema if record['check'] == 'count_only_no_generation')['sha256'] = ['not-a-string']
+classify_with_reason(bad_count_schema, 'invalid', 'bad-schema')
 
 
 def paid_collect_case(manifest_sha='match', verify_rc=0):

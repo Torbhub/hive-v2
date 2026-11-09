@@ -454,6 +454,7 @@ def valid_record(record):
             'generationRequests', 'timestamp', 'revokedAt', 'proof',
         }
         if set(record) != expected or record['model'] != 'kimi-code/k3.1-pro' \
+                or any(not isinstance(record[key], str) for key in ('sha256', 'requestHash', 'proof')) \
                 or not re.fullmatch(r'[a-f0-9]{64}', record['sha256']) \
                 or not re.fullmatch(r'[a-f0-9]{64}', record['requestHash']) \
                 or not re.fullmatch(r'[a-f0-9]{64}', record['proof']) \
@@ -490,15 +491,17 @@ def validate_evidence(path):
         return 1
 
 
-def classify_records(records):
+def classify_records_with_reason(records):
     seen = set()
     for record in records:
         check = record.get('check') if isinstance(record, dict) else None
-        if not valid_record(record) or check in seen:
-            return 'invalid'
+        if not valid_record(record):
+            return 'invalid', 'bad-schema'
+        if check in seen:
+            return 'invalid', 'duplicate-check'
         seen.add(check)
     if 'complete' not in seen:
-        return 'incomplete'
+        return 'incomplete', 'missing-complete'
     if records[-1] == {'check': 'complete', 'status': 'passed'}:
         required = BASE_SIMPLE_CHECKS | {'hermes_version', 'source_sha256', 'complete'}
         if 'paid_matrix_completed' in seen:
@@ -515,10 +518,14 @@ def classify_records(records):
             }
         else:
             required.add('paid_admission_disabled')
-        return 'passed' if seen == required else 'invalid'
+        return ('passed', 'none') if seen == required else ('invalid', 'wrong-record-set')
     if records[-1] == {'check': 'complete', 'status': 'failed'}:
-        return 'failed'
-    return 'invalid'
+        return 'failed', 'completion-failed'
+    return 'invalid', 'wrong-record-set'
+
+
+def classify_records(records):
+    return classify_records_with_reason(records)[0]
 
 
 def classify_evidence(path):
@@ -526,6 +533,13 @@ def classify_evidence(path):
         return classify_records(read_evidence(path))
     except (OSError, ValueError):
         return 'invalid'
+
+
+def evidence_rejection_reason(path):
+    try:
+        return classify_records_with_reason(read_evidence(path))[1]
+    except (OSError, ValueError):
+        return 'bad-schema'
 
 
 def main():
@@ -566,6 +580,9 @@ def main():
         return sanitize_evidence(sys.argv[2])
     if sys.argv[1] == 'classify-evidence' and len(sys.argv) == 3:
         print(classify_evidence(sys.argv[2]))
+        return 0
+    if sys.argv[1] == 'evidence-rejection-reason' and len(sys.argv) == 3:
+        print(evidence_rejection_reason(sys.argv[2]))
         return 0
     if sys.argv[1] == 'count-evidence' and len(sys.argv) == 3:
         try:
