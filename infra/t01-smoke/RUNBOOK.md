@@ -38,20 +38,24 @@ If the stack update fails, use the normal deploy workflow rollback controls for 
 6. Use a lifetime from 5 through 120 minutes. The instance terminates at that deadline even if the workflow stops.
 7. Start the workflow. It acquires the fleet deploy mutex before any AWS act. It creates the health secret and preflight stack. It renews the mutex every ten minutes throughout the critical section and stops renewal before the final release.
 
-The workflow uses only the `t01-smoke` environment role. It has no push, pull-request, schedule, or external-call trigger.
+Preflight and matrix use only the `t01-smoke` environment role. Count also uses the existing deploy role for its two fixed host commands. The workflow has no push, pull-request, schedule, or external-call trigger.
 
 ## Execute the count-only probe
 
 1. Complete and review the no-spend preflight first.
-2. Start TeamKimi from reviewed PR #16 head `faeb27d2be4e07ac1a9d063c7ac326aec7373183` on the existing host. Its smoke listener must be loopback-only on port 8765. Keep pricing absent until the count and semantics review finishes.
+2. Let the normal deploy install the reviewed TeamKimi PR #17 source. The commit is `ab0dcf76cc96a31e2376677a915990d011c5c807`. The codeload archive SHA-256 is `87b6648a0ec932da74c3a3e383d9209c34dafaff5b3a1f6b4373d6ac11f9f3f4`. Provisioning installs read-only source and a disabled template. It does not start TeamKimi or change `teamkimi-tmux.service`.
 3. Dispatch `scenario=count`, `matrix=none`, and `paid_admission=false`.
 4. Set `max_total_tokens=0`, `max_api_calls=0`, `max_estimated_cost_usd=0`, and `max_paid_admissions=0`. Any paid cap or admission fails before AWS credentials are used.
-5. The disposable service installs and checks Hermes before lockdown. It starts the fixed tunnel before lockdown, then uses only loopback smoke control routes.
-6. The Node count probe mints a `count-only` credential, sends the frozen synthetic count request once, checks zero reservations and zero admissions, and revokes the credential in `finally`.
-7. Review `count_only_no_generation`. It contains the request hash, cache and TTL counts, zero-generation marker, evidence hash, timestamp, and revocation proof. It contains no credential, account name, request body, response body, or upstream error text.
-8. Confirm `tunnel_cleanup` and the final passing `complete` record. A failed revocation or uncertain tunnel cleanup blocks completion.
+5. After validation and one fleet mutex acquisition, the workflow uses `HIVE_DEPLOY_ROLE_ARN` only for the fixed host start and stop commands. It uses the T01 smoke role for every other step. The start command checks the source stamp and an unused loopback port. The normal proxy must stay active with an unchanged nonzero PID. The run unit must stay active, and its nonzero PID must own the loopback listener.
+6. The listener uses `/var/lib/teamkimi-count/<run-id>/ledger.json` and its run-specific crash log. Shared config and home paths are read-only. The service has no secret arguments, no restart, no boot enablement, and a three-hour lifetime.
+7. The disposable service installs and checks Hermes before lockdown. It starts the fixed tunnel before lockdown, then uses only loopback smoke control routes. The broker context must receive local rejections for generation mint and `/v1/messages`.
+8. The Node count probe mints a `count-only` credential, sends the frozen synthetic count request once, checks zero reservations and zero admissions, and revokes the credential in `finally`.
+9. Review `count_only_no_generation` and `count-host.jsonl`. They contain only fixed checks, count evidence, and revocation proof. They contain no credential, account name, request body, response body, raw SSM output, or upstream error text.
+10. The stop step always runs after count. It requires no live credentials or reservations. It checks listener ownership again, then stops only the run unit. It confirms the closed port and unchanged active normal proxy. Confirm `count_stop`, `count_port_closed`, `tunnel_cleanup`, and the final passing `complete` record.
 
-A count probe does not authorize generation. The workflow does not issue a generation credential in count mode.
+A failed or uncertain stop retains the fleet mutex and the run ledger. Stack and run-secret cleanup still runs. Keep the run state for review. Automatic stop fails closed on an inactive or uncertain listener. For reviewed recovery, first prove revocation, empty reservations, a closed port, and an unchanged active normal proxy. Then run cleanup with the original run owner and both `T01_REVIEWED_UNCERTAIN_CLEANUP=yes` and `T01_COUNT_STOP_VERIFIED=yes`. Do not use an offline ledger parser. Do not delete uncertain state or release the mutex by hand.
+
+A count probe does not authorize generation. The workflow does not issue a generation credential in count mode. Matrix remains separately reviewed and is not enabled by this change.
 
 ## Evidence order before the full matrix
 
@@ -122,6 +126,8 @@ Static tests cannot prove these results. The first reviewed run must confirm the
 - The selected AMI contains the required `iptables`, `systemd`, and Python 3.11 bootstrap controls.
 - The frozen Hermes build completes from the pinned source and `uv.lock` hashes. The pinned Node archive and locked runner-only TypeScript build complete without a frontend build.
 - The fixed SSM document starts only on the tagged host and reaches only the loopback TeamKimi smoke listener. No public listener or `SendCommand` permission exists.
+- Normal provisioning installs the exact source without starting the count unit or changing the normal proxy. The host start and stop checks prove port ownership, zero live credentials, zero reservations, and an unchanged normal proxy PID.
+- The broker context receives local HTTP rejections for generation mint and `/v1/messages`. The Hermes network check alone does not prove these rejections.
 - Hermes has no metadata, AWS, proxy, SSH-agent, account, or smoke credential access. Only the broker context holds the short-lived smoke credential.
 - The count probe performs one provider count, zero generation, complete revocation, and tunnel cleanup before generation credential issuance.
 - Every paid receipt matches the attestation hash, counted input, cache TTL buckets, reasoning usage, total tokens, and matrix ceilings.

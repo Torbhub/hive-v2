@@ -94,6 +94,7 @@ assert allows(
 ), 'CloudFormation must remove the default egress from its own security group'
 MUTEX_TABLE = 'arn:aws:dynamodb:us-east-1:594552273052:table/citadel-deploy-mutex'
 assert allows('dynamodb:UpdateItem', MUTEX_TABLE), 'owner-only renewal requires UpdateItem'
+assert allows('dynamodb:UpdateItem', MUTEX_TABLE, statements=DEPLOY_STATEMENTS), 'count host renewal requires UpdateItem'
 OTHER_STACK = 'arn:aws:cloudformation:us-east-1:594552273052:stack/other/*'
 HEALTH_SECRET = 'arn:aws:secretsmanager:us-east-1:594552273052:secret:hive-v2-t01-smoke-health-123-AbCdEf'
 assert not allows('cloudformation:DeleteStack', OTHER_STACK)

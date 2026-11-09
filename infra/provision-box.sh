@@ -53,6 +53,9 @@ install_if_different "$BOX_DIR/daily-scan.sh" /opt/hive-v2/daily-scan.sh 755
 install_if_different "$BOX_DIR/llm-forward.py" /opt/hive-v2/llm-forward.py 755
 install_if_different "$BOX_DIR/memory-relay.py" /opt/hive-v2/memory-relay.py 755
 install_if_different "$REPO/infra/question-guard.mjs" /opt/hive-v2/question-guard.mjs 755
+install_if_different "$BOX_DIR/teamkimi-count@.service" /etc/systemd/system/teamkimi-count@.service 644
+install_if_different "$REPO/infra/t01-smoke/teamkimi-count-host.sh" /opt/hive-v2/teamkimi-count-host.sh 755
+bash "$REPO/infra/t01-smoke/teamkimi-count-install.sh"
 
 NEXUS_PUSH_SHA=6542be37f15e682c5c18268892fd769911d0bf5b
 NEXUS_PUSH_SHA256=bdf23a9ddca9377a357400110564aedf85b546a5ce8ff762a17cbe3341024cbf

@@ -154,6 +154,7 @@ Resources:
                 Action:
                   - dynamodb:GetItem
                   - dynamodb:PutItem
+                  - dynamodb:UpdateItem
                   - dynamodb:DeleteItem
                 Resource: arn:aws:dynamodb:us-east-1:594552273052:table/citadel-deploy-mutex
 
