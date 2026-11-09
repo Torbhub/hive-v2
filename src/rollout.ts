@@ -7,11 +7,23 @@ export class RolloutPaused extends Error {
   }
 }
 
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function pauseMarker(project: string, value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !ISO_TIMESTAMP.test(value) || Number.isNaN(Date.parse(value))) {
+    throw new RolloutPaused(project);
+  }
+  return value;
+}
+
 export async function assertExecutionAllowed(root: string, project: string): Promise<void> {
   if (process.env.HIVE_COLLABORATION_ENABLED !== '1') return;
   try {
     const current = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
-    if (!current || current.collaboration_execution_disabled_at !== undefined) throw new RolloutPaused(project);
+    if (!current || pauseMarker(project, current.collaboration_execution_disabled_at) !== undefined) {
+      throw new RolloutPaused(project);
+    }
   } catch (error) {
     if (error instanceof RolloutPaused) throw error;
     throw new RolloutPaused(project);
@@ -23,7 +35,8 @@ export async function disableExecution(root: string, project: string): Promise<s
     const pf = await readProjects(root);
     const current = pf.projects.find((candidate) => candidate.name === project);
     if (!current) throw new Refusal(`unknown project: ${project}`);
-    if (current.collaboration_execution_disabled_at !== undefined) return current.collaboration_execution_disabled_at;
+    const existing = pauseMarker(project, current.collaboration_execution_disabled_at);
+    if (existing !== undefined) return existing;
     const disabledAt = new Date().toISOString();
     await writeProjects(root, {
       ...pf,
@@ -39,7 +52,7 @@ export async function executionDisabledAt(root: string, project: string): Promis
   const pf = await readProjects(root);
   const current = pf.projects.find((candidate) => candidate.name === project);
   if (!current) throw new Refusal(`unknown project: ${project}`);
-  return current.collaboration_execution_disabled_at;
+  return pauseMarker(project, current.collaboration_execution_disabled_at);
 }
 
 export async function executionLine(root: string, project: string, action: 'off' | 'status'): Promise<string> {

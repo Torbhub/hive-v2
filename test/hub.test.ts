@@ -50,6 +50,11 @@ import { removeProject } from '../src/project.js';
 import { lines, parseDialog } from '../src/screen.js';
 import { appendTaskEvent, hubPath, hivePath, readDecisions, readPendingPane, readProjects, readTeam, writeJson, writePendingPane, writeProjects } from '../src/state.js';
 import type { Checkpoint } from '../src/types.js';
+import { disableExecution } from '../src/rollout.js';
+
+afterEach(() => {
+  delete process.env.HIVE_COLLABORATION_ENABLED;
+});
 
 async function setup() {
   const root = mkdtempSync(path.join(tmpdir(), 'hive-hub-'));
@@ -292,6 +297,18 @@ describe('answerDialog on menus', () => {
     const r = await answerDialog(root, 'demo', undefined, '3', fp);
     expect(r.option).toBe('Gamma');
     expect(events).toEqual(['Down', 'Down', 'Enter']);
+  });
+
+  it('refuses a paused answer before reading the dialog or sending keys', async () => {
+    const root = await setupOrchestrator(MENU);
+    await disableExecution(root, 'demo');
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    vi.mocked(capturePane).mockClear();
+    const fp = parseDialog(lines(MENU)).fingerprint;
+    await expect(answerDialog(root, 'demo', undefined, '1', fp)).rejects.toThrow('rollout paused for demo');
+    expect(vi.mocked(capturePane)).not.toHaveBeenCalled();
+    expect(vi.mocked(sendArrow)).not.toHaveBeenCalled();
+    expect(vi.mocked(sendEnter)).not.toHaveBeenCalled();
   });
 
   it('a stale fingerprint refuses before any key is sent', async () => {
@@ -551,6 +568,27 @@ describe('feed line', () => {
   });
 });
 
+describe('paused automatic approvals', () => {
+  it.each(['mode', 'approvals'] as const)('commits %s changes without a watchdog 409', async (action) => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
+    });
+    if (action === 'mode') await setProjectApprovals(root, 'demo', 'safe');
+    else await setProjectMode(root, 'demo', 'auto');
+    await disableExecution(root, 'demo');
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    if (action === 'mode') await setProjectMode(root, 'demo', 'auto');
+    else await setProjectApprovals(root, 'demo', 'safe');
+
+    await expect(handleCurrentOrchestratorDialog(root, 'demo')).resolves.toBeUndefined();
+    const project = (await readProjects(root)).projects[0];
+    expect(project.collaboration_execution_disabled_at).toEqual(expect.any(String));
+    if (action === 'mode') expect(project.mode).toBe('auto');
+    else expect(project.approvals).toBe('safe');
+  });
+});
+
 describe('orchestrator dialog pane resolution', () => {
   afterEach(() => {
     vi.mocked(paneExists).mockResolvedValue(true);
@@ -601,6 +639,18 @@ describe('continue sending claim', () => {
     vi.mocked(typeLine).mockClear();
     return root;
   }
+
+  it('rechecks a pause after the pending wait before typing', async () => {
+    const root = await setupPending();
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    vi.mocked(waitIdle).mockImplementationOnce(async () => {
+      await disableExecution(root, 'demo');
+      return 'idle';
+    });
+    await expect(continueProject(root, 'demo')).rejects.toThrow('rollout paused for demo');
+    expect(typeLine).not.toHaveBeenCalled();
+    expect(await readPendingPane(root, 'demo')).toMatchObject({ typed: false, sending: false });
+  });
 
   it('lets only one overlapping continuation reach typeLine', async () => {
     const root = await setupPending();
@@ -686,6 +736,21 @@ describe('original launch sending claim', () => {
     vi.mocked(typeLine).mockClear();
     return { root };
   }
+
+  it('rechecks a pause after the original launch wait before typing', async () => {
+    const { root } = await setupStart();
+    const home = path.join(root, 'demo');
+    const credentialFile = hivePath(home, 'team', 'demo-orchestrator', 'credential.env');
+    await fs.mkdir(path.dirname(credentialFile), { recursive: true });
+    await fs.writeFile(credentialFile, "HIVE_AGENT_CREDENTIAL='hva1.demo-orchestrator.fedcba9876543210.test-secret-with-high-entropy'\n", { mode: 0o600 });
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    vi.mocked(waitIdle).mockImplementationOnce(async () => {
+      await disableExecution(root, 'demo');
+      return 'idle';
+    });
+    await expect(startProject(root, 'demo', 'demo-1')).rejects.toThrow('rollout paused for demo');
+    expect(typeLine).not.toHaveBeenCalled();
+  });
 
   it('lets only the original launcher reach typeLine when Continue overlaps', async () => {
     const { root } = await setupStart();

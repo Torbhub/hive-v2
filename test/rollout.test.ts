@@ -148,4 +148,100 @@ describe('project execution rollout control', () => {
     expect(newWindow).not.toHaveBeenCalled();
     expect(await fs.stat(hivePath(home, 'lanes', 'builder', '.hive', 'team', 'builder', 'agent.md')).catch(() => null)).toBeNull();
   });
+
+  it('rechecks immediately before newWindow when credential validation pauses the project', async () => {
+    const { root, home } = await projectRoot();
+    const credentialFile = hivePath(home, 'team', 'builder', 'credential.env');
+    await fs.mkdir(path.dirname(credentialFile), { recursive: true });
+    await fs.writeFile(credentialFile, "HIVE_AGENT_CREDENTIAL='hva1.builder.fedcba9876543210.test-secret-with-high-entropy'\n", { mode: 0o600 });
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    const credentials = await import('../src/collaboration-credentials.js');
+    const validate = credentials.requireAgentCredential;
+    vi.spyOn(credentials, 'requireAgentCredential').mockImplementation(async (cwd, project, agent) => {
+      await disableExecution(root, 'demo');
+      return validate(cwd, project, agent);
+    });
+    const newWindow = vi.spyOn(tmux, 'newWindow').mockResolvedValue('%1');
+    await expect(launchWindow(root, 'demo', 'builder', home)).rejects.toThrow('rollout paused for demo');
+    expect(newWindow).not.toHaveBeenCalled();
+  });
+
+  it('rechecks after respawn preflight before stamping closed or killing the old pane', async () => {
+    const { root, home } = await projectRoot();
+    const handoff = hivePath(home, 'handoffs', 'builder.md');
+    await fs.mkdir(path.dirname(handoff), { recursive: true });
+    await fs.writeFile(handoff, '# builder\n\n## START HERE\n### Assignment\nComplete the bounded rollout assignment.\n\n### Deliverable\nReturn the bounded rollout evidence.\n');
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 1, pane_started: 'now', worktree: home, handoff }],
+    });
+    process.env.HIVE_COLLABORATION_ENABLED = '1';
+    vi.spyOn(tmux, 'run').mockImplementation(async (command) => {
+      if (command === 'teamkimi') await disableExecution(root, 'demo');
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    const killWindow = vi.spyOn(tmux, 'killWindow').mockResolvedValue();
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow('rollout paused for demo');
+    expect(killWindow).not.toHaveBeenCalled();
+    const team = await (await import('../src/state.js')).readTeam(home);
+    expect(team.agents[0].closed_at).toBeUndefined();
+  });
+
+  it('fails closed on malformed pause markers in status and repeated off', async () => {
+    for (const marker of ['', 'not-a-timestamp']) {
+      const { root } = await projectRoot();
+      const pf = await readProjects(root);
+      await writeJson(hubPath(root, 'projects.json'), {
+        projects: [{ ...pf.projects[0], collaboration_execution_disabled_at: marker }],
+      });
+      for (const action of ['status', 'off']) {
+        const result = cli(root, ['hub', 'execution', 'demo', action]);
+        expect(result.status).toBe(1);
+        expect(result.stdout).not.toContain('execution enabled');
+        expect(result.stderr).toContain('rollout paused for demo');
+      }
+      expect((await readProjects(root)).projects[0].collaboration_execution_disabled_at).toBe(marker);
+    }
+  });
+
+  it('preserves a pause across interleaved project config writes', async () => {
+    const state = await import('../src/state.js');
+    const { hubInit, setProjectApprovals, setProjectMode } = await import('../src/hub.js');
+    for (const action of ['mode', 'approvals', 'init'] as const) {
+      const { root } = await projectRoot();
+      const actualRead = state.readProjects;
+      const actualWrite = state.writeProjects;
+      let releaseRead!: () => void;
+      let markRead!: () => void;
+      let markPauseWritten!: () => void;
+      const readEntered = new Promise<void>((resolve) => { markRead = resolve; });
+      const pauseWritten = new Promise<void>((resolve) => { markPauseWritten = resolve; });
+      const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+      let first = true;
+      vi.spyOn(state, 'readProjects').mockImplementation(async (root) => {
+        const pf = await actualRead(root);
+        if (first) {
+          first = false;
+          markRead();
+          await readGate;
+        }
+        return pf;
+      });
+      vi.spyOn(state, 'writeProjects').mockImplementation(async (root, pf) => {
+        await actualWrite(root, pf);
+        if (pf.projects.some((project) => project.collaboration_execution_disabled_at !== undefined)) markPauseWritten();
+      });
+      const changing = action === 'mode' ? setProjectMode(root, 'demo', 'yolo')
+        : action === 'approvals' ? setProjectApprovals(root, 'demo', 'safe') : hubInit(root);
+      await readEntered;
+      const pausing = disableExecution(root, 'demo');
+      await Promise.race([pauseWritten, new Promise((resolve) => setImmediate(resolve))]);
+      releaseRead();
+      await Promise.all([changing, pausing]);
+      const project = (await actualRead(root)).projects[0];
+      expect(project.collaboration_execution_disabled_at).toEqual(expect.any(String));
+      if (action === 'mode') expect(project.mode).toBe('yolo');
+      if (action === 'approvals') expect(project.approvals).toBe('safe');
+      vi.restoreAllMocks();
+    }
+  });
 });

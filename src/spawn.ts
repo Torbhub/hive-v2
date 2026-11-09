@@ -217,6 +217,7 @@ export async function launchWindow(
   await requireAgentCredential(cwd, project, agent);
   const credentialFile = process.env.HIVE_COLLABORATION_ENABLED === '1'
     ? `HIVE_COLLABORATION_ENABLED=1 HIVE_AGENT_REF=${quote(`${agent}@${cwd}`)} HIVE_AGENT_CREDENTIAL= HIVE_AGENT_CREDENTIAL_FILE=${quote(hivePath(cwd, 'team', agent, 'credential.env'))} ` : '';
+  await assertExecutionAllowed(root, project);
   const pane = await newWindow(
     windowName(project, agent),
     cwd,
@@ -588,6 +589,7 @@ export async function respawnAgent(
   await preflight();
   if (old.task && !old.orchestrator) await requireApprovedPlan(root, old.task);
   if (repair) await writeWorkerContract(old.worktree || home, agent, options, old.handoff);
+  await assertExecutionAllowed(root, project);
   await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
   try {
     if (old.pane) await killWindow(old.pane, recordedIdentity(old));

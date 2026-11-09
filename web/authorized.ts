@@ -10,7 +10,9 @@ import {
   exactGrant, publicAgentIdentity, revoked, type Principal,
 } from '../src/security.js';
 import { buildView, lastLine } from '../src/view.js';
-import { BODY_CAP, checkBrowserHeaders, handlePost, postAction, postScope, readBody, storedAgentTask } from './actions.js';
+import {
+  BODY_CAP, checkBrowserHeaders, handlePost, isExecutionApprovalAnswer, postAction, postScope, readBody, storedAgentTask,
+} from './actions.js';
 import { HttpError } from './http-error.js';
 import { serveStatic } from './static.js';
 
@@ -204,11 +206,7 @@ async function approvalAuthorization(context: RequestContext, principal: Princip
 async function requiredAction(root: string, pathname: string, body: Record<string, unknown>): Promise<string> {
   if (pathname !== '/api/questions/answer' || !Array.isArray(body.answers)) return postAction(pathname);
   const batch = await readQuestionBatch(root, String(body.id ?? ''));
-  const execution = body.answers.some((answer) => {
-    const question = batch.questions.find((candidate) => candidate.id === answer?.question);
-    return question?.decision?.action === 'push' && question.choices.length === 3 && answer?.choice === 'c2';
-  });
-  return execution ? 'execute' : 'write';
+  return isExecutionApprovalAnswer(batch, body.answers) ? 'execute' : 'write';
 }
 
 async function postResponse(context: RequestContext, principal: Principal): Promise<void> {
@@ -249,7 +247,7 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   const approvalGrant = await authorizeAction(principal, context.registry, action, scope);
   const authorization = executionApproval
     ? await approvalAuthorization(context, principal, body, scope, approvalGrant) : undefined;
-  if (executionApproval || ['/api/wake', '/api/continue', '/api/start', '/api/answer'].includes(pathname)) {
+  if (executionApproval || pathname === '/api/answer') {
     await assertExecutionAllowed(context.root, scope.project);
   }
   const result = await handlePost(context.root, pathname, body, principal, authorization);

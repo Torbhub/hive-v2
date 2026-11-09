@@ -115,6 +115,7 @@ async function launchRegisteredOrchestrator(
       if (!current || current.typed || !current.sending || current.claim_token !== pending.claim_token) {
         throw new Refusal(`${project}'s sending claim is no longer active`);
       }
+      await assertExecutionAllowed(root, project);
       await typeLine(pane, line, identity);
       await upsertTeamEntry(p.home, {
         name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
@@ -181,6 +182,7 @@ async function continueRegisteredProject(root: string, p: ProjectEntry): Promise
       if (!current || current.typed || !current.sending || current.claim_token !== pending.claim_token) {
         throw new Refusal(`${project}'s sending claim is no longer active`);
       }
+      await assertExecutionAllowed(root, project);
       await typeLine(pending.pane, pending.line, id);
       await upsertTeamEntry(p.home, {
         name: orchestratorName(project), orchestrator: true,

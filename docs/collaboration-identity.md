@@ -40,7 +40,7 @@ Execution approvals require a human approver. Agent principals cannot create the
 
 Run `hive hub execution <project> off` to pause one project. The command stores `collaboration_execution_disabled_at` in `.hive-hub/projects.json`. A second `off` command keeps the first timestamp. Run `hive hub execution <project> status` to read the pause state. This slice has no `on` command.
 
-The pause applies only when collaboration is enabled. It blocks worker spawn, respawn, orchestrator launch, watchdog wake, continue, and execution answers for that project. Other projects stay unchanged. The final launch check runs before agent profile and tmux setup. Enabled execution returns HTTP 409 with a rollout-paused error when the project is paused or its config is missing or corrupt. Legacy execution does not read the pause setting.
+The pause applies only when collaboration is enabled. It blocks worker spawn, respawn, orchestrator launch, watchdog wake, continue, and execution answers for that project. Other projects stay unchanged. Launch checks run at entry and immediately before pane creation or pending input. Automatic approvals skip paused projects before classifiers. Enabled execution returns HTTP 409 when the project is paused or its config is missing or corrupt. A malformed pause marker is corrupt config. Status and repeated `off` fail closed instead of reporting enabled. Legacy execution does not read the pause setting.
 
 The pause does not stop existing panes. Reads, progress, cancellation, ordinary answers, interrupt, and kill remain available. Wake-subscription listing and revocation also remain available.
 
