@@ -541,13 +541,29 @@ expect_denied container_credentials curl -4 --fail --silent http://169.254.170.2
 BOOTSTRAP_STAGE=teamkimi-no-model
 expect_allowed teamkimi_no_model curl -4 --fail --silent "http://127.0.0.1:$BROKER_PORT/health"
 expect_broker_allowed() {
-  local name="$1"
+  local name="$1" attempt code previous_stage="${BOOTSTRAP_STAGE:-}"
   shift
-  if ! runuser -u t01broker -- env -i PATH=/usr/bin:/bin timeout 15 "$@" >/dev/null 2>&1; then
-    emit "$name" failed
-    return 1
-  fi
-  emit "$name" passed
+  BOOTSTRAP_STAGE=teamkimi-control-broker
+  for attempt in 1 2 3; do
+    code="$(runuser -u t01broker -- env -i PATH=/usr/bin:/bin \
+      timeout 15 "$@" --output /dev/null --write-out '%{http_code}' 2>/dev/null)" || code=000
+    case "$code" in
+      2[0-9][0-9]|3[0-9][0-9])
+        emit "$name" passed
+        BOOTSTRAP_STAGE="$previous_stage"
+        return 0
+        ;;
+      [0-9][0-9][0-9]) ;;
+      *) code=000 ;;
+    esac
+    if [ "$attempt" != 3 ]; then
+      sleep 2
+    fi
+  done
+  emit "$name" failed
+  printf '%s\n' "failure:$BOOTSTRAP_STAGE" > "${EVIDENCE%/*}/bootstrap-category"
+  printf '%s\n' "$BOOTSTRAP_STAGE:$code" > "${EVIDENCE%/*}/bootstrap-origin"
+  return 1
 }
 expect_broker_rejected() {
   local name="$1" expected="$2" code
@@ -566,7 +582,7 @@ expect_broker_rejected() {
 if [ "$SCENARIO" != preflight ]; then
   expect_denied teamkimi_control_port curl -4 --fail --silent -X POST -H 'content-type: application/json' \
     --data '{"scope":"generation"}' http://127.0.0.1:8765/teamkimi/smoke/credentials
-  expect_broker_allowed teamkimi_control_broker curl -4 --fail --silent http://127.0.0.1:8765/teamkimi/smoke/status
+  expect_broker_allowed teamkimi_control_broker curl -4 --silent http://127.0.0.1:8765/teamkimi/smoke/status
   expect_broker_rejected teamkimi_messages_rejected 401 --request POST \
     -H 'content-type: application/json' -H 'x-api-key: tcc-local-negative-check' \
     --data '{}' http://127.0.0.1:8765/v1/messages
