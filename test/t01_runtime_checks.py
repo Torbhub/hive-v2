@@ -183,12 +183,22 @@ def system_package_case(failures):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         (root / 'bin').mkdir()
-        (root / 'dnf-calls').write_text('')
+        for name in ('dnf-calls', 'download-calls', 'digest-calls', 'removal-calls'):
+            (root / name).write_text('')
         write_executable(root / 'bin/dnf', '''#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MOCK_DNF_CALLS"
 printf 'raw repository failure\n' >&2
 count=$(wc -l < "$MOCK_DNF_CALLS")
 [ "$count" -gt "$MOCK_FAILURES" ]
+''')
+        write_executable(root / 'bin/curl', '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_DOWNLOAD_CALLS"
+''')
+        write_executable(root / 'bin/sha256sum', '''#!/usr/bin/env bash
+printf '%s\n' "$(cat)" >> "$MOCK_DIGEST_CALLS"
+''')
+        write_executable(root / 'bin/rm', '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_REMOVAL_CALLS"
 ''')
         write_executable(root / 'bin/sleep', '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$MOCK_SLEEP_CALLS"\n')
         source = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
@@ -212,6 +222,9 @@ publish_evidence() { cat "$EVIDENCE"; }
                 'PATH': f'{root}/bin:{os.environ["PATH"]}',
                 'EVIDENCE': str(root / 'preflight.jsonl'),
                 'MOCK_DNF_CALLS': str(root / 'dnf-calls'),
+                'MOCK_DOWNLOAD_CALLS': str(root / 'download-calls'),
+                'MOCK_DIGEST_CALLS': str(root / 'digest-calls'),
+                'MOCK_REMOVAL_CALLS': str(root / 'removal-calls'),
                 'MOCK_SLEEP_CALLS': str(root / 'sleep-calls'),
                 'MOCK_FAILURES': str(failures),
             },
@@ -219,26 +232,40 @@ publish_evidence() { cat "$EVIDENCE"; }
         )
         calls = (root / 'dnf-calls').read_text().splitlines()
         sleeps = (root / 'sleep-calls').read_text().splitlines() if (root / 'sleep-calls').exists() else []
-        return result, calls, sleeps
+        downloads = (root / 'download-calls').read_text().splitlines()
+        digests = (root / 'digest-calls').read_text().splitlines()
+        removals = (root / 'removal-calls').read_text().splitlines()
+        return result, calls, sleeps, downloads, digests, removals
 
 
-packages = 'install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables session-manager-plugin'
-result, calls, sleeps = system_package_case(1)
+packages = 'install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables /opt/t01/session-manager-plugin.rpm'
+download = '--fail --silent --show-error --location --proto =https --proto-redir =https --max-redirs 0 --connect-timeout 10 --max-time 60 https://s3.amazonaws.com/session-manager-downloads/plugin/1.2.896.0/linux_64bit/session-manager-plugin.rpm --output /opt/t01/session-manager-plugin.rpm'
+digest = '89a4a07fcb92169bdd2f07c2531acd11b84857338172e7638964aaa08fd5f0e3  /opt/t01/session-manager-plugin.rpm'
+result, calls, sleeps, downloads, digests, removals = system_package_case(1)
 assert result.returncode == 0, (result.stdout, result.stderr)
 assert calls == [packages, packages], calls
 assert sleeps == ['5'], sleeps
-result, calls, sleeps = system_package_case(3)
+assert downloads == [download], downloads
+assert digests == [digest], digests
+assert removals == ['-f /opt/t01/session-manager-plugin.rpm'], removals
+result, calls, sleeps, downloads, digests, removals = system_package_case(3)
 assert result.returncode == 1, (result.stdout, result.stderr)
 assert calls == [packages, packages, packages], calls
 assert sleeps == ['5', '5'], sleeps
+assert downloads == [download], downloads
+assert digests == [digest], digests
+assert removals == [], removals
 records = [json.loads(line) for line in result.stdout.splitlines()]
 assert records[0]['category'] == 'failure:system-packages', records
 assert records[0]['origin'] == 'system-packages:1', records
 assert 'raw repository failure' not in result.stdout, result.stdout
-result, calls, sleeps = system_package_case(0)
+result, calls, sleeps, downloads, digests, removals = system_package_case(0)
 assert result.returncode == 0, (result.stdout, result.stderr)
 assert calls == [packages], calls
 assert sleeps == [], sleeps
+assert downloads == [download], downloads
+assert digests == [digest], digests
+assert removals == ['-f /opt/t01/session-manager-plugin.rpm'], removals
 
 
 def assert_diagnostic(root, expected, result):
