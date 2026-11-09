@@ -136,6 +136,8 @@ def host_workspace():
         source = source.replace(prefix, str(root / prefix.lstrip('/')))
     source = source.replace('SOURCE_OWNER=0', f'SOURCE_OWNER={os.getuid()}')
     source = source.replace('SOURCE_GROUP=0', f'SOURCE_GROUP={os.getgid()}')
+    current_user = subprocess.check_output(['id', '-un'], text=True).strip()
+    source = source.replace('= ubuntu ] || fail count_state', f'= {current_user} ] || fail count_state')
     source = source.replace('install -d -m 0700 -o ubuntu -g ubuntu', 'install -d -m 0700')
     script = root / 'host.sh'
     script.write_text(source)
