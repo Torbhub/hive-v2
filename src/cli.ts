@@ -4,12 +4,13 @@ import {
   listTasks, planAnswer, readDialogFor, startProject, wake,
 } from './hub.js';
 import { closeAgent, respawnAgent, spawnAgent } from './spawn.js';
-import { landPr, parseSteps, runGate, verifyCommits, verifyLog } from './gate.js';
+import { parseSteps, runGate, verifyCommits, verifyLog } from './gate.js';
 import { cleanupProject } from './cleanup.js';
 import { memoryCommand } from './memory-cli.js';
 import { checkName } from './names.js';
 import { runPushCommand } from './push-cli.js';
 import { UsageError } from './usage.js';
+import { executionLine } from './rollout.js';
 
 function validName(kind: string, value: string): string {
   try {
@@ -30,6 +31,7 @@ const USAGE = `usage:
   hive hub init|add <name> [path] [--source <path>]|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note] [--checkpoints <json>]|progress <task> <cp> <started|ok|fail|skip> [note]|accept <task> <cp>
   hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
   hive hub wake <project> | start <project> <task-id> | continue <project>
+  hive hub execution <project> off|status
   hive spawn <project> --agent <name> --assignment <text> --deliverable <text> [--role r] [--worktree wt] [--task id] [--model m] | respawn [--assignment <text> --deliverable <text>] | close
   hive gate --log <path> -- <name> <cmd>...
   hive gate-verify log <path> [--expect a,b] [--commit sha] | gate-verify commits <base>..<tip> --max-files <n> --style conventional|free --attribution allow|deny [--no-body]
@@ -142,6 +144,12 @@ async function hubCommand(args: string[]): Promise<void> {
       console.log(`hive: typed into ${project}'s orchestrator: ${r.typed}`);
       return;
     }
+    case 'execution': {
+      const [, rawProject, action, extra] = args;
+      if (!rawProject || !['off', 'status'].includes(action) || extra !== undefined) throw new UsageError('usage: hive hub execution <project> off|status');
+      console.log(await executionLine(root, validName('project', rawProject), action as 'off' | 'status'));
+      return;
+    }
     case 'wake':
     case 'start':
     case 'continue': {
@@ -234,13 +242,6 @@ async function main(): Promise<void> {
     }
     case 'land': {
       throw new UsageError('push and pull request creation need separate structured approvals');
-      const { flags: f, pos } = parseFlags(args.slice(1), ['title', 'body', 'bookmark']);
-      const [remote, sha, branch] = pos;
-      if (f.bookmark !== undefined ? pos.length > 0 : !remote || !sha || !branch) {
-        throw new UsageError('usage: hive land <remote> <sha> <branch> [--title t] [--body b] | --bookmark <name> [--title t] [--body b]');
-      }
-      console.log(await landPr({ remote, sha, branch, bookmark: str(f.bookmark), title: str(f.title), body: str(f.body) }, process.cwd()));
-      return;
     }
     case 'cleanup': {
       const project = args[1];

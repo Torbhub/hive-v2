@@ -222,6 +222,17 @@ describe('MCP identity and revocation', () => {
 });
 
 describe('wake subscription broker', () => {
+  it('requires explicit write enablement but keeps listing and revocation available', async () => {
+    const { base } = await fixture();
+    delete process.env.HIVE_WAKE_SUBSCRIPTION_WRITES_ENABLED;
+    const body = { agentId: 'builder', executionGrantId: 'owner:builder' };
+    expect((await post(base, '/api/wake-subscriptions', body, authHeaders())).status).toBe(403);
+    expect((await fetch(`${base}/api/wake-subscriptions?agentId=builder`, { headers: authHeaders() })).status).toBe(200);
+    expect((await post(base, '/api/wake-subscriptions/revoke', {
+      agentId: 'builder', subscriptionId: 'wake-test',
+    }, authHeaders())).status).toBe(200);
+  });
+
   it('maps denials and returns the Citadel projection', async () => {
     const { base } = await fixture();
     expect((await post(base, '/api/wake-subscriptions', { agentId: 'builder', executionGrantId: 'bob-write' }, authHeaders('user:bob'))).status).toBe(404);

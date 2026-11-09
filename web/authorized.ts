@@ -4,12 +4,15 @@ import { listOpenQuestionBatches, readQuestionBatch, type ApprovalAuthorization 
 import { readAgentLog, resolveLogTarget } from '../src/logview.js';
 import { RegistryUnavailable, type Registry, type RegistryRow } from '../src/registry.js';
 import { Refusal } from '../src/state.js';
+import { assertExecutionAllowed, RolloutPaused } from '../src/rollout.js';
 import {
   AuthenticationError, AuthorizationError, authorize, authorizeExact, bearerFromRequest,
   exactGrant, publicAgentIdentity, revoked, type Principal,
 } from '../src/security.js';
 import { buildView, lastLine } from '../src/view.js';
-import { BODY_CAP, checkBrowserHeaders, handlePost, postAction, postScope, readBody, storedAgentTask } from './actions.js';
+import {
+  BODY_CAP, checkBrowserHeaders, handlePost, isExecutionApprovalAnswer, postAction, postScope, readBody, storedAgentTask,
+} from './actions.js';
 import { HttpError } from './http-error.js';
 import { serveStatic } from './static.js';
 
@@ -203,11 +206,7 @@ async function approvalAuthorization(context: RequestContext, principal: Princip
 async function requiredAction(root: string, pathname: string, body: Record<string, unknown>): Promise<string> {
   if (pathname !== '/api/questions/answer' || !Array.isArray(body.answers)) return postAction(pathname);
   const batch = await readQuestionBatch(root, String(body.id ?? ''));
-  const execution = body.answers.some((answer) => {
-    const question = batch.questions.find((candidate) => candidate.id === answer?.question);
-    return question?.decision?.action === 'push' && question.choices.length === 3 && answer?.choice === 'c2';
-  });
-  return execution ? 'execute' : 'write';
+  return isExecutionApprovalAnswer(batch, body.answers) ? 'execute' : 'write';
 }
 
 async function postResponse(context: RequestContext, principal: Principal): Promise<void> {
@@ -218,6 +217,9 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   if (!contentType.startsWith('application/json')) throw new HttpError(415, 'POST a JSON body');
   const body = await readBody(req, pathname === '/api/questions/answer' ? 512 * 1024 : BODY_CAP);
   if (pathname === '/api/wake-subscriptions') {
+    if (process.env.HIVE_WAKE_SUBSCRIPTION_WRITES_ENABLED !== '1') {
+      throw new HttpError(403, 'wake subscription writes are disabled');
+    }
     sendJson(res, 200, await context.registry.createWakeSubscription(
       agentId(body), bearerFromRequest(req), String(body.executionGrantId ?? ''),
     ));
@@ -245,6 +247,9 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   const approvalGrant = await authorizeAction(principal, context.registry, action, scope);
   const authorization = executionApproval
     ? await approvalAuthorization(context, principal, body, scope, approvalGrant) : undefined;
+  if (executionApproval || pathname === '/api/answer') {
+    await assertExecutionAllowed(context.root, scope.project);
+  }
   const result = await handlePost(context.root, pathname, body, principal, authorization);
   const current = await context.authenticate();
   await authorizeAction(current, context.registry, action, scope);
@@ -316,6 +321,7 @@ export function errorResponse(res: http.ServerResponse, error: unknown): void {
     return sendJson(res, 503, { ok: false, detail: 'identity service unavailable' });
   }
   if (error instanceof HttpError) return sendJson(res, error.code, { ok: false, detail: error.message });
+  if (error instanceof RolloutPaused) return sendJson(res, 409, { ok: false, detail: error.message });
   if (error instanceof Refusal) return sendJson(res, 400, { ok: false, detail: lastLine(error) });
   console.error('hive web:', error);
   sendJson(res, 500, { ok: false, detail: 'internal error' });

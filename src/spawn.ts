@@ -18,6 +18,7 @@ import { checkTaskScope } from './scope.js';
 import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 import { assertEntryAlive, killEntry, recordedIdentity } from './kill.js';
 import { requireAgentCredential } from './collaboration-credentials.js';
+import { assertExecutionAllowed } from './rollout.js';
 export { assertEntryAlive } from './kill.js';
 
 export function orchestratorName(project: string): string {
@@ -207,6 +208,7 @@ export async function launchWindow(
   mode: LaunchMode = 'ask',
   model?: string,
 ): Promise<{ pane: string; identity: PaneIdentity }> {
+  await assertExecutionAllowed(root, project);
   // HIVE_AGENT names the pane's own agent: a `hive spawn` run inside the pane
   // reads it to record its parent, and the memory CLI already reports with it.
   // HIVE_PROJECT + HIVE_HUB_ROOT route the agent's ask_operator MCP calls.
@@ -215,6 +217,7 @@ export async function launchWindow(
   await requireAgentCredential(cwd, project, agent);
   const credentialFile = process.env.HIVE_COLLABORATION_ENABLED === '1'
     ? `HIVE_COLLABORATION_ENABLED=1 HIVE_AGENT_REF=${quote(`${agent}@${cwd}`)} HIVE_AGENT_CREDENTIAL= HIVE_AGENT_CREDENTIAL_FILE=${quote(hivePath(cwd, 'team', agent, 'credential.env'))} ` : '';
+  await assertExecutionAllowed(root, project);
   const pane = await newWindow(
     windowName(project, agent),
     cwd,
@@ -383,6 +386,7 @@ function envParent(self: string): string | undefined {
 }
 
 export async function spawnAgent(root: string, project: string, opts: SpawnOptions): Promise<string> {
+  await assertExecutionAllowed(root, project);
   if (!AGENT_NAME_RE.test(opts.agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${opts.agent}`);
   checkWorkerContract(opts);
   checkModel(opts.model);
@@ -508,7 +512,10 @@ async function spawnRegisteredAgent(
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
       : `${pane} never went idle; nothing was typed`);
   }
-  await typeLine(pane, pickupLine(root, project, agent), identity);
+  await withProjectLock(root, project, async () => {
+    await assertExecutionAllowed(root, project);
+    await typeLine(pane, pickupLine(root, project, agent), identity);
+  });
   const sid = await findLatestSession(worktree, agent);
   if (sid) await withProjectLock(root, project, () => upsertTeamEntry(home, { name: agent, session_id: sid }));
   return pane;
@@ -563,7 +570,10 @@ async function relaunchRegisteredAgent(
       ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
       : `${pane} never went idle; nothing was typed`);
   }
-  await typeLine(pane, pickupLine(root, p.name, old.name, old.handoff), identity);
+  await withProjectLock(root, p.name, async () => {
+    await assertExecutionAllowed(root, p.name);
+    await typeLine(pane, pickupLine(root, p.name, old.name, old.handoff), identity);
+  });
   const sid = await findLatestSession(worktree, old.name);
   if (sid) await withProjectLock(root, p.name, () => upsertTeamEntry(home, { name: old.name, session_id: sid }));
   return pane;
@@ -572,6 +582,7 @@ async function relaunchRegisteredAgent(
 export async function respawnAgent(
   root: string, project: string, agent: string, options: Partial<WorkerContract> = {},
 ): Promise<string> {
+  await assertExecutionAllowed(root, project);
   const p = await projectEntry(root, project);
   const home = p.home;
   const team = await readTeam(home);
@@ -584,6 +595,7 @@ export async function respawnAgent(
   await preflight();
   if (old.task && !old.orchestrator) await requireApprovedPlan(root, old.task);
   if (repair) await writeWorkerContract(old.worktree || home, agent, options, old.handoff);
+  await assertExecutionAllowed(root, project);
   await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
   try {
     if (old.pane) await killWindow(old.pane, recordedIdentity(old));
@@ -600,6 +612,7 @@ export async function respawnAgent(
 // The watchdog's agent ensure: a dead agent with a recorded session comes back
 // with that session resumed. A stamped close is never woken.
 export async function wakeAgent(root: string, project: string, agent: string): Promise<string> {
+  await assertExecutionAllowed(root, project);
   const p = await projectEntry(root, project);
   const team = await readTeam(p.home);
   const old = team.agents.find((a) => a.name === agent);

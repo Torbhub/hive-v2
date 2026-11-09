@@ -13,6 +13,7 @@ import {
 import { withLaunchClaim, withProjectLock } from './project.js';
 import { settlePendingPane } from './taskgate.js';
 import { applyMemoryBlock, memoryBlockFor } from './memory.js';
+import { assertExecutionAllowed } from './rollout.js';
 
 type ProjectEntry = ProjectsFile['projects'][number];
 type LaunchKind = 'wake' | 'start';
@@ -32,6 +33,7 @@ async function launchOrchestrator(
   kind: LaunchKind,
   task?: string,
 ): Promise<string> {
+  await assertExecutionAllowed(root, project);
   return withLaunchClaim(root, project, (p) => launchRegisteredOrchestrator(root, p, kind, task));
 }
 
@@ -113,6 +115,7 @@ async function launchRegisteredOrchestrator(
       if (!current || current.typed || !current.sending || current.claim_token !== pending.claim_token) {
         throw new Refusal(`${project}'s sending claim is no longer active`);
       }
+      await assertExecutionAllowed(root, project);
       await typeLine(pane, line, identity);
       await upsertTeamEntry(p.home, {
         name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
@@ -138,6 +141,7 @@ export async function startProject(root: string, project: string, task: string):
 }
 
 export async function continueProject(root: string, project: string): Promise<string> {
+  await assertExecutionAllowed(root, project);
   return withLaunchClaim(root, project, (p) => continueRegisteredProject(root, p));
 }
 
@@ -178,6 +182,7 @@ async function continueRegisteredProject(root: string, p: ProjectEntry): Promise
       if (!current || current.typed || !current.sending || current.claim_token !== pending.claim_token) {
         throw new Refusal(`${project}'s sending claim is no longer active`);
       }
+      await assertExecutionAllowed(root, project);
       await typeLine(pending.pane, pending.line, id);
       await upsertTeamEntry(p.home, {
         name: orchestratorName(project), orchestrator: true,

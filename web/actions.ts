@@ -11,6 +11,8 @@ import { addProjectFromBody, removeProject } from '../src/project.js';
 import { handleCurrentOrchestratorDialog } from '../src/watch.js';
 import { readQuestionBatch, type ApprovalAuthorization } from '../src/questions.js';
 import { AuthorizationError, type Principal } from '../src/security.js';
+import { RolloutPaused } from '../src/rollout.js';
+import type { QuestionBatch } from '../src/types.js';
 import { ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, withTimeout } from '../src/view.js';
 import { HttpError } from './http-error.js';
 import { recordStretchOpened } from './stretch.js';
@@ -180,15 +182,27 @@ async function storedTask(root: string, project: string, taskId: unknown): Promi
   return task.id;
 }
 
+export function isExecutionApprovalAnswer(batch: QuestionBatch, answers: unknown): boolean {
+  if (!Array.isArray(answers)) return false;
+  return answers.some((answer) => {
+    const question = batch.questions.find((candidate) => candidate.id === answer?.question);
+    return question?.decision?.action === 'push' && question.choices.length === 3 && answer?.choice === 'c2';
+  });
+}
+
 export async function postScope(root: string, pathname: string,
   body: Record<string, unknown>, principal: Principal): Promise<{ project: string; task?: string; thread?: string }> {
   if (body.thread !== undefined) throw new AuthorizationError('not found');
   if (pathname.startsWith('/api/questions/')) {
     try {
       const batch = await readQuestionBatch(root, String(body.id ?? ''));
-      return { project: batch.project, task: await storedAgentTask(root, batch.project, batch.agent) };
+      const pauseOnConfigFailure = pathname === '/api/questions/answer' && isExecutionApprovalAnswer(batch, body.answers);
+      return {
+        project: batch.project,
+        task: await storedAgentTask(root, batch.project, batch.agent, pauseOnConfigFailure),
+      };
     } catch (error) {
-      if (error instanceof AuthorizationError) throw error;
+      if (error instanceof AuthorizationError || error instanceof RolloutPaused) throw error;
       throw new AuthorizationError('not found');
     }
   }
@@ -206,7 +220,10 @@ export async function postScope(root: string, pathname: string,
   }
   const task = await storedTask(root, project, body.task);
   if (['/api/message', '/api/interrupt', '/api/kill', '/api/answer'].includes(pathname)) {
-    return { project, task: await storedAgentTask(root, project, requestAgentRef(body, principal)) };
+    return {
+      project,
+      task: await storedAgentTask(root, project, requestAgentRef(body, principal), pathname === '/api/answer'),
+    };
   }
   return { project, task };
 }

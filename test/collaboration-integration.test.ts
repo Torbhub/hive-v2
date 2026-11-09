@@ -7,6 +7,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildDecision } from '../src/decisions.js';
 import { createQuestionBatch, readQuestionBatch } from '../src/questions.js';
+import { disableExecution } from '../src/rollout.js';
 import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
 import type { QuestionBatch } from '../src/types.js';
 import { createServer } from '../web/server.js';
@@ -257,6 +258,120 @@ describe('integration authorization and revocation', () => {
       ['/api/answer', { project: 'demo', agent: 'builder@one', choice: '1', fingerprint: 'x' }],
     ] as const) {
       expect((await post(base, pathname, body)).status).toBe(200);
+    }
+  });
+
+  it('returns 409 for paused execution and preserves non-execution controls', async () => {
+    const { root, home, base } = await fixture();
+    await team(home);
+    const interrupt = await import('../src/interrupt.js');
+    vi.spyOn(interrupt, 'interruptAgent').mockResolvedValue({ target: 'builder', pane: '%1' });
+    const kill = await import('../src/kill.js');
+    vi.spyOn(kill, 'killAgent').mockResolvedValue({ target: 'builder', killed: ['builder'], summary: 'killed builder' });
+    await disableExecution(root, 'demo');
+
+    const { authHeaders } = await import('./security-fixture.js');
+    const denied = await fetch(`${base}/api/wake`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders('user:bob') },
+      body: JSON.stringify({ project: 'demo' }),
+    });
+    expect(denied.status).toBe(404);
+    for (const [pathname, body] of [
+      ['/api/wake', { project: 'demo' }],
+      ['/api/continue', { project: 'demo' }],
+      ['/api/start', { project: 'demo', task: 'demo-1' }],
+      ['/api/answer', { project: 'demo', agent: 'builder@one', choice: '1', fingerprint: 'x' }],
+    ] as const) {
+      const response = await post(base, pathname, body);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ ok: false, detail: 'rollout paused for demo' });
+    }
+    expect((await fetch(`${base}/api/view`, { headers: agentHeaders() })).status).toBe(200);
+    await appendTaskEvent(root, {
+      id: 'demo-1', project: 'demo', event: 'plan', at: new Date().toISOString(),
+      checkpoints: [{ id: 'a', desc: 'bounded work', etaMin: 5 }],
+    });
+    expect((await post(base, '/api/progress', {
+      project: 'demo', task: 'demo-1', checkpoint: 'a', status: 'started',
+    })).status).toBe(200);
+    expect((await post(base, '/api/interrupt', { project: 'demo', agent: 'builder@one' })).status).toBe(200);
+    expect((await post(base, '/api/kill', { project: 'demo', agent: 'builder@one' })).status).toBe(200);
+
+    const general = await createQuestionBatch(root, { project: 'demo', agent: 'builder@one' }, {
+      context: 'Choose a direction.', questions: [{
+        question: 'Continue?', context: 'General answer.', priority: 1, recommended: 'c1',
+        choices: [{ label: 'Yes', description: 'Continue.' }, { label: 'No', description: 'Stop.' }],
+      }],
+    });
+    expect((await post(base, '/api/questions/answer', {
+      id: general.id, answers: [{ question: 'q1', choice: 'c1' }],
+    })).status).toBe(200);
+    const cancellable = await createQuestionBatch(root, { project: 'demo', agent: 'builder@one' }, {
+      context: 'Cancel this question.', questions: [{
+        question: 'Continue?', context: 'Cancellation.', priority: 1, recommended: 'c1',
+        choices: [{ label: 'Yes', description: 'Continue.' }, { label: 'No', description: 'Stop.' }],
+      }],
+    });
+    expect((await post(base, '/api/questions/cancel', { id: cancellable.id })).status).toBe(200);
+  });
+
+  it('blocks execution-granting answers without closing the question', async () => {
+    const { root, home, base, items } = await fixture();
+    await team(home);
+    for (const subject of ['user:alice', 'agent:builder']) {
+      const row = items.find((candidate) => candidate.sk === `PRINCIPAL#${subject}`)!;
+      row.pk = 'ACL#demo#demo-1#*';
+      row.task = 'demo-1';
+    }
+    const batch = await pushBatch(root);
+    await disableExecution(root, 'demo');
+    const { authHeaders } = await import('./security-fixture.js');
+    const response = await fetch(`${base}/api/questions/answer`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ id: batch.id, answers: [{ question: 'q1', choice: 'c2' }] }),
+    });
+    expect(response.status).toBe(409);
+    expect((await readQuestionBatch(root, batch.id)).status).toBe('open');
+  });
+
+  it('normalizes missing and corrupt project config for scoped dialog execution', async () => {
+    for (const contents of [null, '{"projects": [', '{}', '{"projects":null}']) {
+      const { root, home, base } = await fixture();
+      await team(home);
+      if (contents === null) await fs.rm(hubPath(root, 'projects.json'));
+      else await fs.writeFile(hubPath(root, 'projects.json'), contents);
+      const response = await post(base, '/api/answer', {
+        project: 'demo', agent: 'builder@one', choice: '1', fingerprint: 'x',
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ ok: false, detail: 'rollout paused for demo' });
+    }
+
+    const { home, base } = await fixture();
+    await team(home);
+    expect((await post(base, '/api/answer', {
+      project: 'demo', agent: 'ghost', choice: '1', fingerprint: 'x',
+    })).status).toBe(404);
+  });
+
+  it('normalizes corrupt scope config for execution-granting answers only', async () => {
+    for (const contents of ['{"projects": [', '{}', '{"projects":null}']) {
+      const { root, home, base, items } = await fixture();
+      await team(home);
+      for (const subject of ['user:alice', 'agent:builder']) {
+        const row = items.find((candidate) => candidate.sk === `PRINCIPAL#${subject}`)!;
+        row.pk = 'ACL#demo#demo-1#*';
+        row.task = 'demo-1';
+      }
+      const batch = await pushBatch(root);
+      await fs.writeFile(hubPath(root, 'projects.json'), contents);
+      const { authHeaders } = await import('./security-fixture.js');
+      const response = await fetch(`${base}/api/questions/answer`, {
+        method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ id: batch.id, answers: [{ question: 'q1', choice: 'c2' }] }),
+      });
+      expect(response.status).toBe(409);
+      expect((await readQuestionBatch(root, batch.id)).status).toBe('open');
     }
   });
 });

@@ -169,7 +169,15 @@ curl --fail --silent --show-error --location --proto '=https' --proto-redir '=ht
   "https://s3.amazonaws.com/session-manager-downloads/plugin/$SESSION_MANAGER_PLUGIN_VERSION/linux_64bit/session-manager-plugin.rpm" \
   --output /opt/t01/session-manager-plugin.rpm
 printf '%s  %s\n' "$SESSION_MANAGER_PLUGIN_SHA256" /opt/t01/session-manager-plugin.rpm | sha256sum -c -
-dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables /opt/t01/session-manager-plugin.rpm
+for attempt in 1 2 3; do
+  if dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables /opt/t01/session-manager-plugin.rpm; then
+    break
+  fi
+  if [ "$attempt" = 3 ]; then
+    false
+  fi
+  sleep 5
+done
 rm -f /opt/t01/session-manager-plugin.rpm
 BOOTSTRAP_STAGE=runtime-download
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \

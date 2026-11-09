@@ -11,6 +11,7 @@ import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep } f
 import { lastLine, withTimeout } from './view.js';
 import { loadProcessedKeys, migrateLegacyStaleKey, recordProcessedKey } from './watch-persist.js';
 import type { Approvals, TeamEntry } from './types.js';
+import { assertExecutionAllowed, RolloutPaused } from './rollout.js';
 
 // Read-only leaders: a chain segment must start with one of these to be
 // auto-approvable. Multi-word leaders match the subcommand, not just `git`.
@@ -99,6 +100,12 @@ async function maybeAutoApprove(
   marks: Set<string>,
   auto = false,
 ): Promise<void> {
+  try {
+    await assertExecutionAllowed(root, project);
+  } catch (error) {
+    if (error instanceof RolloutPaused) return;
+    throw error;
+  }
   const command = extractCommand(dialog.text);
   if (auto) {
     const trust = !command && dialog.text.includes('Trust this folder?');
