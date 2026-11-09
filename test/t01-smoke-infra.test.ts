@@ -13,6 +13,7 @@ const paths = {
   runbook: '../infra/t01-smoke/RUNBOOK.md',
   infraReadme: '../infra/README.md',
   deployWorkflow: '../.github/workflows/deploy.yml',
+  deployMutex: '../infra/deploy-mutex.sh',
   prePush: '../scripts/git-hooks/pre-push',
   trustTemplate: '../infra/template.yaml',
 };
@@ -260,6 +261,12 @@ Environment=HERMES_RUNTIME_DIR=/opt/t01/tools`,
     expect(script).toContain('python3 infra/t01-smoke/runtime.py classify-evidence "$candidate"');
     expect(script).toContain('console_error');
     expect(script).toContain('RequestTimeout');
+  });
+
+  it('allows legitimate fleet jobs to finish before failing lock acquisition', () => {
+    expect(read('workflow')).toContain('DEPLOY_MUTEX_WAIT_SECONDS: 3600');
+    expect(read('deployWorkflow')).toContain('DEPLOY_MUTEX_WAIT_SECONDS: 3600');
+    expect(read('deployMutex')).toContain('TTL_SECONDS=1500');
   });
 
   it('uses only a reviewed /32 resolver for bootstrap DNS', () => {
