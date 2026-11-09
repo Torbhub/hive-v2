@@ -166,6 +166,12 @@ issue_health_credential() {
   python3 infra/t01-smoke/health_credential.py
 }
 
+refresh_health_credential() {
+  require_env GITHUB_RUN_ID
+  require_env T01_HEALTH_ATTESTATION
+  python3 infra/t01-smoke/health_credential.py refresh
+}
+
 issue_proxy_credential() {
   require_env GITHUB_RUN_ID
   require_env TEAMKIMI_PROXY_KEY
@@ -406,9 +412,10 @@ case "${1:-}" in
   count-start) with_mutex_renewal count_host start ;;
   count-stop) with_mutex_renewal count_host stop ;;
   issue-health-credential) with_mutex_renewal issue_health_credential ;;
+  refresh-health-credential) with_mutex_renewal refresh_health_credential ;;
   issue-proxy-credential) with_mutex_renewal issue_proxy_credential ;;
   deploy) with_mutex_renewal deploy_stack ;;
   collect) with_mutex_renewal collect_evidence ;;
   cleanup) with_mutex_renewal cleanup ;;
-  *) echo "usage: $0 validate-inputs|acquire|count-start|count-stop|issue-health-credential|issue-proxy-credential|deploy|collect|cleanup" >&2; exit 2 ;;
+  *) echo "usage: $0 validate-inputs|acquire|count-start|count-stop|issue-health-credential|refresh-health-credential|issue-proxy-credential|deploy|collect|cleanup" >&2; exit 2 ;;
 esac

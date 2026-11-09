@@ -36,9 +36,9 @@ If the stack update fails, use the normal deploy workflow rollback controls for 
 4. Leave `paid_admission` as `false`. A `true` value fails before AWS credentials are used.
 5. Enter every token, API-call, cost, admission, and lifetime cap. Set `max_paid_admissions=0`. Any other admission value fails before AWS credentials are used.
 6. Use a lifetime from 5 through 120 minutes. The instance terminates at that deadline even if the workflow stops.
-7. Start the workflow. It acquires the fleet deploy mutex before any AWS act. It creates the health secret and preflight stack. It renews the mutex every ten minutes throughout the critical section and stops renewal before the final release.
+7. Start the workflow. It acquires the fleet deploy mutex before any AWS act. It creates the health secret and preflight stack. After stack creation, it refreshes the attestation in the same secret. The refresh preserves the health key and original expiry. It renews the mutex every ten minutes throughout the critical section and stops renewal before the final release.
 
-Preflight and matrix use only the `t01-smoke` environment role. Count also uses the existing deploy role for its two fixed host commands. The workflow has no push, pull-request, schedule, or external-call trigger.
+Every scenario uses the existing deploy role for the fixed host attestation command. Count also uses that role for its two fixed host commands. The `t01-smoke` environment role performs every other step. The workflow has no push, pull-request, schedule, or external-call trigger.
 
 ## Execute the count-only probe
 
