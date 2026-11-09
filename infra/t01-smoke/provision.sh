@@ -39,10 +39,38 @@ publish_evidence() {
 
 stop_tunnel() {
   if [ -n "$TUNNEL_PID" ]; then
-    kill -TERM -- "-$TUNNEL_PID"
-    wait "$TUNNEL_PID" || [ "$?" = 143 ]
+    if kill -0 "$TUNNEL_PID" 2>/dev/null; then
+      kill -TERM -- "-$TUNNEL_PID"
+      wait "$TUNNEL_PID" || [ "$?" = 143 ]
+    else
+      wait "$TUNNEL_PID" 2>/dev/null || :
+    fi
     TUNNEL_PID=
   fi
+}
+
+start_tunnel() {
+  setsid runuser -u t01broker -- env -i HOME=/nonexistent PATH=/usr/local/sessionmanagerplugin/bin:/usr/local/bin:/usr/bin:/bin AWS_REGION=us-east-1 \
+    aws ssm start-session --target "$T01_TEAMKIMI_HOST_ID" \
+    --document-name hive-v2-t01-teamkimi-port-forward >/dev/null 2>&1 &
+  TUNNEL_PID=$!
+}
+
+wait_for_teamkimi() {
+  runuser -u t01broker -- env -i PATH=/usr/bin:/bin /usr/bin/python3 /opt/t01/runtime.py wait-for-teamkimi
+}
+
+ensure_teamkimi_tunnel() {
+  local previous_stage="$BOOTSTRAP_STAGE"
+  BOOTSTRAP_STAGE=teamkimi-tunnel-recovery
+  if kill -0 "$TUNNEL_PID" 2>/dev/null && wait_for_teamkimi; then
+    BOOTSTRAP_STAGE="$previous_stage"
+    return 0
+  fi
+  stop_tunnel
+  start_tunnel
+  wait_for_teamkimi
+  BOOTSTRAP_STAGE="$previous_stage"
 }
 
 lock_down() {
@@ -464,11 +492,8 @@ chmod 0444 /etc/systemd/system/t01-broker.service /etc/systemd/system/t01-hermes
 BOOTSTRAP_STAGE=default-deny-lockdown
 systemctl daemon-reload
 if [ "$SCENARIO" != preflight ]; then
-  setsid runuser -u t01broker -- env -i HOME=/nonexistent PATH=/usr/local/sessionmanagerplugin/bin:/usr/local/bin:/usr/bin:/bin AWS_REGION=us-east-1 \
-    aws ssm start-session --target "$T01_TEAMKIMI_HOST_ID" \
-    --document-name hive-v2-t01-teamkimi-port-forward >/dev/null 2>&1 &
-  TUNNEL_PID=$!
-  runuser -u t01broker -- env -i PATH=/usr/bin:/bin /usr/bin/python3 /opt/t01/runtime.py wait-for-teamkimi
+  start_tunnel
+  wait_for_teamkimi
   emit trusted_tunnel_ready passed
 fi
 BOOTSTRAP_STAGE=credential-refresh
@@ -600,6 +625,7 @@ expect_broker_rejected() {
 if [ "$SCENARIO" != preflight ]; then
   expect_denied teamkimi_control_port curl -4 --fail --silent -X POST -H 'content-type: application/json' \
     --data '{"scope":"generation"}' http://127.0.0.1:8765/teamkimi/smoke/credentials
+  ensure_teamkimi_tunnel
   expect_broker_allowed teamkimi_control_broker curl -4 --silent http://127.0.0.1:8765/teamkimi/smoke/status
   expect_broker_rejected teamkimi_messages_rejected 401 --request POST \
     -H 'content-type: application/json' -H 'x-api-key: tcc-local-negative-check' \

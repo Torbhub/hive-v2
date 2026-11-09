@@ -768,3 +768,149 @@ for responses, code in (
     assert sleeps == ['2', '2'], sleeps
     assert 'raw tunnel output' not in result.stdout + result.stderr
     assert 'synthetic-credential' not in result.stdout + result.stderr
+
+
+def shell_function(source, name):
+    start = source.index(f'{name}() {{')
+    return source[start:source.index('\n}', start) + 2]
+
+
+def tunnel_recovery_case(kill_zero_status, readiness_results):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / 'readiness-count').write_text('0')
+        readiness_cases = '\n'.join(
+            f"  {attempt}) return {status} ;;"
+            for attempt, status in enumerate(readiness_results, 1)
+        )
+        source = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+        functions = '\n'.join(
+            shell_function(source, name)
+            for name in ('start_tunnel', 'stop_tunnel', 'wait_for_teamkimi', 'ensure_teamkimi_tunnel')
+        )
+        start = source.index('read_hermes_check_metadata() {')
+        on_error = source[start:source.index('\ntrap on_error ERR', start)]
+        on_error = on_error.replace('/var/lib/t01/evidence', str(root))
+        result = subprocess.run(
+            ['/bin/bash', '-c', f'''set -Eeuo pipefail
+TUNNEL_PID=4142
+EVIDENCE="$MOCK_EVIDENCE"
+emit() {{
+  local check="$1" status="$2" details="${{3:-}}" record
+  record="{{\\"check\\":\\"$check\\",\\"status\\":\\"$status\\"${{details:+,$details}}}}"
+  printf '%s\n' "$record" >> "$EVIDENCE"
+}}
+lock_down() {{ :; }}
+publish_evidence() {{ cat "$EVIDENCE"; }}
+kill() {{
+  if [ "$1" = -0 ]; then
+    return "$MOCK_PROCESS_LIVE"
+  fi
+  printf '%s\n' "$*" >> "$MOCK_KILL_CALLS"
+}}
+wait() {{ printf 'wait %s\n' "$*" >> "$MOCK_WAIT_CALLS"; }}
+setsid() {{
+  printf '%s\n' "$*" >> "$MOCK_START_CALLS"
+  printf 'raw tunnel output synthetic-credential\n' >&2
+}}
+runuser() {{
+  printf '%s\n' "$*" >> "$MOCK_RUNUSER_CALLS"
+  count=$(($(cat "$MOCK_READINESS_COUNT") + 1))
+  printf '%s\n' "$count" > "$MOCK_READINESS_COUNT"
+  case "$count" in
+{readiness_cases}
+    *) return 99 ;;
+  esac
+}}
+{functions}
+{on_error}
+trap on_error ERR
+BOOTSTRAP_STAGE=default-deny-lockdown
+ensure_teamkimi_tunnel
+printf '%s' "$BOOTSTRAP_STAGE" > "$MOCK_FINAL_STAGE"
+'''],
+            env={
+                'PATH': os.environ['PATH'],
+                'MOCK_PROCESS_LIVE': str(kill_zero_status),
+                'MOCK_EVIDENCE': str(root / 'preflight.jsonl'),
+                'MOCK_KILL_CALLS': str(root / 'kill-calls'),
+                'MOCK_WAIT_CALLS': str(root / 'wait-calls'),
+                'MOCK_START_CALLS': str(root / 'start-calls'),
+                'MOCK_RUNUSER_CALLS': str(root / 'runuser-calls'),
+                'MOCK_READINESS_COUNT': str(root / 'readiness-count'),
+                'MOCK_FINAL_STAGE': str(root / 'final-stage'),
+                'T01_TEAMKIMI_HOST_ID': 'synthetic-host',
+                'T01_RUNTIME_CHECK_OUT': str(root / 'runtime-check.json'),
+            },
+            capture_output=True, text=True, timeout=5,
+        )
+
+        def lines(name):
+            path = root / name
+            return path.read_text().splitlines() if path.exists() else []
+
+        evidence = root / 'preflight.jsonl'
+        records = [json.loads(line) for line in evidence.read_text().splitlines()] if evidence.exists() else []
+        final_stage_path = root / 'final-stage'
+        final_stage = final_stage_path.read_text() if final_stage_path.exists() else None
+        return {
+            'result': result,
+            'records': records,
+            'starts': lines('start-calls'),
+            'readiness': lines('runuser-calls'),
+            'kills': lines('kill-calls'),
+            'final_stage': final_stage,
+        }
+
+
+case = tunnel_recovery_case(kill_zero_status=1, readiness_results=[0])
+result = case['result']
+assert result.returncode == 0, (result.stdout, result.stderr)
+assert len(case['starts']) == 1, case['starts']
+assert len(case['readiness']) == 1, case['readiness']
+assert case['kills'] == [], case['kills']
+assert case['records'] == [], case['records']
+assert case['final_stage'] == 'default-deny-lockdown', case['final_stage']
+assert 'raw tunnel output' not in result.stdout + result.stderr
+assert 'synthetic-credential' not in result.stdout + result.stderr
+assert 'runuser -u t01broker -- env -i HOME=/nonexistent' in case['starts'][0]
+assert 'AWS_REGION=us-east-1 aws ssm start-session --target synthetic-host' in case['starts'][0]
+assert '--document-name hive-v2-t01-teamkimi-port-forward' in case['starts'][0]
+assert case['readiness'] == [
+    '-u t01broker -- env -i PATH=/usr/bin:/bin /usr/bin/python3 /opt/t01/runtime.py wait-for-teamkimi'
+], case['readiness']
+
+case = tunnel_recovery_case(kill_zero_status=0, readiness_results=[1, 0])
+result = case['result']
+assert result.returncode == 0, (result.stdout, result.stderr)
+assert len(case['starts']) == 1, case['starts']
+assert len(case['readiness']) == 2, case['readiness']
+assert case['kills'] == ['-TERM -- -4142'], case['kills']
+assert case['records'] == [], case['records']
+assert case['final_stage'] == 'default-deny-lockdown', case['final_stage']
+assert 'raw tunnel output' not in result.stdout + result.stderr
+assert 'synthetic-credential' not in result.stdout + result.stderr
+
+case = tunnel_recovery_case(kill_zero_status=0, readiness_results=[1, 1])
+result = case['result']
+assert result.returncode == 1, (result.stdout, result.stderr)
+assert len(case['starts']) == 1, case['starts']
+assert len(case['readiness']) == 2, case['readiness']
+assert case['kills'][0] == '-TERM -- -4142', case['kills']
+assert case['records'] == [
+    {
+        'check': 'bootstrap_error', 'status': 'failed',
+        'category': 'failure:teamkimi-tunnel-recovery',
+        'origin': 'teamkimi-tunnel-recovery:1',
+    },
+    {'check': 'provisioning', 'status': 'failed'},
+    {'check': 'complete', 'status': 'failed'},
+], case['records']
+assert case['final_stage'] is None, case['final_stage']
+assert 'raw tunnel output' not in result.stdout + result.stderr
+assert 'synthetic-credential' not in result.stdout + result.stderr
+
+provision = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+recovery = provision.index('  ensure_teamkimi_tunnel\n')
+broker_status = provision.index('  expect_broker_allowed teamkimi_control_broker ')
+assert recovery < broker_status
