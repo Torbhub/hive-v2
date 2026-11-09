@@ -594,3 +594,99 @@ exit 99
     assert environment.read_text() == 'HIVE_T01_PROXY_KEY=synthetic-proxy-secret\n'
     assert environment.stat().st_mode & 0o777 == 0o400
     assert 'synthetic-proxy-secret' not in result.stdout + result.stderr
+
+
+def broker_status_case(responses):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / 'bin').mkdir()
+        (root / 'count').write_text('0')
+        response_cases = '\n'.join(
+            f"  {attempt}) printf '%s' '{code}'; exit {status} ;;"
+            for attempt, (code, status) in enumerate(responses, 1)
+        )
+        executable(root, 'bin/runuser', f'''#!/usr/bin/env bash
+count=$(($(cat "$MOCK_COUNT") + 1))
+printf '%s\n' "$count" > "$MOCK_COUNT"
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+printf 'raw tunnel output synthetic-credential\n' >&2
+case "$count" in
+{response_cases}
+  *) exit 99 ;;
+esac
+''')
+        executable(root, 'bin/sleep', '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_SLEEPS"
+''')
+        source = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+        start = source.index('expect_broker_allowed() {')
+        check = source[start:source.index('\n}', start) + 2]
+        start = source.index('read_hermes_check_metadata() {')
+        on_error = source[start:source.index('\ntrap on_error ERR', start)]
+        on_error = on_error.replace('/var/lib/t01/evidence', str(root))
+        result = subprocess.run(
+            ['/bin/bash', '-c', f'''set -Eeuo pipefail
+emit() {{
+  local check="$1" status="$2" details="${{3:-}}" record
+  record="{{\\"check\\":\\"$check\\",\\"status\\":\\"$status\\"${{details:+,$details}}}}"
+  printf '%s\\n' "$record" >> "$EVIDENCE"
+}}
+stop_tunnel() {{ :; }}
+lock_down() {{ :; }}
+publish_evidence() {{ cat "$EVIDENCE"; }}
+{on_error}
+trap on_error ERR
+{check}
+BOOTSTRAP_STAGE=teamkimi-no-model
+expect_broker_allowed teamkimi_control_broker curl -4 --silent http://127.0.0.1:8765/teamkimi/smoke/status
+printf '%s' "$BOOTSTRAP_STAGE" > "$MOCK_FINAL_STAGE"
+'''],
+            env={
+                'PATH': f'{root}/bin:{os.environ["PATH"]}',
+                'EVIDENCE': str(root / 'preflight.jsonl'),
+                'T01_RUNTIME_CHECK_OUT': str(root / 'runtime-check.json'),
+                'MOCK_COUNT': str(root / 'count'),
+                'MOCK_CALLS': str(root / 'calls'),
+                'MOCK_SLEEPS': str(root / 'sleeps'),
+                'MOCK_FINAL_STAGE': str(root / 'final-stage'),
+            },
+            capture_output=True, text=True, timeout=5,
+        )
+        evidence = root / 'preflight.jsonl'
+        records = [json.loads(line) for line in evidence.read_text().splitlines()] if evidence.exists() else []
+        calls = (root / 'calls').read_text().splitlines()
+        sleeps_path = root / 'sleeps'
+        sleeps = sleeps_path.read_text().splitlines() if sleeps_path.exists() else []
+        final_stage_path = root / 'final-stage'
+        final_stage = final_stage_path.read_text() if final_stage_path.exists() else None
+        return result, records, calls, sleeps, final_stage
+
+
+result, records, calls, sleeps, final_stage = broker_status_case([('503', 0), ('000', 7), ('200', 0)])
+assert result.returncode == 0, (result.stdout, result.stderr)
+assert records == [{'check': 'teamkimi_control_broker', 'status': 'passed'}], records
+assert len(calls) == 3, calls
+assert sleeps == ['2', '2'], sleeps
+assert all('--output /dev/null --write-out %{http_code}' in call for call in calls), calls
+assert final_stage == 'teamkimi-no-model', final_stage
+
+for responses, code in (
+    ([('503', 0)] * 3, '503'),
+    ([('000', 7)] * 3, '000'),
+):
+    result, records, calls, sleeps, _ = broker_status_case(responses)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert records == [
+        {'check': 'teamkimi_control_broker', 'status': 'failed'},
+        {
+            'check': 'bootstrap_error', 'status': 'failed',
+            'category': 'failure:teamkimi-control-broker',
+            'origin': f'teamkimi-control-broker:{code}',
+        },
+        {'check': 'provisioning', 'status': 'failed'},
+        {'check': 'complete', 'status': 'failed'},
+    ], records
+    assert len(calls) == 3, calls
+    assert sleeps == ['2', '2'], sleeps
+    assert 'raw tunnel output' not in result.stdout + result.stderr
+    assert 'synthetic-credential' not in result.stdout + result.stderr
