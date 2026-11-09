@@ -203,6 +203,26 @@ console_failure_case(
 console_failure_case('{"check":"bootstrap_error","status":"failed","category":"' + 'x' * 65_537 + '","origin":"client.py:1"}\n')
 reordered_failure = '{"status":"failed","check":"provisioning"}\n{"status":"failed","check":"complete"}\n'
 console_failure_case(reordered_failure, reordered_failure, 'completion-failed')
+teamkimi_failure = [
+    source_record,
+    {'check': 'teamkimi_no_model', 'status': 'failed'},
+    {
+        'check': 'bootstrap_error', 'status': 'failed',
+        'category': 'failure:teamkimi-no-model', 'origin': 'teamkimi-no-model:1',
+    },
+    {'check': 'provisioning', 'status': 'failed'},
+    {'check': 'complete', 'status': 'failed'},
+]
+classify_with_reason(teamkimi_failure, 'failed', 'completion-failed')
+classify_with_reason(
+    [source_record, {'check': 'teamkimi_no_model', 'status': 'passed'}],
+    'incomplete', 'missing-complete',
+)
+for record in evidence_records():
+    failed_record = {**record, 'status': 'failed'}
+    assert runtime.valid_record(failed_record), failed_record
+teamkimi_console = ''.join(json.dumps(record, separators=(',', ':')) + '\n' for record in teamkimi_failure)
+console_failure_case(teamkimi_console, teamkimi_console, 'completion-failed')
 console_failure_case(
     '{"status":"failed","check":"complete"}\n{"status":"failed","check":"provisioning"}\n',
     expected_reason='wrong-record-set',
@@ -331,7 +351,7 @@ def paid_console_records(manifest_sha, marker=True):
 
 
 classify_with_reason([None], 'invalid', 'bad-schema:unknown:record')
-classify_with_reason([{'check': 'uv_install', 'status': 'failed'}], 'invalid', 'bad-schema:uv_install:status')
+classify_with_reason([{'check': 'uv_install', 'status': 'pending'}], 'invalid', 'bad-schema:uv_install:status')
 classify_with_reason(
     [{'check': 'uv_install', 'status': 'passed', 'version': 'unexpected'}],
     'invalid', 'bad-schema:uv_install:fields',

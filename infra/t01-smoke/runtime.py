@@ -335,7 +335,6 @@ def record_hermes_check_error(error):
 
 
 MAX_EVIDENCE_BYTES = 65_536
-FAILURE_CHECKS = {'bootstrap_error', 'provisioning', 'complete'}
 
 
 def read_evidence(path):
@@ -421,7 +420,7 @@ def record_schema_error(record):
         return 'record'
     if check not in ALLOWED_CHECKS:
         return 'check'
-    if status not in {'passed', 'failed'} or status == 'failed' and check not in FAILURE_CHECKS:
+    if status not in {'passed', 'failed'}:
         return 'status'
     if check == 'bootstrap_error':
         category = record.get('category')
@@ -435,13 +434,13 @@ def record_schema_error(record):
         if not isinstance(origin, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+:[0-9]+', origin):
             return 'origin'
     elif check == 'hermes_version':
-        if record != {'check': check, 'status': 'passed', 'version': VERSION, 'commit': COMMIT}:
+        if {**record, 'status': 'passed'} != {'check': check, 'status': 'passed', 'version': VERSION, 'commit': COMMIT}:
             return 'identity'
     elif check == 'source_sha256':
-        if record != {'check': check, 'status': 'passed', 'sha256': SOURCE_SHA256}:
+        if {**record, 'status': 'passed'} != {'check': check, 'status': 'passed', 'sha256': SOURCE_SHA256}:
             return 'identity'
     elif check == 'node_runtime_locked':
-        if record != {'check': check, 'status': 'passed', 'version': '22.23.2'}:
+        if {**record, 'status': 'passed'} != {'check': check, 'status': 'passed', 'version': '22.23.2'}:
             return 'identity'
     elif check == 'paid_evidence_export':
         if set(record) != {'check', 'status', 'sha256', 'credentialId'} \
@@ -525,7 +524,9 @@ def classify_records_with_reason(records):
             }
         else:
             required.add('paid_admission_disabled')
-        return ('passed', 'none') if seen == required else ('invalid', 'wrong-record-set')
+        if seen != required or any(record['status'] != 'passed' for record in records):
+            return 'invalid', 'wrong-record-set'
+        return 'passed', 'none'
     if records[-1] == {'check': 'complete', 'status': 'failed'}:
         return 'failed', 'completion-failed'
     return 'invalid', 'wrong-record-set'
