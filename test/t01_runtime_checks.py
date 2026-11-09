@@ -11,6 +11,8 @@ import tempfile
 import time
 from unittest.mock import patch
 
+from t01_workflow_harness import write_executable
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / 'infra/t01-smoke/runtime.py'
 COMMIT = 'f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab'
@@ -175,6 +177,68 @@ on_error
     )
     assert result.returncode == 1, result.stderr
     return [json.loads(line) for line in (root / 'preflight.jsonl').read_text().splitlines()]
+
+
+def system_package_case(failures):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / 'bin').mkdir()
+        (root / 'dnf-calls').write_text('')
+        write_executable(root / 'bin/dnf', '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_DNF_CALLS"
+printf 'raw repository failure\n' >&2
+count=$(wc -l < "$MOCK_DNF_CALLS")
+[ "$count" -gt "$MOCK_FAILURES" ]
+''')
+        write_executable(root / 'bin/sleep', '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$MOCK_SLEEP_CALLS"\n')
+        source = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+        start = source.index('BOOTSTRAP_STAGE=system-packages')
+        stage = source[start:source.index('BOOTSTRAP_STAGE=runtime-download', start)]
+        start = source.index('read_hermes_check_metadata() {')
+        on_error = source[start:source.index('\ntrap on_error ERR', start)]
+        result = subprocess.run(
+            ['bash', '-c', '''
+set -Eeuo pipefail
+emit() {
+  local check="$1" status="$2" details="${3:-}" record
+  record="{\\"check\\":\\"$check\\",\\"status\\":\\"$status\\"${details:+,$details}}"
+  printf '%s\\n' "$record" >> "$EVIDENCE"
+}
+stop_tunnel() { :; }
+lock_down() { :; }
+publish_evidence() { cat "$EVIDENCE"; }
+''' + on_error + '\ntrap on_error ERR\n' + stage],
+            env={
+                'PATH': f'{root}/bin:{os.environ["PATH"]}',
+                'EVIDENCE': str(root / 'preflight.jsonl'),
+                'MOCK_DNF_CALLS': str(root / 'dnf-calls'),
+                'MOCK_SLEEP_CALLS': str(root / 'sleep-calls'),
+                'MOCK_FAILURES': str(failures),
+            },
+            capture_output=True, text=True, timeout=5,
+        )
+        calls = (root / 'dnf-calls').read_text().splitlines()
+        sleeps = (root / 'sleep-calls').read_text().splitlines() if (root / 'sleep-calls').exists() else []
+        return result, calls, sleeps
+
+
+packages = 'install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables session-manager-plugin'
+result, calls, sleeps = system_package_case(1)
+assert result.returncode == 0, (result.stdout, result.stderr)
+assert calls == [packages, packages], calls
+assert sleeps == ['5'], sleeps
+result, calls, sleeps = system_package_case(3)
+assert result.returncode == 1, (result.stdout, result.stderr)
+assert calls == [packages, packages, packages], calls
+assert sleeps == ['5', '5'], sleeps
+records = [json.loads(line) for line in result.stdout.splitlines()]
+assert records[0]['category'] == 'failure:system-packages', records
+assert records[0]['origin'] == 'system-packages:1', records
+assert 'raw repository failure' not in result.stdout, result.stdout
+result, calls, sleeps = system_package_case(0)
+assert result.returncode == 0, (result.stdout, result.stderr)
+assert calls == [packages], calls
+assert sleeps == [], sleeps
 
 
 def assert_diagnostic(root, expected, result):
