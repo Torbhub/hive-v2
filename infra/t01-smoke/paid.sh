@@ -11,8 +11,20 @@ export HERMES_HOME=/var/lib/t01/hermes
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy SSH_AUTH_SOCK
 
-"$NODE" "$RUNNER/count-probe.mjs" "$EVIDENCE/count.json"
-/usr/bin/python3 /opt/t01/runtime.py count-evidence "$EVIDENCE/count.json" >> "$EVIDENCE/preflight.jsonl"
+printf '%s\n' node-count-runner-failed > "$EVIDENCE/bootstrap-category"
+printf '%s\n' count-probe:1 > "$EVIDENCE/bootstrap-origin"
+if [ ! -f "$RUNNER/count-probe.mjs" ] || [ ! -f "$RUNNER/policy.js" ]; then
+  printf '%s\n' count-runner-missing > "$EVIDENCE/bootstrap-category"
+  printf '%s\n' count-runner:1 > "$EVIDENCE/bootstrap-origin"
+  false
+fi
+"$NODE" "$RUNNER/count-probe.mjs" "$EVIDENCE/count.json" >/dev/null 2>&1
+if ! /usr/bin/python3 /opt/t01/runtime.py count-evidence "$EVIDENCE/count.json" >> "$EVIDENCE/preflight.jsonl" 2>/dev/null; then
+  printf '%s\n' runtime-count-evidence-invalid > "$EVIDENCE/bootstrap-category"
+  printf '%s\n' count-evidence:1 > "$EVIDENCE/bootstrap-origin"
+  false
+fi
+rm -f "$EVIDENCE/bootstrap-category" "$EVIDENCE/bootstrap-origin"
 
 if [ "$SCENARIO" = matrix ]; then
   export HIVE_T01_BROKER_URL=http://127.0.0.1:8765

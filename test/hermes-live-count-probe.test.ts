@@ -16,7 +16,7 @@ const counts = {
 };
 const closers: (() => Promise<void>)[] = [];
 
-async function runProbe(countStatus = 200) {
+async function runProbe(countStatus = 200, revokeStatus = 200) {
   const routes: string[] = [];
   let credential: Record<string, unknown> | undefined;
   const revokedAt = 1760000001000;
@@ -56,14 +56,17 @@ async function runProbe(countStatus = 200) {
           model: 'kimi-code/k3.1-pro', requestHash: createHash('sha256').update(requestBody).digest('hex'),
           counts: countStatus === 200 ? counts : null,
           status: countStatus === 200 ? 'counted' : 'provider_input_accounting_unverified', timestamp: 1760000000000,
+          diagnostic: countStatus === 200 ? undefined : 'raw-provider-response-secret',
         }));
       });
       return;
     }
     if (request.url === '/teamkimi/smoke/revoke') {
-      credential = { ...credential, revokedAt, revocationProof: proof };
-      response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ revoked: [{ id: credential.id, revokedAt, proof }] }));
+      if (revokeStatus === 200) credential = { ...credential, revokedAt, revocationProof: proof };
+      response.writeHead(revokeStatus, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(revokeStatus === 200
+        ? { revoked: [{ id: credential.id, revokedAt, proof }] }
+        : { diagnostic: 'raw-revocation-response-secret' }));
       return;
     }
     response.writeHead(404).end();
@@ -78,7 +81,7 @@ async function runProbe(countStatus = 200) {
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   const status = await new Promise<number | null>((resolve) => child.on('close', resolve));
-  return { status, stdout, stderr, routes, output, revokedAt, proof };
+  return { status, stdout, stderr, routes, root, output, revokedAt, proof };
 }
 
 afterEach(async () => {
@@ -100,15 +103,40 @@ describe('T01 count-only probe', () => {
     expect(JSON.stringify(evidence)).not.toContain('tcc-synthetic-only');
   });
 
-  it('revokes in finally after provider count failure', async () => {
+  it('revokes in finally after provider count failure and reports fixed sanitized diagnostics', async () => {
     const result = await runProbe(503);
     expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
     expect(result.routes.some((route) => route.endsWith('/teamkimi/smoke/revoke'))).toBe(true);
     expect(result.routes.some((route) => route.endsWith('/v1/messages'))).toBe(false);
     const evidence = JSON.parse(await readFile(result.output, 'utf8'));
     expect(evidence.status).toBe('failed');
     expect(evidence.counts).toBeNull();
     expect(evidence.revocation.proof).toBe(result.proof);
-    expect(JSON.stringify(evidence)).not.toContain('tcc-synthetic-only');
+    const category = await readFile(join(result.root, 'bootstrap-category'), 'utf8');
+    const origin = await readFile(join(result.root, 'bootstrap-origin'), 'utf8');
+    expect(category).toBe('provider-count-evidence-invalid\n');
+    expect(origin).toBe('count-provider:1\n');
+    const exposed = result.stdout + result.stderr + category + origin + JSON.stringify(evidence);
+    for (const sentinel of ['tcc-synthetic-only', 'raw-provider-response-secret', result.root, probe]) {
+      expect(exposed).not.toContain(sentinel);
+    }
+  });
+
+  it('reports revocation failure without raw output or count evidence', async () => {
+    const result = await runProbe(200, 503);
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+    await expect(readFile(result.output, 'utf8')).rejects.toThrow();
+    const category = await readFile(join(result.root, 'bootstrap-category'), 'utf8');
+    const origin = await readFile(join(result.root, 'bootstrap-origin'), 'utf8');
+    expect(category).toBe('count-revocation-failed\n');
+    expect(origin).toBe('count-revocation:1\n');
+    const exposed = result.stdout + result.stderr + category + origin;
+    for (const sentinel of ['tcc-synthetic-only', 'raw-revocation-response-secret', result.root, probe]) {
+      expect(exposed).not.toContain(sentinel);
+    }
   });
 });
