@@ -162,7 +162,15 @@ case "$SCENARIO/$MATRIX/$PAID_ADMISSION/$MAX_PAID_ADMISSIONS" in
 esac
 
 BOOTSTRAP_STAGE=system-packages
-dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables session-manager-plugin
+SESSION_MANAGER_PLUGIN_VERSION=1.2.896.0
+SESSION_MANAGER_PLUGIN_SHA256=89a4a07fcb92169bdd2f07c2531acd11b84857338172e7638964aaa08fd5f0e3
+curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+  --max-redirs 0 --connect-timeout 10 --max-time 60 \
+  "https://s3.amazonaws.com/session-manager-downloads/plugin/$SESSION_MANAGER_PLUGIN_VERSION/linux_64bit/session-manager-plugin.rpm" \
+  --output /opt/t01/session-manager-plugin.rpm
+printf '%s  %s\n' "$SESSION_MANAGER_PLUGIN_SHA256" /opt/t01/session-manager-plugin.rpm | sha256sum -c -
+dnf install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables /opt/t01/session-manager-plugin.rpm
+rm -f /opt/t01/session-manager-plugin.rpm
 BOOTSTRAP_STAGE=runtime-download
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --max-redirs 0 --connect-timeout 10 --max-time 60 \
