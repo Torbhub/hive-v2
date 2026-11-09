@@ -238,7 +238,47 @@ publish_evidence() { cat "$EVIDENCE"; }
         return result, calls, sleeps, downloads, digests, removals
 
 
-packages = 'install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables /opt/t01/session-manager-plugin.rpm'
+def credential_secret_case(aws_content=None):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / 'bin').mkdir()
+        if aws_content is not None:
+            write_executable(root / 'bin/aws', aws_content)
+        source = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+        start = source.index('BOOTSTRAP_STAGE=credential-secret')
+        stage = source[start:source.index('BOOTSTRAP_STAGE=evidence-endpoint', start)]
+        stage = stage.replace('/etc/t01/broker/teamkimi.json', str(root / 'teamkimi.json'))
+        start = source.index('read_hermes_check_metadata() {')
+        on_error = source[start:source.index('\ntrap on_error ERR', start)]
+        result = subprocess.run(
+            ['/bin/bash', '-c', '''
+set -Eeuo pipefail
+emit() {
+  local check="$1" status="$2" details="${3:-}" record
+  record="{\\"check\\":\\"$check\\",\\"status\\":\\"$status\\"${details:+,$details}}"
+  printf '%s\\n' "$record" >> "$EVIDENCE"
+}
+stop_tunnel() { :; }
+lock_down() { :; }
+publish_evidence() {
+  while IFS= read -r record; do
+    printf '%s\\n' "$record"
+  done < "$EVIDENCE"
+}
+''' + on_error + '\ntrap on_error ERR\n' + stage],
+            env={
+                'PATH': str(root / 'bin'),
+                'EVIDENCE': str(root / 'preflight.jsonl'),
+                'SCENARIO': 'preflight',
+                'TEAMKIMI_SECRET_ARN': 'synthetic-secret-arn',
+            },
+            capture_output=True, text=True, timeout=5,
+        )
+        records = [json.loads(line) for line in result.stdout.splitlines()]
+        return result, records
+
+
+packages = 'install -y gcc gcc-c++ make cmake python3-devel python3.11 python3.11-devel libffi-devel libatomic git xz ca-certificates iptables awscli /opt/t01/session-manager-plugin.rpm'
 download = '--fail --silent --show-error --location --proto =https --proto-redir =https --max-redirs 0 --connect-timeout 10 --max-time 60 https://s3.amazonaws.com/session-manager-downloads/plugin/1.2.896.0/linux_64bit/session-manager-plugin.rpm --output /opt/t01/session-manager-plugin.rpm'
 digest = '89a4a07fcb92169bdd2f07c2531acd11b84857338172e7638964aaa08fd5f0e3  /opt/t01/session-manager-plugin.rpm'
 result, calls, sleeps, downloads, digests, removals = system_package_case(1)
@@ -266,6 +306,35 @@ assert sleeps == [], sleeps
 assert downloads == [download], downloads
 assert digests == [digest], digests
 assert removals == ['-f /opt/t01/session-manager-plugin.rpm'], removals
+
+provision = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+stages = [
+    provision.index(f'BOOTSTRAP_STAGE={stage}')
+    for stage in ('credential-users', 'credential-secret', 'evidence-endpoint', 'broker-config')
+]
+assert stages == sorted(stages), stages
+assert 'BOOTSTRAP_STAGE=credential-config' not in provision
+aws_check = provision.index('command -v aws >/dev/null')
+secret_read = provision.index('aws secretsmanager get-secret-value')
+assert stages[1] < aws_check < secret_read, (stages[1], aws_check, secret_read)
+
+result, records = credential_secret_case()
+assert result.returncode == 1, (result.stdout, result.stderr)
+assert records[0] == {
+    'check': 'bootstrap_error', 'status': 'failed',
+    'category': 'failure:credential-secret', 'origin': 'credential-secret:1',
+}, records
+raw_aws_output = 'synthetic raw secret output'
+result, records = credential_secret_case(
+    f'#!/bin/bash\nprintf \'%s\\n\' \'{raw_aws_output}\' >&2\nexit 1\n',
+)
+assert result.returncode == 1, (result.stdout, result.stderr)
+assert raw_aws_output in result.stderr, result.stderr
+assert raw_aws_output not in result.stdout, result.stdout
+assert records[0] == {
+    'check': 'bootstrap_error', 'status': 'failed',
+    'category': 'failure:credential-secret', 'origin': 'credential-secret:1',
+}, records
 
 
 def assert_diagnostic(root, expected, result):
