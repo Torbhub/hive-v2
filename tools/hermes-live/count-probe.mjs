@@ -1,10 +1,35 @@
 import { createHash } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import process from 'node:process';
 import { COUNTED_INPUT_FIELDS, countedInput } from './policy.js';
 
 const BASE = 'http://127.0.0.1:8765';
 const output = process.argv[2];
+
+function diagnose(error) {
+  process.exitCode = 1;
+  let category;
+  let origin;
+  if (error?.message === 'count-evidence-invalid') {
+    category = 'provider-count-evidence-invalid';
+    origin = 'count-provider:1';
+  } else if (['count-revocation-failed', 'count-revocation-not-attested'].includes(error?.message)) {
+    category = 'count-revocation-failed';
+    origin = 'count-revocation:1';
+  } else {
+    return;
+  }
+  try {
+    writeFileSync(join(dirname(output), 'bootstrap-category'), `${category}\n`, { mode: 0o600 });
+    writeFileSync(join(dirname(output), 'bootstrap-origin'), `${origin}\n`, { mode: 0o600 });
+  } catch {
+    // paid.sh retains its generic fixed diagnostic when refinement is unavailable.
+  }
+}
+process.on('uncaughtException', diagnose);
+process.on('unhandledRejection', diagnose);
 if (!output || !output.startsWith('/') || output.includes('..')) throw new Error('invalid-evidence-path');
 const requestPath = new URL('./fixtures/count-request.json', import.meta.url);
 const body = await readFile(requestPath);
