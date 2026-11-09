@@ -4,8 +4,8 @@ umask 077
 
 ACTION="${1:-}"
 RUN_ID="${2:-}"
-COMMIT=87e5ed7dc1fd7af3a234ac4e4f24b9c7286126b6
-ARCHIVE_SHA256=d85df1db79405b0240ec5bc48a6441064dbbfbaf3cf95c54dd5355c3baddb19c
+COMMIT=935104a1936a603467c91e14acc1aa0b6715c2f3
+ARCHIVE_SHA256=12d88ebb52192538df902dfaaf2cc6669bfb7a9601558a23300fe7e0806621f0
 SOURCE=/opt/teamkimi-count/$COMMIT
 STATE=/var/lib/teamkimi-count/$RUN_ID
 UNIT="teamkimi-count@$RUN_ID.service"
