@@ -94,7 +94,7 @@ describeDisposable('pinned Hermes in the disposable environment', () => {
       await handle.reap();
       expect(bodies).toHaveLength(1);
       expect(JSON.parse(bodies[0])).toMatchObject({
-        model: EXPECTED_MODEL, max_tokens: 2000,
+        model: EXPECTED_MODEL, max_tokens: 6000,
         thinking: { type: 'enabled', budget_tokens: 4000 },
       });
       expect(JSON.parse(bodies[0]).reasoning_effort).toBeUndefined();

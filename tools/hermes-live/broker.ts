@@ -174,7 +174,7 @@ export function canonicalAnthropicBody(parsed: Record<string, unknown>) {
   const canonical: Record<string, unknown> = {
     ...parsed,
     model: MODEL,
-    max_tokens: 2000,
+    max_tokens: 6000,
     thinking: { type: 'enabled', budget_tokens: 4000 },
   };
   delete canonical.adaptive;

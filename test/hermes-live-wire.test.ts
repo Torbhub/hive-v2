@@ -11,7 +11,7 @@ import { usageCostMicros } from '../tools/hermes-live/policy.js';
 import { attestation, controls, policyHash, wireCounted, wireUsage } from './hermes-live-fixtures.js';
 
 const source = process.env.TEAMKIMI_SMOKE_SOURCE;
-const TESTED_TEAMKIMI_COMMIT = '935104a1936a603467c91e14acc1aa0b6715c2f3';
+const TESTED_TEAMKIMI_COMMIT = '35b0d0d9b2e124b3418e3c049bd79c2f857b8cfe';
 const attemptKey = 'a'.repeat(64);
 const proxyApiKey = 'ordinary-proxy-key';
 const describeWire = source ? describe : describe.skip;
@@ -79,7 +79,7 @@ async function fixture(responseStatus = 200, mode: 'json' | 'malformed-sse' | 's
       if (mode === 'missing-usage-sse') {
         response.writeHead(200, { 'content-type': 'text/event-stream' });
         response.end([
-          'data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}',
+          `data: ${JSON.stringify({ type: 'message_start', message: { usage: contract.countTokens.response } })}`,
           '',
           'data: {"type":"message_stop"}',
           '',
@@ -130,7 +130,7 @@ describe('Anthropic canonicalization', () => {
       adaptive: true, adaptive_thinking: {}, thinking_budget: 999, reasoning_effort: 'max',
       output_config: { effort: 'max' }, messages: [],
     })).toEqual({
-      model: 'kimi-code/k3.1-pro', max_tokens: 2000,
+      model: 'kimi-code/k3.1-pro', max_tokens: 6000,
       thinking: { type: 'enabled', budget_tokens: 4000 }, messages: [],
     });
   });
@@ -140,7 +140,7 @@ describe('Anthropic canonicalization', () => {
   });
 });
 
-describeWire('TeamKimi PR19 no-paid HTTP wire contract', () => {
+describeWire('TeamKimi PR20 no-paid HTTP wire contract', () => {
   it('injects credentials, forwards the exact Anthropic request, and maps usage and revocation', async () => {
     const wire = await fixture();
     const issued = await request(wire.proxyPort, '/teamkimi/smoke/credentials', {
@@ -181,7 +181,7 @@ describeWire('TeamKimi PR19 no-paid HTTP wire contract', () => {
     expect(upstream.headers.authorization).toBe('Bearer wire-broker-account');
     expect(upstream.headers['x-api-key']).toBeUndefined();
     expect(JSON.parse(upstream.body)).toMatchObject({
-      model: 'k3.1-pro', max_tokens: 2000,
+      model: 'k3.1-pro', max_tokens: 6000,
       thinking: { type: 'enabled', budget_tokens: 4000 },
     });
     expect(JSON.parse(upstream.body).output_config).toBeUndefined();

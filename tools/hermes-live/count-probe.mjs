@@ -39,7 +39,7 @@ const requestPath = new URL('./fixtures/count-request.json', import.meta.url);
 const body = await readFile(requestPath);
 const expectedRequest = {
   model: 'kimi-code/k3.1-pro',
-  max_tokens: 2000,
+  max_tokens: 6000,
   thinking: { type: 'enabled', budget_tokens: 4000 },
   messages: [],
 };
