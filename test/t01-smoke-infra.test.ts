@@ -279,7 +279,7 @@ Environment=HERMES_RUNTIME_DIR=/opt/t01/tools`,
 
   it('allows legitimate fleet jobs to finish before failing lock acquisition', () => {
     expect(read('workflow')).toContain('DEPLOY_MUTEX_WAIT_SECONDS: 3600');
-    expect(read('deployWorkflow')).toContain('DEPLOY_MUTEX_WAIT_SECONDS: 3600');
+    expect(read('deployWorkflow')).toContain('DEPLOY_MUTEX_WAIT_SECONDS: 2700');
     expect(read('deployMutex')).toContain('TTL_SECONDS=1500');
   });
 
