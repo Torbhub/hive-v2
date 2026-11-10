@@ -775,6 +775,47 @@ def shell_function(source, name):
     return source[start:source.index('\n}', start) + 2]
 
 
+def incremental_evidence_case():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        evidence = root / 'preflight.jsonl'
+        console = root / 'console'
+        intermediate = root / 'intermediate-console'
+        source = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+        functions = '\n'.join(
+            shell_function(source, name) for name in ('emit', 'publish_evidence')
+        ).replace('/dev/console', str(console))
+        result = subprocess.run(
+            ['/bin/bash', '-c', f'''set -Eeuo pipefail
+EVIDENCE="$MOCK_EVIDENCE"
+EVIDENCE_PUBLISHED=0
+{functions}
+emit uv_install passed
+cp "$MOCK_CONSOLE" "$MOCK_INTERMEDIATE"
+emit python_install passed
+publish_evidence
+'''],
+            env={
+                'PATH': os.environ['PATH'],
+                'MOCK_EVIDENCE': str(evidence),
+                'MOCK_CONSOLE': str(console),
+                'MOCK_INTERMEDIATE': str(intermediate),
+            },
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        uv_record = '{"check":"uv_install","status":"passed"}'
+        python_record = '{"check":"python_install","status":"passed"}'
+        assert evidence.read_text() == f'{uv_record}\n{python_record}\n'
+        assert intermediate.read_text() == f'T01_EVIDENCE {uv_record}\n'
+        assert console.read_text() == (
+            f'T01_EVIDENCE {uv_record}\nT01_EVIDENCE {python_record}\n'
+        )
+
+
+incremental_evidence_case()
+
+
 def tunnel_recovery_case(
     leader_status, readiness_results, group_states, term_status=0, wait_status=0,
 ):

@@ -8,6 +8,7 @@ HERMES_ARCHIVE_SHA256=551f2c190f21a0df8e0576a20809c63d3077bc56568fe009b98b289fae
 NODE_VERSION=22.23.2
 NODE_ARCHIVE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
 EVIDENCE=/var/lib/t01/evidence/preflight.jsonl
+EVIDENCE_PUBLISHED=0
 EVIDENCE_IP=
 SSM_IP=
 SSMMESSAGES_IP=
@@ -30,12 +31,18 @@ emit() {
   local check="$1" status="$2" details="${3:-}" record
   record="{\"check\":\"$check\",\"status\":\"$status\"${details:+,$details}}"
   printf '%s\n' "$record" >> "$EVIDENCE"
+  publish_evidence
 }
 
 publish_evidence() {
-  local record
+  local record line=0
   while IFS= read -r record; do
-    printf 'T01_EVIDENCE %s\n' "$record" > /dev/console
+    line=$((line + 1))
+    if [ "$line" -le "$EVIDENCE_PUBLISHED" ]; then
+      continue
+    fi
+    printf 'T01_EVIDENCE %s\n' "$record" >> /dev/console
+    EVIDENCE_PUBLISHED="$line"
   done < "$EVIDENCE"
 }
 
