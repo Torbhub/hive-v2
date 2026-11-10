@@ -55,6 +55,8 @@ def early_provision_case():
             },
             capture_output=True, text=True, timeout=5,
         )
+        for relative in ('opt/t01/runner-source', 'opt/t01/node', 'var/lib/t01/workspace'):
+            assert (root / relative).is_dir(), relative
         console = root / 'console'
         return result, console.read_text() if console.exists() else ''
 
