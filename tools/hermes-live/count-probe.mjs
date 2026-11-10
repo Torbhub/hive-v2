@@ -16,7 +16,7 @@ function diagnose(error) {
   process.exitCode = 1;
   let category;
   let origin;
-  if (/^provider-count-(?:http-\d{3}(?:-(?:invalid_request_error|authentication_error|rate_limit_error|api_error|unknown))?|status-(?:provider_input_accounting_unverified|unclassified)|model-mismatch|request-hash-mismatch|fields-invalid|arithmetic-mismatch)$/.test(error?.message)) {
+  if (/^provider-count-(?:http-\d{3}(?:-(?:invalid_request_error|authentication_error|rate_limit_error|api_error|unknown(?:-upstream-(?:0|[1-9]\d?|[1-5]\d{2}))?))?|status-(?:provider_input_accounting_unverified|unclassified)|model-mismatch|request-hash-mismatch|fields-invalid|arithmetic-mismatch)$/.test(error?.message)) {
     category = error.message;
     origin = 'count-provider:1';
   } else if (['count-revocation-failed', 'count-revocation-not-attested'].includes(error?.message)) {
@@ -98,8 +98,11 @@ try {
   counted = await request('POST', '/teamkimi/smoke/count-tokens', body, issued.credential);
   if (counted.status !== 200) {
     const errorType = counted.value?.upstreamErrorType;
+    const upstreamStatus = counted.value?.upstreamStatus;
     const suffix = PROVIDER_COUNT_ERROR_TYPES.has(errorType) ? `-${errorType}` : '';
-    throw new Error(`provider-count-http-${counted.status}${suffix}`);
+    const upstreamSuffix = errorType === 'unknown' && Number.isInteger(upstreamStatus)
+      && upstreamStatus >= 0 && upstreamStatus <= 599 ? `-upstream-${upstreamStatus}` : '';
+    throw new Error(`provider-count-http-${counted.status}${suffix}${upstreamSuffix}`);
   }
   if (counted.value?.status !== 'counted') {
     const providerStatus = PROVIDER_COUNT_STATUSES.has(counted.value?.status) ? counted.value.status : 'unclassified';
