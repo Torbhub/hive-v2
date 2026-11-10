@@ -816,6 +816,65 @@ publish_evidence
 incremental_evidence_case()
 
 
+def evidence_publish_retry_case():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        evidence = root / 'preflight.jsonl'
+        uv_record = '{"check":"uv_install","status":"passed"}'
+        python_record = '{"check":"python_install","status":"passed"}'
+        evidence.write_text(f'{uv_record}\n{python_record}\n')
+        attempts = root / 'attempts'
+        attempts.write_text('0')
+        source = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
+        function = shell_function(source, 'publish_evidence').replace(
+            '/dev/console', str(root / 'console')
+        )
+        result = subprocess.run(
+            ['/bin/bash', '-c', f'''set -Eeuo pipefail
+set +e
+EVIDENCE="$MOCK_EVIDENCE"
+EVIDENCE_PUBLISHED=0
+{function}
+printf() {{
+  if [ "$1" = 'T01_EVIDENCE %s\\n' ]; then
+    attempts=$(($(cat "$MOCK_ATTEMPTS") + 1))
+    command printf '%s' "$attempts" > "$MOCK_ATTEMPTS"
+    if [ "$attempts" -eq 1 ]; then
+      return 1
+    fi
+    command printf "$1" "$2" >> "$MOCK_CONSOLE"
+    return
+  fi
+  command printf "$@"
+}}
+publish_evidence
+first_status=$?
+command printf '%s' "$first_status" > "$MOCK_FIRST_STATUS"
+command printf '%s' "$EVIDENCE_PUBLISHED" > "$MOCK_CURSOR"
+publish_evidence
+'''],
+            env={
+                'PATH': os.environ['PATH'],
+                'MOCK_EVIDENCE': str(evidence),
+                'MOCK_CONSOLE': str(root / 'console'),
+                'MOCK_ATTEMPTS': str(attempts),
+                'MOCK_FIRST_STATUS': str(root / 'first-status'),
+                'MOCK_CURSOR': str(root / 'cursor'),
+            },
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert (root / 'first-status').read_text() != '0'
+        assert (root / 'cursor').read_text() == '0'
+        assert (root / 'console').read_text() == (
+            f'T01_EVIDENCE {uv_record}\nT01_EVIDENCE {python_record}\n'
+        )
+        assert attempts.read_text() == '3'
+
+
+evidence_publish_retry_case()
+
+
 def tunnel_recovery_case(
     leader_status, readiness_results, group_states, term_status=0, wait_status=0,
 ):

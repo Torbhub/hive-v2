@@ -41,7 +41,7 @@ publish_evidence() {
     if [ "$line" -le "$EVIDENCE_PUBLISHED" ]; then
       continue
     fi
-    printf 'T01_EVIDENCE %s\n' "$record" >> /dev/console
+    printf 'T01_EVIDENCE %s\n' "$record" >> /dev/console || return 1
     EVIDENCE_PUBLISHED="$line"
   done < "$EVIDENCE"
 }
