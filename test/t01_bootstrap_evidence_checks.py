@@ -44,7 +44,7 @@ def early_provision_case():
         source = PROVISION.split('BOOTSTRAP_STAGE=input-validation', 1)[0]
         for absolute in ('/opt/t01', '/var/lib/t01', '/etc/t01'):
             source = source.replace(absolute, str(root / absolute.removeprefix('/')))
-        source = source.replace('> /dev/console', f'>> {root / "console"}')
+        source = re.sub(r'>>? /dev/console', f'>> {root / "console"}', source)
         script = root / 'provision-init.sh'
         script.write_text(source)
         result = subprocess.run(
@@ -104,7 +104,7 @@ cp "$MOCK_INNER" "$output"
 ''')
         source = re.sub(r'\$\{[A-Za-z0-9]+\}', '120', USER_DATA)
         source = source.replace('/opt/t01-provision.sh', str(root / 'provision.sh'))
-        source = source.replace('> /dev/console', f'>> {root / "console"}')
+        source = re.sub(r'>>? /dev/console', f'>> {root / "console"}', source)
         script = root / 'user-data.sh'
         script.write_text(source)
         result = subprocess.run(
