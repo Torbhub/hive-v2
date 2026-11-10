@@ -137,10 +137,30 @@ describe('T01 count-only probe', () => {
       category: 'provider-count-http-503-api_error',
     },
     {
+      name: 'unknown upstream transport status', httpStatus: 503,
+      response: { upstreamStatus: 0, upstreamErrorType: 'unknown' },
+      category: 'provider-count-http-503-unknown-upstream-0',
+    },
+    {
+      name: 'unknown upstream HTTP 200 receipt', httpStatus: 503,
+      response: { upstreamStatus: 200, upstreamErrorType: 'unknown' },
+      category: 'provider-count-http-503-unknown-upstream-200',
+    },
+    {
       name: 'explicit unknown upstream error', httpStatus: 503,
       response: { upstreamStatus: 502, upstreamErrorType: 'unknown' },
-      category: 'provider-count-http-503-unknown',
+      category: 'provider-count-http-503-unknown-upstream-502',
     },
+    {
+      name: 'unknown upstream maximum status', httpStatus: 503,
+      response: { upstreamStatus: 599, upstreamErrorType: 'unknown' },
+      category: 'provider-count-http-503-unknown-upstream-599',
+    },
+    ...[-1, 600, 200.5, '200', undefined].map((upstreamStatus) => ({
+      name: `invalid unknown upstream status ${String(upstreamStatus)}`, httpStatus: 503,
+      response: { upstreamStatus, upstreamErrorType: 'unknown' },
+      category: 'provider-count-http-503-unknown',
+    })),
     {
       name: 'unrecognized upstream error type', httpStatus: 503,
       response: { upstreamStatus: 500, upstreamErrorType: 'raw-upstream-error-type-secret' },
