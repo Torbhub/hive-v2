@@ -13,18 +13,9 @@ SSM_IP=
 SSMMESSAGES_IP=
 TUNNEL_PID=
 BROKER_PORT=8765
-if [ "$SCENARIO" != preflight ]; then
+if [ "${SCENARIO:-}" != preflight ]; then
   BROKER_PORT=8766
 fi
-
-mkdir -p /opt/t01/source /opt/t01/fixtures /opt/t01/tools /opt/t01/pm-home
-mkdir -p /opt/t01/runner-source /opt/t01/node /var/lib/t01/evidence /var/lib/t01/hermes /var/lib/t01/workspace /etc/t01/broker
-chown root:root /opt/t01 /var/lib/t01 /etc/t01
-chmod 0711 /opt/t01 /var/lib/t01 /etc/t01
-chmod 0700 /var/lib/t01/evidence /opt/t01/pm-home
-: > "$EVIDENCE"
-chmod 0600 /var/lib/t01/evidence/preflight.jsonl
-shutdown -h +"${LIFETIME_MINUTES}"
 
 emit() {
   local check="$1" status="$2" details="${3:-}" record
