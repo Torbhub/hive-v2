@@ -429,7 +429,7 @@ esac
             assert 'release aws-acts' not in calls
 
 
-def recovery_case(overrides=None):
+def recovery_case(overrides=None, command='count-recovery'):
     temporary, root = workspace()
     with temporary:
         mock_aws(root, '''#!/usr/bin/env bash
@@ -456,7 +456,7 @@ esac
         }
         if overrides:
             env.update(overrides)
-        result = run(root, 'count-recovery', env)
+        result = run(root, command, env)
         calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
         return result, calls
 
@@ -480,16 +480,21 @@ assert result.returncode != 0
 assert calls == renew + '\n', calls
 assert 'delete-secret' not in calls and 'release aws-acts' not in calls
 
-for overrides in (
-    {'T01_RECOVERY_RUN_ID': ''},
-    {'T01_RECOVERY_RUN_ID': 'run-42941131826'},
-    {'T01_RECOVERY_RUN_ID': '42941131826/evidence'},
-    {'T01_REVIEWED_UNCERTAIN_CLEANUP': 'no'},
-    {'T01_COUNT_STOP_VERIFIED': 'no'},
-):
-    result, calls = recovery_case(overrides)
-    assert result.returncode != 0, overrides
-    assert calls == '', (overrides, calls)
+result, calls = recovery_case(command='validate-recovery')
+assert result.returncode == 0, (result.stdout, result.stderr)
+assert calls == '', calls
+
+for command in ('validate-recovery', 'count-recovery'):
+    for overrides in (
+        {'T01_RECOVERY_RUN_ID': ''},
+        {'T01_RECOVERY_RUN_ID': 'run-42941131826'},
+        {'T01_RECOVERY_RUN_ID': '42941131826/evidence'},
+        {'T01_REVIEWED_UNCERTAIN_CLEANUP': 'no'},
+        {'T01_COUNT_STOP_VERIFIED': 'no'},
+    ):
+        result, calls = recovery_case(overrides, command)
+        assert result.returncode != 0, (command, overrides)
+        assert calls == '', (command, overrides, calls)
 
 
 check_host_lifecycle()

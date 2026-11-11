@@ -30,18 +30,22 @@ assert WORKFLOW_CONFIG['jobs']['preflight']['if'] == "inputs.scenario != 'count-
 RECOVERY_JOB = WORKFLOW_CONFIG['jobs']['count-recovery']
 assert RECOVERY_JOB['if'] == "inputs.scenario == 'count-recovery'"
 assert RECOVERY_JOB['environment'] == 't01-smoke'
-assert len(RECOVERY_JOB['steps']) == 3
+assert len(RECOVERY_JOB['steps']) == 4
 assert RECOVERY_JOB['steps'][0]['uses'] == 'actions/checkout@v4'
-assert RECOVERY_JOB['steps'][1]['uses'] == 'aws-actions/configure-aws-credentials@v4'
-assert RECOVERY_JOB['steps'][1]['with']['role-to-assume'] == '${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}'
-recovery_step = RECOVERY_JOB['steps'][2]
-assert recovery_step['run'] == 'bash infra/t01-smoke/workflow.sh count-recovery'
-assert recovery_step['env'] == {
+RECOVERY_ENV = {
     'SCENARIO': 'count-recovery',
     'T01_RECOVERY_RUN_ID': '${{ inputs.recovery_run_id }}',
     'T01_REVIEWED_UNCERTAIN_CLEANUP': 'yes',
     'T01_COUNT_STOP_VERIFIED': 'yes',
 }
+validation_step = RECOVERY_JOB['steps'][1]
+assert validation_step['run'] == 'bash infra/t01-smoke/workflow.sh validate-recovery'
+assert validation_step['env'] == RECOVERY_ENV
+assert RECOVERY_JOB['steps'][2]['uses'] == 'aws-actions/configure-aws-credentials@v4'
+assert RECOVERY_JOB['steps'][2]['with']['role-to-assume'] == '${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}'
+recovery_step = RECOVERY_JOB['steps'][3]
+assert recovery_step['run'] == 'bash infra/t01-smoke/workflow.sh count-recovery'
+assert recovery_step['env'] == RECOVERY_ENV
 WORKFLOW_STEPS = WORKFLOW_CONFIG['jobs']['preflight']['steps']
 collect_step = next(step for step in WORKFLOW_STEPS if step.get('id') == 'collect')
 assert collect_step['env']['SCENARIO'] == '${{ inputs.scenario }}'
