@@ -55,6 +55,7 @@ async function request(method, path, requestBody, credential) {
     headers: {
       accept: 'application/json',
       ...(requestBody === undefined ? {} : { 'content-type': 'application/json' }),
+      ...(path === '/teamkimi/smoke/count-tokens' ? { 'anthropic-version': '2023-06-01' } : {}),
       ...(credential === undefined ? {} : { 'x-api-key': credential }),
     },
     body: requestBody,

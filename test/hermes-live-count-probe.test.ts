@@ -47,6 +47,7 @@ async function runProbe(countStatus = 200, revokeStatus = 200, countResponse: Re
     }
     if (request.url === '/teamkimi/smoke/count-tokens') {
       expect(request.headers['x-api-key']).toBe('tcc-synthetic-only');
+      expect(request.headers['anthropic-version']).toBe('2023-06-01');
       let body = '';
       request.on('data', (chunk) => { body += chunk; });
       request.on('end', () => {
