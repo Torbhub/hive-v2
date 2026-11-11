@@ -429,7 +429,28 @@ esac
             assert 'release aws-acts' not in calls
 
 
+def original_count_job():
+    return {
+        'id': 1,
+        'run_id': 42941131826,
+        'name': 'preflight',
+        'status': 'completed',
+        'conclusion': 'failure',
+        'steps': [
+            {'name': 'Start only the run-scoped count listener', 'status': 'completed', 'conclusion': 'success'},
+            {'name': 'Stop only the run-scoped count listener', 'status': 'completed', 'conclusion': 'success'},
+            {'name': 'Issue the run-scoped TeamKimi control credential', 'status': 'completed', 'conclusion': 'skipped'},
+        ],
+    }
+
+
+def original_count_document(job=None):
+    return json.dumps({'total_count': 1, 'jobs': [job or original_count_job()]})
+
+
 def recovery_case(overrides=None, command='count-recovery'):
+    overrides = dict(overrides or {})
+    response = overrides.pop('GH_RESPONSE', original_count_document())
     temporary, root = workspace()
     with temporary:
         mock_aws(root, '''#!/usr/bin/env bash
@@ -448,51 +469,90 @@ case "$1 $2" in
   'secretsmanager delete-secret') exit 0 ;;
 esac
 ''')
+        (root / 'gh-response.json').write_text(response)
+        write_executable(root / 'bin/gh', '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_GH_CALLS"
+if [ "$#" -ne 2 ] || [ "$1" != api ] || [ "$2" != "/repos/$GITHUB_REPOSITORY/actions/runs/$T01_RECOVERY_RUN_ID/jobs?per_page=100" ]; then
+  exit 90
+fi
+cat "$MOCK_GH_RESPONSE"
+exit "${MOCK_GH_RC:-0}"
+''')
         env = {
             'SCENARIO': 'count-recovery',
             'T01_RECOVERY_RUN_ID': '42941131826',
             'T01_REVIEWED_UNCERTAIN_CLEANUP': 'yes',
             'T01_COUNT_STOP_VERIFIED': 'yes',
+            'GITHUB_REPOSITORY': 'Torbhub/hive-v2',
+            'GH_TOKEN': 'synthetic-github-token',
+            'MOCK_GH_CALLS': str(root / 'gh-calls'),
+            'MOCK_GH_RESPONSE': str(root / 'gh-response.json'),
         }
-        if overrides:
-            env.update(overrides)
+        env.update(overrides)
         result = run(root, command, env)
         calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
-        return result, calls
+        gh_calls = (root / 'gh-calls').read_text() if (root / 'gh-calls').exists() else ''
+        return result, calls, gh_calls
 
 
-result, calls = recovery_case()
+expected_gh_call = 'api /repos/Torbhub/hive-v2/actions/runs/42941131826/jobs?per_page=100\n'
+result, calls, gh_calls = recovery_case()
 assert result.returncode == 0, (result.stdout, result.stderr)
+assert gh_calls == expected_gh_call, gh_calls
 lines = calls.splitlines()
 renew = 'renew aws-acts hive-v2-t01-smoke/42941131826'
 deletes = [line for line in lines if line.startswith('secretsmanager delete-secret ')]
 assert len(deletes) == 1, calls
 assert 'secretsmanager delete-secret --secret-id hive-v2-t01-smoke-health-42941131826 ' in deletes[0], calls
 assert lines[0] == renew, calls
-assert lines.index(renew) < lines.index(deletes[0]), calls
 assert 'release aws-acts hive-v2-t01-smoke/42941131826' in lines, calls
 assert 'acquire aws-acts' not in calls
 assert 'hive-v2-t01-smoke/123' not in calls
 assert 'hive-v2-t01-smoke-health-123' not in calls
 
-result, calls = recovery_case({'MOCK_RENEW_RC': '17'})
+result, calls, gh_calls = recovery_case({'MOCK_RENEW_RC': '17'})
 assert result.returncode != 0
 assert calls == renew + '\n', calls
-assert 'delete-secret' not in calls and 'release aws-acts' not in calls
+assert gh_calls == expected_gh_call, gh_calls
 
-result, calls = recovery_case(command='validate-recovery')
+result, calls, gh_calls = recovery_case(command='validate-recovery')
 assert result.returncode == 0, (result.stdout, result.stderr)
 assert calls == '', calls
+assert gh_calls == expected_gh_call, gh_calls
+
+matrix_job = original_count_job()
+matrix_job['steps'][2]['conclusion'] = 'success'
+preflight_job = original_count_job()
+preflight_job['steps'][0]['conclusion'] = 'skipped'
+successful_job = original_count_job()
+successful_job['conclusion'] = 'success'
+missing_step_job = original_count_job()
+missing_step_job['steps'].pop(1)
+duplicate_step_job = original_count_job()
+duplicate_step_job['steps'].append(duplicate_step_job['steps'][1])
+wrong_status_job = original_count_job()
+wrong_status_job['steps'][1]['status'] = 'in_progress'
+wrong_status_job['steps'][1]['conclusion'] = None
 
 for command in ('validate-recovery', 'count-recovery'):
     for overrides in (
+        {'SCENARIO': 'count'},
         {'T01_RECOVERY_RUN_ID': ''},
         {'T01_RECOVERY_RUN_ID': 'run-42941131826'},
         {'T01_RECOVERY_RUN_ID': '42941131826/evidence'},
         {'T01_REVIEWED_UNCERTAIN_CLEANUP': 'no'},
         {'T01_COUNT_STOP_VERIFIED': 'no'},
+        {'GH_RESPONSE': original_count_document(matrix_job)},
+        {'GH_RESPONSE': original_count_document(preflight_job)},
+        {'GH_RESPONSE': original_count_document(successful_job)},
+        {'GH_RESPONSE': original_count_document(missing_step_job)},
+        {'GH_RESPONSE': original_count_document(duplicate_step_job)},
+        {'GH_RESPONSE': original_count_document(wrong_status_job)},
+        {'GH_RESPONSE': json.dumps({'total_count': 2, 'jobs': [original_count_job(), original_count_job()]})},
+        {'GH_RESPONSE': '{not-json'},
+        {'MOCK_GH_RC': '17'},
     ):
-        result, calls = recovery_case(overrides, command)
+        result, calls, _ = recovery_case(overrides, command)
         assert result.returncode != 0, (command, overrides)
         assert calls == '', (command, overrides, calls)
 

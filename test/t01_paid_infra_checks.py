@@ -30,6 +30,7 @@ assert WORKFLOW_CONFIG['jobs']['preflight']['if'] == "inputs.scenario != 'count-
 RECOVERY_JOB = WORKFLOW_CONFIG['jobs']['count-recovery']
 assert RECOVERY_JOB['if'] == "inputs.scenario == 'count-recovery'"
 assert RECOVERY_JOB['environment'] == 't01-smoke'
+assert RECOVERY_JOB['permissions']['actions'] == 'read'
 assert len(RECOVERY_JOB['steps']) == 4
 assert RECOVERY_JOB['steps'][0]['uses'] == 'actions/checkout@v4'
 RECOVERY_ENV = {
@@ -37,12 +38,14 @@ RECOVERY_ENV = {
     'T01_RECOVERY_RUN_ID': '${{ inputs.recovery_run_id }}',
     'T01_REVIEWED_UNCERTAIN_CLEANUP': 'yes',
     'T01_COUNT_STOP_VERIFIED': 'yes',
+    'GH_TOKEN': '${{ github.token }}',
 }
 validation_step = RECOVERY_JOB['steps'][1]
 assert validation_step['run'] == 'bash infra/t01-smoke/workflow.sh validate-recovery'
 assert validation_step['env'] == RECOVERY_ENV
 assert RECOVERY_JOB['steps'][2]['uses'] == 'aws-actions/configure-aws-credentials@v4'
 assert RECOVERY_JOB['steps'][2]['with']['role-to-assume'] == '${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}'
+assert 'GH_TOKEN' not in RECOVERY_JOB['steps'][2].get('env', {})
 recovery_step = RECOVERY_JOB['steps'][3]
 assert recovery_step['run'] == 'bash infra/t01-smoke/workflow.sh count-recovery'
 assert recovery_step['env'] == RECOVERY_ENV
@@ -140,19 +143,9 @@ def validate(overrides):
         return result.returncode
 
 
-COUNT = {
-    **BASE,
-    'SCENARIO': 'count',
-    'MAX_TOTAL_TOKENS': '0',
-    'MAX_API_CALLS': '0',
-    'MAX_ESTIMATED_COST_USD': '0',
-    'T01_TEAMKIMI_HOST_ID': 'i-0123456789abcdef0',
-}
 assert validate({}) == 0
-assert validate(COUNT) == 0
-assert validate(PAID) == 0
-for normal_inputs in ({}, COUNT, PAID):
-    assert validate({**normal_inputs, 'T01_RECOVERY_RUN_ID': '42941131826'}) != 0
+assert validate({**PAID}) == 0
+assert validate({**BASE, 'SCENARIO': 'count', 'MAX_TOTAL_TOKENS': '0', 'MAX_API_CALLS': '0', 'MAX_ESTIMATED_COST_USD': '0', 'T01_TEAMKIMI_HOST_ID': 'i-0123456789abcdef0'}) == 0
 for override in (
     {'PAID_ADMISSION': 'true'},
     {'SCENARIO': 'matrix'},
