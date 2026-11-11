@@ -429,6 +429,67 @@ esac
             assert 'release aws-acts' not in calls
 
 
+def recovery_case(overrides=None):
+    temporary, root = workspace()
+    with temporary:
+        mock_aws(root, '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+case "$1 $2" in
+  'cloudformation describe-stacks')
+    printf 'ValidationError: Stack with id hive-v2-t01-smoke does not exist\n' >&2
+    exit 254
+    ;;
+  'secretsmanager describe-secret')
+    if grep -q delete-secret "$MOCK_CALLS"; then
+      printf 'ResourceNotFoundException: secret not found\n' >&2
+      exit 254
+    fi
+    ;;
+  'secretsmanager delete-secret') exit 0 ;;
+esac
+''')
+        env = {
+            'SCENARIO': 'count-recovery',
+            'T01_RECOVERY_RUN_ID': '42941131826',
+            'T01_REVIEWED_UNCERTAIN_CLEANUP': 'yes',
+            'T01_COUNT_STOP_VERIFIED': 'yes',
+        }
+        if overrides:
+            env.update(overrides)
+        result = run(root, 'count-recovery', env)
+        calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
+        return result, calls
+
+
+result, calls = recovery_case()
+assert result.returncode == 0, (result.stdout, result.stderr)
+lines = calls.splitlines()
+renew = 'renew aws-acts hive-v2-t01-smoke/42941131826'
+delete = 'delete-secret --secret-id hive-v2-t01-smoke-health-42941131826 --force-delete-without-recovery --query {Name:Name,VersionId:VersionId,DeletionDate:DeletionDate} --output json'
+assert lines[0] == renew, calls
+assert lines.index(renew) < lines.index(delete), calls
+assert 'release aws-acts hive-v2-t01-smoke/42941131826' in lines, calls
+assert 'acquire aws-acts' not in calls
+assert 'hive-v2-t01-smoke/123' not in calls
+assert 'hive-v2-t01-smoke-health-123' not in calls
+
+result, calls = recovery_case({'MOCK_RENEW_RC': '17'})
+assert result.returncode != 0
+assert calls == renew + '\n', calls
+assert 'delete-secret' not in calls and 'release aws-acts' not in calls
+
+for overrides in (
+    {'T01_RECOVERY_RUN_ID': ''},
+    {'T01_RECOVERY_RUN_ID': 'run-42941131826'},
+    {'T01_RECOVERY_RUN_ID': '42941131826/evidence'},
+    {'T01_REVIEWED_UNCERTAIN_CLEANUP': 'no'},
+    {'T01_COUNT_STOP_VERIFIED': 'no'},
+):
+    result, calls = recovery_case(overrides)
+    assert result.returncode != 0, overrides
+    assert calls == '', (overrides, calls)
+
+
 check_host_lifecycle()
 check_install_contract()
 check_installer_idempotence()

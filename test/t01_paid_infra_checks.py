@@ -21,7 +21,28 @@ CLEANUP_SOURCE = WORKFLOW_SCRIPT.split('cleanup() {', 1)[1].split('\ncase ', 1)[
 assert 'paid evidence is incomplete or uncertain' in CLEANUP_SOURCE
 assert 'stop_mutex_renewal' not in CLEANUP_SOURCE
 assert 'deploy-mutex.sh release aws-acts' not in CLEANUP_SOURCE
-WORKFLOW_STEPS = yaml.safe_load(WORKFLOW)['jobs']['preflight']['steps']
+WORKFLOW_CONFIG = yaml.safe_load(WORKFLOW)
+INPUTS = WORKFLOW_CONFIG[True]['workflow_dispatch']['inputs']
+assert INPUTS['scenario']['options'] == ['preflight', 'count', 'matrix', 'count-recovery']
+assert INPUTS['recovery_run_id']['type'] == 'string'
+assert INPUTS['recovery_run_id']['required'] is False
+assert WORKFLOW_CONFIG['jobs']['preflight']['if'] == "inputs.scenario != 'count-recovery'"
+RECOVERY_JOB = WORKFLOW_CONFIG['jobs']['count-recovery']
+assert RECOVERY_JOB['if'] == "inputs.scenario == 'count-recovery'"
+assert RECOVERY_JOB['environment'] == 't01-smoke'
+assert len(RECOVERY_JOB['steps']) == 3
+assert RECOVERY_JOB['steps'][0]['uses'] == 'actions/checkout@v4'
+assert RECOVERY_JOB['steps'][1]['uses'] == 'aws-actions/configure-aws-credentials@v4'
+assert RECOVERY_JOB['steps'][1]['with']['role-to-assume'] == '${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}'
+recovery_step = RECOVERY_JOB['steps'][2]
+assert recovery_step['run'] == 'bash infra/t01-smoke/workflow.sh count-recovery'
+assert recovery_step['env'] == {
+    'SCENARIO': 'count-recovery',
+    'T01_RECOVERY_RUN_ID': '${{ inputs.recovery_run_id }}',
+    'T01_REVIEWED_UNCERTAIN_CLEANUP': 'yes',
+    'T01_COUNT_STOP_VERIFIED': 'yes',
+}
+WORKFLOW_STEPS = WORKFLOW_CONFIG['jobs']['preflight']['steps']
 collect_step = next(step for step in WORKFLOW_STEPS if step.get('id') == 'collect')
 assert collect_step['env']['SCENARIO'] == '${{ inputs.scenario }}'
 upload_step = next(step for step in WORKFLOW_STEPS if step.get('id') == 'upload')
@@ -43,6 +64,8 @@ assert 'TEAMKIMI_PROXY_KEY' not in health_step.get('env', {})
 assert WORKFLOW.count('secrets.TEAMKIMI_PROXY_KEY') == 1
 RUNBOOK = (ROOT / 'infra/t01-smoke/RUNBOOK.md').read_text()
 assert 'T01_REVIEWED_UNCERTAIN_CLEANUP=yes' in RUNBOOK
+assert 'scenario=count-recovery' in RUNBOOK
+assert 'recovery_run_id=<original-run-id>' in RUNBOOK
 
 BASE = {
     'PATH': os.environ['PATH'],
@@ -113,9 +136,19 @@ def validate(overrides):
         return result.returncode
 
 
+COUNT = {
+    **BASE,
+    'SCENARIO': 'count',
+    'MAX_TOTAL_TOKENS': '0',
+    'MAX_API_CALLS': '0',
+    'MAX_ESTIMATED_COST_USD': '0',
+    'T01_TEAMKIMI_HOST_ID': 'i-0123456789abcdef0',
+}
 assert validate({}) == 0
-assert validate({**PAID}) == 0
-assert validate({**BASE, 'SCENARIO': 'count', 'MAX_TOTAL_TOKENS': '0', 'MAX_API_CALLS': '0', 'MAX_ESTIMATED_COST_USD': '0', 'T01_TEAMKIMI_HOST_ID': 'i-0123456789abcdef0'}) == 0
+assert validate(COUNT) == 0
+assert validate(PAID) == 0
+for normal_inputs in ({}, COUNT, PAID):
+    assert validate({**normal_inputs, 'T01_RECOVERY_RUN_ID': '42941131826'}) != 0
 for override in (
     {'PAID_ADMISSION': 'true'},
     {'SCENARIO': 'matrix'},
