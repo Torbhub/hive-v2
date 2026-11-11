@@ -90,10 +90,14 @@ afterEach(async () => {
 });
 
 describe('T01 count-only probe', () => {
-  it('preserves separate output and reasoning ceilings in a valid total budget', () => {
+  it('freezes one valid count message and the reviewed token caps', () => {
     const body = JSON.parse(requestBody.toString('utf8'));
-    expect(body.max_tokens).toBe(6000);
-    expect(body.thinking.budget_tokens).toBe(4000);
+    expect(body).toEqual({
+      model: 'kimi-code/k3.1-pro',
+      max_tokens: 6000,
+      thinking: { type: 'enabled', budget_tokens: 4000 },
+      messages: [{ role: 'user', content: 'Count tokens.' }],
+    });
     expect(body.max_tokens - body.thinking.budget_tokens).toBe(2000);
   });
 

@@ -6,6 +6,10 @@ STACK_NAME=hive-v2-t01-smoke
 HEALTH_SECRET_NAME="hive-v2-t01-smoke-health-${GITHUB_RUN_ID:-manual}"
 PROXY_SECRET_NAME="hive-v2-t01-smoke-proxy-${GITHUB_RUN_ID:-manual}"
 OWNER="hive-v2-t01-smoke/${GITHUB_RUN_ID:-manual}"
+if [ "${SCENARIO:-}" = count-recovery ]; then
+  HEALTH_SECRET_NAME="hive-v2-t01-smoke-health-${T01_RECOVERY_RUN_ID:-}"
+  OWNER="hive-v2-t01-smoke/${T01_RECOVERY_RUN_ID:-}"
+fi
 
 require_env() {
   local name="$1"
@@ -399,7 +403,8 @@ cleanup() {
       status=1
     fi
   fi
-  if (( status == 0 )) && [ "${SCENARIO:-preflight}" = count ] && [ "${T01_COUNT_STOP_VERIFIED:-no}" != yes ]; then
+  if (( status == 0 )) && { [ "${SCENARIO:-preflight}" = count ] || [ "${SCENARIO:-preflight}" = count-recovery ]; } \
+      && [ "${T01_COUNT_STOP_VERIFIED:-no}" != yes ]; then
     echo "count host stop is not proven; retaining the fleet mutex and run state" >&2
     status=1
   fi
@@ -409,6 +414,70 @@ cleanup() {
 count_host() {
   [ "${SCENARIO:-}" = count ] || return 2
   bash infra/t01-smoke/count-host.sh "$1"
+}
+
+validate_recovery() {
+  [ "${SCENARIO:-}" = count-recovery ] || { echo "count recovery requires SCENARIO=count-recovery" >&2; exit 2; }
+  require_env T01_RECOVERY_RUN_ID
+  [[ "$T01_RECOVERY_RUN_ID" =~ ^[0-9]+$ ]] || { echo "recovery run ID must be numeric" >&2; exit 2; }
+  [ "${T01_REVIEWED_UNCERTAIN_CLEANUP:-}" = yes ] || { echo "count recovery requires reviewed uncertain cleanup" >&2; exit 2; }
+  [ "${T01_COUNT_STOP_VERIFIED:-}" = yes ] || { echo "count recovery requires verified count host stop" >&2; exit 2; }
+  require_env GITHUB_REPOSITORY
+  require_env GH_TOKEN
+  local jobs_file
+  jobs_file="$(mktemp)"
+  trap "rm -f $jobs_file" RETURN
+  if ! gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$T01_RECOVERY_RUN_ID/jobs?per_page=100" > "$jobs_file"; then
+    echo "original count job lookup failed" >&2
+    exit 2
+  fi
+  python3 - "$jobs_file" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+
+def invalid():
+    raise SystemExit("original run is not a failed count job")
+
+
+with Path(sys.argv[1]).open('rb') as stream:
+    payload = stream.read(1_048_577)
+if len(payload) > 1_048_576:
+    raise SystemExit("original count job response is too large")
+try:
+    document = json.loads(payload)
+except (UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit("original count job response is malformed")
+if not isinstance(document, dict) or type(document.get('total_count')) is not int:
+    invalid()
+jobs = document.get('jobs')
+if document['total_count'] != 1 or not isinstance(jobs, list) or len(jobs) != 1:
+    invalid()
+job = jobs[0]
+if not isinstance(job, dict) or job.get('status') != 'completed' or job.get('conclusion') != 'failure':
+    invalid()
+steps = job.get('steps')
+if not isinstance(steps, list):
+    invalid()
+expected = {
+    'Start only the run-scoped count listener': 'success',
+    'Stop only the run-scoped count listener': 'success',
+    'Issue the run-scoped TeamKimi control credential': 'skipped',
+}
+for name, conclusion in expected.items():
+    matches = [step for step in steps if isinstance(step, dict) and step.get('name') == name]
+    if len(matches) != 1:
+        invalid()
+    if matches[0].get('status') != 'completed' or matches[0].get('conclusion') != conclusion:
+        invalid()
+PY
+}
+
+recover_count() {
+  validate_recovery
+  bash infra/deploy-mutex.sh renew aws-acts "$OWNER"
+  with_mutex_renewal cleanup
 }
 
 case "${1:-}" in
@@ -423,5 +492,7 @@ case "${1:-}" in
   deploy) with_mutex_renewal deploy_stack ;;
   collect) with_mutex_renewal collect_evidence ;;
   cleanup) with_mutex_renewal cleanup ;;
-  *) echo "usage: $0 validate-inputs|acquire|count-start|count-stop|issue-health-credential|refresh-host-attestation|refresh-health-credential|issue-proxy-credential|deploy|collect|cleanup" >&2; exit 2 ;;
+  validate-recovery) validate_recovery ;;
+  count-recovery) recover_count ;;
+  *) echo "usage: $0 validate-inputs|acquire|count-start|count-stop|issue-health-credential|refresh-host-attestation|refresh-health-credential|issue-proxy-credential|deploy|collect|cleanup|validate-recovery|count-recovery" >&2; exit 2 ;;
 esac

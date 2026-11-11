@@ -49,7 +49,9 @@ The Anthropic body has this exact policy:
   "model": "kimi-code/k3.1-pro",
   "max_tokens": 6000,
   "thinking": { "type": "enabled", "budget_tokens": 4000 },
-  "messages": []
+  "messages": [
+    { "role": "user", "content": "Count tokens." }
+  ]
 }
 ```
 

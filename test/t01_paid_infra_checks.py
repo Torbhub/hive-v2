@@ -21,7 +21,35 @@ CLEANUP_SOURCE = WORKFLOW_SCRIPT.split('cleanup() {', 1)[1].split('\ncase ', 1)[
 assert 'paid evidence is incomplete or uncertain' in CLEANUP_SOURCE
 assert 'stop_mutex_renewal' not in CLEANUP_SOURCE
 assert 'deploy-mutex.sh release aws-acts' not in CLEANUP_SOURCE
-WORKFLOW_STEPS = yaml.safe_load(WORKFLOW)['jobs']['preflight']['steps']
+WORKFLOW_CONFIG = yaml.safe_load(WORKFLOW)
+INPUTS = WORKFLOW_CONFIG[True]['workflow_dispatch']['inputs']
+assert INPUTS['scenario']['options'] == ['preflight', 'count', 'matrix', 'count-recovery']
+assert INPUTS['recovery_run_id']['type'] == 'string'
+assert INPUTS['recovery_run_id']['required'] is False
+assert WORKFLOW_CONFIG['jobs']['preflight']['if'] == "inputs.scenario != 'count-recovery'"
+RECOVERY_JOB = WORKFLOW_CONFIG['jobs']['count-recovery']
+assert RECOVERY_JOB['if'] == "inputs.scenario == 'count-recovery'"
+assert RECOVERY_JOB['environment'] == 't01-smoke'
+assert RECOVERY_JOB['permissions']['actions'] == 'read'
+assert len(RECOVERY_JOB['steps']) == 4
+assert RECOVERY_JOB['steps'][0]['uses'] == 'actions/checkout@v4'
+RECOVERY_ENV = {
+    'SCENARIO': 'count-recovery',
+    'T01_RECOVERY_RUN_ID': '${{ inputs.recovery_run_id }}',
+    'T01_REVIEWED_UNCERTAIN_CLEANUP': 'yes',
+    'T01_COUNT_STOP_VERIFIED': 'yes',
+    'GH_TOKEN': '${{ github.token }}',
+}
+validation_step = RECOVERY_JOB['steps'][1]
+assert validation_step['run'] == 'bash infra/t01-smoke/workflow.sh validate-recovery'
+assert validation_step['env'] == RECOVERY_ENV
+assert RECOVERY_JOB['steps'][2]['uses'] == 'aws-actions/configure-aws-credentials@v4'
+assert RECOVERY_JOB['steps'][2]['with']['role-to-assume'] == '${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}'
+assert 'GH_TOKEN' not in RECOVERY_JOB['steps'][2].get('env', {})
+recovery_step = RECOVERY_JOB['steps'][3]
+assert recovery_step['run'] == 'bash infra/t01-smoke/workflow.sh count-recovery'
+assert recovery_step['env'] == RECOVERY_ENV
+WORKFLOW_STEPS = WORKFLOW_CONFIG['jobs']['preflight']['steps']
 collect_step = next(step for step in WORKFLOW_STEPS if step.get('id') == 'collect')
 assert collect_step['env']['SCENARIO'] == '${{ inputs.scenario }}'
 upload_step = next(step for step in WORKFLOW_STEPS if step.get('id') == 'upload')
@@ -43,6 +71,8 @@ assert 'TEAMKIMI_PROXY_KEY' not in health_step.get('env', {})
 assert WORKFLOW.count('secrets.TEAMKIMI_PROXY_KEY') == 1
 RUNBOOK = (ROOT / 'infra/t01-smoke/RUNBOOK.md').read_text()
 assert 'T01_REVIEWED_UNCERTAIN_CLEANUP=yes' in RUNBOOK
+assert 'scenario=count-recovery' in RUNBOOK
+assert 'recovery_run_id=<original-run-id>' in RUNBOOK
 
 BASE = {
     'PATH': os.environ['PATH'],
