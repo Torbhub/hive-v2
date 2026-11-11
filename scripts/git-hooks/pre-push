@@ -48,6 +48,7 @@ python3 test/t01_runtime_checks.py
 python3 test/t01_workflow_checks.py
 python3 test/t01_lifecycle_checks.py
 python3 test/t01_health_broker_checks.py
+python3 test/t01_bootstrap_evidence_checks.py
 python3 test/t01_paid_infra_checks.py
 python3 test/t01_count_listener_checks.py
 cfn-lint infra/template.yaml infra/t01-smoke/template.yaml

@@ -240,6 +240,16 @@ Resources:
           #!/bin/bash
           set -euo pipefail
           umask 077
+          on_bootstrap_error() {
+            local status=$?
+            trap - ERR
+            set +e
+            printf 'T01_EVIDENCE {"check":"bootstrap_error","status":"failed","category":"failure:userdata-bootstrap","origin":"userdata-bootstrap:%s"}\n' "$status" > /dev/console
+            printf 'T01_EVIDENCE {"check":"provisioning","status":"failed"}\n' > /dev/console
+            printf 'T01_EVIDENCE {"check":"complete","status":"failed"}\n' > /dev/console
+            exit 1
+          }
+          trap on_bootstrap_error ERR
           shutdown -h +${LifetimeMinutes}
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
             --max-redirs 0 --connect-timeout 10 --max-time 60 \
@@ -265,6 +275,7 @@ Resources:
           export LIFETIME_MINUTES='${LifetimeMinutes}' RUN_ID='${RunId}'
           export RUNTIME_SCRIPT_URL='${RuntimeScriptUrl}'
           export RUNTIME_SCRIPT_SHA256='${RuntimeScriptSha256}'
+          trap - ERR
           /opt/t01-provision.sh
       Tags:
         - Key: Name
