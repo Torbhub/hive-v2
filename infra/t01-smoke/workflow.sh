@@ -421,12 +421,16 @@ count_host() {
   bash infra/t01-smoke/count-host.sh "$1"
 }
 
-recover_count() {
+validate_recovery() {
   [ "${SCENARIO:-}" = count-recovery ] || { echo "count recovery requires SCENARIO=count-recovery" >&2; exit 2; }
   require_env T01_RECOVERY_RUN_ID
   [[ "$T01_RECOVERY_RUN_ID" =~ ^[0-9]+$ ]] || { echo "recovery run ID must be numeric" >&2; exit 2; }
   [ "${T01_REVIEWED_UNCERTAIN_CLEANUP:-}" = yes ] || { echo "count recovery requires reviewed uncertain cleanup" >&2; exit 2; }
   [ "${T01_COUNT_STOP_VERIFIED:-}" = yes ] || { echo "count recovery requires verified count host stop" >&2; exit 2; }
+}
+
+recover_count() {
+  validate_recovery
   bash infra/deploy-mutex.sh renew aws-acts "$OWNER"
   with_mutex_renewal cleanup
 }
@@ -443,6 +447,7 @@ case "${1:-}" in
   deploy) with_mutex_renewal deploy_stack ;;
   collect) with_mutex_renewal collect_evidence ;;
   cleanup) with_mutex_renewal cleanup ;;
+  validate-recovery) validate_recovery ;;
   count-recovery) recover_count ;;
-  *) echo "usage: $0 validate-inputs|acquire|count-start|count-stop|issue-health-credential|refresh-host-attestation|refresh-health-credential|issue-proxy-credential|deploy|collect|cleanup|count-recovery" >&2; exit 2 ;;
+  *) echo "usage: $0 validate-inputs|acquire|count-start|count-stop|issue-health-credential|refresh-host-attestation|refresh-health-credential|issue-proxy-credential|deploy|collect|cleanup|validate-recovery|count-recovery" >&2; exit 2 ;;
 esac

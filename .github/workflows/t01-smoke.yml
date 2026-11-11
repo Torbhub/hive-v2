@@ -254,6 +254,13 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+      - name: Validate reviewed count recovery before AWS access
+        env:
+          SCENARIO: count-recovery
+          T01_RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+          T01_REVIEWED_UNCERTAIN_CLEANUP: 'yes'
+          T01_COUNT_STOP_VERIFIED: 'yes'
+        run: bash infra/t01-smoke/workflow.sh validate-recovery
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}
