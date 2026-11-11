@@ -4,10 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: Explicit preflight, count-only, or paid matrix scenario
+        description: Explicit preflight, count-only, paid matrix, or reviewed count recovery
         required: true
         type: choice
-        options: [preflight, count, matrix]
+        options: [preflight, count, matrix, count-recovery]
+      recovery_run_id:
+        description: Original numeric count run ID for reviewed recovery
+        required: false
+        type: string
       matrix:
         description: Explicit paid matrix selection
         required: true
@@ -60,6 +64,7 @@ concurrency:
 
 jobs:
   preflight:
+    if: inputs.scenario != 'count-recovery'
     environment: t01-smoke
     runs-on: ubuntu-latest
     timeout-minutes: 150
@@ -239,3 +244,25 @@ jobs:
       - name: Fail after evidence and cleanup finish
         if: always() && (steps.collect.outcome == 'failure' || steps.upload.outcome == 'failure' || steps.count_start.outcome == 'failure' || steps.count_stop.outcome == 'failure')
         run: exit 1
+  count-recovery:
+    if: inputs.scenario == 'count-recovery'
+    environment: t01-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.HIVE_T01_SMOKE_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 9000
+      - name: Renew the original owner and clean up the reviewed count run
+        env:
+          SCENARIO: count-recovery
+          T01_RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+          T01_REVIEWED_UNCERTAIN_CLEANUP: 'yes'
+          T01_COUNT_STOP_VERIFIED: 'yes'
+        run: bash infra/t01-smoke/workflow.sh count-recovery

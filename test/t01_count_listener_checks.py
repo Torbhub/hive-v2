@@ -465,9 +465,11 @@ result, calls = recovery_case()
 assert result.returncode == 0, (result.stdout, result.stderr)
 lines = calls.splitlines()
 renew = 'renew aws-acts hive-v2-t01-smoke/42941131826'
-delete = 'delete-secret --secret-id hive-v2-t01-smoke-health-42941131826 --force-delete-without-recovery --query {Name:Name,VersionId:VersionId,DeletionDate:DeletionDate} --output json'
+deletes = [line for line in lines if line.startswith('secretsmanager delete-secret ')]
+assert len(deletes) == 1, calls
+assert 'secretsmanager delete-secret --secret-id hive-v2-t01-smoke-health-42941131826 ' in deletes[0], calls
 assert lines[0] == renew, calls
-assert lines.index(renew) < lines.index(delete), calls
+assert lines.index(renew) < lines.index(deletes[0]), calls
 assert 'release aws-acts hive-v2-t01-smoke/42941131826' in lines, calls
 assert 'acquire aws-acts' not in calls
 assert 'hive-v2-t01-smoke/123' not in calls

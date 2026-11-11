@@ -41,7 +41,7 @@ const expectedRequest = {
   model: 'kimi-code/k3.1-pro',
   max_tokens: 6000,
   thinking: { type: 'enabled', budget_tokens: 4000 },
-  messages: [],
+  messages: [{ role: 'user', content: 'Count tokens.' }],
 };
 if (JSON.stringify(JSON.parse(body.toString('utf8'))) !== JSON.stringify(expectedRequest)) throw new Error('count-request-not-frozen');
 const requestHash = createHash('sha256').update(body).digest('hex');

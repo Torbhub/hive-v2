@@ -6,6 +6,11 @@ STACK_NAME=hive-v2-t01-smoke
 HEALTH_SECRET_NAME="hive-v2-t01-smoke-health-${GITHUB_RUN_ID:-manual}"
 PROXY_SECRET_NAME="hive-v2-t01-smoke-proxy-${GITHUB_RUN_ID:-manual}"
 OWNER="hive-v2-t01-smoke/${GITHUB_RUN_ID:-manual}"
+if [ "${SCENARIO:-}" = count-recovery ]; then
+  HEALTH_SECRET_NAME="hive-v2-t01-smoke-health-${T01_RECOVERY_RUN_ID:-}"
+  PROXY_SECRET_NAME="hive-v2-t01-smoke-proxy-${T01_RECOVERY_RUN_ID:-}"
+  OWNER="hive-v2-t01-smoke/${T01_RECOVERY_RUN_ID:-}"
+fi
 
 require_env() {
   local name="$1"
@@ -26,6 +31,10 @@ validate_integer_cap() {
 
 validate_inputs() {
   require_env SCENARIO
+  if [ -n "${T01_RECOVERY_RUN_ID:-}" ]; then
+    echo "recovery run ID is not valid for preflight, count, or matrix" >&2
+    exit 2
+  fi
   require_env MATRIX
   require_env PAID_ADMISSION
   validate_integer_cap MAX_INPUT_TOKENS 16000
@@ -399,7 +408,8 @@ cleanup() {
       status=1
     fi
   fi
-  if (( status == 0 )) && [ "${SCENARIO:-preflight}" = count ] && [ "${T01_COUNT_STOP_VERIFIED:-no}" != yes ]; then
+  if (( status == 0 )) && { [ "${SCENARIO:-preflight}" = count ] || [ "${SCENARIO:-preflight}" = count-recovery ]; } \
+      && [ "${T01_COUNT_STOP_VERIFIED:-no}" != yes ]; then
     echo "count host stop is not proven; retaining the fleet mutex and run state" >&2
     status=1
   fi
@@ -409,6 +419,16 @@ cleanup() {
 count_host() {
   [ "${SCENARIO:-}" = count ] || return 2
   bash infra/t01-smoke/count-host.sh "$1"
+}
+
+recover_count() {
+  [ "${SCENARIO:-}" = count-recovery ] || { echo "count recovery requires SCENARIO=count-recovery" >&2; exit 2; }
+  require_env T01_RECOVERY_RUN_ID
+  [[ "$T01_RECOVERY_RUN_ID" =~ ^[0-9]+$ ]] || { echo "recovery run ID must be numeric" >&2; exit 2; }
+  [ "${T01_REVIEWED_UNCERTAIN_CLEANUP:-}" = yes ] || { echo "count recovery requires reviewed uncertain cleanup" >&2; exit 2; }
+  [ "${T01_COUNT_STOP_VERIFIED:-}" = yes ] || { echo "count recovery requires verified count host stop" >&2; exit 2; }
+  bash infra/deploy-mutex.sh renew aws-acts "$OWNER"
+  with_mutex_renewal cleanup
 }
 
 case "${1:-}" in
@@ -423,5 +443,6 @@ case "${1:-}" in
   deploy) with_mutex_renewal deploy_stack ;;
   collect) with_mutex_renewal collect_evidence ;;
   cleanup) with_mutex_renewal cleanup ;;
-  *) echo "usage: $0 validate-inputs|acquire|count-start|count-stop|issue-health-credential|refresh-host-attestation|refresh-health-credential|issue-proxy-credential|deploy|collect|cleanup" >&2; exit 2 ;;
+  count-recovery) recover_count ;;
+  *) echo "usage: $0 validate-inputs|acquire|count-start|count-stop|issue-health-credential|refresh-host-attestation|refresh-health-credential|issue-proxy-credential|deploy|collect|cleanup|count-recovery" >&2; exit 2 ;;
 esac
