@@ -533,6 +533,8 @@ duplicate_step_job['steps'].append(duplicate_step_job['steps'][1])
 wrong_status_job = original_count_job()
 wrong_status_job['steps'][1]['status'] = 'in_progress'
 wrong_status_job['steps'][1]['conclusion'] = None
+failed_stop_job = original_count_job()
+failed_stop_job['steps'][1]['conclusion'] = 'failure'
 
 for command in ('validate-recovery', 'count-recovery'):
     for overrides in (
@@ -542,12 +544,19 @@ for command in ('validate-recovery', 'count-recovery'):
         {'T01_RECOVERY_RUN_ID': '42941131826/evidence'},
         {'T01_REVIEWED_UNCERTAIN_CLEANUP': 'no'},
         {'T01_COUNT_STOP_VERIFIED': 'no'},
+    ):
+        result, calls, gh_calls = recovery_case(overrides, command)
+        assert result.returncode != 0, (command, overrides)
+        assert calls == '', (command, overrides, calls)
+        assert gh_calls == '', (command, overrides, gh_calls)
+    for overrides in (
         {'GH_RESPONSE': original_count_document(matrix_job)},
         {'GH_RESPONSE': original_count_document(preflight_job)},
         {'GH_RESPONSE': original_count_document(successful_job)},
         {'GH_RESPONSE': original_count_document(missing_step_job)},
         {'GH_RESPONSE': original_count_document(duplicate_step_job)},
         {'GH_RESPONSE': original_count_document(wrong_status_job)},
+        {'GH_RESPONSE': original_count_document(failed_stop_job)},
         {'GH_RESPONSE': json.dumps({'total_count': 2, 'jobs': [original_count_job(), original_count_job()]})},
         {'GH_RESPONSE': '{not-json'},
         {'MOCK_GH_RC': '17'},
