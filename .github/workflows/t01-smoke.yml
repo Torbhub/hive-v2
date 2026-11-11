@@ -252,6 +252,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
       - name: Validate reviewed count recovery before AWS access
@@ -260,6 +261,7 @@ jobs:
           T01_RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
           T01_REVIEWED_UNCERTAIN_CLEANUP: 'yes'
           T01_COUNT_STOP_VERIFIED: 'yes'
+          GH_TOKEN: ${{ github.token }}
         run: bash infra/t01-smoke/workflow.sh validate-recovery
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -272,4 +274,5 @@ jobs:
           T01_RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
           T01_REVIEWED_UNCERTAIN_CLEANUP: 'yes'
           T01_COUNT_STOP_VERIFIED: 'yes'
+          GH_TOKEN: ${{ github.token }}
         run: bash infra/t01-smoke/workflow.sh count-recovery

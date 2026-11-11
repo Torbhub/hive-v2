@@ -8,7 +8,6 @@ PROXY_SECRET_NAME="hive-v2-t01-smoke-proxy-${GITHUB_RUN_ID:-manual}"
 OWNER="hive-v2-t01-smoke/${GITHUB_RUN_ID:-manual}"
 if [ "${SCENARIO:-}" = count-recovery ]; then
   HEALTH_SECRET_NAME="hive-v2-t01-smoke-health-${T01_RECOVERY_RUN_ID:-}"
-  PROXY_SECRET_NAME="hive-v2-t01-smoke-proxy-${T01_RECOVERY_RUN_ID:-}"
   OWNER="hive-v2-t01-smoke/${T01_RECOVERY_RUN_ID:-}"
 fi
 
@@ -31,10 +30,6 @@ validate_integer_cap() {
 
 validate_inputs() {
   require_env SCENARIO
-  if [ -n "${T01_RECOVERY_RUN_ID:-}" ]; then
-    echo "recovery run ID is not valid for preflight, count, or matrix" >&2
-    exit 2
-  fi
   require_env MATRIX
   require_env PAID_ADMISSION
   validate_integer_cap MAX_INPUT_TOKENS 16000
@@ -427,6 +422,56 @@ validate_recovery() {
   [[ "$T01_RECOVERY_RUN_ID" =~ ^[0-9]+$ ]] || { echo "recovery run ID must be numeric" >&2; exit 2; }
   [ "${T01_REVIEWED_UNCERTAIN_CLEANUP:-}" = yes ] || { echo "count recovery requires reviewed uncertain cleanup" >&2; exit 2; }
   [ "${T01_COUNT_STOP_VERIFIED:-}" = yes ] || { echo "count recovery requires verified count host stop" >&2; exit 2; }
+  require_env GITHUB_REPOSITORY
+  require_env GH_TOKEN
+  local jobs_file
+  jobs_file="$(mktemp)"
+  trap "rm -f $jobs_file" RETURN
+  if ! gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$T01_RECOVERY_RUN_ID/jobs?per_page=100" > "$jobs_file"; then
+    echo "original count job lookup failed" >&2
+    exit 2
+  fi
+  python3 - "$jobs_file" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+
+def invalid():
+    raise SystemExit("original run is not a failed count job")
+
+
+with Path(sys.argv[1]).open('rb') as stream:
+    payload = stream.read(1_048_577)
+if len(payload) > 1_048_576:
+    raise SystemExit("original count job response is too large")
+try:
+    document = json.loads(payload)
+except (UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit("original count job response is malformed")
+if not isinstance(document, dict) or type(document.get('total_count')) is not int:
+    invalid()
+jobs = document.get('jobs')
+if document['total_count'] != 1 or not isinstance(jobs, list) or len(jobs) != 1:
+    invalid()
+job = jobs[0]
+if not isinstance(job, dict) or job.get('status') != 'completed' or job.get('conclusion') != 'failure':
+    invalid()
+steps = job.get('steps')
+if not isinstance(steps, list):
+    invalid()
+expected = {
+    'Start only the run-scoped count listener': 'success',
+    'Stop only the run-scoped count listener': 'success',
+    'Issue the run-scoped TeamKimi control credential': 'skipped',
+}
+for name, conclusion in expected.items():
+    matches = [step for step in steps if isinstance(step, dict) and step.get('name') == name]
+    if len(matches) != 1:
+        invalid()
+    if matches[0].get('status') != 'completed' or matches[0].get('conclusion') != conclusion:
+        invalid()
+PY
 }
 
 recover_count() {
