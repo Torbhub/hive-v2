@@ -520,6 +520,16 @@ assert result.returncode == 0, (result.stdout, result.stderr)
 assert calls == '', calls
 assert gh_calls == expected_gh_call, gh_calls
 
+skipped_recovery_job = {'name': 'count-recovery', 'status': 'completed', 'conclusion': 'skipped'}
+skipped_companion_document = json.dumps({
+    'total_count': 2,
+    'jobs': [original_count_job(), skipped_recovery_job],
+})
+result, calls, gh_calls = recovery_case({'GH_RESPONSE': skipped_companion_document}, 'validate-recovery')
+assert result.returncode == 0, (result.stdout, result.stderr)
+assert calls == '', calls
+assert gh_calls == expected_gh_call, gh_calls
+
 matrix_job = original_count_job()
 matrix_job['steps'][2]['conclusion'] = 'success'
 preflight_job = original_count_job()
@@ -558,6 +568,8 @@ for command in ('validate-recovery', 'count-recovery'):
         {'GH_RESPONSE': original_count_document(wrong_status_job)},
         {'GH_RESPONSE': original_count_document(failed_stop_job)},
         {'GH_RESPONSE': json.dumps({'total_count': 2, 'jobs': [original_count_job(), original_count_job()]})},
+        {'GH_RESPONSE': json.dumps({'total_count': 2, 'jobs': [original_count_job(), {**skipped_recovery_job, 'conclusion': 'failure'}]})},
+        {'GH_RESPONSE': json.dumps({'total_count': 2, 'jobs': [original_count_job(), {**skipped_recovery_job, 'name': 'unexpected'}]})},
         {'GH_RESPONSE': '{not-json'},
         {'MOCK_GH_RC': '17'},
     ):

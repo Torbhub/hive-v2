@@ -452,10 +452,16 @@ except (UnicodeDecodeError, json.JSONDecodeError):
 if not isinstance(document, dict) or type(document.get('total_count')) is not int:
     invalid()
 jobs = document.get('jobs')
-if document['total_count'] != 1 or not isinstance(jobs, list) or len(jobs) != 1:
+if not isinstance(jobs, list) or document['total_count'] != len(jobs):
     invalid()
-job = jobs[0]
-if not isinstance(job, dict) or job.get('status') != 'completed' or job.get('conclusion') != 'failure':
+preflight_jobs = [job for job in jobs if isinstance(job, dict) and job.get('name') == 'preflight']
+companion_jobs = [job for job in jobs if isinstance(job, dict) and job.get('name') == 'count-recovery']
+if len(preflight_jobs) != 1 or len(preflight_jobs) + len(companion_jobs) != len(jobs):
+    invalid()
+if any(job.get('status') != 'completed' or job.get('conclusion') != 'skipped' for job in companion_jobs):
+    invalid()
+job = preflight_jobs[0]
+if job.get('status') != 'completed' or job.get('conclusion') != 'failure':
     invalid()
 steps = job.get('steps')
 if not isinstance(steps, list):
