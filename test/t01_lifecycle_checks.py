@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -444,3 +445,88 @@ fi
 
 
 missing_renewal_status_case()
+
+
+def render_user_data(root):
+    template = (root / 'infra/t01-smoke/template.yaml').read_text()
+    user_data = template.split('        Fn::Base64: !Sub |\n', 1)[1].split('      Tags:', 1)[0]
+    user_data = '\n'.join(line[10:] for line in user_data.splitlines()) + '\n'
+    user_data = user_data.replace('${LifetimeMinutes}', '5')
+    user_data = re.sub(r'\$\{[A-Za-z][A-Za-z0-9]*\}', 'test', user_data)
+    user_data = user_data.replace('/opt/t01-provision.sh', str(root / 'provision.sh'))
+    user_data = user_data.replace('/var/lib/t01/evidence', str(root / 'evidence'))
+    user_data = user_data.replace('> /dev/console', f'>> {root / "console"}')
+    user_data = user_data.replace(
+        'PROVISION_TIMEOUT_SECONDS="$(( 5 * 60 - 60 ))"',
+        'PROVISION_TIMEOUT_SECONDS=1',
+    )
+    script = root / 'user-data.sh'
+    write_executable(script, user_data)
+    return script
+
+
+def run_user_data(root):
+    write_executable(root / 'bin/shutdown', '#!/usr/bin/env bash\nexit 0\n')
+    write_executable(root / 'bin/sha256sum', '#!/usr/bin/env bash\nexit 0\n')
+    write_executable(root / 'bin/curl', '''#!/usr/bin/env bash
+output=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then
+    shift
+    output="$1"
+  fi
+  shift
+done
+cp "$MOCK_PROVISION" "$output"
+''')
+    process = subprocess.Popen(
+        ['bash', str(render_user_data(root))], cwd=root,
+        env={
+            'PATH': f'{root}/bin:{os.environ["PATH"]}',
+            'MOCK_PROVISION': str(root / 'provision-source.sh'),
+            'MOCK_EVIDENCE_DIR': str(root / 'evidence'),
+        },
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, 9)
+        process.communicate()
+        raise AssertionError('stalled UserData did not publish terminal evidence') from None
+    return process, stdout, stderr
+
+
+def stalled_user_data_publishes_terminal_evidence():
+    temporary, root = workspace()
+    with temporary:
+        write_executable(root / 'provision-source.sh', '''#!/usr/bin/env bash
+mkdir -p "$MOCK_EVIDENCE_DIR"
+printf '%s\n' '{"check":"node_runtime_locked","status":"passed","version":"22.23.2"}' > "$MOCK_EVIDENCE_DIR/preflight.jsonl"
+printf 'T01_EVIDENCE %s\n' '{"check":"node_runtime_locked","status":"passed","version":"22.23.2"}' >> "$MOCK_EVIDENCE_DIR/../console"
+sleep 60
+''')
+        process, stdout, stderr = run_user_data(root)
+        assert process.returncode == 124, (process.returncode, stdout, stderr)
+        console = (root / 'console').read_text()
+        records = [json.loads(line.removeprefix('T01_EVIDENCE ')) for line in console.splitlines()]
+        assert [record['check'] for record in records] == [
+            'node_runtime_locked', 'bootstrap_error', 'provisioning', 'complete',
+        ], records
+        assert records[1] == {
+            'check': 'bootstrap_error', 'status': 'failed',
+            'category': 'timeout:instance-bootstrap', 'origin': 'instance-bootstrap:124',
+        }, records
+        assert records[-1] == {'check': 'complete', 'status': 'failed'}, records
+        candidate = root / 'candidate.jsonl'
+        candidate.write_text(''.join(
+            line.removeprefix('T01_EVIDENCE ') + '\n' for line in console.splitlines()
+        ))
+        classification = subprocess.check_output(
+            ['python3', str(root / 'infra/t01-smoke/runtime.py'), 'classify-evidence', str(candidate)],
+            text=True,
+        ).strip()
+        assert classification == 'failed', classification
+
+
+stalled_user_data_publishes_terminal_evidence()
