@@ -43,7 +43,7 @@ Preflight, count, and matrix use the existing deploy role for the fixed host att
 ## Execute the count-only probe
 
 1. Complete and review the no-spend preflight first.
-2. Let the normal deploy install the reviewed TeamKimi PR #20 source. The commit is `35b0d0d9b2e124b3418e3c049bd79c2f857b8cfe`. The codeload archive SHA-256 is `e5584a3d9e8cc7b4b4196146f39f0964f06adc2fe79b5fbb5b7631a848972b58`. Provisioning installs read-only source and a disabled template. It does not start TeamKimi or change `teamkimi-tmux.service`.
+2. Let the normal deploy install the reviewed TeamKimi PR #21 source. The commit is `a0ee0a586ca445ad4d1cdb4fbf14579236b017e7`. The codeload archive SHA-256 is `30e2c4ccae49f8819b061f90237f4c2e0fc55b81638f3d26b4ea0df8704fb9b7`. Provisioning installs read-only source and a disabled template. It does not start TeamKimi or change `teamkimi-tmux.service`.
 3. Dispatch `scenario=count`, `matrix=none`, and `paid_admission=false`.
 4. Set `max_total_tokens=0`, `max_api_calls=0`, `max_estimated_cost_usd=0`, and `max_paid_admissions=0`. Any paid cap or admission fails before AWS credentials are used.
 5. After validation and one fleet mutex acquisition, the workflow uses `HIVE_DEPLOY_ROLE_ARN` only for the fixed host start and stop commands. It uses the T01 smoke role for every other step. The start command checks the source stamp and an unused loopback port. The normal proxy must stay active with an unchanged nonzero PID. The run unit must stay active, and its nonzero PID must own the loopback listener.

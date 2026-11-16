@@ -9,10 +9,10 @@ Group=ubuntu
 Environment=HOME=/home/ubuntu
 Environment=TEAMKIMI_DISABLE_AUTOUPDATE=1
 Environment=PATH=/opt/node22/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/opt/node22/bin/node /opt/teamkimi-count/35b0d0d9b2e124b3418e3c049bd79c2f857b8cfe/src/index.js smoke-count --state-path /var/lib/teamkimi-count/%i/ledger.json
+ExecStart=/opt/node22/bin/node /opt/teamkimi-count/a0ee0a586ca445ad4d1cdb4fbf14579236b017e7/src/index.js smoke-count --state-path /var/lib/teamkimi-count/%i/ledger.json
 StateDirectory=teamkimi-count/%i
 StateDirectoryMode=0700
-ReadOnlyPaths=/home/ubuntu /opt/teamkimi-count/35b0d0d9b2e124b3418e3c049bd79c2f857b8cfe
+ReadOnlyPaths=/home/ubuntu /opt/teamkimi-count/a0ee0a586ca445ad4d1cdb4fbf14579236b017e7
 ReadWritePaths=/var/lib/teamkimi-count/%i
 Restart=no
 RuntimeMaxSec=10800
