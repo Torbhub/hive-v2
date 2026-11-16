@@ -169,8 +169,8 @@ Run `cleanup --manifest /operator/export/manifest.json` from the scheduled opera
 
 ## No-paid cross-repo wire test
 
-`test/hermes-live-wire.test.ts` starts TeamKimi PR #20's real proxy and a synthetic loopback upstream.
-Set `TEAMKIMI_SMOKE_SOURCE` to a read-only checkout of TeamKimi commit `35b0d0d9b2e124b3418e3c049bd79c2f857b8cfe`.
+`test/hermes-live-wire.test.ts` starts TeamKimi PR #21's real proxy and a synthetic loopback upstream.
+Set `TEAMKIMI_SMOKE_SOURCE` to a read-only checkout of TeamKimi commit `a0ee0a586ca445ad4d1cdb4fbf14579236b017e7`.
 The test verifies that commit before starting the proxy and uses `test/fixtures/hermes-smoke-http.json` for count-token and message examples.
 The upstream request uses `k3.1-pro`. Local policy and evidence keep `kimi-code/k3.1-pro`.
 The test uses the real Hive adapter and checks canonicalization, request headers, Anthropic policy, count-before-generation order, `inputVerified`, exact usage, provider errors, malformed SSE, missing final usage, detachment, and revocation.
