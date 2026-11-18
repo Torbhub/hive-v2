@@ -6,6 +6,7 @@ import type { Approvals, HubView, ProjectMode, QuestionAnswer, QuestionBatch } f
 import { ago, buildNeeds, homeTilde } from '../src/ui/look';
 import { StretchText } from './Stretch';
 import { ActionContext, Btn } from './action';
+import { Branches } from './branches';
 import { LogView } from './logview';
 import { ProjectCard, StatusDot } from './project';
 import { NeedCard } from './needs';
@@ -36,6 +37,7 @@ export function App() {
   const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting' | 'killing' | 'deleting'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
   const [logs, setLogs] = useState<{ project: string; agent?: string } | null>(null);
+  const [branchesFor, setBranchesFor] = useState<string | null>(null);
   const [questionsOpen, setQuestionsOpen] = useState(false);
   const actingRef = useRef(false);
 
@@ -201,6 +203,7 @@ export function App() {
   }, [act]);
 
   const onLogs = useCallback((project: string, agent?: string) => setLogs({ project, agent }), []);
+  const onBranches = useCallback((project: string) => setBranchesFor(project), []);
 
   const onQuestionAnswer = useCallback((batch: QuestionBatch, answers: QuestionAnswer[]) => {
     const who = `${batch.project} · ${batch.agent}`;
@@ -217,6 +220,15 @@ export function App() {
       return `${batch.project}: question batch cancelled`;
     });
   }, [act]);
+
+  if (branchesFor) {
+    return (
+      <ActionContext.Provider value={{ acting, pressed }}>
+        <Branches project={branchesFor} onBack={() => setBranchesFor(null)} />
+        <Toaster theme="dark" position="bottom-right" />
+      </ActionContext.Provider>
+    );
+  }
 
   if (logs) {
     return (
@@ -338,6 +350,7 @@ export function App() {
               onNudge={onNudge}
               onInterrupt={onInterrupt}
               onLogs={onLogs}
+              onBranches={onBranches}
               onKill={onKill}
               onDelete={onDelete}
             />

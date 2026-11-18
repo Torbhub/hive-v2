@@ -8,6 +8,7 @@ import {
   NATIVE_HISTORY_SNAPSHOT_CAP,
   createNativeBranch,
   parseNativeBranchResult,
+  previewNativeBranchRejoin,
   readNativeBranch,
   reconcileNativeBranchCreation,
   reconcileNativeBranchRejoin,
@@ -264,6 +265,17 @@ async function reviewedFixture() {
   const branch = await reviewNativeBranch(fixture.selector, fixture.branch.id, {
     findingIds: [findingId], principal: fixture.principal, registry: fixture.registry,
   }, fixture.native, { now: NOW });
+  return { ...fixture, branch };
+}
+
+async function terminalFixture(status: 'rejoined' | 'unknown') {
+  const fixture = await reviewedFixture();
+  if (status === 'unknown') fixture.native.state.submitError = new Error('terminal outcome is unknown');
+  const branch = await rejoinNativeBranch(fixture.selector, fixture.branch.id, {
+    principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
+  }, fixture.native, { now: NOW });
+  expect(branch.rejoin?.status).toBe(status);
+  fixture.native.submitPrompt.mockClear();
   return { ...fixture, branch };
 }
 
@@ -561,7 +573,7 @@ describe('authenticated human review', () => {
     const refreshed = await refreshNativeBranch(fixture.selector, fixture.branch.id, fixture.native, { now: NOW });
     expect(refreshed.status).toBe('stale');
     await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW })).rejects.toThrow(/stale/);
     expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
   });
@@ -577,10 +589,10 @@ describe('authenticated human review', () => {
       await writeJson(hivePath(fixture.home, 'branches', `${fixture.branch.id}.json`), withoutReview);
     };
     await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW })).rejects.toThrow(/review|changed|stale/);
     await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW })).rejects.not.toThrow(/Cannot read properties of undefined/);
   });
 });
@@ -600,7 +612,7 @@ describe('current team and grant authority', () => {
     const fixture = await reviewedFixture();
     invalidateAuthority(fixture, failure);
     await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW })).rejects.toThrow(/grant|expired|revoked|project|not found|authorization/);
     expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
   });
@@ -631,7 +643,7 @@ describe('current team and grant authority', () => {
     const rejoin = await reviewedFixture();
     await reassignTeam(rejoin.home);
     await expect(rejoinNativeBranch(rejoin.selector, rejoin.branch.id, {
-      principal: rejoin.principal, registry: rejoin.registry,
+      principal: rejoin.principal, registry: rejoin.registry, reviewDigest: rejoin.branch.review!.digest,
     }, rejoin.native, { now: NOW })).rejects.toThrow(/TeamEntry|scope|agent|task|session/);
     expect(rejoin.native.submitPrompt).not.toHaveBeenCalled();
   });
@@ -640,7 +652,7 @@ describe('current team and grant authority', () => {
     const fixture = await reviewedFixture();
     beforeThirdApproverCall(fixture, () => reassignTeam(fixture.home));
     await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW })).rejects.toThrow(/TeamEntry|scope|agent|task|session/);
     expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
   });
@@ -652,7 +664,7 @@ describe('current team and grant authority', () => {
       grant.expiresAt = 1;
     });
     await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW })).rejects.toThrow(/expired|grant|authorization/);
     expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
   });
@@ -669,7 +681,7 @@ describe('current team and grant authority', () => {
         vi.setSystemTime(NOW_MS + 15 * 60_000);
       };
       await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-        principal: fixture.principal, registry: fixture.registry,
+        principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
       }, fixture.native)).rejects.toThrow(/expired|stale/);
       expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
     } finally {
@@ -694,8 +706,9 @@ describe('selective rejoin and exact delivery fencing', () => {
         fs.stat(hivePath(fixture.home, 'team.json.lock')).then(() => true).catch(() => false),
       ]));
     };
+    const preview = previewNativeBranchRejoin(fixture.branch);
     const rejoined = await rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW });
 
     expect(locks).toEqual([[true, true]]);
@@ -704,18 +717,28 @@ describe('selective rejoin and exact delivery fencing', () => {
     const [sessionId, request] = fixture.native.submitPrompt.mock.calls[0];
     expect(sessionId).toBe(PARENT);
     expect(Object.keys(request).sort()).toEqual(['content', 'promptId']);
+    expect(preview).toEqual(previewNativeBranchRejoin(fixture.branch));
+    expect(request.promptId).toBe(preview.promptId);
+    expect(request.content).toEqual([{ type: 'text', text: preview.prompt }]);
     expect(intent?.rejoin).toMatchObject({ status: 'submitting', promptId: request.promptId });
     expect(intent?.rejoin).not.toHaveProperty('prompt');
     const payload = JSON.parse(request.content[0].text);
     expect(payload).toMatchObject({
       branchId: fixture.branch.id,
       reviewDigest: fixture.branch.review!.digest,
-      parentSessionId: PARENT,
-      childSessionId: CHILD,
+      promptId: request.promptId,
       untrusted: true,
     });
+    for (const field of ['parentSessionId', 'childSessionId', 'parentHistoryHash', 'childHistoryHash']) {
+      expect(payload).not.toHaveProperty(field);
+    }
     expect(payload.findings).toHaveLength(1);
     expect(payload.findings[0].answer).toBe('The child route has no turn_index.');
+    expect(payload.findings[0]).not.toHaveProperty('nativeEvidence');
+    expect(request.content[0].text).not.toContain(PARENT);
+    expect(request.content[0].text).not.toContain(CHILD);
+    expect(request.content[0].text).not.toContain(fixture.branch.parentSnapshot.historyHash);
+    expect(request.content[0].text).not.toContain(fixture.branch.childSnapshot.historyHash);
     expect(request.content[0].text).not.toContain('UNSELECTED FINDING');
     expect(request.content[0].text).not.toContain('PRIVATE PARENT TRANSCRIPT');
     expect(rejoined.rejoin).toMatchObject({ status: 'rejoined', promptId: request.promptId, nativeMessageId: 'msg_rejoin' });
@@ -723,9 +746,26 @@ describe('selective rejoin and exact delivery fencing', () => {
     expect(rejoined.rejoin).not.toHaveProperty('submittedAt');
 
     await rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW });
     expect(fixture.native.submitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires the displayed review digest before native refresh or submission', async () => {
+    const fixture = await reviewedFixture();
+    const missing = {
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
+    };
+    delete (missing as { reviewDigest?: string }).reviewDigest;
+    fixture.native.getSession.mockClear();
+    await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, missing, fixture.native, { now: NOW }))
+      .rejects.toThrow(/review ?digest|digest/i);
+    await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
+      ...missing, reviewDigest: '0'.repeat(64),
+    }, fixture.native, { now: NOW })).rejects.toThrow(/review ?digest|digest/i);
+    expect(fixture.native.getSession).not.toHaveBeenCalled();
+    expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
+    expect((await readNativeBranch(fixture.selector, fixture.branch.id)).rejoin).toBeUndefined();
   });
 
   it.each([
@@ -737,7 +777,7 @@ describe('selective rejoin and exact delivery fencing', () => {
     const fixture = await reviewedFixture();
     fixture.native.state.ack = ack;
     const result = await rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW });
     expect(result.rejoin?.status).toBe('unknown');
     expect(result.status).not.toBe('rejoined');
@@ -748,7 +788,7 @@ describe('selective rejoin and exact delivery fencing', () => {
     const fixture = await reviewedFixture();
     fixture.native.state.submitError = new Error('crash before ack id persistence');
     const unknown = await rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW });
     expect(unknown.rejoin).toMatchObject({ status: 'unknown' });
     expect(unknown.rejoin?.nativeMessageId).toBeUndefined();
@@ -768,7 +808,7 @@ describe('selective rejoin and exact delivery fencing', () => {
       }
     };
     const unknown = await rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW });
     expect(unknown.rejoin).toMatchObject({ status: 'unknown', nativeMessageId: 'msg_rejoin' });
     const reconciled = await reconcileNativeBranchRejoin(fixture.selector, fixture.branch.id, fixture.native, { now: NOW });
@@ -795,7 +835,7 @@ describe('selective rejoin and exact delivery fencing', () => {
         await writeJson(file, updated);
       };
       const result = await rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-        principal: fixture.principal, registry: fixture.registry,
+        principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
       }, fixture.native, { now: NOW });
       expect(result.status).not.toBe('rejoined');
       expect(result.rejoin?.status).toBe('unknown');
@@ -805,14 +845,14 @@ describe('selective rejoin and exact delivery fencing', () => {
   it('rejects an expired review and parent advancement before prompting', async () => {
     const expired = await reviewedFixture();
     await expect(rejoinNativeBranch(expired.selector, expired.branch.id, {
-      principal: expired.principal, registry: expired.registry,
+      principal: expired.principal, registry: expired.registry, reviewDigest: expired.branch.review!.digest,
     }, expired.native, { now: new Date(NOW_MS + 15 * 60_000).toISOString() })).rejects.toThrow(/expired|stale/);
     expect(expired.native.submitPrompt).not.toHaveBeenCalled();
 
     const diverged = await reviewedFixture();
     diverged.native.state.histories.set(PARENT, [message('msg_parent_2', PARENT, 'unrelated parent work'), ...diverged.native.state.histories.get(PARENT)!]);
     await expect(rejoinNativeBranch(diverged.selector, diverged.branch.id, {
-      principal: diverged.principal, registry: diverged.registry,
+      principal: diverged.principal, registry: diverged.registry, reviewDigest: diverged.branch.review!.digest,
     }, diverged.native, { now: NOW })).rejects.toThrow(/diverged/);
     expect(diverged.native.submitPrompt).not.toHaveBeenCalled();
   });
@@ -825,6 +865,7 @@ describe('selective rejoin and exact delivery fencing', () => {
     });
     await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
       principal: { kind: 'human', subject: 'user:bob', aclEpoch: 1 }, registry: fixture.registry,
+      reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW })).rejects.toThrow(/reviewer|grant|authorization|not found/);
     expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
   });
@@ -839,7 +880,7 @@ describe('selective rejoin and exact delivery fencing', () => {
     const row = fixture.registry.items.find((candidate) => candidate.pk === pk && candidate.sk === sk)!;
     row[field] = value;
     await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW })).rejects.toThrow(/grant|epoch|authorization|not found/);
     expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
   });
@@ -849,7 +890,7 @@ describe('selective rejoin and exact delivery fencing', () => {
     process.env.HIVE_COLLABORATION_ENABLED = '1';
     await disableExecution(paused.root, 'demo');
     await expect(rejoinNativeBranch(paused.selector, paused.branch.id, {
-      principal: paused.principal, registry: paused.registry,
+      principal: paused.principal, registry: paused.registry, reviewDigest: paused.branch.review!.digest,
     }, paused.native, { now: NOW })).rejects.toThrow(/paused/);
     expect(paused.native.submitPrompt).not.toHaveBeenCalled();
 
@@ -857,9 +898,41 @@ describe('selective rejoin and exact delivery fencing', () => {
     const disabled = await reviewedFixture();
     delete process.env.HIVE_NATIVE_BRANCHES;
     await expect(rejoinNativeBranch(disabled.selector, disabled.branch.id, {
-      principal: disabled.principal, registry: disabled.registry,
+      principal: disabled.principal, registry: disabled.registry, reviewDigest: disabled.branch.review!.digest,
     }, disabled.native, { now: NOW })).rejects.toThrow(/disabled|HIVE_NATIVE_BRANCHES/);
     expect(disabled.native.submitPrompt).not.toHaveBeenCalled();
+  });
+});
+
+describe('terminal rejoin replay authority', () => {
+  it.each(
+    (['rejoined', 'unknown'] as const).flatMap((status) =>
+      (['agent', 'another human', 'expired grant', 'expired review', 'wrong digest'] as const)
+        .map((failure) => [status, failure] as const)),
+  )('%s replay rejects %s without another submission', async (status, failure) => {
+    const fixture = await terminalFixture(status);
+    let principal = fixture.principal;
+    let reviewDigest = fixture.branch.review!.digest;
+    let at = NOW;
+    if (failure === 'agent') principal = AGENT;
+    if (failure === 'another human') {
+      fixture.registry.items.push({
+        pk: 'ACL#demo#demo-1#*', sk: 'PRINCIPAL#user:bob', project: 'demo', task: 'demo-1',
+        principal: 'user:bob', grantId: 'bob-grant', actions: ['execute'], aclEpoch: 1, revokedAt: null,
+      });
+      principal = { kind: 'human', subject: 'user:bob', aclEpoch: 1 };
+    }
+    if (failure === 'expired grant') {
+      fixture.registry.items.find((row) => row.pk === 'ACL#demo#demo-1#*'
+        && row.sk === 'PRINCIPAL#user:alice')!.expiresAt = 1;
+    }
+    if (failure === 'expired review') at = fixture.branch.review!.expiresAt;
+    if (failure === 'wrong digest') reviewDigest = '0'.repeat(64);
+
+    await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
+      principal, registry: fixture.registry, reviewDigest,
+    }, fixture.native, { now: at })).rejects.toThrow(/human|reviewer|grant|expired|digest|authorization|not found/);
+    expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
   });
 });
 
@@ -872,7 +945,7 @@ describe('stored record validation and hub isolation', () => {
       : { ...fixture.branch, review: { ...fixture.branch.review!, digest: '0'.repeat(64) } };
     await writeJson(file, updated);
     await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
-      principal: fixture.principal, registry: fixture.registry,
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW })).rejects.toThrow(/digest|schema|conflict/);
     expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
   });

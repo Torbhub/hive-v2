@@ -31,6 +31,52 @@ const VIEW = {
   tasks: [], dialogs: {}, decisions: [], questions: [], updatedAt: Date.now(), error: '',
 };
 
+const BRANCH_ID = '7ca3c50b-8304-45f0-a925-f41d10a14cf2';
+const REVIEW_DIGEST = 'a'.repeat(64);
+const PROMPT_ID = `hive-rejoin-${BRANCH_ID}-${REVIEW_DIGEST.slice(0, 16)}`;
+const REJOINED_AT = '2026-11-18T12:02:00.000Z';
+const BRANCH_PROMPT = JSON.stringify({
+  kind: 'hive.native-branch.reviewed-findings',
+  branchId: BRANCH_ID,
+  reviewDigest: REVIEW_DIGEST,
+  promptId: PROMPT_ID,
+  escaped: '<img src=x onerror="window.__branchXss = true">\\n\"quoted\"',
+});
+const ACTIVE_BRANCH = {
+  id: BRANCH_ID,
+  kind: 'child',
+  status: 'active',
+  purpose: 'Review the transport boundary',
+  agent: 'builder',
+  task: 'demo-1',
+  createdAt: '2026-11-18T12:00:00.000Z',
+  updatedAt: '2026-11-18T12:01:00.000Z',
+  hasResult: true,
+  error: 'child transport needs attention',
+  findings: [{
+    id: 'finding-1',
+    answer: 'Return only the reviewed finding.',
+    recommendation: 'Use the exact prompt preview.',
+    uncertainty: 'No unselected finding is included.',
+  }],
+};
+let branchState: Record<string, unknown> = { ...ACTIVE_BRANCH };
+let branchRequests: { url: string; method: string; body?: Record<string, unknown> }[] = [];
+
+function branchSummary() {
+  return {
+    id: ACTIVE_BRANCH.id,
+    status: branchState.status,
+    purpose: ACTIVE_BRANCH.purpose,
+    agent: ACTIVE_BRANCH.agent,
+    task: ACTIVE_BRANCH.task,
+    createdAt: ACTIVE_BRANCH.createdAt,
+    updatedAt: branchState.updatedAt,
+    hasResult: true,
+    error: ACTIVE_BRANCH.error,
+  };
+}
+
 async function chromeExecutable(): Promise<string> {
   const candidates = [
     process.env.CHROME_BIN,
@@ -131,6 +177,66 @@ beforeAll(async () => {
           if (req.url === '/api/view') {
             res.setHeader('content-type', 'application/json');
             res.end(JSON.stringify(VIEW));
+            return;
+          }
+          if (req.url?.startsWith('/api/branch')) {
+            void (async () => {
+              const url = new URL(req.url ?? '/', 'http://fake');
+              let body: Record<string, unknown> | undefined;
+              if (req.method === 'POST') {
+                let raw = '';
+                for await (const chunk of req) raw += chunk;
+                body = JSON.parse(raw || '{}') as Record<string, unknown>;
+              }
+              branchRequests.push({ url: req.url!, method: req.method ?? 'GET', ...(body ? { body } : {}) });
+              const send = (value: unknown, status = 200) => {
+                const raw = JSON.stringify(value);
+                res.statusCode = status;
+                res.setHeader('content-type', 'application/json');
+                res.end(raw);
+              };
+              if (url.pathname === '/api/branches' && req.method === 'GET') {
+                send({ ok: true, branches: [branchSummary()] });
+                return;
+              }
+              if (url.pathname === '/api/branch' && req.method === 'GET') {
+                send({ ok: true, branch: branchState });
+                return;
+              }
+              if (url.pathname === '/api/branch-review' && req.method === 'POST') {
+                branchState = {
+                  ...ACTIVE_BRANCH,
+                  review: {
+                    digest: REVIEW_DIGEST,
+                    findingIds: ['finding-1'],
+                    createdAt: ACTIVE_BRANCH.updatedAt,
+                    expiresAt: '2026-11-18T12:16:00.000Z',
+                    promptId: PROMPT_ID,
+                    prompt: BRANCH_PROMPT,
+                  },
+                };
+                send({ ok: true, branch: branchState });
+                return;
+              }
+              if (url.pathname === '/api/branch-rejoin' && req.method === 'POST') {
+                if (body?.reviewDigest !== REVIEW_DIGEST) {
+                  send({ ok: false, detail: 'review digest mismatch' }, 400);
+                  return;
+                }
+                branchState = {
+                  ...branchState,
+                  status: 'rejoined',
+                  updatedAt: REJOINED_AT,
+                  rejoin: {
+                    status: 'rejoined', reviewDigest: REVIEW_DIGEST, promptId: PROMPT_ID,
+                    nativeMessageId: 'msg_rejoined', rejoinedAt: REJOINED_AT,
+                  },
+                };
+                send({ ok: true, branch: branchState });
+                return;
+              }
+              send({ ok: false, detail: 'not found' }, 404);
+            })().catch(next);
             return;
           }
           if (req.url?.startsWith('/api/')) {
@@ -254,5 +360,61 @@ describe('real Chrome dictation E2E', () => {
     expect(await cdp.evaluate('window.__trackStops')).toBe(2);
     expect(await cdp.evaluate(`document.querySelector('input[aria-label="new task for demo"]').value`)).toBe(TRANSCRIPT);
     expect(submissions).toEqual([]);
+  }, 30_000);
+});
+
+describe('real Chrome native branch E2E', () => {
+  it('lazy loads, reviews, previews, arms without posting, confirms the digest, and shows the actual receipt', async () => {
+    branchState = { ...ACTIVE_BRANCH };
+    branchRequests = [];
+    expect(await cdp.evaluate(`window.__fetchTrace.filter(([url]) => url.includes('/api/branch')).length`)).toBe(0);
+    expect(await cdp.evaluate(`(() => {
+      const matches = [...document.querySelectorAll('button')].filter((button) => button.textContent === 'Branches');
+      return matches.length === 1 && matches[0].parentElement?.textContent?.includes('Logs');
+    })()`)).toBe(true);
+
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'Branches').click()`);
+    await cdp.waitFor(`document.body.innerText.includes('Review the transport boundary')`);
+    expect(branchRequests.map((request) => request.url)).toEqual(['/api/branches?project=demo']);
+    expect(branchRequests.some((request) => request.url.startsWith('/api/branch?'))).toBe(false);
+
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent.includes('Review the transport boundary')).click()`);
+    await cdp.waitFor(`document.querySelector('input[aria-label="select finding finding-1"]')`);
+    expect(await cdp.evaluate(`document.querySelector('input[aria-label="select finding finding-1"]').checked`)).toBe(false);
+    expect(await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'Review').disabled`)).toBe(true);
+    for (const text of [
+      'active', 'builder', 'demo-1', ACTIVE_BRANCH.createdAt, ACTIVE_BRANCH.updatedAt, ACTIVE_BRANCH.error,
+      ACTIVE_BRANCH.findings[0].answer, ACTIVE_BRANCH.findings[0].recommendation, ACTIVE_BRANCH.findings[0].uncertainty,
+    ]) {
+      expect(await cdp.evaluate(`document.body.innerText.includes(${JSON.stringify(text)})`)).toBe(true);
+    }
+
+    await click('input[aria-label="select finding finding-1"]');
+    expect(await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'Review').disabled`)).toBe(false);
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'Review').click()`);
+    await cdp.waitFor(`document.querySelector('[data-branch-prompt]')`);
+    expect(branchRequests.at(-1)).toMatchObject({
+      url: '/api/branch-review', method: 'POST',
+      body: { project: 'demo', branch: BRANCH_ID, findingIds: ['finding-1'] },
+    });
+    expect(await cdp.evaluate(`document.querySelector('[data-branch-prompt]').textContent`)).toBe(BRANCH_PROMPT);
+    expect(await cdp.evaluate(`document.querySelector('[data-branch-prompt] img')`)).toBeNull();
+    expect(await cdp.evaluate(`window.__branchXss`)).toBeUndefined();
+
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'Rejoin').click()`);
+    await cdp.waitFor(`[...document.querySelectorAll('button')].some((button) => button.textContent === 'Confirm rejoin')`);
+    expect(branchRequests.filter((request) => request.url === '/api/branch-rejoin')).toHaveLength(0);
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'Confirm rejoin').click()`);
+    await cdp.waitFor(`document.querySelector('[data-branch-receipt]')`);
+    expect(branchRequests.at(-1)).toMatchObject({
+      url: '/api/branch-rejoin', method: 'POST',
+      body: { project: 'demo', branch: BRANCH_ID, reviewDigest: REVIEW_DIGEST },
+    });
+    const receipt = await cdp.evaluate(`document.querySelector('[data-branch-receipt]').textContent`);
+    for (const text of ['Rejoined', 'msg_rejoined', REJOINED_AT, PROMPT_ID, REVIEW_DIGEST]) {
+      expect(receipt).toContain(text);
+    }
+    expect(receipt).not.toContain('unknown');
+
   }, 30_000);
 });

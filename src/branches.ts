@@ -625,12 +625,18 @@ function rejoinPrompt(branch: NativeBranchRecord, promptId: string): string {
     branchId: branch.id,
     reviewDigest: branch.review!.digest,
     promptId,
-    parentSessionId: branch.parentSessionId,
-    childSessionId: branch.childSessionId,
-    parentHistoryHash: branch.parentSnapshot.historyHash,
-    childHistoryHash: branch.childSnapshot!.historyHash,
-    findings: selectedFindings(branch),
+    findings: selectedFindings(branch).map((finding) => ({
+      id: finding.id,
+      answer: finding.answer,
+      recommendation: finding.recommendation,
+      uncertainty: finding.uncertainty,
+    })),
   });
+}
+export function previewNativeBranchRejoin(branch: NativeBranchRecord): { promptId: string; prompt: string } {
+  if (!branch.review || !branch.result || !branch.childSnapshot) throw new Refusal('native branch has no complete review to preview');
+  const promptId = `hive-rejoin-${branch.id}-${branch.review.digest.slice(0, 16)}`;
+  return { promptId, prompt: rejoinPrompt(branch, promptId) };
 }
 async function verifyReview(branch: NativeBranchRecord, input: AuthInput, at: string): Promise<void> {
   const expiresAt = branch.review ? Date.parse(branch.review.expiresAt) : NaN;
@@ -659,25 +665,29 @@ async function finishUnknown(home: string, intent: NativeBranchRecord, at: strin
   return unknown(home, intent, at, error);
 }
 export async function rejoinNativeBranch(
-  scope: NativeBranchScope, id: string, input: AuthInput, native: NativeBranchClient, options: TimeOptions = {},
+  scope: NativeBranchScope, id: string, input: AuthInput & { reviewDigest: string }, native: NativeBranchClient, options: TimeOptions = {},
 ): Promise<NativeBranchRecord> {
   enabled();
   return withBranchLock(scope, async (home) => {
     await assertExecutionAllowed(scope.root, scope.project);
     let branch = await readNativeBranch(scope, id);
     await assertCurrentTeam(home, branch);
-    if (branch.rejoin?.status === 'rejoined' || branch.rejoin?.status === 'unknown') return branch;
+    if (input.reviewDigest !== branch.review?.digest) throw new Refusal('native review digest does not match the current review');
     const at = now(options);
+    if (branch.rejoin?.status === 'rejoined' || branch.rejoin?.status === 'unknown') {
+      await verifyReview(branch, input, at);
+      return branch;
+    }
     if (branch.rejoin?.status === 'submitting') return unknown(home, branch, at, 'previous prompt outcome is unknown');
     if (branch.status !== 'active' || !branch.result || !branch.review) throw new Refusal(`native branch is ${branch.status}; no active review`);
     await verifyReview(branch, input, at);
     branch = await refreshLocked(home, branch, native, at);
     if (branch.status !== 'active' || !branch.result || !branch.review) throw new Refusal(`native branch is ${branch.status}; no current review`);
+    if (input.reviewDigest !== branch.review.digest) throw new Refusal('native review digest changed during refresh');
     await assertCurrentTeam(home, branch);
     await verifyReview(branch, input, at);
     const review = branch.review;
-    const promptId = `hive-rejoin-${branch.id}-${review.digest.slice(0, 16)}`;
-    const prompt = rejoinPrompt(branch, promptId);
+    const { promptId, prompt } = previewNativeBranchRejoin(branch);
     const intent = await commit(home, branch, {
       ...branch,
       rejoin: { status: 'submitting', reviewDigest: review.digest, promptId, promptHash: sha(prompt), intentAt: at },
@@ -688,6 +698,7 @@ export async function rejoinNativeBranch(
     try {
       await verifyReview(delivery, input, finalAt);
       await assertCurrentTeam(home, delivery);
+      if (input.reviewDigest !== delivery.review?.digest) throw new Refusal('native review digest changed before submission');
     } catch (error) {
       await commit(home, intent, branch);
       throw error;
