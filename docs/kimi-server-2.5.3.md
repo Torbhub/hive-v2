@@ -2,9 +2,9 @@
 
 ## Status
 
-This spike provides disposable preflight tooling. It is not a production adapter.
+This spike provides disposable preflight and compatibility tooling. It is not a production adapter.
 
-The revised direct-binary no-generation preflight ran successfully. Every other live capability remains unverified.
+The revised direct-binary no-generation preflight ran successfully. A later disposable native compatibility run also passed. Historical fork turns and restart reconciliation remain unverified.
 
 The source reference is tag `@moonshot-ai/kimi-code@2.5.3` at commit `5af9942e9fb789b6a1530830575b3768499932e9`.
 
@@ -30,7 +30,7 @@ The direct-binary focused run passed both test files and all 15 tests. The dispo
 
 That run verified the installed `2.5.3` version, direct-binary scrubbed startup, internal temporary-home ownership, authenticated bounded OpenAPI retrieval, fixed evidence, and group-wide cleanup, including orphaned descendants.
 
-No session, fork, prompt, compaction, or generation request ran. Every other live capability remains unverified.
+No session, fork, prompt, compaction, or generation request ran in PR1.
 
 The observed command was:
 
@@ -38,11 +38,23 @@ The observed command was:
 HIVE_KIMI_SERVER_DISPOSABLE=1 HIVE_KIMI_SERVER_BIN=/usr/local/bin/kimi-real /opt/node22/bin/npm test -- test/kimi-server-spike.test.ts test/kimi-server-disposable.test.ts
 ```
 
+## PR2 native compatibility result
+
+`test/kimi-server-native-disposable.test.ts` passed all 8 tests. One test used a synthetic `kimi-code/k3.1-pro` parent turn through TeamKimi. The remaining tests covered URL and validation rules without network calls.
+
+The live turn verified the exact prompt acknowledgement, nested child lineage metadata, child discovery, and current-boundary fork content equivalence, including session-derived message ID mappings. No real user session was read. No historical fork was created or verified.
+
+The observed command was:
+
+```sh
+HIVE_KIMI_NATIVE_DISPOSABLE=1 /opt/node22/bin/npm test -- test/kimi-server-native-disposable.test.ts
+```
+
 ## Generation-dependent and unverified behavior
 
 Historical forks and nonempty message ancestry remain generation-dependent and unverified.
 
-Child creation, restart reconciliation, and plain-fork lineage remain live-unverified. The probe does not exercise them.
+Restart reconciliation and historical turn selection remain unverified. PR2 exercised child creation, discovery, and a current-boundary plain fork. It did not test a historical fork turn.
 
 ## Disposable boundaries
 
