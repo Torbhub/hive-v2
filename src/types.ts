@@ -252,3 +252,110 @@ export type TaskEvent = {
 
 export const NEEDS_OWNER_STATES = new Set(['plan', 'question', 'blocked']);
 export const CLOSED_STATES = new Set(['done', 'cancelled']);
+
+export type NativeBranchScope = { root: string; project: string };
+export type NativeBranchCreateScope = NativeBranchScope & { agent: string };
+export type NativeBranchSnapshotEntry = { id: string; contentHash: string };
+export type NativeBranchSnapshot = {
+  count: number;
+  headId: string | null;
+  historyHash: string;
+  messages: NativeBranchSnapshotEntry[];
+};
+export type NativeBranchEvidence = { messageId: string; contentHash: string };
+export type NativeBranchFinding = {
+  id: string;
+  answer: string;
+  recommendation: string;
+  uncertainty: string;
+  nativeEvidence: NativeBranchEvidence[];
+};
+export type NativeBranchResult = {
+  schemaVersion: 1;
+  branchId: string;
+  childHistoryHash: string;
+  findings: NativeBranchFinding[];
+};
+export type NativeBranchReview = {
+  branchId: string;
+  findingIds: string[];
+  digest: string;
+  parentHistoryHash: string;
+  childHistoryHash: string;
+  reviewer: string;
+  consumerGrantId: string;
+  consumerAclEpoch: number;
+  approverGrantId: string;
+  approverAclEpoch: number;
+  createdAt: string;
+  expiresAt: string;
+};
+export type NativeBranchRejoin = {
+  status: 'submitting' | 'unknown' | 'rejoined';
+  reviewDigest: string;
+  promptId: string;
+  promptHash: string;
+  intentAt: string;
+  nativeMessageId?: string;
+  rejoinedAt?: string;
+  detail?: string;
+};
+export type NativeBranchRecord = {
+  schemaVersion: 1;
+  id: string;
+  kind: 'child' | 'fork';
+  purpose: string;
+  parentSessionId: string;
+  childSessionId: string | null;
+  workspaceId: string;
+  cwd: string;
+  scope: { project: string; agent: string; task: string };
+  parentSnapshot: NativeBranchSnapshot;
+  childSnapshot: NativeBranchSnapshot | null;
+  status: 'creating' | 'active' | 'stale' | 'diverged' | 'unknown' | 'rejoined';
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+  result?: NativeBranchResult & { digest: string; recordedAt: string };
+  review?: NativeBranchReview;
+  rejoin?: NativeBranchRejoin;
+};
+
+export type NativeTextPart = { type: 'text'; text: string };
+export type NativeSession = {
+  id: string;
+  workspace_id: string;
+  metadata: {
+    cwd: string;
+    hive_branch_id?: string;
+    parent_session_id?: string;
+    child_session_kind?: string;
+    [key: string]: unknown;
+  };
+};
+export type NativeMessage = {
+  id: string;
+  session_id: string;
+  role: string;
+  content: { type: string; [key: string]: unknown }[];
+  created_at: string;
+};
+export type NativePrompt = {
+  prompt_id: string;
+  user_message_id: string;
+  status: string;
+  content: NativeTextPart[];
+  created_at: string;
+};
+export type NativeBranchClient = {
+  getSession(sessionId: string): Promise<NativeSession>;
+  createChild(sessionId: string, input: { title: string; metadata: Record<string, unknown> }): Promise<NativeSession>;
+  forkSession(sessionId: string, input: { title: string; metadata: Record<string, unknown> }): Promise<NativeSession>;
+  listChildren(sessionId: string, options?: { pageSize?: number }): Promise<{ items: NativeSession[]; has_more: boolean }>;
+  listMessages(sessionId: string, options?: {
+    beforeId?: string;
+    pageSize?: number;
+    role?: 'user' | 'assistant' | 'tool' | 'system';
+  }): Promise<{ items: NativeMessage[]; has_more: boolean }>;
+  submitPrompt(sessionId: string, input: { promptId: string; content: NativeTextPart[] }): Promise<NativePrompt>;
+};

@@ -236,7 +236,7 @@ export async function stopProcessGroup(
   }
 }
 
-async function checkVersion(binary: string, home: string, env: NodeJS.ProcessEnv): Promise<void> {
+export async function checkVersion(binary: string, home: string, env: NodeJS.ProcessEnv): Promise<void> {
   const child = spawnProcessGroup(binary, ['--version'], { cwd: home, env });
   let output = '';
   child.stdout?.setEncoding('utf8');
@@ -251,7 +251,7 @@ async function checkVersion(binary: string, home: string, env: NodeJS.ProcessEnv
   }
 }
 
-async function launchServer(binary: string, home: string, env: NodeJS.ProcessEnv) {
+export async function launchServer(binary: string, home: string, env: NodeJS.ProcessEnv) {
   const child = spawnProcessGroup(binary, ['web', '--no-open', '--host', '127.0.0.1', '--port', '0'], {
     cwd: home, env,
   });

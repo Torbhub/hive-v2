@@ -41,7 +41,7 @@ const USAGE = `usage:
   hive interrupt <project> [agent] | hive kill <project> [agent] | hive compact <project> [agent] on|off
   hive doctor | ui | watch
   hive web [--port N] | handy-bridge [--origin URL] | mcp
-  hive memory propose <project> <text...> | ls <project> | promote <project> <id>`;
+  hive memory propose <project> <text...> | ls <project> | promote <project> <id> | hive branch create|status|refresh|result|reconcile ...`;
 const VALUELESS_FLAGS = new Set(['json', 'dry-run', 'no-body']);
 
 function parseFlags(args: string[], names: string[]): { flags: Record<string, string | true>; pos: string[] } {
@@ -269,6 +269,7 @@ async function main(): Promise<void> {
       console.log(await fn(process.cwd(), validName('project', args[1]), args[2] && validAgentRef(args[2])));
       return;
     }
+    case 'branch': return (await import('./branch-cli.js')).branchCommand(process.cwd(), args.slice(1));
     case 'compact': return (await import('./compact.js')).compactCommand(process.cwd(), args.slice(1));
     case 'watch': {
       const { watch } = await import('./watch.js');
