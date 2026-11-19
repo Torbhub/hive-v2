@@ -29,6 +29,12 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
 });
 
 import { maybeCompact, setAutoCompact } from '../src/compact.js';
+import {
+  getDaydreamAutomationStatus,
+  reconcileDaydreamAutomation,
+  type DaydreamAutomationOutcome,
+  type DaydreamAutomationRunner,
+} from '../src/daydream-automation.js';
 import { wireActivityAt } from '../src/death-bundle.js';
 import { PreInputError, typeLine } from '../src/spawn.js';
 import { appendTaskEvent, hivePath, hubPath, readTeam, upsertTeamEntry, writeJson } from '../src/state.js';
@@ -376,6 +382,254 @@ describe('idle compaction threshold', () => {
       maybeCompact(root, 'demo', entry, { now: NOW }),
     ]);
     expect(typeLine).toHaveBeenCalledTimes(1);
+  });
+
+  function automationRunner(): DaydreamAutomationRunner {
+    return {
+      run: vi.fn(async (input) => ({
+        daydreamId: input.daydreamId, status: 'recovered', prompts: 2, compactions: 1, tokens: 100,
+      })),
+      reconcile: vi.fn(async (input) => ({
+        daydreamId: input.daydreamId, status: 'recovered', prompts: 0, compactions: 0, tokens: 0,
+      })),
+    };
+  }
+
+  it('runs after serialized delivery guards and before actual compaction input', async () => {
+    vi.stubEnv('HIVE_DAYDREAM_AUTOMATION', '1');
+    vi.stubEnv('HIVE_DAYDREAM', '1');
+    vi.stubEnv('HIVE_NATIVE_BRANCHES', '1');
+    try {
+      const entry = { ...worker(), auto_compact: true, daydream_automation: true };
+      const { root } = await setup(entry);
+      const runner = automationRunner();
+
+      await maybeCompact(root, 'demo', entry, { now: NOW, daydreamAutomation: { runner } });
+
+      expect(capturePane).toHaveBeenCalledTimes(3);
+      expect(wireActivityAt).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(capturePane).mock.invocationCallOrder[1]).toBeLessThan(vi.mocked(runner.run).mock.invocationCallOrder[0]);
+      expect(vi.mocked(wireActivityAt).mock.invocationCallOrder[1]).toBeLessThan(vi.mocked(runner.run).mock.invocationCallOrder[0]);
+      expect(vi.mocked(runner.run)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(runner.run).mock.calls[0][0].reason).toBe('before_compaction');
+      expect(vi.mocked(capturePane).mock.invocationCallOrder[2]).toBeGreaterThan(vi.mocked(runner.run).mock.invocationCallOrder[0]);
+      expect(vi.mocked(wireActivityAt).mock.invocationCallOrder[2]).toBeGreaterThan(vi.mocked(runner.run).mock.invocationCallOrder[0]);
+      expect(vi.mocked(capturePane).mock.invocationCallOrder[2]).toBeLessThan(vi.mocked(typeLine).mock.invocationCallOrder[0]);
+      expect(vi.mocked(wireActivityAt).mock.invocationCallOrder[2]).toBeLessThan(vi.mocked(typeLine).mock.invocationCallOrder[0]);
+      expect(vi.mocked(runner.run).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(typeLine).mock.invocationCallOrder[0]);
+      expect(typeLine).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(typeLine).mock.calls[0][1]).toBe(FIXED_DIRECTIVE);
+      expect((await getDaydreamAutomationStatus(root, 'demo')).runs).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
+    { name: 'new output', screen: 'new output\n│ > \n' },
+    { name: 'working state', screen: '⠋ thinking…\nworking' },
+    { name: 'spinner', screen: '⠼ Compacting context…\nworking' },
+    { name: 'completion marker', screen: '✓ Context compacted\n│ > \n' },
+    { name: 'newer wire activity', screen: 'done\n│ > \n' },
+  ])('repeats every delivery guard after beforeSend: $name', async ({ name, screen }) => {
+    vi.stubEnv('HIVE_DAYDREAM_AUTOMATION', '1');
+    vi.stubEnv('HIVE_DAYDREAM', '1');
+    vi.stubEnv('HIVE_NATIVE_BRANCHES', '1');
+    try {
+      const entry = { ...worker(), auto_compact: true, daydream_automation: true };
+      const { root } = await setup(entry);
+      const runner = automationRunner();
+      vi.mocked(capturePane)
+        .mockResolvedValueOnce('done\n│ > \n')
+        .mockResolvedValueOnce('done\n│ > \n')
+        .mockResolvedValueOnce(screen);
+      if (name === 'newer wire activity') {
+        vi.mocked(wireActivityAt)
+          .mockResolvedValueOnce(NOW - IDLE)
+          .mockResolvedValueOnce(NOW - IDLE)
+          .mockResolvedValueOnce(NOW - IDLE + 1);
+      }
+
+      await maybeCompact(root, 'demo', entry, { now: NOW, daydreamAutomation: { runner } });
+
+      expect(vi.mocked(runner.run)).toHaveBeenCalledTimes(1);
+      expect(capturePane).toHaveBeenCalledTimes(3);
+      expect(wireActivityAt).toHaveBeenCalledTimes(name === 'newer wire activity' ? 3 : 2);
+      expect(typeLine).not.toHaveBeenCalled();
+      expect((await getDaydreamAutomationStatus(root, 'demo')).runs).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('repeats the cache-fallback fingerprint guard after beforeSend', async () => {
+    vi.stubEnv('HIVE_DAYDREAM_AUTOMATION', '1');
+    vi.stubEnv('HIVE_DAYDREAM', '1');
+    vi.stubEnv('HIVE_NATIVE_BRANCHES', '1');
+    try {
+      const entry = { ...worker(), auto_compact: true, daydream_automation: true };
+      const { root } = await setup(entry);
+      const runner = automationRunner();
+      const chooser = await fs.readFile(path.join(import.meta.dirname, 'fixtures', 'dialog-cache-expiry-2.5.1.txt'), 'utf8');
+      vi.mocked(capturePane)
+        .mockResolvedValueOnce(chooser)
+        .mockResolvedValueOnce(chooser)
+        .mockResolvedValueOnce(chooser.replace('~286k', '~287k'));
+
+      await maybeCompact(root, 'demo', entry, { now: NOW, daydreamAutomation: { runner } });
+
+      expect(vi.mocked(runner.run)).toHaveBeenCalledTimes(1);
+      expect(capturePane).toHaveBeenCalledTimes(3);
+      expect(wireActivityAt).toHaveBeenCalledTimes(2);
+      expect(sendEnter).not.toHaveBeenCalled();
+      expect(typeLine).not.toHaveBeenCalled();
+      expect((await getDaydreamAutomationStatus(root, 'demo')).runs).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each(['worker', 'session', 'pane', 'activity', 'completion'] as const)('consumes no daydream reservation when the serialized %s guard rejects delivery', async (guard) => {
+    vi.stubEnv('HIVE_DAYDREAM_AUTOMATION', '1');
+    vi.stubEnv('HIVE_DAYDREAM', '1');
+    vi.stubEnv('HIVE_NATIVE_BRANCHES', '1');
+    try {
+      const entry = { ...worker(), auto_compact: true, daydream_automation: true };
+      const { root, home } = await setup(entry);
+      const runner = automationRunner();
+      if (guard === 'worker') {
+        vi.mocked(capturePane).mockImplementationOnce(async () => {
+          await setAutoCompact(root, 'demo', 'builder', false);
+          return 'done\n│ > \n';
+        });
+      }
+      if (guard === 'session' || guard === 'pane') {
+        vi.mocked(capturePane).mockImplementationOnce(async () => {
+          await upsertTeamEntry(home, guard === 'session'
+            ? { name: 'builder', session_id: 'session_respawned' }
+            : { name: 'builder', pane: '%9' });
+          return 'done\n│ > \n';
+        });
+      }
+      if (guard === 'activity') {
+        vi.mocked(wireActivityAt).mockResolvedValueOnce(NOW - IDLE).mockResolvedValue(NOW - IDLE + 1);
+      }
+      if (guard === 'completion') {
+        vi.mocked(capturePane)
+          .mockResolvedValueOnce('done\n│ > \n')
+          .mockResolvedValueOnce('✓ Context compacted\n│ > \n');
+      }
+
+      await maybeCompact(root, 'demo', entry, { now: NOW, daydreamAutomation: { runner } });
+
+      expect(runner.run).not.toHaveBeenCalled();
+      expect(typeLine).not.toHaveBeenCalled();
+      expect((await getDaydreamAutomationStatus(root, 'demo')).runs).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
+    { global: '0', agent: true },
+    { global: '1', agent: false },
+  ])('leaves auto_compact unchanged without both daydream opt-ins: %o', async ({ global, agent }) => {
+    vi.stubEnv('HIVE_DAYDREAM_AUTOMATION', global);
+    vi.stubEnv('HIVE_DAYDREAM', '1');
+    vi.stubEnv('HIVE_NATIVE_BRANCHES', '1');
+    try {
+      const entry = { ...worker(), auto_compact: true, daydream_automation: agent };
+      const { root } = await setup(entry);
+      const runner = automationRunner();
+
+      await maybeCompact(root, 'demo', entry, { now: NOW, daydreamAutomation: { runner } });
+
+      expect(runner.run).not.toHaveBeenCalled();
+      expect(typeLine).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(typeLine).mock.calls[0][1]).toBe(FIXED_DIRECTIVE);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('allows idle daydream automation with auto_compact disabled', async () => {
+    vi.stubEnv('HIVE_DAYDREAM_AUTOMATION', '1');
+    vi.stubEnv('HIVE_DAYDREAM', '1');
+    vi.stubEnv('HIVE_NATIVE_BRANCHES', '1');
+    try {
+      const entry = { ...worker(), auto_compact: false, daydream_automation: true };
+      const { root } = await setup(entry);
+      const runner = automationRunner();
+
+      await maybeCompact(root, 'demo', entry, { now: NOW, daydreamAutomation: { runner } });
+
+      expect(vi.mocked(runner.run)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(runner.run).mock.calls[0][0].reason).toBe('idle');
+      expect(typeLine).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps one compact-owned idle journey through reload, unknown, reconcile, and ordinary compaction', async () => {
+    vi.stubEnv('HIVE_DAYDREAM_AUTOMATION', '1');
+    vi.stubEnv('HIVE_DAYDREAM', '1');
+    vi.stubEnv('HIVE_NATIVE_BRANCHES', '1');
+    try {
+      const entry = { ...worker(), auto_compact: false, daydream_automation: true };
+      const { root, home } = await setup(entry);
+      const outcomes: DaydreamAutomationOutcome[] = [
+        { daydreamId: '', status: 'recovered', prompts: 2, compactions: 1, tokens: 100 },
+        { daydreamId: '', status: 'unknown', prompts: 1, compactions: 0, tokens: 50, unknownStage: 'prompt' },
+        { daydreamId: '', status: 'recovered', prompts: 2, compactions: 1, tokens: 100 },
+      ];
+      let index = 0;
+      const runner: DaydreamAutomationRunner = {
+        run: vi.fn(async (input) => ({ ...outcomes[index++], daydreamId: input.daydreamId })),
+        reconcile: vi.fn(async (input) => ({
+          daydreamId: input.daydreamId, status: 'recovered', prompts: 0, compactions: 0, tokens: 0,
+        })),
+      };
+      let activity = NOW - IDLE;
+      vi.mocked(wireActivityAt).mockImplementation(async () => activity);
+      const compact = () => maybeCompact(root, 'demo', entry, {
+        now: activity + IDLE,
+        daydreamAutomation: { runner, idleMs: IDLE },
+      });
+
+      await compact();
+      expect(vi.mocked(runner.run)).toHaveBeenCalledTimes(1);
+      await compact();
+      await compact();
+      expect(vi.mocked(runner.run)).toHaveBeenCalledTimes(1);
+      expect((await getDaydreamAutomationStatus(root, 'demo')).runs).toHaveLength(1);
+
+      activity += 60_000;
+      await compact();
+      expect(vi.mocked(runner.run)).toHaveBeenCalledTimes(2);
+      const unknownId = vi.mocked(runner.run).mock.calls[1][0].daydreamId;
+      activity += 60_000;
+      await compact();
+      expect(vi.mocked(runner.run)).toHaveBeenCalledTimes(2);
+      expect((await getDaydreamAutomationStatus(root, 'demo')).agents[0].fencedDaydreamId).toBe(unknownId);
+
+      await reconcileDaydreamAutomation(root, 'demo', unknownId, { runner, now: activity + IDLE });
+      await compact();
+      expect(vi.mocked(runner.run)).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(runner.run).mock.calls.every((call) => call[0].agent.name === 'builder')).toBe(true);
+
+      const compactor = {
+        ...worker(), name: 'compactor', pane: '%3', session_id: 'session_compactor', auto_compact: true,
+      };
+      await upsertTeamEntry(home, compactor);
+      await maybeCompact(root, 'demo', compactor, { now: activity + IDLE, daydreamAutomation: { runner } });
+      expect(vi.mocked(runner.run)).toHaveBeenCalledTimes(3);
+      expect(typeLine).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(typeLine).mock.calls[0][0]).toBe('%3');
+      expect(vi.mocked(typeLine).mock.calls[0][1]).toBe(FIXED_DIRECTIVE);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

@@ -6,22 +6,37 @@ import {
   recoverDaydream,
   verifyDaydreamBrief,
 } from './daydream.js';
+import {
+  getDaydreamAutomationStatus,
+  reconcileDaydreamAutomation,
+  setDaydreamAutomation,
+} from './daydream-automation.js';
+import { pruneDaydreamArtifacts, type DaydreamRetentionOptions } from './daydream-retention.js';
 import { KimiServerClient } from './kimi-server.js';
 import { checkName } from './names.js';
 import { readProjects } from './state.js';
 import { UsageError } from './usage.js';
-import type { DaydreamNativeClient } from './types.js';
+import type { DaydreamAutomationRunner, DaydreamNativeClient, NativeTextPart } from './types.js';
 
 const USAGE = `usage: hive daydream
   mine <project> --agent <name> --checkpoint <id> --question <text>
   verify <project> <daydream> --file <brief.json>
   recover <project> <daydream> [--file <brief.json>]
-  status [project]`;
+  status [project]
+  automation <project> [agent] on|off|status
+  reconcile <project> <daydream>
+  prune <project> [--dry-run]`;
 
-type Dependencies = { native?: DaydreamNativeClient; now?: string };
+type Dependencies = {
+  native?: DaydreamNativeClient;
+  now?: string;
+  proofContent?: NativeTextPart[];
+  automationRunner?: DaydreamAutomationRunner;
+  retention?: Omit<DaydreamRetentionOptions, 'dryRun'>;
+};
 type Parsed = { pos: string[]; flags: Record<string, string[]> };
 
-function parse(args: string[], names: string[]): Parsed {
+function parse(args: string[], names: string[], valueless: string[] = []): Parsed {
   const pos: string[] = [];
   const flags: Record<string, string[]> = {};
   for (let index = 0; index < args.length; index++) {
@@ -32,6 +47,10 @@ function parse(args: string[], names: string[]): Parsed {
     }
     const name = arg.slice(2);
     if (!names.includes(name)) throw new UsageError(`unknown daydream flag: ${arg}\n${USAGE}`);
+    if (valueless.includes(name)) {
+      flags[name] = [...(flags[name] ?? []), 'true'];
+      continue;
+    }
     const value = args[++index];
     if (value === undefined || value.startsWith('--')) throw new UsageError(`--${name} needs a value\n${USAGE}`);
     flags[name] = [...(flags[name] ?? []), value];
@@ -95,6 +114,40 @@ export async function daydreamCommand(root: string, args: string[], dependencies
     print((await Promise.all(projects.map((project) => listDaydreams(root, project.name)))).flat());
     return;
   }
+  if (command === 'automation') {
+    const parsed = parse(args.slice(1), []);
+    const [projectName, agentOrState, explicitState, extra] = parsed.pos;
+    const state = explicitState ?? agentOrState;
+    if (!projectName || extra || state === undefined || !['on', 'off', 'status'].includes(state)) throw new UsageError(USAGE);
+    const project = validName('project', projectName);
+    const agentRef = explicitState === undefined ? undefined : agentOrState;
+    if (agentRef) checkName('agent', agentRef.split('@')[0]);
+    if (state === 'on' || state === 'off') {
+      await setDaydreamAutomation(root, project, agentRef, state === 'on');
+      console.log(`hive: daydream automation ${state} for ${project}/${agentRef ?? `${project}-orchestrator`}`);
+      return;
+    }
+    const current = await getDaydreamAutomationStatus(root, project);
+    if (!agentRef) {
+      print(current);
+      return;
+    }
+    const [name, worktree] = agentRef.split('@');
+    const agent = current.agents.find((candidate) => candidate.name === name
+      && (worktree === undefined || candidate.worktree === worktree));
+    if (!agent) throw new UsageError(`${project} has no agent named ${agentRef}`);
+    print({ ...agent, daily: current.daily });
+    return;
+  }
+  if (command === 'prune') {
+    const parsed = parse(args.slice(1), ['dry-run'], ['dry-run']);
+    if (parsed.pos.length !== 1) throw new UsageError(USAGE);
+    print(await pruneDaydreamArtifacts(root, validName('project', parsed.pos[0]), {
+      ...dependencies.retention,
+      dryRun: one(parsed, 'dry-run') === 'true',
+    }));
+    return;
+  }
 
   requireEnabled();
   switch (command) {
@@ -115,7 +168,20 @@ export async function daydreamCommand(root: string, args: string[], dependencies
       const parsed = parse(args.slice(1), ['file']);
       const { project, id } = position(parsed);
       const value = await readBrief(required(one(parsed, 'file'), 'file'));
-      print(await verifyDaydreamBrief({ root, project }, id, value, nativeFor(dependencies), { now: dependencies.now }));
+      print(await verifyDaydreamBrief({ root, project }, id, value, nativeFor(dependencies), {
+        now: dependencies.now,
+        proofContent: dependencies.proofContent,
+      }));
+      return;
+    }
+    case 'reconcile': {
+      const parsed = parse(args.slice(1), []);
+      const { project, id } = position(parsed);
+      print(await reconcileDaydreamAutomation(root, project, id, {
+        native: dependencies.automationRunner ? dependencies.native : nativeFor(dependencies),
+        runner: dependencies.automationRunner,
+        now: dependencies.now === undefined ? undefined : Date.parse(dependencies.now),
+      }));
       return;
     }
     case 'recover': {
@@ -123,7 +189,10 @@ export async function daydreamCommand(root: string, args: string[], dependencies
       const { project, id } = position(parsed);
       const file = one(parsed, 'file');
       const value = file === undefined ? undefined : await readBrief(file);
-      print(await recoverDaydream({ root, project }, id, value, nativeFor(dependencies), { now: dependencies.now }));
+      print(await recoverDaydream({ root, project }, id, value, nativeFor(dependencies), {
+        now: dependencies.now,
+        proofContent: dependencies.proofContent,
+      }));
       return;
     }
     default:

@@ -49,7 +49,7 @@ const COMPACT_PREFIX = 'Preserve the active mining question and verified fact st
 
 type Scope = NativeBranchScope;
 type CreateScope = Scope & { agent: string };
-type TimeOptions = { now?: string };
+type TimeOptions = { now?: string; proofContent?: NativeTextPart[] };
 type Capture = {
   agent: TeamEntry;
   taskEvents: TaskEvent[];
@@ -138,8 +138,14 @@ async function readHandoff(agent: TeamEntry, home: string) {
     await handle.close();
   }
 }
-async function capture(scope: CreateScope, home: string): Promise<Capture> {
-  const agents = (await readTeam(home)).agents.filter((agent) => agent.name === scope.agent && !agent.orchestrator);
+async function capture(
+  scope: CreateScope,
+  home: string,
+  expected: { sessionId?: string; worktree?: string } = {},
+): Promise<Capture> {
+  const agents = (await readTeam(home)).agents.filter((agent) => agent.name === scope.agent && !agent.orchestrator
+    && (!('sessionId' in expected) || agent.session_id === expected.sessionId)
+    && (!('worktree' in expected) || agent.worktree === expected.worktree));
   if (agents.length !== 1 || !agents[0].task || !agents[0].session_id) throw new Refusal('daydream requires one uniquely scoped TeamEntry');
   const agent = agents[0];
   const taskEvents = (await readTaskEvents(scope.root)).filter((event) => event.project === scope.project && event.id === agent.task);
@@ -196,14 +202,23 @@ async function readBtwTranscript(native: DaydreamNativeClient, sessionId: string
   if (page.has_more) throw new Error('daydream BTW transcript exceeds the bounded page');
   return page;
 }
-async function btwPromptTurn(native: DaydreamNativeClient, record: DaydreamRecord) {
+async function btwPromptTurn(native: DaydreamNativeClient, record: DaydreamRecord, proofContent?: NativeTextPart[]) {
   const intent = record.prompt;
   if (!intent?.agentId || !record.childSessionId) throw new Error('daydream BTW prompt intent is incomplete');
   if (intent.promptId !== `hive-daydream-${intent.phase}-${record.id}`) throw new Error('daydream prompt phase or promptId conflicts');
   const page = await readBtwTranscript(native, record.childSessionId, intent.agentId);
   const prompts = page.prompts.filter((candidate) => candidate.promptId === intent.promptId);
-  if (prompts.length !== 1) throw new Error('daydream BTW promptId is missing or ambiguous');
-  const prompt = prompts[0];
+  if (prompts.length > 1 || (prompts.length === 0 && page.prompts.length > 0)) {
+    throw new Error('daydream BTW promptId is missing or ambiguous');
+  }
+  if (proofContent && Buffer.byteLength(JSON.stringify(proofContent)) > MAX_PROMPT_BYTES) throw new Refusal('daydream prompt is oversized');
+  const prompt = prompts[0] ?? (intent.nativeMessageId && proofContent && nativeSha(proofContent) === intent.promptHash ? {
+    promptId: intent.promptId,
+    status: 'completed',
+    userMessageId: intent.nativeMessageId,
+    content: proofContent,
+  } : null);
+  if (!prompt) throw new Error('daydream BTW promptId is missing or ambiguous');
   if (intent.nativeMessageId && prompt.userMessageId !== intent.nativeMessageId) {
     throw new Error('daydream BTW user message id conflicts with acknowledgement');
   }
@@ -213,8 +228,8 @@ async function btwPromptTurn(native: DaydreamNativeClient, record: DaydreamRecor
   ));
   return selectBtwTurn(prompt, turns, page.agents, intent.agentId);
 }
-async function completedBtwPromptTurn(native: DaydreamNativeClient, record: DaydreamRecord) {
-  const selected = await btwPromptTurn(native, record);
+async function completedBtwPromptTurn(native: DaydreamNativeClient, record: DaydreamRecord, proofContent?: NativeTextPart[]) {
+  const selected = await btwPromptTurn(native, record, proofContent);
   if (selected.status === 'pending') throw new Refusal('daydream BTW prompt or turn is pending');
   return selected;
 }
@@ -294,10 +309,11 @@ function buildDaydreamRecord(
   parent: NativeSession,
   parentSnapshot: NativeBranchSnapshot,
   at: string,
+  daydreamId = randomUUID(),
 ): DaydreamRecord {
   return {
     schemaVersion: 1,
-    id: randomUUID(),
+    id: daydreamId,
     status: 'creating',
     parentSessionId: parent.id,
     childSessionId: null,
@@ -318,7 +334,14 @@ function buildDaydreamRecord(
 }
 export async function mineDaydream(
   scope: CreateScope,
-  input: { checkpointId: string; question: string },
+  input: {
+    checkpointId?: string;
+    question: string;
+    daydreamId?: string;
+    sessionId?: string;
+    worktree?: string;
+    miningPrompt?: (record: DaydreamRecord) => NativeTextPart[];
+  },
   native: DaydreamNativeClient,
   options: TimeOptions = {},
 ): Promise<DaydreamRecord> {
@@ -327,20 +350,32 @@ export async function mineDaydream(
     await assertExecutionAllowed(scope.root, scope.project);
     if (typeof input.question !== 'string' || !input.question.trim() || input.question.length > 4_000
       || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.question)) throw new Refusal('daydream question is invalid or oversized');
-    const captured = await capture(scope, home);
-    assertStarted(captured, input.checkpointId);
+    if (input.daydreamId !== undefined
+      && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.daydreamId)) {
+      throw new Refusal('invalid daydream id');
+    }
+    const daydreamId = input.daydreamId as ReturnType<typeof randomUUID> | undefined;
+    const expected = input.sessionId === undefined && input.worktree === undefined
+      ? {}
+      : { sessionId: input.sessionId, worktree: input.worktree };
+    const captured = await capture(scope, home, expected);
+    const checkpointId = input.checkpointId ?? captured.taskEvents.filter((event) => event.event === 'progress').at(-1)?.checkpoint;
+    if (!checkpointId) throw new Refusal('daydream requires the current started checkpoint');
+    assertStarted(captured, checkpointId);
     const parent = await native.getSession(captured.agent.session_id!);
     if (!parent || parent.id !== captured.agent.session_id || parent.metadata.cwd !== home) throw new Refusal('daydream parent workspace mismatch');
     const parentSnapshot = await snapshotNativeHistory(native, parent.id);
     const at = now(options);
-    let current = buildDaydreamRecord(scope, home, captured, input.checkpointId, input.question, parent, parentSnapshot, at);
+    let current = buildDaydreamRecord(scope, home, captured, checkpointId, input.question, parent, parentSnapshot, at, daydreamId);
     await writeRecord(home, current);
     try {
       const child = await native.createChild(parent.id, { title: `Hive daydream ${current.id}`, metadata: { hive_daydream_id: current.id } });
       const identified = { ...current, childSessionId: child.id };
       verifyChild(identified, child);
       current = await commit(home, current, { ...identified, status: 'mining', updatedAt: at });
-      current = await submitDaydreamPrompt(home, current, 'mine', miningPrompt(current, captured, input.question), native, at);
+      const content = input.miningPrompt?.(current) ?? miningPrompt(current, captured, input.question);
+      if (Buffer.byteLength(JSON.stringify(content)) > MAX_PROMPT_BYTES) throw new Refusal('daydream prompt is oversized');
+      current = await submitDaydreamPrompt(home, current, 'mine', content, native, at);
       if (current.status === 'unknown') return current;
       const childSnapshot = await snapshotNativeHistory(native, current.childSessionId!);
       return await commit(home, current, { ...current, childSnapshot, status: 'mining', updatedAt: at, error: undefined });
@@ -394,9 +429,9 @@ function btwBriefProvenance(
     frameHash: nativeSha(frame.text),
   };
 }
-async function verifyMinedBrief(record: DaydreamRecord, value: unknown, captured: Capture, native: DaydreamNativeClient) {
+async function verifyMinedBrief(record: DaydreamRecord, value: unknown, captured: Capture, native: DaydreamNativeClient, proofContent?: NativeTextPart[]) {
   const brief = parseDaydreamBrief(value, briefBinding(record, 'mine'));
-  const { turn } = await completedBtwPromptTurn(native, record);
+  const { turn } = await completedBtwPromptTurn(native, record, proofContent);
   const provenance = btwBriefProvenance(record, value, turn);
   const nativeMessages = await readNativeHistory(native, record.childSessionId!);
   verifyDaydreamCitations(brief, {
@@ -524,7 +559,7 @@ export async function verifyDaydreamBrief(
     await assertParentCurrent(record, native);
     const childSnapshot = await snapshotNativeHistory(native, record.childSessionId!);
     if (!record.childSnapshot || !nativeHistoryIsPrefix(record.childSnapshot, childSnapshot)) throw new Refusal('daydream child history was rewritten');
-    const { brief, provenance } = await verifyMinedBrief(record, value, captured, native);
+    const { brief, provenance } = await verifyMinedBrief(record, value, captured, native, options.proofContent);
     const minedBrief = redactDaydreamBrief(brief);
     const factsHash = daydreamFactsHash(minedBrief);
     if (record.factsHash && record.factsHash !== factsHash) throw new Refusal('daydream mined facts conflict with the terminal brief');
@@ -536,10 +571,10 @@ export async function verifyDaydreamBrief(
     return compactDaydreamChild(home, record, native, at);
   });
 }
-async function reconcileAcknowledgedPrompt(home: string, record: DaydreamRecord, native: DaydreamNativeClient, at: string): Promise<DaydreamRecord> {
+async function reconcileAcknowledgedPrompt(home: string, record: DaydreamRecord, native: DaydreamNativeClient, at: string, proofContent?: NativeTextPart[]): Promise<DaydreamRecord> {
   const prompt = record.prompt;
   if (!prompt || prompt.status !== 'accepted' || !record.childSessionId) return record;
-  const selected = await btwPromptTurn(native, record);
+  const selected = await btwPromptTurn(native, record, proofContent);
   if (selected.status === 'pending' && !prompt.nativeMessageId) throw new Error('daydream BTW prompt is pending without an acknowledgement');
   return commit(home, record, {
     ...record,
@@ -554,13 +589,14 @@ async function reconcileAcceptedMiningSnapshot(
   record: DaydreamRecord,
   native: DaydreamNativeClient,
   at: string,
+  proofContent?: NativeTextPart[],
 ): Promise<DaydreamRecord> {
-  const reconciled = await reconcileAcknowledgedPrompt(home, record, native, at);
+  const reconciled = await reconcileAcknowledgedPrompt(home, record, native, at, proofContent);
   if (reconciled.status === 'unknown' || reconciled.childSnapshot) return reconciled;
   const childSnapshot = await snapshotNativeHistory(native, reconciled.childSessionId!);
   return commit(home, reconciled, { ...reconciled, childSnapshot, status: 'mining', updatedAt: at });
 }
-async function reconcileDaydreamNative(home: string, record: DaydreamRecord, native: DaydreamNativeClient, at: string): Promise<DaydreamRecord> {
+async function reconcileDaydreamNative(home: string, record: DaydreamRecord, native: DaydreamNativeClient, at: string, proofContent?: NativeTextPart[]): Promise<DaydreamRecord> {
   let current = record;
   try {
     if (!current.childSessionId) {
@@ -578,7 +614,7 @@ async function reconcileDaydreamNative(home: string, record: DaydreamRecord, nat
       return unknownWithoutEffect(home, current, at, new Error('daydream fork intent has no checkpoint ID'));
     }
     if (current.prompt && !current.prompt.nativeMessageId && current.prompt.status !== 'accepted') {
-      const { prompt: transcriptPrompt } = await completedBtwPromptTurn(native, current);
+      const { prompt: transcriptPrompt } = await completedBtwPromptTurn(native, current, proofContent);
       current = await commit(home, current, {
         ...current,
         prompt: { ...current.prompt, status: 'accepted', nativeMessageId: transcriptPrompt.userMessageId },
@@ -586,11 +622,11 @@ async function reconcileDaydreamNative(home: string, record: DaydreamRecord, nat
       });
     }
     if (current.prompt?.phase === 'recover' && current.prompt.status === 'accepted') {
-      return reconcileAcknowledgedPrompt(home, current, native, at);
+      return reconcileAcknowledgedPrompt(home, current, native, at, proofContent);
     }
     if (current.prompt?.phase === 'mine' && current.prompt.status === 'accepted' && !current.fork && !current.compaction
       && (current.status === 'unknown' || (current.status === 'mining' && !current.childSnapshot))) {
-      current = await reconcileAcceptedMiningSnapshot(home, current, native, at);
+      current = await reconcileAcceptedMiningSnapshot(home, current, native, at, proofContent);
     }
     if (current.compaction && (current.status === 'compacting' || current.status === 'unknown')) {
       const backfillSnapshot = await proveCompaction(native, current);
@@ -615,12 +651,13 @@ async function verifyRecoveryBrief(
   captured: Capture,
   native: DaydreamNativeClient,
   at: string,
+  proofContent?: NativeTextPart[],
 ): Promise<DaydreamRecord> {
   const brief = parseDaydreamBrief(value, briefBinding(record, 'recover'));
   if (!record.factsHash || daydreamFactsHash(brief) !== record.factsHash) {
     throw new Refusal('recovery facts and unknowns must match the mined brief exactly');
   }
-  const { turn } = await completedBtwPromptTurn(native, record);
+  const { turn } = await completedBtwPromptTurn(native, record, proofContent);
   const recoveryProvenance = btwBriefProvenance(record, value, turn);
   const checkpointMessages = await readNativeHistory(native, record.checkpointSessionId!);
   const nativeMessages = checkpointMessages.map((message) => {
@@ -661,9 +698,9 @@ export async function recoverDaydream(
     }
     if (record.status === 'mining' && record.prompt?.phase === 'mine'
       && record.prompt.status === 'accepted' && !record.childSnapshot) {
-      return reconcileAcceptedMiningSnapshot(home, record, native, at);
+      return reconcileAcceptedMiningSnapshot(home, record, native, at, options.proofContent);
     }
-    record = await reconcileDaydreamNative(home, record, native, at);
+    record = await reconcileDaydreamNative(home, record, native, at, options.proofContent);
     if (value === undefined && record.status === 'mining') return record;
     if (record.status === 'unknown') return record;
     const captured = await currentCapture(record, scope, home);
@@ -675,6 +712,6 @@ export async function recoverDaydream(
     }
     if (record.status !== 'recovering') throw new Refusal(`daydream is ${record.status}; recovery is blocked until native compaction proof`);
     if (value === undefined) return record;
-    return verifyRecoveryBrief(home, record, value, captured, native, at);
+    return verifyRecoveryBrief(home, record, value, captured, native, at, options.proofContent);
   });
 }

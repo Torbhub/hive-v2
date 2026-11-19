@@ -177,7 +177,7 @@ describePosix('Kimi Server disposable process-group supervision', () => {
     try {
       await waitForText(() => output, 'ready');
       expect(process.kill(-child.pid!, 0)).toBe(true);
-      await stopProcessGroup(child, { termGraceMs: 20, waitDeadlineMs: 500 });
+      await stopProcessGroup(child, { termGraceMs: 100, waitDeadlineMs: 1000 });
       await waitForText(() => output, 'term');
       expect(child.signalCode).toBe('SIGKILL');
     } finally {

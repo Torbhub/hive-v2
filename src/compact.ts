@@ -2,12 +2,13 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import { answerCacheExpiry, cacheExpiryChoice, type CacheExpiryChoice } from './cache-expiry.js';
 import { wireActivityAt } from './death-bundle.js';
+import { maybeDaydreamAutomation } from './daydream-automation.js';
 import { checkName } from './names.js';
 import { appendDecision, hivePath, readProjects, readTeam, withTeamLock, writeJson } from './state.js';
 import { classify, isNativeQuestion, lines } from './screen.js';
 import { PreInputError, typeLine } from './spawn.js';
 import { capturePane } from './tmux.js';
-import type { CompactionState, TeamEntry } from './types.js';
+import type { CompactionState, DaydreamAutomationOptions, TeamEntry } from './types.js';
 
 export const COMPACT_IDLE_MS = 30 * 60_000;
 const RETRY_MS = 5 * 60_000;
@@ -157,14 +158,73 @@ async function normalizeLegacy(home: string, agent: TeamEntry, current: LegacySt
   return fresh.agents[workerIndex(fresh, agent)]?.compaction ?? current;
 }
 
+async function deliverClaimed(
+  root: string, project: string, home: string, agent: TeamEntry,
+  team: { agents: TeamEntry[] }, index: number, claimed: CompactionState, command: string | null,
+  state: ScreenState, fallback: CacheExpiryChoice | null,
+): Promise<string> {
+  team.agents[index] = { ...team.agents[index], compaction: claimed };
+  await writeJson(hivePath(home, 'team.json'), team);
+  let next: CompactionState;
+  let summary: string;
+  try {
+    if (fallback) {
+      const answered = await answerCacheExpiry(agent, fallback);
+      next = answered ? { ...claimed, status: 'submitted' } : ambiguous(claimed, Date.parse(claimed.at), 'cache dialog answer is unconfirmed');
+      summary = answered ? 'submitted auto-compaction' : 'auto-compaction is ambiguous';
+    } else {
+      await typeLine(
+        agent.pane!, command!, { pid: agent.pane_pid ?? 0, started: agent.pane_started ?? '' },
+        (raw) => compactionScreenGuard(agent.pane!, raw),
+      );
+      next = { ...claimed, status: state === 'working' ? 'queued' : 'submitted' };
+      summary = `${next.status === 'queued' ? 'queued' : 'submitted'} auto-compaction`;
+    }
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    if (e instanceof PreInputError) {
+      next = preInputFailure(claimed, Date.parse(claimed.at), detail);
+      summary = 'auto-compaction failed before input';
+    } else {
+      next = ambiguous(claimed, Date.parse(claimed.at), detail);
+      summary = 'auto-compaction is ambiguous';
+    }
+  }
+  team.agents[index] = { ...team.agents[index], compaction: next };
+  await writeJson(hivePath(home, 'team.json'), team);
+  await appendDecision(root, { project, by: 'watch', summary: `${summary} for ${project}/${agent.name}` });
+  return summary;
+}
+
+async function screenDeliveryGuard(
+  sessionId: string,
+  sending: CompactionState,
+  originalRaw: string,
+  state: ScreenState,
+  fallback: CacheExpiryChoice | null,
+  rearmed: boolean,
+  raw: string,
+): Promise<boolean> {
+  if (raw !== originalRaw) return false;
+  const latestFallback = cacheExpiryChoice(raw);
+  const latestState = classify(lines(raw));
+  const unchanged = fallback
+    ? latestFallback?.fingerprint === fallback.fingerprint && latestFallback.cursor === fallback.cursor
+    : latestState === state && latestState !== 'dialog' && latestState !== 'unknown' && latestFallback === null;
+  if (!unchanged || (!rearmed && completionMarker(raw)) || compactionSpinner(raw)) return false;
+  const latestActivity = await wireActivityAt(os.homedir(), sessionId);
+  return latestActivity === sending.activity_at;
+}
+
 async function deliverSerialized(
   root: string, project: string, home: string, agent: TeamEntry,
-  expected: CompactionState | undefined, sending: CompactionState, command: string | null,
+  expected: CompactionState | undefined, sending: CompactionState, originalRaw: string, command: string | null,
   state: ScreenState, fallback: CacheExpiryChoice | null, rearmed: boolean,
+  beforeSend?: () => Promise<void>,
 ): Promise<string | null> {
   const sessionId = agent.session_id;
   if (!sessionId) return null;
-  return withTeamLock(home, async () => {
+  const result = await withTeamLock(home, async (): Promise<string | CompactionState | null> => {
     const team = await readTeam(home);
     const i = workerIndex(team, agent);
     if (i < 0 || team.agents[i].auto_compact === false) return null;
@@ -179,48 +239,31 @@ async function deliverSerialized(
     }
 
     const raw = await capturePane(agent.pane!);
-    if (raw === null) return null;
-    const latestFallback = cacheExpiryChoice(raw);
-    const latestState = classify(lines(raw));
-    const unchanged = fallback
-      ? latestFallback?.fingerprint === fallback.fingerprint && latestFallback.cursor === fallback.cursor
-      : latestState === state && latestState !== 'dialog' && latestState !== 'unknown' && latestFallback === null;
-    if (!unchanged || (!rearmed && completionMarker(raw)) || compactionSpinner(raw)) return null;
-    const latestActivity = await wireActivityAt(os.homedir(), sessionId);
-    if (latestActivity !== sending.activity_at) return null;
+    if (raw === null || !await screenDeliveryGuard(sessionId, sending, originalRaw, state, fallback, rearmed, raw)) return null;
 
     const claimed = { ...sending, rejection_before: rejectionCount(raw), completion_before: completionCount(raw) };
-    team.agents[i] = { ...currentWorker, compaction: claimed };
-    await writeJson(hivePath(home, 'team.json'), team);
-    let next: CompactionState;
-    let summary: string;
-    try {
-      if (fallback) {
-        const answered = await answerCacheExpiry(agent, fallback);
-        next = answered ? { ...claimed, status: 'submitted' } : ambiguous(claimed, Date.parse(claimed.at), 'cache dialog answer is unconfirmed');
-        summary = answered ? 'submitted auto-compaction' : 'auto-compaction is ambiguous';
-      } else {
-        await typeLine(
-          agent.pane!, command!, { pid: agent.pane_pid ?? 0, started: agent.pane_started ?? '' },
-          (raw) => compactionScreenGuard(agent.pane!, raw),
-        );
-        next = { ...claimed, status: state === 'working' ? 'queued' : 'submitted' };
-        summary = `${next.status === 'queued' ? 'queued' : 'submitted'} auto-compaction`;
-      }
-    } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
-      if (e instanceof PreInputError) {
-        next = preInputFailure(claimed, Date.parse(claimed.at), detail);
-        summary = 'auto-compaction failed before input';
-      } else {
-        next = ambiguous(claimed, Date.parse(claimed.at), detail);
-        summary = 'auto-compaction is ambiguous';
-      }
+    if (beforeSend) return claimed;
+    return deliverClaimed(root, project, home, agent, team, i, claimed, command, state, fallback);
+  });
+  if (result === null || typeof result === 'string') return result;
+
+  await beforeSend!();
+  return withTeamLock(home, async () => {
+    const team = await readTeam(home);
+    const i = workerIndex(team, agent);
+    if (i < 0 || team.agents[i].auto_compact === false) return null;
+    const currentWorker = team.agents[i];
+    if (currentWorker.closed_at || currentWorker.session_id !== sessionId || currentWorker.pane !== agent.pane) return null;
+    const current = currentWorker.compaction;
+    if (expected) {
+      if (!sameState(current, expected)) return null;
+    } else if (current && current.session_id === sessionId) {
+      const epoch = current.activity_at ?? Number.POSITIVE_INFINITY;
+      if (!rearmed || !terminal(current) || (result.activity_at ?? 0) <= epoch) return null;
     }
-    team.agents[i] = { ...team.agents[i], compaction: next };
-    await writeJson(hivePath(home, 'team.json'), team);
-    await appendDecision(root, { project, by: 'watch', summary: `${summary} for ${project}/${agent.name}` });
-    return summary;
+    const raw = await capturePane(agent.pane!);
+    if (raw === null || !await screenDeliveryGuard(sessionId, result, originalRaw, state, fallback, rearmed, raw)) return null;
+    return deliverClaimed(root, project, home, agent, team, i, result, command, state, fallback);
   });
 }
 
@@ -228,7 +271,11 @@ export async function maybeCompact(
   root: string,
   project: string,
   agent: TeamEntry,
-  { now = Date.now(), idleMs = COMPACT_IDLE_MS }: { now?: number; idleMs?: number } = {},
+  { now = Date.now(), idleMs = COMPACT_IDLE_MS, daydreamAutomation }: {
+    now?: number;
+    idleMs?: number;
+    daydreamAutomation?: DaydreamAutomationOptions;
+  } = {},
 ): Promise<void> {
   const projectEntry = (await readProjects(root)).projects.find((x) => x.name === project);
   if (!projectEntry) return;
@@ -243,7 +290,11 @@ export async function maybeCompact(
   const normalized = agent.compaction
     ? await normalizeLegacy(projectEntry.home, agent, agent.compaction)
     : undefined;
-  if (agent.auto_compact === false || agent.closed_at || !agent.pane || !agent.session_id) return;
+  if (agent.auto_compact === false) {
+    await maybeDaydreamAutomation(root, project, agent, { ...daydreamAutomation, now, idleMs });
+    return;
+  }
+  if (agent.closed_at || !agent.pane || !agent.session_id) return;
   const raw = await capturePane(agent.pane);
   if (raw === null) return;
   const activityAt = await wireActivityAt(os.homedir(), agent.session_id);
@@ -273,7 +324,16 @@ export async function maybeCompact(
     rejection_before: rejectionCount(raw),
     completion_before: completionCount(raw),
   };
-  await deliverSerialized(root, project, projectEntry.home, agent, existing, sending, command, state, fallback, rearmed);
+  const beforeSend = process.env.HIVE_DAYDREAM_AUTOMATION === '1' && agent.daydream_automation === true
+    ? async () => maybeDaydreamAutomation(root, project, agent, {
+      ...daydreamAutomation,
+      now,
+      idleMs,
+      activityAt,
+      trigger: 'before_compaction',
+    }).then(() => {})
+    : undefined;
+  await deliverSerialized(root, project, projectEntry.home, agent, existing, sending, raw, command, state, fallback, rearmed, beforeSend);
 }
 
 export async function setAutoCompact(

@@ -10,7 +10,7 @@ import { appendDecision, hasLiveSendingClaim, hivePath, hubPath, readPendingPane
 import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
 import { loadProcessedKeys, migrateLegacyStaleKey, recordProcessedKey } from './watch-persist.js';
-import type { Approvals, TeamEntry } from './types.js';
+import type { Approvals, DaydreamAutomationOptions, TeamEntry } from './types.js';
 import { assertExecutionAllowed, RolloutPaused } from './rollout.js';
 
 // Read-only leaders: a chain segment must start with one of these to be
@@ -416,11 +416,12 @@ export async function watchCycle(
   deaths: Set<string> = new Set(),
   wakes: WakeState = new Map(),
   stills: Stillness = new Map(),
-  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache, marks = inFlightMarks, nativeQuestions = nativeQuestionMarks }: {
+  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache, marks = inFlightMarks, nativeQuestions = nativeQuestionMarks, daydreamAutomation }: {
     wedgeStillMs?: number;
     verdicts?: Map<string, true>;
     marks?: Set<string>;
     nativeQuestions?: Map<string, string>;
+    daydreamAutomation?: DaydreamAutomationOptions;
   } = {},
 ): Promise<void> {
   const pf = await readProjects(root);
@@ -429,9 +430,17 @@ export async function watchCycle(
     const proj = status.projects.find((x) => x.name === p.name);
     const team = await readTeam(p.home);
     for (const a of team.agents) {
-      await maybeCompact(root, p.name, a).catch(async (e: unknown) => {
-        await appendWatchLog(root, `${new Date().toISOString()} ${p.name} auto-compaction failed for ${a.name}: ${lastLine(e)}`);
-      });
+      const automation = a.daydream_automation === true
+        && (process.env.HIVE_DAYDREAM_AUTOMATION === '1' || daydreamAutomation !== undefined);
+      if (automation) {
+        await maybeCompact(root, p.name, a, { daydreamAutomation }).catch(async (e: unknown) => {
+          await appendWatchLog(root, `${new Date().toISOString()} ${p.name} auto-compaction failed for ${a.name}: ${lastLine(e)}`);
+        });
+      } else {
+        await maybeCompact(root, p.name, a).catch(async (e: unknown) => {
+          await appendWatchLog(root, `${new Date().toISOString()} ${p.name} auto-compaction failed for ${a.name}: ${lastLine(e)}`);
+        });
+      }
       if (!a.pane || a.closed_at) continue;
       if (!(await paneExists(a.pane))) {
         await handleDeath(root, p.name, p.home, a, deaths, wakes);

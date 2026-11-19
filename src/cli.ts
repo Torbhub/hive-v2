@@ -40,7 +40,7 @@ const USAGE = `usage:
   hive cleanup <project> [--dry-run]
   hive interrupt <project> [agent] | hive kill <project> [agent] | hive compact <project> [agent] on|off
   hive doctor | ui | watch | web [--port N] | handy-bridge [--origin URL] | mcp
-  hive memory propose <project> <text...> | ls <project> | promote <project> <id> | hive branch create|status|refresh|result|reconcile ... | hive daydream mine|verify|recover|status ...`;
+  hive memory propose <project> <text...> | ls <project> | promote <project> <id> | hive branch create|status|refresh|result|reconcile ... | hive daydream mine|verify|recover|status|automation|reconcile|prune ...`;
 const VALUELESS_FLAGS = new Set(['json', 'dry-run', 'no-body']);
 
 function parseFlags(args: string[], names: string[]): { flags: Record<string, string | true>; pos: string[] } {

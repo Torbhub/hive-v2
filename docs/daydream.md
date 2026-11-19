@@ -1,8 +1,8 @@
-# Manual daydreams
+# Daydreams
 
-Daydreams are disabled by default. Set both `HIVE_DAYDREAM=1` and `HIVE_NATIVE_BRANCHES=1` for native operations. The status command is read-only and does not need these flags.
+Daydreams are disabled by default. Set both `HIVE_DAYDREAM=1` and `HIVE_NATIVE_BRANCHES=1` for native operations. Status and local automation controls do not need these flags.
 
-A daydream mines facts for one approved task plan and its current started checkpoint. It never answers owner questions or rejoins the parent session. It has no watcher and does not change idle compaction.
+A daydream mines facts for one approved task plan and its current started checkpoint. It never answers owner questions, rejoins the parent session, or promotes memory. Automation has a separate opt-in and does not replace ordinary idle compaction.
 
 ## Commands
 
@@ -11,6 +11,9 @@ hive daydream mine <project> --agent <name> --checkpoint <id> --question <text>
 hive daydream verify <project> <daydream> --file <brief.json>
 hive daydream recover <project> <daydream> [--file <brief.json>]
 hive daydream status [project]
+hive daydream automation <project> [agent] on|off|status
+hive daydream reconcile <project> <daydream>
+hive daydream prune <project> [--dry-run]
 ```
 
 `mine` resolves one current TeamEntry. It captures bounded task, checkpoint, handoff, parent-history, and question hashes. Task events must match both the project and task ID. It creates one native child with `hive_daydream_id` and submits the exact question.
@@ -21,13 +24,56 @@ hive daydream status [project]
 
 `status` prints durable records for one project or all projects. It does not refresh native state.
 
+## Automation rollout
+
+Automation needs all of these opt-ins:
+
+- `HIVE_DAYDREAM=1` and `HIVE_NATIVE_BRANCHES=1` keep the native rollout gates.
+- `HIVE_DAYDREAM_AUTOMATION=1` enables automation globally.
+- `hive daydream automation <project> <agent> on` enables one non-orchestrator worker. Orchestrator opt-in is rejected before reservation. Status can omit the agent name to report the project.
+
+The native client also needs `HIVE_KIMI_SERVER_TOKEN`. `HIVE_KIMI_SERVER_ORIGIN` can override its loopback origin. Automation status, on, and off are local operations. They do not need native flags. Prune is also local. Reconcile needs the native flags but does not need `HIVE_DAYDREAM_AUTOMATION`.
+
+`auto_compact` is independent. An agent with only `auto_compact` keeps its existing behavior. An agent with automation and `auto_compact=false` can still run an idle daydream.
+
+An idle run needs 30 minutes since the last genuine wire activity. The epoch uses the existing `turn.ended`, `agent.turn.ended`, and `full_compaction.complete` events. Keepalive, polling, and passive screen output do not move it. Watch delegates all daydream work to the compactor. A pre-compaction run happens only after every serialized delivery guard passes and before actual compaction input. A rejected worker, session, pane, activity, or completion guard consumes no run, fingerprint, or budget. After the daydream, delivery recaptures the pane and wire activity and repeats the same screen, fallback, completion, and activity guard. Late output or activity prevents input but preserves the completed run. It has a different trigger reason from an idle run.
+
+A fingerprint contains the agent, session, activity epoch, and reason. One fingerprint has at most one run, including after a watch restart. One active reservation per project prevents concurrent native runs. The reservation and result writes use the project lock. The reserved session and worktree are revalidated against an exact non-orchestrator TeamEntry inside the team lock before native work. The native lifecycle runs outside that lock because the PR4 operations take it themselves.
+
+Automated mining uses a fixed question and the current started checkpoint. The runner delegates to the existing mine, verify, fork, compaction, and recovery operations. It does not add a second compactor, rejoin the parent, or promote memory. A brief that stays pending for 60 seconds becomes unknown. Automation never retries it.
+
+## Budgets and durable state
+
+Daily windows use UTC dates. The default per-agent ceilings are 4 runs, 12 prompts, and 4 compactions. The default per-project ceilings are 16 runs, 48 prompts, and 16 compactions. One run can use at most 3 prompts and 1 compaction.
+
+Before any native effect, Hive reserves 1 run, 3 prompts, and 1 compaction under the project lock. Both per-agent and per-project remaining budgets must cover that reservation. A failed reservation makes no native call. A reported result replaces the reservation with its actual run, prompt, and compaction counts. Result and reconcile use one guarded usage finalizer. A crash or reconcile of an unfinished reservation charges the full reservation because native effects are unknown. This includes missing-child and recovered-result-write crash paths. Recovered completion adds only positive deltas above existing counts. An unknown 1/1 result therefore completes at 3/1 without a repeated charge. `usageRecorded` prevents a repeated first charge. Token usage is evidence and never acts as an enforcement boundary.
+
+Durable run records live in `.hive/daydreams/automation/state.json`. Each reservation stores `ownerPid` and `ownerStartTime` before native runner execution. A live owner blocks new fingerprints and missing-child reconcile. Invalid, mismatched, or unreadable lease data also stays fenced with `usageRecorded=false` and no child discovery. Only confirmed owner death permits the pre-child `ENOENT` proof and full-reservation charging.
+
+A reservation survives process loss and blocks duplicate admission. Any unknown reservation, child, prompt, fork, compaction, or result fences that agent. It also keeps the project reservation closed while native effects may still be active.
+
+`hive daydream reconcile <project> <daydream>` is read-only. It clears a fence only after one of these proofs:
+
+- The durable daydream is already `recovered`.
+- A pre-child record read fails with `ENOENT` and no matching native child exists. The run becomes terminal unknown and is not reported as recovered.
+
+Corruption, permission errors, invalid records, and transient I/O never prove a missing child. They stay fenced with `usageRecorded=false`. Other unknown outcomes also stay fenced. Reconcile never creates a BTW, submits a prompt, forks, compacts, or retries unknown work. Use the explicit manual `verify` or `recover` command to finish an existing PR4 lifecycle when that is safe. Then run `reconcile` to release the automation fence.
+
+## Retention
+
+Recovered automation writes a bounded summary under `.hive/daydreams/automation/artifacts` and matching tombstoned metadata under `.hive/daydreams/automation/metadata`. The summary contains identity, trigger, status, and usage. It does not contain a transcript or credentials.
+
+`hive daydream prune <project> [--dry-run]` considers only these Hive-owned artifact and tombstone pairs. The default age cap is 30 days and the default count cap is the newest 100 tombstones. An artifact is eligible when it meets the age cap or exceeds the count cap. Dry-run reports the same candidates without deleting them.
+
+Prune refuses symbolic links, non-regular files, foreign artifact paths, and changes detected during pruning. Every `.json` entry must be a regular file. It validates all owned tombstones before the first unlink. Verified directory handles stay open, and deletion uses `/proc/self/fd` paths so an ancestor rename or symlink swap cannot redirect it. Prune never deletes native sessions, wire logs, context files, workspaces, panes, credentials, manual daydream records, active metadata, or automation state.
+
 ## BTW read-only boundary and phase isolation
 
 Mining uses one fresh native `:btw` agent. Recovery uses a different fresh `:btw` agent after main compaction is proven. Each session has at most one active BTW. Timeout or unknown effects never create a replacement.
 
 BTW provides a built-in positive allowlist of `Read`, `Grep`, and `Glob`. Manual mode remains as defense in depth. No custom profile or `disabled_tools` override is needed.
 
-Hive persists the BTW agent and prompt intent before submission. A lost prompt reconciles only through a unique `prompt_id` in that agent's transcript. The existing agent, acknowledgement, and intent are preserved. No prompt is overwritten or resubmitted.
+Hive persists the BTW agent and prompt intent before submission, but not prompt content. A lost prompt reconciles only through a unique `prompt_id` in that agent's transcript. If backfill omits the prompt record, the operator can supply proof content for verification or recovery. Hive uses it only when its hash matches the durable prompt hash and `nativeMessageId` is present. An existing wrong prompt ID is never overridden. Missing proof, mismatches, duplicates, and missing turns are refused. The same completed, non-wedged linked turn and assistant JSON frame are still required. The existing agent, acknowledgement, and intent are preserved. No prompt is overwritten, resubmitted, or persisted in durable records.
 
 ## Brief and evidence
 
