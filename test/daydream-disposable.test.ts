@@ -7,18 +7,24 @@ import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { selectBtwTurn } from '../src/btw.js';
 import { compactionJournalDiagnostics, selectCompactionProof } from '../src/compaction-journal.js';
-import { recoverDaydream } from '../src/daydream.js';
+import { readDaydream } from '../src/daydream.js';
+import { createDaydreamAutomationRunner } from '../src/daydream-automation-runner.js';
+import {
+  getDaydreamAutomationStatus,
+  maybeDaydreamAutomation,
+  reconcileDaydreamAutomation,
+} from '../src/daydream-automation.js';
 import { daydreamFactsHash } from '../src/daydream-brief.js';
-import { writeRecord } from '../src/daydream-record.js';
 import { KimiServerClient } from '../src/kimi-server.js';
 import {
+  nativeHistoryIsPrefix,
   sameNativeForkSnapshot,
   snapshotNativeHistory,
 } from '../src/native-history.js';
 import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
 import type {
   DaydreamBrief,
-  DaydreamRecord,
+  NativeMessage,
   NativePrompt,
   NativeTranscriptFrame,
   NativeTranscriptTurn,
@@ -33,7 +39,7 @@ import { disposableProviderBaseUrl } from './kimi-server-native-disposable.test.
 
 const execFileAsync = promisify(execFile);
 const describeDisposable = process.env.HIVE_DAYDREAM_DISPOSABLE === '1' ? describe : describe.skip;
-const BINARY = '/usr/local/bin/kimi-real';
+const BINARY = process.env.HIVE_KIMI_SERVER_BIN ?? '/usr/local/bin/kimi-real';
 const CONTEXT = 'Cache boundary detail for deterministic compaction. '.repeat(100);
 const MAX_PROMPT_TURNS = 3;
 
@@ -49,6 +55,11 @@ type PromptQueue = {
 
 function sha(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+type AutomationStateFile = { runs: Record<string, unknown>[] };
+async function readAutomationState(home: string): Promise<AutomationStateFile> {
+  return JSON.parse(await fs.readFile(hivePath(home, 'daydreams', 'automation', 'state.json'), 'utf8')) as AutomationStateFile;
 }
 
 function routingEnvironment(stdout: string): NodeJS.ProcessEnv {
@@ -170,8 +181,8 @@ async function waitForBtw(
       throw new Error(`btw-turn-id-conflict:${JSON.stringify({ status: 'turn-id-conflict', count: turns.length })}`);
     }
     const roster = page.agents.filter((agent) => agent.agentId === agentId);
-    if (prompts.length === 1) {
-      const prompt = prompts[0];
+    if (prompts.length <= 1) {
+      const prompt = prompts[0] ?? { promptId, status: 'completed', userMessageId, content };
       if (prompt.userMessageId !== userMessageId) throw new Error(`btw-user-message-conflict:${JSON.stringify({ status: 'user-message-conflict', count: 1 })}`);
       if (sha(prompt.content) !== sha(content)) throw new Error(`btw-content-conflict:${JSON.stringify({ status: 'content-conflict', contentHash: sha(prompt.content) })}`);
       const selected = selectBtwTurn(prompt, turns, page.agents, agentId);
@@ -302,83 +313,39 @@ capabilities = ["thinking", "always_thinking", "image_in", "video_in", "tool_use
         body: JSON.stringify({ title: 'Daydream disposable parent', metadata: { cwd: home } }),
       });
       sessionIds.push(parent.id);
-      const daydreamId = randomUUID();
-      const child = await client.createChild(parent.id, {
-        title: 'Daydream disposable child', metadata: { hive_daydream_id: daydreamId },
-      });
-      sessionIds.push(child.id);
-      expect(child.metadata.parent_session_id).toBe(parent.id);
-      expect(child.metadata.child_session_kind).toBe('child');
-      expect(child.metadata.hive_daydream_id).toBe(daydreamId);
-      expect(child.workspace_id).toBe(parent.workspace_id);
-      expect(sha(child.metadata.cwd)).toBe(sha(home));
-      await apiData(server.origin, server.token, `/api/v1/sessions/${encodeURIComponent(child.id)}/profile`, {
-        method: 'POST', body: JSON.stringify({ agent_config: { model: 'kimi-code/k3.1-pro' } }),
-      });
-
       const fact = `fact_${randomUUID()}`;
+      let daydreamId = '';
       let promptTurns = 0;
-      const setupPromptId = `daydream-setup-${randomUUID()}`;
-      promptTurns++;
-      const setupAck = await client.submitPrompt(child.id, {
-        promptId: setupPromptId,
-        content: [{ type: 'text', text: `Remember this exact fact: ${fact}. ${CONTEXT} Reply with only that fact.` }],
-      });
-      expect(setupAck.prompt_id).toBe(setupPromptId);
-      const setupMessages = await waitForTurn(client, server.origin, server.token, child.id, setupAck.user_message_id);
-      expect(setupMessages.some((message) => message.id === setupAck.user_message_id)).toBe(true);
-      const setupEvidence = setupMessages.find((message) => message.role === 'assistant'
-        && message.content.some((part) => part.type === 'text' && String(part.text).includes(fact)));
-      if (!setupEvidence) throw new Error('daydream-setup-evidence-missing');
-
-      const miningAgentId = (await client.createBtw(child.id)).agent_id;
-      const miningPromptId = `hive-daydream-mine-${daydreamId}`;
-      promptTurns++;
-      const miningAck = await client.submitPrompt(child.id, {
-        promptId: miningPromptId,
-        content: [{ type: 'text', text: `Remember this exact fact: ${fact}. Reply with only that fact.` }],
-        agentId: miningAgentId,
-        permissionMode: 'manual',
-      });
-      expect(miningAck.prompt_id).toBe(miningPromptId);
-      const miningTurn = await waitForBtw(client, child.id, miningAgentId, miningAck.prompt_id, miningAck.user_message_id, miningAck.content);
-      expect(sha(assistantTextFrame(miningTurn).text)).toBe(sha(fact));
-
-      const forkIntentAt = new Date().toISOString();
-      const checkpoint = await client.forkSession(child.id, {
-        title: 'Daydream disposable checkpoint', metadata: { hive_daydream_id: daydreamId },
-      });
-      const [parentSnapshot, sourceSnapshot, checkpointSnapshot] = await Promise.all([
-        snapshotNativeHistory(client, parent.id),
-        snapshotNativeHistory(client, child.id),
-        snapshotNativeHistory(client, checkpoint.id),
-      ]);
-      expect(sameNativeForkSnapshot(sourceSnapshot, child.id, checkpoint.id, checkpointSnapshot)).toBe(true);
-
-      const [incarnation, watermark] = await Promise.all([
-        client.getServerMeta(),
-        client.getTranscriptWatermark(child.id, { agentId: 'main', pageSize: 1 }),
-      ]);
-      const compactingPath = `/api/v1/debug/session/${encodeURIComponent(child.id)}/agent/main/agentFullCompactionService/compacting`;
-      expect(await apiData<unknown>(server.origin, server.token, compactingPath)).toBeNull();
-      const nonce = randomUUID();
-      const compactionIntentAt = new Date().toISOString();
-      const instruction = `Preserve the active mining question and verified fact structure. Do not answer owner questions or rejoin the parent. Include the nonce verbatim in the compaction summary. nonce=${nonce}`;
-      let compactCalls = 0;
-      compactCalls++;
-      const began = await apiData<boolean>(
-        server.origin,
-        server.token,
-        `/api/v1/debug/session/${encodeURIComponent(child.id)}/agent/main/agentFullCompactionService/begin`,
-        { method: 'POST', body: JSON.stringify({ source: 'manual', instruction }) },
-      );
-      if (began !== true) throw new Error('daydream-compaction-begin-refused:{"status":"occupied-no-op"}');
-      const summary = await waitForDebugCompactionSummary(
-        client, server.origin, server.token, child.id, watermark.seq, fact, instruction, compactingPath,
-      );
-      const compactedSnapshot = await snapshotNativeHistory(client, child.id);
-      expect(compactedSnapshot.count).toBeGreaterThan(0);
-      expect(compactedSnapshot.historyHash).not.toBe(sourceSnapshot.historyHash);
+      let childCreations = 0;
+      let setupEvidence: NativeMessage | undefined;
+      const promptAcks: NativePrompt[] = [];
+      const createChild = client.createChild.bind(client);
+      const submitPrompt = client.submitPrompt.bind(client);
+      client.submitPrompt = async (sessionId, input) => {
+        const ack = await submitPrompt(sessionId, input);
+        promptTurns++;
+        promptAcks.push(ack);
+        return ack;
+      };
+      client.createChild = async (parentId, input) => {
+        childCreations++;
+        if (childCreations > 1) throw new Error('daydream-unexpected-second-generation');
+        const child = await createChild(parentId, input);
+        sessionIds.push(child.id);
+        daydreamId = String(child.metadata.hive_daydream_id);
+        await apiData(server!.origin, server!.token, `/api/v1/sessions/${encodeURIComponent(child.id)}/profile`, {
+          method: 'POST', body: JSON.stringify({ agent_config: { model: 'kimi-code/k3.1-pro' } }),
+        });
+        const setupAck = await client.submitPrompt(child.id, {
+          promptId: `daydream-setup-${randomUUID()}`,
+          content: [{ type: 'text', text: `Remember this exact fact: ${fact}. ${CONTEXT} Reply with only that fact.` }],
+        });
+        const setupMessages = await waitForTurn(client, server!.origin, server!.token, child.id, setupAck.user_message_id);
+        setupEvidence = setupMessages.find((message) => message.role === 'assistant'
+          && message.content.some((part) => part.type === 'text' && String(part.text).includes(fact)));
+        if (!setupEvidence) throw new Error('daydream-setup-evidence-missing');
+        return child;
+      };
 
       const project = 'daydream-live';
       const taskId = 'daydream-live-task';
@@ -389,17 +356,20 @@ capabilities = ["thinking", "always_thinking", "image_in", "video_in", "tool_use
       await fs.writeFile(handoffPath, handoffContent, { mode: 0o600 });
       await writeJson(hubPath(scope.root, 'projects.json'), { projects: [{ name: project, home, repos: [] }] });
       await writeJson(hivePath(home, 'team.json'), {
-        agents: [{ name: 'builder', session_id: parent.id, task: taskId, worktree: home, handoff: handoffPath }],
+        agents: [{ name: 'builder', session_id: parent.id, task: taskId, worktree: home, handoff: handoffPath, daydream_automation: true }],
       });
+      const automationAt = new Date().toISOString();
       const taskEvents: TaskEvent[] = [
-        { id: taskId, project, event: 'asked', at: compactionIntentAt, note: 'Investigate the cache boundary.' },
-        { id: taskId, project, event: 'plan', at: compactionIntentAt, checkpoints: [{ id: 'cp1', desc: 'Preserve the cache fact', etaMin: 5 }] },
-        { id: taskId, project, event: 'answered', at: compactionIntentAt, note: 'plan approved by owner' },
-        { id: taskId, project, event: 'progress', at: compactionIntentAt, checkpoint: 'cp1', status: 'started', note: 'Start cp1.' },
+        { id: taskId, project, event: 'asked', at: automationAt, note: 'Investigate the cache boundary.' },
+        { id: taskId, project, event: 'plan', at: automationAt, checkpoints: [{ id: 'cp1', desc: 'Preserve the cache fact', etaMin: 5 }] },
+        { id: taskId, project, event: 'answered', at: automationAt, note: 'plan approved by owner' },
+        { id: taskId, project, event: 'progress', at: automationAt, checkpoint: 'cp1', status: 'started', note: 'Start cp1.' },
       ];
       for (const event of taskEvents) await appendTaskEvent(scope.root, event);
-      const question = 'Which exact cache fact survives compaction?';
-      const briefFor = (phase: 'mine' | 'recover'): DaydreamBrief => ({
+
+      const parentSnapshot = await snapshotNativeHistory(client, parent.id);
+      const question = 'Which approved-plan and current-checkpoint facts must survive compaction? Return only cited facts and unknowns.';
+      const briefFor = (phase: 'mine'): DaydreamBrief => ({
         schemaVersion: 1,
         daydreamId,
         phase,
@@ -411,66 +381,103 @@ capabilities = ["thinking", "always_thinking", "image_in", "video_in", "tool_use
           answer: fact,
           whyNow: 'Recovery must preserve the cache invariant.',
           uncertainty: 'Eviction ordering remains unverified.',
-          citations: [{ kind: 'native', messageId: setupEvidence.id, contentHash: sha(setupEvidence.content), quote: fact }],
+          citations: [{ kind: 'native', messageId: setupEvidence!.id, contentHash: sha(setupEvidence!.content), quote: fact }],
         }],
         unknowns: [],
       });
-      const minedBrief = briefFor('mine');
-      const recoveredBrief = briefFor('recover');
-      const miningFrame = assistantTextFrame(miningTurn);
-      const miningStep = miningTurn.steps.find((step) => step.frames.some((frame) => frame.frameId === miningFrame.frameId));
-      if (!miningStep) throw new Error('daydream-mining-provenance-step-missing');
-      const record: DaydreamRecord = {
-        schemaVersion: 1,
-        id: daydreamId,
-        status: 'compacting',
-        parentSessionId: parent.id,
-        childSessionId: child.id,
-        checkpointSessionId: checkpoint.id,
-        workspaceId: child.workspace_id,
-        cwd: home,
-        scope: { project, agent: 'builder', task: taskId },
-        checkpointId: 'cp1',
-        questionHash: sha(question),
-        sourceTaskHash: sha(taskEvents),
-        handoffPathHash: sha(handoffPath),
-        handoffContentHash: sha(handoffContent),
-        parentSnapshot,
-        childSnapshot: sourceSnapshot,
-        prompt: {
-          phase: 'mine',
-          status: 'accepted',
-          agentId: miningAgentId,
-          promptId: miningAck.prompt_id,
-          promptHash: sha(miningAck.content),
-          intentAt: miningAck.created_at,
-          nativeMessageId: miningAck.user_message_id,
-        },
-        fork: { status: 'completed', intentAt: forkIntentAt },
-        compaction: {
-          status: 'submitting',
-          instructionHash: sha(instruction),
-          nonce,
-          intentAt: compactionIntentAt,
-          watermark: watermark.seq,
-          serverId: incarnation.server_id,
-          serverStartedAt: incarnation.started_at,
-        },
-        provenance: {
-          sessionId: child.id,
-          agentId: miningAgentId,
-          promptId: miningAck.prompt_id,
-          turnId: miningTurn.turnId,
-          stepId: miningStep.stepId,
-          frameId: miningFrame.frameId,
-          frameHash: sha(miningFrame.text),
-        },
-        minedBrief,
-        factsHash: daydreamFactsHash(minedBrief),
-        createdAt: compactionIntentAt,
-        updatedAt: compactionIntentAt,
-      };
-      await writeRecord(home, record);
+      const previousDaydream = process.env.HIVE_DAYDREAM;
+      const previousNativeBranches = process.env.HIVE_NATIVE_BRANCHES;
+      const previousAutomation = process.env.HIVE_DAYDREAM_AUTOMATION;
+      process.env.HIVE_DAYDREAM = '1';
+      process.env.HIVE_NATIVE_BRANCHES = '1';
+      process.env.HIVE_DAYDREAM_AUTOMATION = '1';
+      let compactCalls = 0;
+      let automationRuns = 0;
+      let automationRun: Awaited<ReturnType<typeof maybeDaydreamAutomation>> = null;
+      let sourceSnapshot: Awaited<ReturnType<typeof snapshotNativeHistory>> | undefined;
+      let summary: { text: string; hash: string } | undefined;
+      let compactingPath = '';
+      let instruction = '';
+      let watermark = 0;
+      try {
+        const realRunner = createDaydreamAutomationRunner(client, {
+          miningPrompt: () => [{ type: 'text', text: `Return only this exact JSON object with no prose:\n${JSON.stringify(briefFor('mine'))}` }],
+        });
+        client.compactSession = async (sessionId, input) => {
+          compactCalls++;
+          if (compactCalls > 1) throw new Error('daydream-unexpected-second-compaction');
+          const compactingRecord = await readDaydream(scope, daydreamId);
+          if (!compactingRecord.checkpointSessionId) throw new Error('daydream-checkpoint-missing');
+          const [source, checkpoint] = await Promise.all([
+            snapshotNativeHistory(client, sessionId),
+            snapshotNativeHistory(client, compactingRecord.checkpointSessionId),
+          ]);
+          expect(sameNativeForkSnapshot(source, sessionId, compactingRecord.checkpointSessionId, checkpoint)).toBe(true);
+          sourceSnapshot = source;
+          watermark = (await client.getTranscriptWatermark(sessionId, { agentId: 'main', pageSize: 1 })).seq;
+          compactingPath = `/api/v1/debug/session/${encodeURIComponent(sessionId)}/agent/main/agentFullCompactionService/compacting`;
+          expect(await apiData<unknown>(server!.origin, server!.token, compactingPath)).toBeNull();
+          instruction = input.instruction;
+          const began = await apiData<boolean>(
+            server!.origin,
+            server!.token,
+            `/api/v1/debug/session/${encodeURIComponent(sessionId)}/agent/main/agentFullCompactionService/begin`,
+            { method: 'POST', body: JSON.stringify({ source: 'manual', instruction }) },
+          );
+          if (began !== true) throw new Error('daydream-compaction-begin-refused');
+          summary = await waitForDebugCompactionSummary(
+            client, server!.origin, server!.token, sessionId, watermark, fact, instruction, compactingPath,
+          );
+          return {};
+        };
+        const crashingRunner = {
+          run: async (input: Parameters<typeof realRunner.run>[0]) => {
+            automationRuns++;
+            const result = await realRunner.run(input);
+            if (result.status !== 'recovered') throw new Error('daydream-automation-not-recovered');
+            throw new Error('daydream-simulated-result-write-crash');
+          },
+          reconcile: realRunner.reconcile,
+        };
+        const activityAt = Date.now();
+        automationRun = await maybeDaydreamAutomation(scope.root, project, {
+          name: 'builder', session_id: parent.id, task: taskId, worktree: home, handoff: handoffPath, daydream_automation: true,
+        }, {
+          native: client,
+          runner: crashingRunner,
+          now: activityAt,
+          idleMs: 0,
+          activityAt,
+        });
+      } finally {
+        if (previousDaydream === undefined) delete process.env.HIVE_DAYDREAM;
+        else process.env.HIVE_DAYDREAM = previousDaydream;
+        if (previousNativeBranches === undefined) delete process.env.HIVE_NATIVE_BRANCHES;
+        else process.env.HIVE_NATIVE_BRANCHES = previousNativeBranches;
+        if (previousAutomation === undefined) delete process.env.HIVE_DAYDREAM_AUTOMATION;
+        else process.env.HIVE_DAYDREAM_AUTOMATION = previousAutomation;
+      }
+      const diagnosticRecord = await readDaydream(scope, daydreamId);
+      expect(diagnosticRecord.error).toBeUndefined();
+      expect(automationRun, `diagnosticRecord.status=${diagnosticRecord.status}`).not.toBeNull();
+      expect(sourceSnapshot, `diagnosticRecord.status=${diagnosticRecord.status}`).toBeDefined();
+      expect(summary, `diagnosticRecord.status=${diagnosticRecord.status}`).toBeDefined();
+      expect(automationRun.status).toBe('unknown');
+      expect(automationRun.daydreamId).toBe(daydreamId);
+      expect(automationRun.fingerprint).toBeTruthy();
+      expect(automationRuns).toBe(1);
+      expect(childCreations).toBe(1);
+      expect(compactCalls).toBe(1);
+      expect(promptTurns).toBe(MAX_PROMPT_TURNS);
+      expect((await getDaydreamAutomationStatus(scope.root, project)).daily.project).toMatchObject({
+        runs: 1, prompts: 3, compactions: 1,
+      });
+      const compactedRecord = await readDaydream(scope, daydreamId);
+      expect(compactedRecord.status).toBe('recovered');
+      expect(compactedRecord.childSessionId).toBeTruthy();
+      const compactedSnapshot = await snapshotNativeHistory(client, compactedRecord.childSessionId!);
+      expect(compactedSnapshot.historyHash).not.toBe(sourceSnapshot.historyHash);
+      const incarnation = await client.getServerMeta();
 
       await stopProcessGroup(server.child);
       server = undefined;
@@ -478,87 +485,94 @@ capabilities = ["thinking", "always_thinking", "image_in", "video_in", "tool_use
       client = new KimiServerClient({ origin: server.origin, token: server.token, deadlineMs: 15_000 });
       const restartedIncarnation = await client.getServerMeta();
       expect(restartedIncarnation.server_id).not.toBe(incarnation.server_id);
-      await client.listMessages(child.id, { pageSize: 100 });
+      await client.listMessages(compactedRecord.childSessionId!, { pageSize: 100 });
       const restartedSummary = await waitForDebugCompactionSummary(
-        client, server.origin, server.token, child.id, 0, fact, instruction, compactingPath,
+        client, server.origin, server.token, compactedRecord.childSessionId!, 0, fact, instruction, compactingPath,
       );
       expect(restartedSummary.hash).toBe(summary.hash);
       expect(compactCalls).toBe(1);
 
       client.compactSession = async () => { throw new Error('daydream-unexpected-second-compaction'); };
-      const recoveryAcks: NativePrompt[] = [];
-      const submitPrompt = client.submitPrompt.bind(client);
-      client.submitPrompt = async (sessionId, input) => {
-        const ack = await submitPrompt(sessionId, input);
-        if (input.promptId === `hive-daydream-recover-${daydreamId}`) recoveryAcks.push(ack);
-        return ack;
-      };
-      const previousDaydream = process.env.HIVE_DAYDREAM;
-      const previousNativeBranches = process.env.HIVE_NATIVE_BRANCHES;
+      const durable = await readAutomationState(home);
+      durable.runs[0].ownerPid = 99_999_999;
+      await writeJson(hivePath(home, 'daydreams', 'automation', 'state.json'), durable);
+      const reconciled = await reconcileDaydreamAutomation(scope.root, project, daydreamId, {
+        native: client,
+        now: Date.now(),
+      });
+      expect(reconciled).toMatchObject({
+        status: 'recovered', fenced: false, usageRecorded: true, prompts: 3, compactions: 1,
+      });
+      expect((await getDaydreamAutomationStatus(scope.root, project)).daily.project).toMatchObject({
+        runs: 1, prompts: 3, compactions: 1,
+      });
+
+      const recovered = await readDaydream(scope, daydreamId);
+      expect(recovered.status).toBe('recovered');
+      expect(recovered.minedBrief).toEqual(briefFor('mine'));
+      expect(nativeHistoryIsPrefix(recovered.childSnapshot!, compactedSnapshot)).toBe(true);
+      expect(recovered.compaction).toMatchObject({ status: 'completed', watermark });
+      expect(recovered.compaction?.instructionHash).toBe(sha(instruction));
+      expect(summary.text).toContain(recovered.compaction?.nonce);
+      expect(recovered.recoveredBrief?.facts).toEqual(recovered.minedBrief?.facts);
+      expect(recovered.recoveredBrief?.unknowns).toEqual(recovered.minedBrief?.unknowns);
+      expect(recovered.factsHash).toBe(daydreamFactsHash(recovered.recoveredBrief!));
+      const childId = recovered.childSessionId!;
+      const miningAck = promptAcks.find((ack) => ack.prompt_id === `hive-daydream-mine-${daydreamId}`);
+      const recoveryAck = promptAcks.find((ack) => ack.prompt_id === `hive-daydream-recover-${daydreamId}`);
+      if (!miningAck || !recoveryAck || !recovered.provenance || !recovered.recoveryProvenance) {
+        throw new Error('daydream-production-provenance-missing');
+      }
+      const miningTurn = await waitForBtw(
+        client, childId, recovered.provenance.agentId, miningAck.prompt_id, miningAck.user_message_id, miningAck.content,
+      );
+      const recoveryTurn = await waitForBtw(
+        client, childId, recovered.recoveryProvenance.agentId, recoveryAck.prompt_id, recoveryAck.user_message_id, recoveryAck.content,
+      );
+      expect(JSON.parse(assistantTextFrame(miningTurn).text)).toEqual(recovered.minedBrief);
+      expect(JSON.parse(assistantTextFrame(recoveryTurn).text)).toEqual(recovered.recoveredBrief);
+      expect(recovered.prompt?.nativeMessageId).toBe(recoveryAck.user_message_id);
+      expect(recovered.recoveryProvenance).toMatchObject({
+        sessionId: childId,
+        promptId: recoveryAck.prompt_id,
+        turnId: recoveryTurn.turnId,
+        frameHash: sha(assistantTextFrame(recoveryTurn).text),
+      });
+      expect(recovered.recoveryProvenance.agentId).not.toBe(recovered.provenance.agentId);
+      const nativeEvidence = setupEvidence;
+      if (!nativeEvidence) throw new Error('daydream-setup-evidence-missing');
+      expect(recovered.recoveredBrief!.facts.some((briefFact) => briefFact.citations.some((citation) => citation.kind === 'native'
+        && citation.messageId === nativeEvidence.id
+        && citation.contentHash === sha(nativeEvidence.content)
+        && citation.quote.includes(fact)))).toBe(true);
+      expect(await snapshotNativeHistory(client, parent.id)).toEqual(parentSnapshot);
+
       process.env.HIVE_DAYDREAM = '1';
       process.env.HIVE_NATIVE_BRANCHES = '1';
+      process.env.HIVE_DAYDREAM_AUTOMATION = '1';
       try {
-        promptTurns++;
-        const recovering = await recoverDaydream(scope, daydreamId, undefined, client);
-        expect(recovering.error).toBeUndefined();
-        expect(recovering.status).toBe('recovering');
-        expect(recovering.childSnapshot?.historyHash).toBe(compactedSnapshot.historyHash);
-        const recoveryAck = recoveryAcks[0];
-        if (!recoveryAck || !recovering.prompt?.agentId) throw new Error('daydream-production-recovery-prompt-missing');
-        expect(recovering.prompt.promptHash).toBe(sha(recoveryAck.content));
-        expect(recovering.prompt.nativeMessageId).toBe(recoveryAck.user_message_id);
-        const recoveryTurn = await waitForBtw(
-          client, child.id, recovering.prompt.agentId, recoveryAck.prompt_id, recoveryAck.user_message_id, recoveryAck.content,
-        );
-        const recoveryFrame = assistantTextFrame(recoveryTurn);
-        let recoveryDiagnostic: Record<string, unknown>;
-        try {
-          const parsed = JSON.parse(recoveryFrame.text) as Record<string, unknown> | null;
-          const facts = parsed && Array.isArray(parsed.facts) ? parsed.facts : undefined;
-          const unknowns = parsed && Array.isArray(parsed.unknowns) ? parsed.unknowns : undefined;
-          recoveryDiagnostic = {
-            parseSuccess: true,
-            phase: typeof parsed?.phase === 'string' ? parsed.phase : 'missing',
-            factCount: facts?.length ?? null,
-            unknownCount: unknowns?.length ?? null,
-            citationCount: facts?.reduce((count, fact) => {
-              const citations = fact && typeof fact === 'object' ? (fact as Record<string, unknown>).citations : undefined;
-              return count + (Array.isArray(citations) ? citations.length : 0);
-            }, 0) ?? null,
-            textHash: sha(recoveryFrame.text),
-          };
-        } catch {
-          throw new Error(`daydream-recovery-frame-mismatch:${JSON.stringify({ parseSuccess: false, textHash: sha(recoveryFrame.text) })}`);
-        }
-        const expectedCitationCount = recoveredBrief.facts.reduce((count, fact) => count + fact.citations.length, 0);
-        if (recoveryDiagnostic.phase !== recoveredBrief.phase
-          || recoveryDiagnostic.factCount !== recoveredBrief.facts.length
-          || recoveryDiagnostic.unknownCount !== recoveredBrief.unknowns.length
-          || recoveryDiagnostic.citationCount !== expectedCitationCount) {
-          throw new Error(`daydream-recovery-frame-mismatch:${JSON.stringify(recoveryDiagnostic)}`);
-        }
-        const recovered = await recoverDaydream(scope, daydreamId, recoveredBrief, client);
-        expect(recovered.status, JSON.stringify(recoveryDiagnostic)).toBe('recovered');
-        expect(recovered.recoveredBrief).toEqual(recoveredBrief);
-        expect(recovered.factsHash).toBe(daydreamFactsHash(recoveredBrief));
-        expect(recovered.prompt?.nativeMessageId).toBe(recoveryAck.user_message_id);
-        expect(recovered.recoveryProvenance).toMatchObject({
-          sessionId: child.id,
-          agentId: recovering.prompt.agentId,
-          promptId: recoveryAck.prompt_id,
-          turnId: recoveryTurn.turnId,
-          frameId: recoveryFrame.frameId,
-          frameHash: sha(recoveryFrame.text),
+        const duplicate = await maybeDaydreamAutomation(scope.root, project, {
+          name: 'builder', session_id: parent.id, task: taskId, worktree: home, handoff: handoffPath, daydream_automation: true,
+        }, {
+          native: client,
+          now: Date.parse(automationRun.createdAt),
+          idleMs: 0,
+          activityAt: automationRun.activityAt,
         });
-        expect(recovered.recoveryProvenance?.agentId).not.toBe(miningAgentId);
+        expect(duplicate).toBeNull();
       } finally {
         if (previousDaydream === undefined) delete process.env.HIVE_DAYDREAM;
         else process.env.HIVE_DAYDREAM = previousDaydream;
         if (previousNativeBranches === undefined) delete process.env.HIVE_NATIVE_BRANCHES;
         else process.env.HIVE_NATIVE_BRANCHES = previousNativeBranches;
+        if (previousAutomation === undefined) delete process.env.HIVE_DAYDREAM_AUTOMATION;
+        else process.env.HIVE_DAYDREAM_AUTOMATION = previousAutomation;
       }
+      expect(childCreations).toBe(1);
+      expect(automationRuns).toBe(1);
       expect(compactCalls).toBe(1);
       expect(promptTurns).toBe(MAX_PROMPT_TURNS);
+      expect((await getDaydreamAutomationStatus(scope.root, project)).runs).toHaveLength(1);
     } finally {
       if (server) {
         try {

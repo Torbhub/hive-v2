@@ -622,6 +622,62 @@ describe('strict bounded briefs and BTW assistant-frame binding', () => {
       .rejects.toThrow(/exactly one|assistant|frame|bound/i);
   });
 
+  it('accepts a backfilled missing prompt record using exact operator proof content', async () => {
+    const fixture = await minedFixture();
+    const mineRequest = fixture.native.submitPrompt.mock.calls[0][1];
+    fixture.native.state.prompts.delete(MINING_AGENT);
+
+    const verified = await verifyDaydreamBrief(fixture.scope, fixture.mined.id, fixture.brief, fixture.native, {
+      now: NOW,
+      proofContent: mineRequest.content,
+    });
+
+    expect(verified.status).toBe('compacted');
+    expect(verified.provenance?.turnId).toBe(`turn_${MINING_AGENT}`);
+    expect(fixture.native.createBtw).toHaveBeenCalledTimes(1);
+    expect(fixture.native.submitPrompt).toHaveBeenCalledTimes(1);
+    const stored = await fs.readFile(hivePath(fixture.home, 'daydreams', `${fixture.mined.id}.json`), 'utf8');
+    expect(stored).not.toContain(PRIVATE_HANDOFF);
+    expect(stored).not.toContain(PRIVATE_TASK);
+    expect(stored).not.toContain(QUESTION);
+  });
+
+  it('keeps a missing prompt record unknown without operator proof content', async () => {
+    const fixture = await minedFixture();
+    fixture.native.state.prompts.delete(MINING_AGENT);
+
+    await expect(verifyDaydreamBrief(fixture.scope, fixture.mined.id, fixture.brief, fixture.native, { now: NOW }))
+      .rejects.toThrow(/promptId|missing|ambiguous/i);
+    expect(fixture.native.forkSession).not.toHaveBeenCalled();
+    expect(fixture.native.compactSession).not.toHaveBeenCalled();
+  });
+
+  it('never uses operator proof content for an existing wrong prompt ID', async () => {
+    const fixture = await minedFixture();
+    const mineRequest = fixture.native.submitPrompt.mock.calls[0][1];
+    promptOf(fixture.native, MINING_AGENT).promptId = 'prompt_other';
+
+    await expect(verifyDaydreamBrief(fixture.scope, fixture.mined.id, fixture.brief, fixture.native, {
+      now: NOW,
+      proofContent: mineRequest.content,
+    })).rejects.toThrow(/promptId|missing|ambiguous/i);
+    expect(fixture.native.forkSession).not.toHaveBeenCalled();
+    expect(fixture.native.compactSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects native prompt content that conflicts with the durable intent', async () => {
+    const fixture = await minedFixture();
+    const mineRequest = fixture.native.submitPrompt.mock.calls[0][1];
+    promptOf(fixture.native, MINING_AGENT).content = [{ type: 'text', text: 'mismatched content' }];
+
+    await expect(verifyDaydreamBrief(fixture.scope, fixture.mined.id, fixture.brief, fixture.native, {
+      now: NOW,
+      proofContent: mineRequest.content,
+    })).rejects.toThrow(/content|intent/i);
+    expect(fixture.native.forkSession).not.toHaveBeenCalled();
+    expect(fixture.native.compactSession).not.toHaveBeenCalled();
+  });
+
   it.each([
     'prompt id', 'missing user message id', 'content', 'turn state', 'prompt state', 'missing trigger',
     'wedged turn', 'duplicate turn', 'duplicate prompt', 'frame JSON', 'different JSON', 'frame kind', 'frame role', 'non-BTW roster',

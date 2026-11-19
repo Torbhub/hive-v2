@@ -209,6 +209,94 @@ export type CompactionState = {
   detail?: string;
 };
 
+export type DaydreamAutomationReason = 'idle' | 'before_compaction';
+export type DaydreamAutomationUnknownStage = 'reservation' | 'child' | 'prompt' | 'fork' | 'compaction' | 'result';
+export type DaydreamAutomationUsage = { runs: number; prompts: number; compactions: number; tokens: number };
+export type DaydreamAutomationCeilings = { runs: number; prompts: number; compactions: number };
+export type DaydreamAutomationBudgets = { perAgent: DaydreamAutomationCeilings; perProject: DaydreamAutomationCeilings };
+export type DaydreamAutomationOutcome = {
+  daydreamId: string;
+  status: 'recovered' | 'unknown' | 'missing';
+  prompts: number;
+  compactions: number;
+  tokens: number;
+  unknownStage?: DaydreamAutomationUnknownStage;
+};
+export type DaydreamAutomationRunInput = {
+  root: string;
+  project: string;
+  agent: TeamEntry;
+  daydreamId: string;
+  sessionId: string;
+  activityAt: number;
+  reason: DaydreamAutomationReason;
+  native?: DaydreamNativeClient;
+  now: number;
+};
+export type DaydreamAutomationReconcileInput = {
+  root: string;
+  project: string;
+  daydreamId: string;
+  parentSessionId: string;
+  ownerPid?: number;
+  ownerStartTime?: string;
+  native?: DaydreamNativeClient;
+  now: number;
+};
+export type DaydreamAutomationRunner = {
+  run(input: DaydreamAutomationRunInput): Promise<DaydreamAutomationOutcome>;
+  reconcile(input: DaydreamAutomationReconcileInput): Promise<DaydreamAutomationOutcome>;
+};
+export type DaydreamAutomationOptions = {
+  runner?: DaydreamAutomationRunner;
+  native?: DaydreamNativeClient;
+  now?: number;
+  idleMs?: number;
+  activityAt?: number | null;
+  trigger?: DaydreamAutomationReason;
+  budgets?: DaydreamAutomationBudgets;
+};
+export type DaydreamAutomationRun = {
+  schemaVersion: 1;
+  fingerprint: string;
+  daydreamId: string;
+  project: string;
+  agentKey: string;
+  agentName: string;
+  sessionId: string;
+  ownerPid?: number;
+  ownerStartTime?: string;
+  worktree?: string;
+  activityAt: number;
+  reason: DaydreamAutomationReason;
+  status: 'reserved' | 'recovered' | 'unknown';
+  fenced: boolean;
+  usageRecorded: boolean;
+  reservedPrompts: number;
+  reservedCompactions: number;
+  prompts: number;
+  compactions: number;
+  tokens: number;
+  createdAt: string;
+  updatedAt: string;
+  unknownStage?: DaydreamAutomationUnknownStage;
+  error?: string;
+  reconciledAt?: string;
+};
+export type DaydreamAutomationReservation = DaydreamAutomationRun;
+export type DaydreamAutomationAgentStatus = {
+  name: string;
+  worktree?: string;
+  daydreamAutomation: boolean;
+  fencedDaydreamId: string | null;
+};
+export type DaydreamAutomationProjectStatus = {
+  project: string;
+  agents: DaydreamAutomationAgentStatus[];
+  runs: DaydreamAutomationRun[];
+  daily: { project: DaydreamAutomationUsage; agents: Record<string, DaydreamAutomationUsage> };
+};
+
 export type TeamEntry = {
   name: string;
   orchestrator?: boolean;
@@ -230,6 +318,7 @@ export type TeamEntry = {
   task?: string;
   model?: string;
   auto_compact?: boolean;
+  daydream_automation?: boolean;
   compaction?: CompactionState;
 };
 
