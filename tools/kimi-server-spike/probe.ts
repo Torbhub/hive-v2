@@ -251,8 +251,10 @@ export async function checkVersion(binary: string, home: string, env: NodeJS.Pro
   }
 }
 
-export async function launchServer(binary: string, home: string, env: NodeJS.ProcessEnv) {
-  const child = spawnProcessGroup(binary, ['web', '--no-open', '--host', '127.0.0.1', '--port', '0'], {
+export async function launchServer(binary: string, home: string, env: NodeJS.ProcessEnv, debugEndpoints = false) {
+  const args = ['web', '--no-open', '--host', '127.0.0.1', '--port', '0'];
+  if (debugEndpoints) args.push('--debug-endpoints');
+  const child = spawnProcessGroup(binary, args, {
     cwd: home, env,
   });
   let output = '';

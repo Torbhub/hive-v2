@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { KimiServerClient } from '../src/kimi-server.js';
+import type { DaydreamStatus, NativePromptInput } from '../src/types.js';
 
 const ORIGIN = 'http://127.0.0.1:58627';
 const TOKEN = 'synthetic-native-token';
@@ -130,5 +131,226 @@ describe('Kimi Server 2.5.3 native client', () => {
     await expect(badPrompt.submitPrompt('session_parent', {
       promptId: 'hive-rejoin-test', content: [{ type: 'text', text: 'selected findings' }],
     })).rejects.toThrow(/schema|invalid|malformed/);
+  });
+
+  it('creates a native BTW and submits only agent and manual fields', async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const prompt = {
+      prompt_id: 'hive-daydream-mine', user_message_id: 'msg_mine', status: 'queued',
+      content: [{ type: 'text', text: 'Mine the bounded facts.' }], created_at: '2026-11-19T12:00:00.000Z',
+    };
+    const fetcher: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      return jsonResponse(envelope(calls.length === 1 ? { agent_id: 'agent_btw_1' } : prompt));
+    };
+    const api = client(fetcher);
+
+    await expect(api.createBtw('session_child')).resolves.toEqual({ agent_id: 'agent_btw_1' });
+    await api.submitPrompt('session_child', {
+      promptId: 'hive-daydream-mine',
+      content: [{ type: 'text', text: 'Mine the bounded facts.' }],
+      agentId: 'agent_btw_1',
+      permissionMode: 'manual',
+    });
+
+    expect(new URL(calls[0].url).pathname).toBe('/api/v1/sessions/session_child:btw');
+    expect(calls[0].init?.method).toBe('POST');
+    expect(calls[0].init?.body).toBeUndefined();
+    const body = JSON.parse(String(calls[1].init?.body)) as Record<string, unknown>;
+    expect(body).toEqual({
+      prompt_id: 'hive-daydream-mine',
+      content: [{ type: 'text', text: 'Mine the bounded facts.' }],
+      agent_id: 'agent_btw_1',
+      permission_mode: 'manual',
+    });
+    expect(body).not.toHaveProperty('profile');
+    expect(body).not.toHaveProperty('disabled_tools');
+  });
+
+  it('reads per-agent turns, prompts, frames, roster, and live sequence from transcript', async () => {
+    const transcript = {
+      agent_id: 'agent_btw_1',
+      prompts: [{
+        promptId: 'hive-daydream-mine', status: 'completed', userMessageId: 'msg_mine',
+        content: [{ type: 'text', text: 'Mine the bounded facts.' }],
+      }],
+      items: [
+        { kind: 'marker', marker: 'compaction', payload: { phase: 'completed' } },
+        {
+          kind: 'turn',
+          turnId: 'turn_btw_1',
+          triggerPromptId: 'hive-daydream-mine',
+          state: 'completed',
+          steps: [{
+            stepId: 'step_btw_1',
+            frames: [
+              { frameId: 'frame_tool', kind: 'tool.call' },
+              { frameId: 'frame_brief', kind: 'text', role: 'assistant', text: '{"schemaVersion":1}' },
+            ],
+          }],
+        },
+        { kind: 'turn', turnId: 'turn_unrelated', state: 'running', steps: [] },
+      ],
+      has_more: false,
+      agents: [{ agentId: 'main', type: 'main' }, { agentId: 'agent_btw_1', type: 'sub' }],
+      seq: 11,
+    };
+    const fetcher: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe('/api/v1/sessions/session_child/transcript');
+      expect(Object.fromEntries(url.searchParams)).toEqual({ agent_id: 'agent_btw_1', page_size: '10' });
+      return jsonResponse(envelope(transcript));
+    };
+    const page = await client(fetcher).getTranscript('session_child', { agentId: 'agent_btw_1', pageSize: 10 });
+    expect(page).toEqual(transcript);
+    expect(page.items.find((item) => item.kind === 'turn' && item.turnId === 'turn_unrelated'))
+      .not.toHaveProperty('triggerPromptId');
+  });
+
+  it('preserves same-prompt turn candidates and pagination for terminal selection', async () => {
+    const prompt = {
+      promptId: 'hive-daydream-mine', status: 'completed', userMessageId: 'msg_mine',
+      content: [{ type: 'text', text: 'Mine the bounded facts.' }],
+    };
+    const turns = [
+      {
+        kind: 'turn', turnId: 'turn_btw_1', triggerPromptId: prompt.promptId, state: 'completed',
+        steps: [{ stepId: 'step_btw_1', frames: [{ frameId: 'frame_brief', kind: 'text', role: 'assistant', text: '{"schemaVersion":1}' }] }],
+      },
+      { kind: 'turn', turnId: 'turn_btw_2', triggerPromptId: prompt.promptId, state: 'running', steps: [] },
+    ];
+    const transcript = {
+      agent_id: 'agent_btw_1',
+      prompts: [prompt],
+      items: [{ kind: 'marker', marker: 'compaction', payload: { phase: 'completed' } }, ...turns],
+      has_more: true,
+      agents: [{ agentId: 'main', type: 'main' }, { agentId: 'agent_btw_1', type: 'sub' }],
+      seq: 12,
+    };
+    const page = await client(async () => jsonResponse(envelope(transcript)))
+      .getTranscript('session_child', { agentId: 'agent_btw_1', pageSize: 10 });
+    expect(page).toEqual(transcript);
+    expect(page.items.filter((item) => item.kind === 'turn')).toEqual(turns);
+    expect(page.has_more).toBe(true);
+  });
+
+  it('rejects malformed BTW identity, prompt, turn, frame, roster, and live sequence fields', async () => {
+    await expect(client(async () => jsonResponse(envelope({ agent_id: '' }))).createBtw('session_child'))
+      .rejects.toThrow(/schema|invalid|agent/);
+    const malformed = [
+      { agent_id: 'agent_btw_1', prompts: [], items: [{ kind: 'turn', turnId: 17 }], has_more: false, agents: [], seq: 1 },
+      {
+        agent_id: 'agent_btw_1',
+        prompts: [{ promptId: 'p', status: 'completed', userMessageId: 17, content: [] }],
+        items: [], has_more: false, agents: [], seq: 1,
+      },
+      {
+        agent_id: 'agent_btw_1',
+        prompts: [],
+        items: [{
+          kind: 'turn', turnId: 'turn_1', triggerPromptId: 'p', state: 'completed',
+          steps: [{ stepId: 's', frames: [{ frameId: 'f', kind: 'text', role: 'assistant', text: 17 }] }],
+        }],
+        has_more: false, agents: [], seq: 1,
+      },
+      { agent_id: 'agent_btw_1', prompts: [], items: [], has_more: false, agents: {}, seq: 1 },
+      { agent_id: 'agent_btw_1', prompts: [], items: [], has_more: false, agents: [{ agentId: 'agent_btw_1', type: 'btw' }], seq: 1 },
+      { agent_id: 'agent_btw_1', prompts: [], items: [], has_more: false, agents: [], seq: -1 },
+    ];
+    for (const data of malformed) {
+      await expect(client(async () => jsonResponse(envelope(data))).getTranscript('session_child', { agentId: 'agent_btw_1', pageSize: 10 }))
+        .rejects.toThrow(/schema|invalid|malformed/);
+    }
+  });
+
+  it('uses native full compaction and bounded transcript-op catch-up routes', async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const ops = {
+      agent_id: 'main',
+      batches: [
+        { seq: 8, ops: [{ op: 'marker.upsert', item: { marker: 'compaction', payload: { phase: 'started', trigger: 'manual', agentId: 'main', instruction: 'nonce=test' } } }] },
+        { seq: 9, ops: [{ op: 'marker.upsert', item: { marker: 'compaction', payload: { phase: 'completed', agentId: 'main', result: { summary: 'Compacted mining evidence.', compactedCount: 2, tokensBefore: 1200, tokensAfter: 300 } } } }] },
+      ],
+      latest_seq: 9,
+      complete: true,
+    };
+    const fetcher: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      return jsonResponse(envelope(calls.length === 1 ? {} : ops));
+    };
+    const api = client(fetcher);
+
+    await expect(api.compactSession('session_child', { instruction: 'Retain the active objective.' })).resolves.toEqual({});
+    await expect(api.listTranscriptOps('session_child', { agentId: 'main', sinceSeq: 7 })).resolves.toEqual(ops);
+
+    expect(new URL(calls[0].url).pathname).toBe('/api/v1/sessions/session_child:compact');
+    expect(calls[0].init?.method).toBe('POST');
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ instruction: 'Retain the active objective.' });
+    const transcriptUrl = new URL(calls[1].url);
+    expect(transcriptUrl.pathname).toBe('/api/v1/sessions/session_child/transcript/ops');
+    expect(Object.fromEntries(transcriptUrl.searchParams)).toEqual({ agent_id: 'main', since_seq: '7' });
+  });
+
+  it('reads only server incarnation and live transcript watermark fields from exact routes', async () => {
+    const calls: string[] = [];
+    const fetcher: typeof fetch = async (input) => {
+      calls.push(String(input));
+      return jsonResponse(envelope(calls.length === 1 ? {
+        server_id: 'server-one', started_at: '2026-11-19T11:00:00.000Z', server_version: '2.5.3', experimental_flags: {},
+      } : {
+        agent_id: 'main', items: [], has_more: false, interactions: [], attachments: [], agents: [], pending_interactions: [], seq: 7,
+      }));
+    };
+    const api = client(fetcher);
+    await expect(api.getServerMeta()).resolves.toEqual({ server_id: 'server-one', started_at: '2026-11-19T11:00:00.000Z' });
+    await expect(api.getTranscriptWatermark('session_child', { agentId: 'main', pageSize: 1 })).resolves.toEqual({ agent_id: 'main', seq: 7 });
+
+    expect(new URL(calls[0]).pathname).toBe('/api/v1/meta');
+    const transcript = new URL(calls[1]);
+    expect(transcript.pathname).toBe('/api/v1/sessions/session_child/transcript');
+    expect(Object.fromEntries(transcript.searchParams)).toEqual({ agent_id: 'main', page_size: '1' });
+  });
+
+  it('rejects missing watermark or incarnation fields and non-manual permission options before fetch', async () => {
+    const missingWatermark = client(async () => jsonResponse(envelope({ agent_id: 'main', items: [], has_more: false })));
+    await expect(missingWatermark.getTranscriptWatermark('session_child', { agentId: 'main', pageSize: 1 }))
+      .rejects.toThrow(/schema|watermark|seq|invalid/);
+    const missingIncarnation = client(async () => jsonResponse(envelope({ server_id: 'server-one' })));
+    await expect(missingIncarnation.getServerMeta()).rejects.toThrow(/schema|incarnation|started_at|invalid/);
+
+    const fetcher = vi.fn<typeof fetch>(async () => jsonResponse(envelope({})));
+    const api = client(fetcher);
+    const input = { promptId: 'hive-daydream-mine', content: [{ type: 'text' as const, text: 'Mine.' }] };
+    await expect(api.submitPrompt('session_child', { ...input, permissionMode: 'yolo' as never })).rejects.toThrow(/manual|permission/);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('accepts an incomplete transcript journal as data so the caller can block recovery', async () => {
+    const api = client(async () => jsonResponse(envelope({ agent_id: 'main', batches: [], latest_seq: 12, complete: false })));
+    await expect(api.listTranscriptOps('session_child', { agentId: 'main', sinceSeq: 3 })).resolves.toEqual({
+      agent_id: 'main', batches: [], latest_seq: 12, complete: false,
+    });
+  });
+
+  it('rejects malformed, duplicate, non-monotonic, or oversized transcript fields', async () => {
+    const badOps = [
+      { agent_id: 'main', batches: [], latest_seq: -1, complete: true },
+      { agent_id: 'main', batches: [{ seq: 2, ops: [] }, { seq: 2, ops: [] }], latest_seq: 2, complete: true },
+      { agent_id: 'main', batches: [{ seq: 1, ops: Array.from({ length: 101 }, () => ({ type: 'marker' })) }], latest_seq: 1, complete: true },
+      { agent_id: 'main', batches: Array.from({ length: 101 }, (_, index) => ({ seq: index + 1, ops: [] })), latest_seq: 101, complete: true },
+    ];
+    for (const data of badOps) {
+      const api = client(async () => jsonResponse(envelope(data)));
+      await expect(api.listTranscriptOps('session_child', { agentId: 'main', sinceSeq: 0 }))
+        .rejects.toThrow(/schema|invalid|bound|limit|monotonic|sequence/i);
+    }
+  });
+
+  it('limits daydream statuses and native prompt policy types and omits dead tool discovery', () => {
+    const api = client(async () => jsonResponse(envelope({})));
+    expect(api).not.toHaveProperty('listTools');
+    expectTypeOf<'stale'>().not.toMatchTypeOf<DaydreamStatus>();
+    expectTypeOf<NativePromptInput['permissionMode']>().toEqualTypeOf<'manual' | undefined>();
+    expectTypeOf<NativePromptInput['agentId']>().toEqualTypeOf<string | undefined>();
   });
 });

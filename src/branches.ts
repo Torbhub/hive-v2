@@ -1,8 +1,19 @@
-import { constants, promises as fs } from 'node:fs';
-import { createHash, randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { readBoundedFile } from './bounded-file.js';
 import { cleanAgentText, containsInternalContent, containsSecurityInstruction } from './decisions.js';
 import { withProjectLock } from './project.js';
+import {
+  NativeHistoryError,
+  exactNativeDelivery,
+  nativeHistoryIsPrefix,
+  nativeSha,
+  parseNativeSnapshot,
+  sameNativeForkSnapshot,
+  sameNativeSnapshot,
+  snapshotNativeHistory,
+} from './native-history.js';
 import { assertExecutionAllowed } from './rollout.js';
 import { authorizeExact, exactGrant, revoked, type Principal } from './security.js';
 import { Refusal, hivePath, readProjects, readTeam, withTeamLock, writeJson } from './state.js';
@@ -16,14 +27,13 @@ import type {
   NativeBranchReview,
   NativeBranchScope,
   NativeBranchSnapshot,
-  NativeMessage,
   NativeSession,
 } from './types.js';
 
 export type { NativeBranchRecord } from './types.js';
 
+export { NATIVE_HISTORY_SNAPSHOT_CAP } from './native-history.js';
 export const MAX_NATIVE_BRANCH_RESULT_BYTES = 64 * 1024;
-export const NATIVE_HISTORY_SNAPSHOT_CAP = 100;
 
 const MAX_NATIVE_BRANCH_RECORD_BYTES = 256 * 1024;
 const REVIEW_TTL_MS = 15 * 60_000;
@@ -37,9 +47,6 @@ class Diverged extends Error {}
 class HistoryCap extends Error {}
 class CasConflict extends Error {}
 
-function sha(value: unknown): string {
-  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
-}
 function now(options: TimeOptions): string {
   const parsed = options.now === undefined ? new Date() : new Date(options.now);
   if (Number.isNaN(parsed.getTime())) throw new Refusal('invalid native branch timestamp');
@@ -67,46 +74,12 @@ function branchPath(home: string, id: string): string {
   if (!BRANCH_ID.test(id)) throw new Refusal('invalid native branch id');
   return hivePath(home, 'branches', `${id}.json`);
 }
-async function readBounded(file: string, cap: number): Promise<string> {
-  const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > cap) throw new Refusal(`not a regular bounded file: ${file}`);
-    const chunks: Buffer[] = [];
-    let total = 0;
-    for (;;) {
-      const buffer = Buffer.alloc(Math.min(16_384, cap + 1 - total));
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
-      if (bytesRead === 0) break;
-      total += bytesRead;
-      if (total > cap) throw new Refusal(`file exceeds byte cap: ${file}`);
-      chunks.push(buffer.subarray(0, bytesRead));
-    }
-    return Buffer.concat(chunks).toString('utf8');
-  } finally {
-    await handle.close();
-  }
-}
 function snapshotFrom(value: unknown, field: string): NativeBranchSnapshot {
-  const raw = object(value, field);
-  keys(raw, ['count', 'headId', 'historyHash', 'messages'], field);
-  if (!Array.isArray(raw.messages) || raw.messages.length > NATIVE_HISTORY_SNAPSHOT_CAP || raw.count !== raw.messages.length) {
-    throw new Refusal(`${field}.messages is invalid`);
+  try {
+    return parseNativeSnapshot(value, field);
+  } catch (error) {
+    throw new Refusal(error instanceof Error ? error.message : String(error));
   }
-  const ids = new Set<string>();
-  const messages = raw.messages.map((entry, index) => {
-    const item = object(entry, `${field}.messages[${index}]`);
-    keys(item, ['id', 'contentHash'], `${field}.messages[${index}]`);
-    const id = text(item.id, `${field}.messages[${index}].id`);
-    if (ids.has(id)) throw new Refusal(`${field} has duplicate message ids`);
-    ids.add(id);
-    return { id, contentHash: hash(item.contentHash, `${field}.messages[${index}].contentHash`) };
-  });
-  const headId = raw.headId === null ? null : text(raw.headId, `${field}.headId`);
-  if (headId !== (messages.at(-1)?.id ?? null)) throw new Refusal(`${field}.headId conflicts with history`);
-  const historyHash = hash(raw.historyHash, `${field}.historyHash`);
-  if (historyHash !== sha(messages)) throw new Refusal(`${field}.historyHash conflicts with history`);
-  return { count: messages.length, headId, historyHash, messages };
 }
 function cleanFindingText(value: unknown, field: string): string {
   if (typeof value !== 'string' || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) {
@@ -134,12 +107,12 @@ function findingFrom(value: unknown, branchId: string, stored: boolean): NativeB
     keys(evidence, ['messageId', 'contentHash'], 'native result evidence');
     return { messageId: text(evidence.messageId, 'native evidence messageId'), contentHash: hash(evidence.contentHash, 'native evidence contentHash') };
   });
-  const id = `f_${sha({ branchId, answer, recommendation, uncertainty, nativeEvidence })}`;
+  const id = `f_${nativeSha({ branchId, answer, recommendation, uncertainty, nativeEvidence })}`;
   if (stored && raw.id !== id) throw new Refusal('native result finding id conflicts with content');
   return { id, answer, recommendation, uncertainty, nativeEvidence };
 }
 function resultDigest(result: NativeBranchResult): string {
-  return sha({
+  return nativeSha({
     schemaVersion: 1,
     branchId: result.branchId,
     childHistoryHash: result.childHistoryHash,
@@ -173,7 +146,7 @@ function resultFrom(branch: NativeBranchRecord, value: unknown, stored: boolean)
   return result;
 }
 function reviewDigest(review: Omit<NativeBranchReview, 'digest'>): string {
-  return sha({
+  return nativeSha({
     branchId: review.branchId,
     findingIds: review.findingIds,
     parentHistoryHash: review.parentHistoryHash,
@@ -277,13 +250,14 @@ function recordFrom(value: unknown, id: string): NativeBranchRecord {
 async function readBranchFile(home: string, id: string): Promise<NativeBranchRecord> {
   let value: unknown;
   try {
-    value = JSON.parse(await readBounded(branchPath(home, id), MAX_NATIVE_BRANCH_RECORD_BYTES));
+    value = JSON.parse(await readBoundedFile(branchPath(home, id), MAX_NATIVE_BRANCH_RECORD_BYTES));
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ELOOP' || code === 'ENOTDIR' || code === 'EISDIR') {
       throw new Refusal('native branch record must be a regular file; symbolic links are refused');
     }
     if (error instanceof Refusal) throw error;
+    if (error instanceof Error && /not a regular bounded file|file exceeds byte cap/.test(error.message)) throw new Refusal(error.message);
     throw new Refusal(`native branch record cannot be read: ${error instanceof Error ? error.message : String(error)}`);
   }
   return recordFrom(value, id);
@@ -335,52 +309,19 @@ function verifySession(branch: NativeBranchRecord, session: NativeSession, paren
   }
 }
 async function snapshotHistory(native: NativeBranchClient, sessionId: string): Promise<NativeBranchSnapshot> {
-  const newest: NativeMessage[] = [];
-  const ids = new Set<string>();
-  let beforeId: string | undefined;
-  for (;;) {
-    const page = await native.listMessages(sessionId, { beforeId, pageSize: NATIVE_HISTORY_SNAPSHOT_CAP });
-    if (!page || !Array.isArray(page.items) || typeof page.has_more !== 'boolean') throw new HistoryCap('native history page is malformed');
-    if (page.has_more && page.items.length < NATIVE_HISTORY_SNAPSHOT_CAP) throw new HistoryCap('native history cap exhausted');
-    for (const message of page.items) {
-      if (!message || typeof message.id !== 'string' || !message.id || message.session_id !== sessionId
-        || !Array.isArray(message.content) || typeof message.created_at !== 'string') throw new Diverged('native history message is malformed');
-      if (ids.has(message.id)) throw new Diverged('native history has duplicate ids');
-      ids.add(message.id);
-      newest.push(message);
+  try {
+    return await snapshotNativeHistory(native, sessionId);
+  } catch (error) {
+    if (error instanceof NativeHistoryError) {
+      if (error.kind === 'cap') throw new HistoryCap(error.message);
+      throw new Diverged(error.message);
     }
-    if (!page.has_more) break;
-    if (newest.length >= NATIVE_HISTORY_SNAPSHOT_CAP || page.items.length === 0) throw new HistoryCap('native history cap exhausted');
-    beforeId = page.items.at(-1)?.id;
-    if (!beforeId) throw new HistoryCap('native history cursor is invalid');
+    throw error;
   }
-  const messages = newest.reverse().map((message) => ({ id: message.id, contentHash: sha(message.content) }));
-  return { count: messages.length, headId: messages.at(-1)?.id ?? null, historyHash: sha(messages), messages };
-}
-function sameSnapshot(a: NativeBranchSnapshot, b: NativeBranchSnapshot): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
 }
 function sameForkSnapshot(branch: NativeBranchRecord, current: NativeBranchSnapshot): boolean {
-  const baseline = branch.parentSnapshot;
-  if (baseline.count !== current.count || !branch.childSessionId) return false;
-  const sessionPrefixes = (sessionId: string) => [...new Set([`msg_${sessionId}_`, `msg_${sessionId.replace(/^session_/, '')}_`])];
-  const parentPrefixes = sessionPrefixes(branch.parentSessionId);
-  const childPrefixes = sessionPrefixes(branch.childSessionId);
-  return baseline.messages.every((parent, index) => {
-    const child = current.messages[index];
-    if (!child || parent.contentHash !== child.contentHash) return false;
-    if (parent.id === child.id) return true;
-    return parentPrefixes.some((prefix, prefixIndex) => {
-      const suffix = parent.id.startsWith(prefix) ? parent.id.slice(prefix.length) : '';
-      return suffix.length > 0 && child.id === `${childPrefixes[prefixIndex]}${suffix}`;
-    });
-  });
-}
-function isPrefix(baseline: NativeBranchSnapshot, current: NativeBranchSnapshot): boolean {
-  return baseline.count <= current.count && baseline.messages.every((entry, index) => {
-    const candidate = current.messages[index];
-    return candidate && candidate.id === entry.id && candidate.contentHash === entry.contentHash;
-  });
+  return Boolean(branch.childSessionId)
+    && sameNativeForkSnapshot(branch.parentSnapshot, branch.parentSessionId, branch.childSessionId!, current);
 }
 async function refreshLocked(home: string, branch: NativeBranchRecord, native: NativeBranchClient, at: string): Promise<NativeBranchRecord> {
   if (branch.status === 'diverged' || branch.status === 'rejoined') return branch;
@@ -391,9 +332,9 @@ async function refreshLocked(home: string, branch: NativeBranchRecord, native: N
     const [parentSnapshot, childSnapshot] = await Promise.all([
       snapshotHistory(native, branch.parentSessionId), snapshotHistory(native, branch.childSessionId!),
     ]);
-    if (!sameSnapshot(branch.parentSnapshot, parentSnapshot)) throw new Diverged('parent history changed');
-    if (!isPrefix(branch.childSnapshot!, childSnapshot)) throw new Diverged('child history was rewritten or shortened');
-    const appended = !sameSnapshot(branch.childSnapshot!, childSnapshot);
+    if (!sameNativeSnapshot(branch.parentSnapshot, parentSnapshot)) throw new Diverged('parent history changed');
+    if (!nativeHistoryIsPrefix(branch.childSnapshot!, childSnapshot)) throw new Diverged('child history was rewritten or shortened');
+    const appended = !sameNativeSnapshot(branch.childSnapshot!, childSnapshot);
     const status = branch.status === 'stale' || (appended && (branch.result || branch.review)) ? 'stale' : 'active';
     if (!appended && branch.status === status) return branch;
     return await commit(home, branch, { ...branch, childSnapshot, status, updatedAt: at, error: undefined });
@@ -472,7 +413,7 @@ export async function reconcileNativeBranchCreation(
     const at = now(options);
     try {
       verifySession(branch, await native.getSession(branch.parentSessionId), true);
-      if (!sameSnapshot(branch.parentSnapshot, await snapshotHistory(native, branch.parentSessionId))) throw new Diverged('parent history changed');
+      if (!sameNativeSnapshot(branch.parentSnapshot, await snapshotHistory(native, branch.parentSessionId))) throw new Diverged('parent history changed');
       if (!branch.childSessionId) {
         if (branch.kind !== 'child') throw new Diverged('plain fork cannot be rediscovered as a child');
         const children = await native.listChildren(branch.parentSessionId, { pageSize: 100 });
@@ -531,7 +472,7 @@ export async function recordNativeBranchResult(
     const [parentSnapshot, childSnapshot] = await Promise.all([
       snapshotHistory(native, branch.parentSessionId), snapshotHistory(native, branch.childSessionId!),
     ]);
-    if (!sameSnapshot(branch.parentSnapshot, parentSnapshot) || !sameSnapshot(branch.childSnapshot!, childSnapshot)) {
+    if (!sameNativeSnapshot(branch.parentSnapshot, parentSnapshot) || !sameNativeSnapshot(branch.childSnapshot!, childSnapshot)) {
       throw new Refusal('native result snapshot is stale');
     }
     const evidence = new Map(childSnapshot.messages.map((entry) => [entry.id, entry.contentHash]));
@@ -646,21 +587,6 @@ async function verifyReview(branch: NativeBranchRecord, input: AuthInput, at: st
     if (branch.review[key] !== authority[key]) throw new Refusal('native branch reviewer, grant, or ACL epoch changed');
   }
 }
-async function exactDelivery(native: NativeBranchClient, branch: NativeBranchRecord, content: NativeMessage['content'], messageId: string) {
-  const messages: NativeMessage[] = [];
-  let beforeId: string | undefined;
-  for (;;) {
-    const page = await native.listMessages(branch.parentSessionId, { beforeId, pageSize: NATIVE_HISTORY_SNAPSHOT_CAP });
-    if (page.has_more && page.items.length < NATIVE_HISTORY_SNAPSHOT_CAP) throw new HistoryCap('native delivery history cap exhausted');
-    messages.push(...page.items);
-    if (!page.has_more) break;
-    if (messages.length >= NATIVE_HISTORY_SNAPSHOT_CAP) throw new HistoryCap('native delivery history cap exhausted');
-    beforeId = page.items.at(-1)?.id;
-  }
-  return messages.filter((message) => message.id === messageId
-    && message.session_id === branch.parentSessionId && message.role === 'user'
-    && JSON.stringify(message.content) === JSON.stringify(content));
-}
 async function finishUnknown(home: string, intent: NativeBranchRecord, at: string, error: unknown): Promise<NativeBranchRecord> {
   return unknown(home, intent, at, error);
 }
@@ -690,7 +616,7 @@ export async function rejoinNativeBranch(
     const { promptId, prompt } = previewNativeBranchRejoin(branch);
     const intent = await commit(home, branch, {
       ...branch,
-      rejoin: { status: 'submitting', reviewDigest: review.digest, promptId, promptHash: sha(prompt), intentAt: at },
+      rejoin: { status: 'submitting', reviewDigest: review.digest, promptId, promptHash: nativeSha(prompt), intentAt: at },
       updatedAt: at,
     });
     let delivery = intent;
@@ -713,7 +639,7 @@ export async function rejoinNativeBranch(
         rejoin: { ...delivery.rejoin!, nativeMessageId: ack.user_message_id },
         updatedAt: finalAt,
       });
-      const delivered = await exactDelivery(native, delivery, content, ack.user_message_id);
+      const delivered = await exactNativeDelivery(native, delivery.parentSessionId, content, ack.user_message_id);
       if (delivered.length !== 1) throw new Error('native acknowledgement message proof is unavailable');
       return await commit(home, delivery, {
         ...delivery,
@@ -740,8 +666,8 @@ export async function reconcileNativeBranchRejoin(
     const at = now(options);
     try {
       const prompt = rejoinPrompt(branch, branch.rejoin.promptId);
-      if (sha(prompt) !== branch.rejoin.promptHash) throw new Error('native rejoin prompt proof changed');
-      const delivered = await exactDelivery(native, branch, [{ type: 'text', text: prompt }], branch.rejoin.nativeMessageId);
+      if (nativeSha(prompt) !== branch.rejoin.promptHash) throw new Error('native rejoin prompt proof changed');
+      const delivered = await exactNativeDelivery(native, branch.parentSessionId, [{ type: 'text', text: prompt }], branch.rejoin.nativeMessageId);
       if (delivered.length !== 1) return branch;
       return await commit(home, branch, {
         ...branch,

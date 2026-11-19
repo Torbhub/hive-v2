@@ -362,6 +362,7 @@ export type NativeSession = {
   metadata: {
     cwd: string;
     hive_branch_id?: string;
+    hive_daydream_id?: string;
     parent_session_id?: string;
     child_session_kind?: string;
     [key: string]: unknown;
@@ -391,5 +392,146 @@ export type NativeBranchClient = {
     pageSize?: number;
     role?: 'user' | 'assistant' | 'tool' | 'system';
   }): Promise<{ items: NativeMessage[]; has_more: boolean }>;
-  submitPrompt(sessionId: string, input: { promptId: string; content: NativeTextPart[] }): Promise<NativePrompt>;
+  submitPrompt(sessionId: string, input: NativePromptInput): Promise<NativePrompt>;
+};
+
+export type NativePromptInput = {
+  promptId: string;
+  content: NativeTextPart[];
+  agentId?: string;
+  permissionMode?: 'manual';
+};
+export type NativeTranscriptOp = { type?: string; [key: string]: unknown };
+export type NativeTranscriptBatch = { seq: number; ops: NativeTranscriptOp[] };
+export type NativeTranscriptOps = {
+  agent_id: string;
+  batches: NativeTranscriptBatch[];
+  latest_seq: number;
+  complete: boolean;
+};
+export type NativeTranscriptFrame = { frameId: string; kind: string; role?: string; text?: string };
+export type NativeTranscriptStep = { stepId: string; frames: NativeTranscriptFrame[] };
+export type NativeTranscriptPrompt = {
+  promptId: string;
+  status: string;
+  userMessageId: string;
+  content: NativeTextPart[];
+};
+export type NativeTranscriptTurn = {
+  kind: 'turn';
+  turnId: string;
+  triggerPromptId?: string;
+  state: string;
+  wedged?: boolean;
+  steps: NativeTranscriptStep[];
+};
+export type NativeTranscriptMarker = { kind: string; [key: string]: unknown };
+export type NativeTranscriptItem = NativeTranscriptTurn | NativeTranscriptMarker;
+export type NativeTranscriptRosterAgent = { agentId: string; type?: 'main' | 'sub' | 'independent' };
+export type NativeTranscriptPage = {
+  agent_id: string;
+  prompts: NativeTranscriptPrompt[];
+  items: NativeTranscriptItem[];
+  has_more: boolean;
+  agents: NativeTranscriptRosterAgent[];
+  seq?: number;
+};
+export type NativeServerMeta = { server_id: string; started_at: string };
+export type NativeTranscriptWatermark = { agent_id: string; seq: number };
+export type DaydreamNativeClient = NativeBranchClient & {
+  createBtw(sessionId: string): Promise<{ agent_id: string }>;
+  getTranscript(sessionId: string, input: { agentId: string; pageSize: number }): Promise<NativeTranscriptPage>;
+  getServerMeta(): Promise<NativeServerMeta>;
+  getTranscriptWatermark(sessionId: string, input: { agentId: string; pageSize: number }): Promise<NativeTranscriptWatermark>;
+  compactSession(sessionId: string, input: { instruction: string }): Promise<Record<string, never>>;
+  listTranscriptOps(sessionId: string, input: { agentId: string; sinceSeq: number }): Promise<NativeTranscriptOps>;
+};
+
+export type DaydreamCitation =
+  | { kind: 'native'; messageId: string; contentHash: string; quote: string }
+  | { kind: 'task'; eventHash: string; quote: string }
+  | { kind: 'handoff'; pathHash: string; contentHash: string; quote: string };
+export type DaydreamFact = {
+  id: string;
+  answer: string;
+  whyNow: string;
+  uncertainty: string;
+  citations: DaydreamCitation[];
+};
+export type DaydreamBrief = {
+  schemaVersion: 1;
+  daydreamId: string;
+  phase: 'mine' | 'recover';
+  checkpointId: string;
+  questionHash: string;
+  sourceHistoryHash: string;
+  facts: DaydreamFact[];
+  unknowns: string[];
+};
+export type DaydreamProvenance = {
+  sessionId: string;
+  agentId: string;
+  promptId: string;
+  turnId: string;
+  stepId: string;
+  frameId: string;
+  frameHash: string;
+};
+export type DaydreamPromptIntent = {
+  phase: 'mine' | 'recover';
+  status: 'submitting' | 'accepted' | 'unknown';
+  agentId?: string;
+  promptId: string;
+  promptHash: string;
+  intentAt: string;
+  nativeMessageId?: string;
+};
+export type DaydreamForkIntent = { status: 'forking' | 'unknown' | 'completed'; intentAt: string };
+export type DaydreamCompactionIntent = {
+  status: 'submitting' | 'unknown' | 'completed';
+  instructionHash: string;
+  nonce: string;
+  intentAt: string;
+  watermark: number;
+  serverId: string;
+  serverStartedAt: string;
+};
+export type DaydreamStatus =
+  | 'creating'
+  | 'mining'
+  | 'mined'
+  | 'forked'
+  | 'compacting'
+  | 'compacted'
+  | 'recovering'
+  | 'recovered'
+  | 'unknown';
+export type DaydreamRecord = {
+  schemaVersion: 1;
+  id: string;
+  status: DaydreamStatus;
+  parentSessionId: string;
+  childSessionId: string | null;
+  checkpointSessionId: string | null;
+  workspaceId: string;
+  cwd: string;
+  scope: { project: string; agent: string; task: string };
+  checkpointId: string;
+  questionHash: string;
+  sourceTaskHash: string;
+  handoffPathHash: string;
+  handoffContentHash: string;
+  parentSnapshot: NativeBranchSnapshot;
+  childSnapshot: NativeBranchSnapshot | null;
+  prompt?: DaydreamPromptIntent;
+  fork?: DaydreamForkIntent;
+  compaction?: DaydreamCompactionIntent;
+  provenance?: DaydreamProvenance;
+  recoveryProvenance?: DaydreamProvenance;
+  minedBrief?: DaydreamBrief;
+  recoveredBrief?: DaydreamBrief;
+  factsHash?: string;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
 };

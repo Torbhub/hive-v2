@@ -39,9 +39,8 @@ const USAGE = `usage:
   hive land <remote> <sha> <branch> [--title t] [--body b] | --bookmark <name> [--title t] [--body b]
   hive cleanup <project> [--dry-run]
   hive interrupt <project> [agent] | hive kill <project> [agent] | hive compact <project> [agent] on|off
-  hive doctor | ui | watch
-  hive web [--port N] | handy-bridge [--origin URL] | mcp
-  hive memory propose <project> <text...> | ls <project> | promote <project> <id> | hive branch create|status|refresh|result|reconcile ...`;
+  hive doctor | ui | watch | web [--port N] | handy-bridge [--origin URL] | mcp
+  hive memory propose <project> <text...> | ls <project> | promote <project> <id> | hive branch create|status|refresh|result|reconcile ... | hive daydream mine|verify|recover|status ...`;
 const VALUELESS_FLAGS = new Set(['json', 'dry-run', 'no-body']);
 
 function parseFlags(args: string[], names: string[]): { flags: Record<string, string | true>; pos: string[] } {
@@ -270,6 +269,7 @@ async function main(): Promise<void> {
       return;
     }
     case 'branch': return (await import('./branch-cli.js')).branchCommand(process.cwd(), args.slice(1));
+    case 'daydream': return (await import('./daydream-cli.js')).daydreamCommand(process.cwd(), args.slice(1));
     case 'compact': return (await import('./compact.js')).compactCommand(process.cwd(), args.slice(1));
     case 'watch': {
       const { watch } = await import('./watch.js');
