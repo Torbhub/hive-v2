@@ -693,3 +693,94 @@ Success trims the transcript and inserts it at the current input selection. It a
 
 The browser converts audio to 16 kHz mono 16-bit PCM WAV and posts it to `http://127.0.0.1:7685/transcribe`. The Hub content security policy permits this exact loopback endpoint in `connect-src`. The bridge requires the pairing token and the configured Hub origin. Setup, retention, and live-engine limits live in `docs/handy-dictation.md`.
 
+## 19. Native branches (web UI only)
+
+An orchestrator with a recorded `session_id` has one **Branches** button beside **Logs**. The button opens the native branch screen. **back** returns to the hub. The hub view keeps its normal 20-second polling. That polling never constructs a native client and never refreshes native history.
+
+### 19.1 Lazy reads and exact DTOs
+
+Opening the screen sends only `GET /api/branches?project=<project>`. It does not fetch branch detail. The response is:
+
+```ts
+{ ok: true, branches: NativeBranchSummary[] }
+
+type NativeBranchSummary = {
+  id: string
+  status: 'creating' | 'active' | 'stale' | 'diverged' | 'unknown' | 'rejoined'
+  purpose: string
+  agent: string
+  task: string
+  createdAt: string
+  updatedAt: string
+  hasResult: boolean
+  error?: string
+}
+```
+
+Selecting a branch sends `GET /api/branch?project=<project>&branch=<id>`. The response is `{ok: true, branch: NativeBranchDetail}`:
+
+```ts
+type NativeBranchDetail = NativeBranchSummary & {
+  kind: 'child' | 'fork'
+  findings: {
+    id: string
+    answer: string
+    recommendation: string
+    uncertainty: string
+  }[]
+  review?: {
+    digest: string
+    findingIds: string[]
+    createdAt: string
+    expiresAt: string
+    promptId: string
+    prompt: string
+  }
+  rejoin?: {
+    status: 'submitting' | 'unknown' | 'rejoined'
+    reviewDigest: string
+    promptId: string
+    nativeMessageId?: string
+    rejoinedAt?: string
+  }
+}
+```
+
+List items do not include findings. Detail findings do not include native evidence. Neither DTO includes `cwd`, workspace IDs, session records, snapshots, grant IDs, ACL epochs, reviewer identity, prompt hashes, or native credentials. `nativeMessageId` and `rejoinedAt` appear only when the actual rejoin status is `rejoined`. The prompt preview is a string inside `review`. It is not a nested authority object.
+
+For every list item, the server authorizes `read` against the stored branch's project and task. Unauthorized items are omitted. Detail uses the same stored-task scope and returns 404 `{ok: false, detail: 'not found'}` when read access fails. Unknown, unreadable, cross-project, and unauthorized detail or mutation lookups all return that same generic 404. The response never distinguishes a missing branch from another project or from a denied branch, and never includes a filesystem path. These reads use stored records only. They never construct a native client.
+
+### 19.2 Review and exact prompt preview
+
+An unreviewed active result starts with no findings selected. **Review** stays disabled until at least one finding is selected. A click sends only:
+
+```json
+{"project":"<project>","branch":"<id>","findingIds":["<finding-id>"]}
+```
+
+to `POST /api/branch-review`. Success returns `{ok: true, branch: NativeBranchDetail}`. The returned review contains the exact `promptId`, JSON `prompt`, and `digest` for the selected findings. The screen renders the prompt as text in `data-branch-prompt`. It never renders prompt markup as HTML.
+
+The server and native delivery use `previewNativeBranchRejoin` for the same prompt ID and prompt bytes. The prompt JSON contains exactly `kind`, `untrusted`, `branchId`, `reviewDigest`, `promptId`, and `findings`. Each finding contains exactly `id`, `answer`, `recommendation`, and `uncertainty`, with text already sanitized by result intake. Parent and child session IDs, history hashes, native evidence, and message IDs never enter the prompt. `reviewDigest` is the provenance link to the history, reviewer, grants, ACL epochs, and expiry held in the stored core record. Those internal fields do not enter the browser DTO.
+
+### 19.3 Two-step rejoin and actual receipt
+
+An active branch with a current review shows **Rejoin**. The first click only shows **Confirm rejoin**. It sends no request. The confirm click sends only:
+
+```json
+{"project":"<project>","branch":"<id>","reviewDigest":"<displayed-digest>"}
+```
+
+to `POST /api/branch-rejoin`. Success returns `{ok: true, branch: NativeBranchDetail}`. `rejoinNativeBranch` requires that digest and rechecks it under the project and team locks on entry, after refresh, and before native submission. No automatic review or rejoin occurs. A terminal `rejoined` or `unknown` return first rechecks the human original reviewer, matching digest, unexpired review, and current grants. It never makes another native submission.
+
+Only an actual `rejoined` response renders `data-branch-receipt`. It contains **Rejoined**, `nativeMessageId`, `time`, `promptId`, and `digest`. Only an actual returned `rejoin.status` of `unknown` renders the unknown delivery warning and disables retry. An HTTP refusal or transport error shows its own error and leaves a later refreshed valid attempt available. `stale`, `diverged`, `creating`, `unknown`, and `rejoined` branch states disable review and rejoin. Any existing rejoin record disables both actions.
+
+Detail refresh, finding selection changes, a new review, or a digest change disarms confirmation. A failed or unauthorized detail read clears the old detail, finding selection, preview, and armed state. A changed review requires a new arm and sends only the newly displayed digest.
+
+### 19.4 Mutation authority and native configuration
+
+Both mutation routes authorize `execute` with `authorizeExact` against the stored branch's project and task. A browser-supplied task cannot change that scope. Review and rejoin require a human principal in the core. Agent self-review, project-only execute grants, revoked grants, cross-project or task substitution, and unknown tasks fail. The server repeats authentication and exact execute authorization after the action.
+
+Review accepts only `project`, `branch`, and `findingIds`. Rejoin accepts only `project`, `branch`, and `reviewDigest`. Any other request field is refused. The browser never supplies reviewer, task, agent, session, grant, history, or expiry authority.
+
+The CLI and server share one native client factory. It reads `HIVE_KIMI_SERVER_TOKEN` and optional `HIVE_KIMI_SERVER_ORIGIN` only when a mutation needs a native client. Native history refresh and delivery stay inside the locked core operations. The routes use the existing JSON body limits, browser-header checks, execution-pause checks, `no-store` responses, and generic error mapping.
+

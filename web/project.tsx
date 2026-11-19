@@ -28,7 +28,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 export function ProjectCard({
-  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage, onNudge, onInterrupt, onLogs, onKill, onDelete,
+  project: p, view, now, busy, onWake, onStartTask, onSetMode, onSetApprovals, onMessage, onNudge, onInterrupt, onLogs, onBranches, onKill, onDelete,
 }: {
   project: HubProject;
   view: HubView;
@@ -42,6 +42,7 @@ export function ProjectCard({
   onNudge: (project: string, taskId: string) => void;
   onInterrupt: (project: string, ref?: string) => void;
   onLogs: (project: string, ref?: string) => void;
+  onBranches: (project: string) => void;
   onKill: (project: string) => void;
   onDelete: (project: string) => void;
 }) {
@@ -87,8 +88,9 @@ export function ProjectCard({
               </span>
             )}
             {o.session_id && (
-              <span className="ml-2 inline-block">
+              <span className="ml-2 inline-flex gap-1.5">
                 <Btn id={`logs-${p.name}`} onPress={() => onLogs(p.name)}>Logs</Btn>
+                <Btn id={`branches-${p.name}`} onPress={() => onBranches(p.name)}>Branches</Btn>
               </span>
             )}
             {o.state === 'running' && (

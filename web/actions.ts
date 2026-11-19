@@ -10,10 +10,12 @@ import { checkName, PROJECT_NAME_RE } from '../src/names.js';
 import { addProjectFromBody, removeProject } from '../src/project.js';
 import { handleCurrentOrchestratorDialog } from '../src/watch.js';
 import { readQuestionBatch, type ApprovalAuthorization } from '../src/questions.js';
+import type { Registry } from '../src/registry.js';
 import { AuthorizationError, type Principal } from '../src/security.js';
 import { RolloutPaused } from '../src/rollout.js';
 import type { QuestionBatch } from '../src/types.js';
 import { ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, withTimeout } from '../src/view.js';
+import { handleBranchAction, storedBranchMutationScope } from './branchactions.js';
 import { HttpError } from './http-error.js';
 import { recordStretchOpened } from './stretch.js';
 import { serialized } from './serialized.js';
@@ -90,7 +92,9 @@ export function requestAgentRef(body: Record<string, unknown>, principal: Princi
 }
 
 export async function handlePost(root: string, pathname: string, body: Record<string, unknown>,
-  principal: Principal, authorization?: ApprovalAuthorization): Promise<unknown> {
+  principal: Principal, authorization?: ApprovalAuthorization, registry?: Registry): Promise<unknown> {
+  const branchAction = await handleBranchAction(root, pathname, body, principal, registry);
+  if (branchAction !== null) return branchAction;
   const questionAction = await handleQuestionAction(root, pathname, body, authorization);
   if (questionAction !== null) return questionAction;
   if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/project-delete', '/api/task-resolve', '/api/progress'].includes(pathname)) {
@@ -170,7 +174,7 @@ export async function handlePost(root: string, pathname: string, body: Record<st
 
 export function postAction(pathname: string): string {
   if (['/api/project', '/api/project-delete', '/api/mode', '/api/approvals', '/api/task-resolve', '/api/questions/cancel', '/api/task'].includes(pathname)) return 'admin';
-  if (['/api/wake', '/api/continue', '/api/start', '/api/interrupt', '/api/kill', '/api/answer'].includes(pathname)) return 'execute';
+  if (['/api/wake', '/api/continue', '/api/start', '/api/interrupt', '/api/kill', '/api/answer', '/api/branch-review', '/api/branch-rejoin'].includes(pathname)) return 'execute';
   return 'write';
 }
 
@@ -193,6 +197,9 @@ export function isExecutionApprovalAnswer(batch: QuestionBatch, answers: unknown
 export async function postScope(root: string, pathname: string,
   body: Record<string, unknown>, principal: Principal): Promise<{ project: string; task?: string; thread?: string }> {
   if (body.thread !== undefined) throw new AuthorizationError('not found');
+  if (pathname === '/api/branch-review' || pathname === '/api/branch-rejoin') {
+    return storedBranchMutationScope(root, body);
+  }
   if (pathname.startsWith('/api/questions/')) {
     try {
       const batch = await readQuestionBatch(root, String(body.id ?? ''));

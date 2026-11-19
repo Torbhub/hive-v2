@@ -321,6 +321,40 @@ export type NativeBranchRecord = {
   rejoin?: NativeBranchRejoin;
 };
 
+export type NativeBranchFindingDto = Pick<NativeBranchFinding, 'id' | 'answer' | 'recommendation' | 'uncertainty'>;
+export type NativeBranchSummary = {
+  id: string;
+  status: NativeBranchRecord['status'];
+  purpose: string;
+  agent: string;
+  task: string;
+  createdAt: string;
+  updatedAt: string;
+  hasResult: boolean;
+  error?: string;
+};
+export type NativeBranchReviewDto = {
+  digest: string;
+  findingIds: string[];
+  createdAt: string;
+  expiresAt: string;
+  promptId: string;
+  prompt: string;
+};
+export type NativeBranchRejoinDto = {
+  status: NativeBranchRejoin['status'];
+  reviewDigest: string;
+  promptId: string;
+  nativeMessageId?: string;
+  rejoinedAt?: string;
+};
+export type NativeBranchDetail = NativeBranchSummary & {
+  kind: NativeBranchRecord['kind'];
+  findings: NativeBranchFindingDto[];
+  review?: NativeBranchReviewDto;
+  rejoin?: NativeBranchRejoinDto;
+};
+
 export type NativeTextPart = { type: 'text'; text: string };
 export type NativeSession = {
   id: string;

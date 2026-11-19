@@ -13,6 +13,7 @@ import { buildView, lastLine } from '../src/view.js';
 import {
   BODY_CAP, checkBrowserHeaders, handlePost, isExecutionApprovalAnswer, postAction, postScope, readBody, storedAgentTask,
 } from './actions.js';
+import { branchDetailResponse, branchListResponse } from './branchactions.js';
 import { HttpError } from './http-error.js';
 import { serveStatic } from './static.js';
 
@@ -243,14 +244,15 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   const scope = await postScope(context.root, pathname, body, principal);
   const action = await requiredAction(context.root, pathname, body);
   const executionApproval = pathname === '/api/questions/answer' && action === 'execute';
-  const authorizeAction = executionApproval ? authorizeExact : authorize;
+  const exactExecution = executionApproval || pathname === '/api/branch-review' || pathname === '/api/branch-rejoin';
+  const authorizeAction = exactExecution ? authorizeExact : authorize;
   const approvalGrant = await authorizeAction(principal, context.registry, action, scope);
   const authorization = executionApproval
     ? await approvalAuthorization(context, principal, body, scope, approvalGrant) : undefined;
-  if (executionApproval || pathname === '/api/answer') {
+  if (exactExecution || pathname === '/api/answer') {
     await assertExecutionAllowed(context.root, scope.project);
   }
-  const result = await handlePost(context.root, pathname, body, principal, authorization);
+  const result = await handlePost(context.root, pathname, body, principal, authorization, context.registry);
   const current = await context.authenticate();
   await authorizeAction(current, context.registry, action, scope);
   sendJson(res, 200, result);
@@ -304,6 +306,19 @@ export async function routeRequest(context: RequestContext): Promise<void> {
     return;
   }
   if (pathname === '/api/view' && req.method === 'GET') return viewResponse(context);
+  if (pathname === '/api/branches' && req.method === 'GET') {
+    sendJson(res, 200, await branchListResponse(
+      context.root, context.registry, principal, context.url.searchParams.get('project'),
+    ));
+    return;
+  }
+  if (pathname === '/api/branch' && req.method === 'GET') {
+    sendJson(res, 200, await branchDetailResponse(
+      context.root, context.registry, principal,
+      context.url.searchParams.get('project'), context.url.searchParams.get('branch') ?? '',
+    ));
+    return;
+  }
   if (pathname === '/api/log' && req.method === 'GET') return logResponse(context, principal);
   if (pathname === '/api/wake-subscriptions' && req.method === 'GET') return wakeListResponse(context, principal);
   if (pathname.startsWith('/api/')) return postResponse(context, principal);

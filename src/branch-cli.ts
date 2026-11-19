@@ -9,7 +9,7 @@ import {
   recordNativeBranchResult,
   refreshNativeBranch,
 } from './branches.js';
-import { KimiServerClient } from './kimi-server.js';
+import { createNativeBranchClient } from './native-client.js';
 import { checkName } from './names.js';
 import { readProjects } from './state.js';
 import { UsageError } from './usage.js';
@@ -68,10 +68,7 @@ function requireEnabled(): void {
   if (process.env.HIVE_NATIVE_BRANCHES !== '1') throw new UsageError('native branches are disabled; set HIVE_NATIVE_BRANCHES=1');
 }
 function nativeFor(dependencies: Dependencies): NativeBranchClient {
-  if (dependencies.native) return dependencies.native;
-  const token = process.env.HIVE_KIMI_SERVER_TOKEN;
-  if (!token) throw new UsageError('HIVE_KIMI_SERVER_TOKEN is required for a native branch operation');
-  return new KimiServerClient({ origin: process.env.HIVE_KIMI_SERVER_ORIGIN ?? 'http://127.0.0.1:58627', token });
+  return dependencies.native ?? createNativeBranchClient();
 }
 function branchPosition(parsed: Parsed): { project: string; id: string } {
   if (parsed.pos.length !== 2) throw new UsageError(USAGE);
