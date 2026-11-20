@@ -106,6 +106,7 @@ async function maybeAutoApprove(
     if (error instanceof RolloutPaused) return;
     throw error;
   }
+  if (neverApprove(dialog.text)) return;
   const command = extractCommand(dialog.text);
   if (auto) {
     const trust = !command && dialog.text.includes('Trust this folder?');
@@ -121,8 +122,7 @@ async function maybeAutoApprove(
     });
     return;
   }
-  // neverApprove runs before every tier and before the cache, always.
-  if (!command || neverApprove(dialog.text)) return;
+  if (!command) return;
   // Whitespace-collapsed key: `git  status` and `git status` share a verdict.
   const cacheKey = command.replace(/\s+/g, ' ');
   let ok = tier1Approves(command);

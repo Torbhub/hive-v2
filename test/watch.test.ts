@@ -1048,7 +1048,8 @@ describe('watchCycle stale-lane heartbeat', () => {
     });
     vi.mocked(paneExists).mockResolvedValue(true);
     vi.mocked(capturePane).mockResolvedValue(idlePane);
-    let wireAt = Date.now() - 20 * 60_000;
+    const initialWireAt = Date.now() - 20 * 60_000;
+    let wireAt = initialWireAt;
     vi.mocked(wireLogMtime).mockImplementation(async () => wireAt);
     const seen = new Set<string>();
     await watchCycle(root, {}, seen);
@@ -1058,7 +1059,7 @@ describe('watchCycle stale-lane heartbeat', () => {
     await watchCycle(root, {}, seen);
     expect(await readDecisions(root)).toHaveLength(1);
 
-    wireAt = Date.now() - 20 * 60_000;
+    wireAt = initialWireAt + 1000;
     await watchCycle(root, {}, seen);
     expect(await readDecisions(root)).toHaveLength(2);
   });
@@ -1273,5 +1274,31 @@ describe('death bundle capture', () => {
     expect(wake).toHaveBeenCalledWith(root, 'demo');
     const text = await fs.readFile(path.join(deathsDir, files[0]), 'utf8');
     expect(text).toContain('wire-log: unavailable (no session_id in the team entry)');
+  });
+});
+
+describe('watchCycle hard denies in auto mode', () => {
+  it.each([
+    'Run this command?\n  $ python3 safe.py\n  note: this also runs rm -rf build',
+    'Trust this folder?\n  note: this also runs rm -rf build',
+  ])('neverApprove wins before blanket auto approval', async (text) => {
+    const { root } = await setupProject({ mode: 'auto' });
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home: '', repos: [], open_tasks: 0,
+        orchestrator: { state: 'running', question: true }, agents: [],
+      }],
+    } as never);
+    vi.mocked(readDialogFor).mockResolvedValue({
+      kind: 'numbered', text, cursor: null, esc: true, fingerprint: 'fp',
+      project: 'demo', session: 'demo-orchestrator', pane: '%1',
+      options: [{ n: 1, label: text.startsWith('Trust') ? 'Trust and continue' : 'Approve once', detail: '', offered: true, saves_rule: false }],
+    } as never);
+
+    await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts: new Map(), marks: new Set() });
+
+    expect(answerDialog).not.toHaveBeenCalled();
+    expect(vi.mocked(run).mock.calls.filter((call) => call[0] === 'kimi')).toEqual([]);
   });
 });

@@ -92,12 +92,13 @@ export function requestAgentRef(body: Record<string, unknown>, principal: Princi
 }
 
 export async function handlePost(root: string, pathname: string, body: Record<string, unknown>,
-  principal: Principal, authorization?: ApprovalAuthorization, registry?: Registry): Promise<unknown> {
+  principal: Principal, authorization?: ApprovalAuthorization, registry?: Registry,
+  revalidate?: () => Promise<void>, revalidateReconciler?: () => Promise<void>): Promise<unknown> {
   const branchAction = await handleBranchAction(root, pathname, body, principal, registry);
   if (branchAction !== null) return branchAction;
   const questionAction = await handleQuestionAction(root, pathname, body, authorization);
   if (questionAction !== null) return questionAction;
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/project-delete', '/api/task-resolve', '/api/progress'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/project-delete', '/api/task-resolve', '/api/progress', '/api/task-receipt'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
@@ -159,16 +160,16 @@ export async function handlePost(root: string, pathname: string, body: Record<st
     if (pathname === '/api/plan-answer') {
       const r = await planAnswer(
         root, project, String(body.task ?? ''), String(body.verdict ?? ''),
-        body.feedback === undefined ? undefined : String(body.feedback),
+        body.feedback === undefined ? undefined : String(body.feedback), revalidate,
       );
       return { ok: true, typed: r.typed };
     }
-    const taskAction = await handleTaskAction(root, project, pathname, body);
+    const taskAction = await handleTaskAction(root, project, pathname, body, principal, revalidate, revalidateReconciler);
     if (taskAction !== null) return taskAction;
     const r = await answerDialog(root, project, requestAgentRef(body, principal), String(body.choice ?? ''), String(body.fingerprint ?? ''));
     return { ok: true, option: r.option, choice: r.choice, session: r.session, dialog_gone: r.dialog_gone };
   });
-  if (['/api/mode', '/api/approvals', '/api/task', '/api/task-resolve', '/api/progress'].includes(pathname)) return action;
+  if (['/api/mode', '/api/approvals', '/api/task', '/api/task-resolve', '/api/progress', '/api/task-receipt'].includes(pathname)) return action;
   return withTimeout(action, pathname === '/api/answer' ? ANSWER_TIMEOUT_MS : ACTION_TIMEOUT_MS, pathname.slice(5));
 }
 
