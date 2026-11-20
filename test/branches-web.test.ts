@@ -72,6 +72,7 @@ function activeRecord(): NativeBranchRecord {
     createdAt: CREATED,
     updatedAt: UPDATED,
     error: 'child transport needs attention',
+    leaseId: 'native-lease-private',
     result: {
       schemaVersion: 1,
       branchId: ID,
@@ -281,7 +282,7 @@ function expectNoNativeSecrets(body: string): void {
     NATIVE_TOKEN, '/private/native/worktree', 'workspace_private', 'session_parent_private', 'session_child_private',
     'human-grant', 'agent-grant', 'parentSnapshot', 'childSnapshot', 'consumerAclEpoch', 'approverAclEpoch',
     'parentHistoryHash', 'childHistoryHash', 'nativeEvidence', 'messageId', 'msg_private',
-    'promptHash', 'private native delivery detail',
+    'promptHash', 'private native delivery detail', 'native-lease-private',
   ]) expect(body).not.toContain(secret);
 }
 

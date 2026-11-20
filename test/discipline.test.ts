@@ -80,3 +80,21 @@ describe('evidence dependency discipline', () => {
     expect(result.stderr).toContain(file);
   });
 });
+
+describe('native evidence dependency discipline', () => {
+  it('allows evidence to read stored branches and construct a client only at the predicate seam', () => {
+    expect(checkEnforcement(fixture('src/evidence.ts', "import { readNativeBranch } from './branches.js';\nexport { readNativeBranch };\n")).status).toBe(0);
+    expect(checkEnforcement(fixture('src/evidence.ts', "import { createNativeBranchClient } from './native-client.js';\nexport { createNativeBranchClient };\n")).status).toBe(0);
+  });
+
+  it.each([
+    { name: 'branches imports evidence', file: 'src/branches.ts', source: "import { evaluate } from './evidence.js';\nexport { evaluate };\n" },
+    { name: 'branches imports hub', file: 'src/branches.ts', source: "import { record } from './hub.js';\nexport { record };\n" },
+    { name: 'branches imports native client', file: 'src/branches.ts', source: "export async function load() { return import('./native-client.js'); }\n" },
+    { name: 'evidence dynamically imports Kimi server', file: 'src/evidence.ts', source: "export async function load() { return import('./kimi-server.js'); }\n" },
+  ])('rejects $name', ({ file, source }) => {
+    const result = checkEnforcement(fixture(file, source));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(file);
+  });
+});

@@ -3,7 +3,9 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { admitTmux, assertTmuxGrant, recordTmuxLaunchOutcome, transitionTmuxAdmission, type TmuxAdmissionRequest } from '../src/admission.js';
+import {
+  admitNative, admitTmux, assertTmuxGrant, recordTmuxLaunchOutcome, transitionTmuxAdmission, type TmuxAdmissionRequest,
+} from '../src/admission.js';
 import { evaluateTaskPredicate, hubLog, hubResolve, hubTask, planAnswer, recordTaskEvidence, recordTaskReceipt } from '../src/hub.js';
 import { appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readTaskEvents, readTeam, writeJson } from '../src/state.js';
 import type { RootContract } from '../src/types.js';
@@ -546,5 +548,81 @@ describe('worker evidence and cancellation', () => {
     await expect(evaluateTaskPredicate(root, 'demo-1', 'task_receipt', {
       plan_digest: task.plan_digest!, artifact_digest: evidence.artifact_digest,
     })).resolves.toBe(false);
+  });
+});
+
+describe('native admission leases', () => {
+  async function nativeFixture(contractChanges: Partial<RootContract> = {}) {
+    const fixture = await setup({
+      write_scope: ['src'],
+      budget: { depth: 2, active_children: 4, active_project_records: 4, attempts: 3 },
+      delegation: {
+        output_claims: [OUTPUT, 'Review the bounded change.', 'Inspect another allocation.'],
+        adapters: ['tmux', 'native'],
+      },
+      ...contractChanges,
+    });
+    await seedTask(fixture.root, fixture.contract);
+    const parent = await admit(fixture.root, fixture.home, fixture.contract, 'builder');
+    const nativeRequest = request(fixture.home, fixture.contract, {
+      output_claim: 'Review the bounded change.', write_scope: [], adapter: 'native',
+      parent_lease_id: parent.lease_id, budget: { depth: 2, attempts: fixture.contract.budget.attempts },
+    });
+    return { ...fixture, parent, nativeRequest };
+  }
+
+  it('persists an epoch-1 read lease without adding a team worker and allows writer overlap', async () => {
+    const { root, home, parent, nativeRequest } = await nativeFixture();
+    const native = await admitNative(root, home, 'demo-1', 'native-branch-1', nativeRequest);
+    expect(native).toMatchObject({
+      adapter: 'native', parent_lease_id: parent.lease_id, lease_epoch: 1,
+      depth: 2, write_scope: [], attempts_used: 1, status: 'admitted',
+    });
+    expect((await readTeam(home)).agents.filter((agent) => !agent.orchestrator)).toHaveLength(1);
+    await expect(admitNative(root, home, 'demo-1', 'native-branch-2', {
+      ...nativeRequest, output_claim: 'Inspect another allocation.',
+    })).resolves.toMatchObject({ depth: 2, write_scope: [] });
+  });
+
+  it('shares dedup and parent and project budget predicates with tmux', async () => {
+    const { root, home, nativeRequest } = await nativeFixture({
+      budget: { depth: 2, active_children: 2, active_project_records: 2, attempts: 3 },
+    });
+    await admitNative(root, home, 'demo-1', 'native-branch-1', nativeRequest);
+    await expect(admitNative(root, home, 'demo-1', 'native-branch-duplicate', nativeRequest))
+      .rejects.toThrow(/duplicate/);
+    await expect(admitNative(root, home, 'demo-1', 'native-branch-2', {
+      ...nativeRequest, output_claim: 'Inspect another allocation.',
+    })).rejects.toThrow(/active children|active project|budget/);
+  });
+
+  it('rejects writable scope and excess depth without a reservation', async () => {
+    const { root, home, nativeRequest } = await nativeFixture({
+      budget: { depth: 1, active_children: 4, active_project_records: 4, attempts: 3 },
+    });
+    await expect(admitNative(root, home, 'demo-1', 'native-branch-write', {
+      ...nativeRequest, write_scope: ['src'], budget: { depth: 1, attempts: 3 },
+    })).rejects.toThrow(/read.only|writable|write scope/i);
+    await expect(admitNative(root, home, 'demo-1', 'native-branch-depth', nativeRequest))
+      .rejects.toThrow(/depth|budget/);
+    const task = foldTasks(await readTaskEvents(root)).find((candidate) => candidate.id === 'demo-1')!;
+    expect(task.admissions?.filter((admission) => admission.adapter === 'native')).toHaveLength(0);
+  });
+
+  it('accumulates native replacement attempts on the same lineage', async () => {
+    const { root, home, contract, nativeRequest } = await nativeFixture({
+      budget: { depth: 2, active_children: 4, active_project_records: 4, attempts: 2 },
+    });
+    const first = await admitNative(root, home, 'demo-1', 'native-branch-1', nativeRequest);
+    await transitionTmuxAdmission(root, home, 'demo-1', first.agent, first.lease_id, 'failed', 'retry native');
+    const second = await admitNative(root, home, 'demo-1', 'native-branch-1', await withRetryIdentity(root, {
+      ...nativeRequest, retry_of: first.agent,
+    }));
+    expect(second).toMatchObject({ attempts_used: 2, lineage_id: first.lineage_id, lease_epoch: 1 });
+    await transitionTmuxAdmission(root, home, 'demo-1', second.agent, second.lease_id, 'failed', 'retry native again');
+    await expect(admitNative(root, home, 'demo-1', 'native-branch-1', await withRetryIdentity(root, {
+      ...nativeRequest, retry_of: second.agent,
+    }))).rejects.toThrow(/blocked:budget_exhausted/);
+    expect(contract.budget.attempts).toBe(2);
   });
 });

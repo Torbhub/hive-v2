@@ -1,5 +1,6 @@
 import type {
   DaydreamNativeClient,
+  NativeBranchCreateRequest,
   NativeMessage,
   NativePrompt,
   NativePromptInput,
@@ -44,6 +45,13 @@ function parseSession(value: unknown): NativeSession {
   const session = object(value, 'session');
   stringField(session.id, 'session.id');
   stringField(session.workspace_id, 'session.workspace_id');
+  if (session.read_only !== undefined) {
+    const policy = object(session.read_only, 'session.read_only');
+    if (policy.filesystem !== 'read-only' || policy.shell !== 'denied' || policy.side_effects !== 'denied'
+      || JSON.stringify(policy.tools) !== JSON.stringify(['Read', 'Grep', 'Glob'])) {
+      throw schemaError('session.read_only is not the required effective policy');
+    }
+  }
   const metadata = object(session.metadata, 'session.metadata');
   stringField(metadata.cwd, 'session.metadata.cwd');
   optionalString(metadata.hive_branch_id, 'session.metadata.hive_branch_id');
@@ -267,14 +275,16 @@ export class KimiServerClient implements DaydreamNativeClient {
   async getSession(sessionId: string): Promise<NativeSession> {
     return parseSession(await this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}`));
   }
-  async createChild(sessionId: string, input: { title: string; metadata: Record<string, unknown> }): Promise<NativeSession> {
+  async createChild(sessionId: string, input: NativeBranchCreateRequest): Promise<NativeSession> {
     return parseSession(await this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/children`, {
-      method: 'POST', body: { title: input.title, metadata: input.metadata },
+      method: 'POST',
+      body: { title: input.title, metadata: input.metadata, ...(input.readOnly ? { read_only: input.readOnly } : {}) },
     }));
   }
-  async forkSession(sessionId: string, input: { title: string; metadata: Record<string, unknown> }): Promise<NativeSession> {
+  async forkSession(sessionId: string, input: NativeBranchCreateRequest): Promise<NativeSession> {
     return parseSession(await this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}:fork`, {
-      method: 'POST', body: { title: input.title, metadata: input.metadata },
+      method: 'POST',
+      body: { title: input.title, metadata: input.metadata, ...(input.readOnly ? { read_only: input.readOnly } : {}) },
     }));
   }
   async listChildren(sessionId: string, options: { pageSize?: number } = {}): Promise<{ items: NativeSession[]; has_more: boolean }> {
