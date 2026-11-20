@@ -31,5 +31,10 @@ fi
 # The hook checks the working tree, which in a jj clone IS the pushed change
 # (@) — no stdin sha resolution needed.
 "$hook" </dev/null
+# Test harnesses can write bytecode even with PYTHONDONTWRITEBYTECODE=1.
+rm -f infra/t01-smoke/__pycache__/health_credential.cpython-312.pyc \
+  infra/t01-smoke/__pycache__/runtime.cpython-312.pyc \
+  infra/t01-smoke/__pycache__/teamkimi_attestation.cpython-312.pyc \
+  test/__pycache__/t01_workflow_harness.cpython-312.pyc
 echo "jj-push-gate: pre-push hook green — delegating: jj git push $*" >&2
 exec jj git push "$@"

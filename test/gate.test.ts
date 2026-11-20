@@ -173,6 +173,11 @@ describe('verifyCommits', () => {
 });
 
 describe('pushByHash', () => {
+  it('registers no executor for non-push authority', async () => {
+    const { OPERATION_REGISTRY } = await import('../src/evidence.js');
+    expect(Object.keys(OPERATION_REGISTRY)).toEqual(['push']);
+  });
+
   it('refuses a remote that looks like a flag before consuming approval', async () => {
     await expect(pushByHash('--upload-pack=x', SHA, 'main', '/tmp', {
       root: '/unused', project: 'demo', batch: 'batch', question: 'q1',

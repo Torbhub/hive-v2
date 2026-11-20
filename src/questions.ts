@@ -1,17 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type { Dirent } from 'node:fs';
-import type { DecisionAnswer, OperatorQuestion, QuestionAnswer, QuestionBatch } from './types.js';
-import { Refusal, appendDecision, hubPath, readJson, withHubLock, writeJson } from './state.js';
+import type {
+  DecisionAnswer, DecisionGrant, HubTask, OperatorQuestion, QuestionAnswer, QuestionBatch, TaskOperation, TaskOperationResult,
+  TmuxAdmission,
+} from './types.js';
+import { CLOSED_STATES } from './types.js';
+import { assertExecutionAllowed } from './rollout.js';
+import {
+  Refusal, appendDecision, appendTaskEvent, canonicalJson, contractDigest, foldTasks, hubPath, readJson, readProjects,
+  readTaskEvents, readTeam, valueDigest, withHubLock, withTeamLock, writeJson,
+} from './state.js';
 import {
   applyDecisionRewrite, buildDecision, buildHandoffFallback, cleanAgentText, containsSecurityInstruction,
-  decisionApprovalAllowed, decisionValidity, isInternalHandoff, type DecisionRewriter,
+  decisionApprovalAllowed, decisionValidity, isInternalHandoff, type DecisionFacts, type DecisionRewriter,
 } from './decisions.js';
 import { decisionFingerprint, repositoryFingerprint, verifyDecisionFacts, verifyExecutionRepository } from './decision-verification.js';
 import { credentialFromEnvironment } from './collaboration-credentials.js';
 import { storedAgentTask } from './agent-target.js';
 import { registryFromEnv, type Registry } from './registry.js';
 import { accountActive, authenticateBearer, authorizeExact, exactGrant } from './security.js';
+import { normalizeScope, repositoryIdentity } from './scope.js';
+import { assertAdmissionCurrentLocked, recordTmuxExternalOperationLocked } from './admission.js';
+import { run } from './tmux.js';
 
 export const QUESTION_LIMITS = {
   questions: 20, choices: 8, context: 4000, question: 1000,
@@ -99,7 +110,102 @@ export type ApprovalAuthorization = {
   approverSubject?: string;
   approverGrantId?: string;
   approverAclEpoch?: number;
+  bindings?: Record<string, Partial<DecisionGrant>>;
 };
+
+type PushBinding = {
+  task: HubTask;
+  home: string;
+  admission?: TmuxAdmission;
+  grant: Partial<DecisionGrant>;
+};
+
+async function taskForPush(root: string, batch: QuestionBatch, authorization?: ApprovalAuthorization, allowClosed = false) {
+  const taskId = authorization?.task ?? await storedAgentTask(root, batch.project, batch.agent);
+  if (!taskId) return null;
+  const task = foldTasks(await readTaskEvents(root)).find((candidate) => candidate.id === taskId);
+  if (!task) throw new Refusal('approval task does not match');
+  if (CLOSED_STATES.has(task.state) && !allowClosed) throw new Refusal(`task is closed: ${task.state}`);
+  if (!task.contract) return null;
+  if (!task.plan_approved || !allowClosed && task.lease_revoked || !task.plan_digest || !task.lease_epoch
+    || contractDigest(task.contract) !== task.plan_digest || !task.contract.action_scope.includes('push')) {
+    throw new Refusal('push is outside the current approved action scope');
+  }
+  return task;
+}
+
+function makePushBinding(
+  batch: QuestionBatch, questionId: string, facts: DecisionFacts, task: HubTask, home: string,
+  admission: TmuxAdmission | undefined, worktree: string | undefined, scope: string[],
+  rootEpoch = task.lease_epoch,
+): PushBinding {
+  const actionScope = [...new Set(task.contract!.action_scope)].sort();
+  const scopeHash = valueDigest(scope);
+  const budgetVersion = valueDigest(task.contract!.budget);
+  const operationId = `push:${batch.id}:${questionId}`;
+  const operationIdentity = {
+    operationId, planDigest: task.plan_digest, scopeHash, actionScope, budgetVersion,
+    leaseId: admission?.lease_id, leaseEpoch: admission?.lease_epoch ?? task.lease_epoch,
+    rootLeaseEpoch: rootEpoch, repositoryFingerprint: facts.repositoryFingerprint,
+    commit: facts.commit, branch: facts.branch,
+  };
+  return {
+    task, home, admission,
+    grant: {
+      task: task.id, planDigest: task.plan_digest!, scopeHash, actionScope, budgetVersion,
+      leaseId: admission?.lease_id, leaseEpoch: admission?.lease_epoch ?? task.lease_epoch,
+      rootLeaseEpoch: rootEpoch, repositoryFingerprint: facts.repositoryFingerprint,
+      commit: facts.commit, branch: facts.branch, operationId, idempotencyKey: valueDigest(operationIdentity),
+    },
+  };
+}
+
+async function currentPushBinding(
+  root: string, batch: QuestionBatch, questionId: string, facts: DecisionFacts,
+  authorization?: ApprovalAuthorization, allowClosed = false, recordedRootEpoch?: number,
+): Promise<PushBinding | null> {
+  const task = await taskForPush(root, batch, authorization, allowClosed);
+  if (!task) return null;
+  const project = (await readProjects(root)).projects.find((candidate) => candidate.name === batch.project);
+  if (!project) throw new Refusal(`unknown project: ${batch.project}`);
+  return withTeamLock(project.home, async () => {
+    const [name, worktree] = batch.agent.split('@');
+    const team = await readTeam(project.home);
+    const agent = team.agents.find((candidate) => candidate.name === name
+      && (worktree ? candidate.worktree === worktree : true));
+    if (!agent || agent.task !== task.id) throw new Refusal('approval agent does not match the current task');
+    let admission: TmuxAdmission | undefined;
+    if (!agent.orchestrator) {
+      admission = task.admissions?.find((candidate) => candidate.agent === agent.name
+        && candidate.lease_id === agent.lease_id && (allowClosed || !candidate.lease_revoked
+          && (candidate.status === 'admitted' || candidate.status === 'running')));
+      if (!agent.lease_id || !admission) throw new Refusal('push needs a current worker lease');
+      if (!allowClosed) await assertAdmissionCurrentLocked(root, project.home, task.id, agent.name, agent.lease_id);
+    }
+    const [contractRepository, executionRepository] = await Promise.all([
+      repositoryIdentity(task.contract!.provenance.repository).catch(() => null),
+      repositoryIdentity(agent.worktree || project.home).catch(() => null),
+    ]);
+    if (!contractRepository || contractRepository !== executionRepository
+      || facts.commit !== task.contract!.provenance.artifact_revision) {
+      throw new Refusal('push repository or commit does not match contract provenance');
+    }
+    const scope = await normalizeScope(task.contract!.provenance.repository, task.contract!.write_scope);
+    return makePushBinding(batch, questionId, facts, task, project.home, admission, agent.worktree, scope, recordedRootEpoch);
+  });
+}
+
+function assertCurrentGrantBinding(grant: DecisionGrant, binding: PushBinding | null): void {
+  if (!binding) {
+    if (grant.planDigest) throw new Refusal('approval contract binding no longer exists');
+    return;
+  }
+  for (const key of Object.keys(binding.grant) as (keyof DecisionGrant)[]) {
+    if (canonicalJson(grant[key]) !== canonicalJson(binding.grant[key])) {
+      throw new Refusal(`approval binding changed: ${key}`);
+    }
+  }
+}
 
 function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, answer: QuestionAnswer,
   authorization?: ApprovalAuthorization): QuestionAnswer {
@@ -110,7 +216,7 @@ function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, an
   else if (answer.choice === 'c1') outcome = card.action === 'unknown' || card.missing.length ? 'details' : 'refresh';
   else if (answer.choice === 'c2' && question.choices.length === 3) outcome = 'approve';
   else outcome = 'cancel';
-  if (outcome === 'approve' && card.action === 'push' && authorization
+  if (outcome === 'approve' && card.action === 'push' && authorization?.consumerGrantId
     && !authorization.approverSubject?.startsWith('user:')) {
     throw new Refusal('execution approvals require a human approver');
   }
@@ -120,6 +226,7 @@ function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, an
     fingerprint: decisionFingerprint(facts), expiresAt: facts.validUntil!,
     executionAuthority: card.action === 'push' ? 'push' as const : 'none' as const,
     agent: batch.agent, task: authorization?.task,
+    ...authorization?.bindings?.[question.id],
     grantId: authorization?.consumerGrantId, profileAclEpoch: authorization?.consumerAclEpoch,
     approverSubject: authorization?.approverSubject,
     approverGrantId: authorization?.approverGrantId,
@@ -293,23 +400,126 @@ async function authorizePushConsumption(root: string, batch: QuestionBatch,
   }
 }
 
-export async function consumePushApproval(
-  root: string,
-  reference: { project: string; batch: string; question: string },
-  remote: string,
-  sha: string,
-  branch: string,
-  cwd: string,
-  now = Date.now(),
-  env: NodeJS.ProcessEnv = process.env,
-  registry: Registry = registryFromEnv(env),
-): Promise<string> {
+export type PushReference = {
+  project: string;
+  batch: string;
+  question: string;
+  operationId?: string;
+  idempotencyKey?: string;
+};
+export type PushConsumption = {
+  executionUrl: string;
+  status: 'pending' | 'reconcile' | 'succeeded';
+  operation?: TaskOperation;
+};
+
+function operationFromGrant(
+  batch: QuestionBatch, grant: DecisionGrant, status: TaskOperation['status'], now: number,
+  result?: TaskOperationResult,
+): TaskOperation {
+  return {
+    operation_id: grant.operationId!, idempotency_key: grant.idempotencyKey!, kind: 'push',
+    actor: grant.agent ?? batch.agent, plan_digest: grant.planDigest!, epoch: grant.rootLeaseEpoch!,
+    lease_id: grant.leaseId, repository_fingerprint: grant.repositoryFingerprint!,
+    commit: grant.commit!, branch: grant.branch!, status, updated_at: new Date(now).toISOString(),
+    ...(result ? { result } : {}),
+  };
+}
+
+function checkedOperationResult(
+  status: 'succeeded' | 'ambiguous' | 'failed', result: TaskOperationResult | undefined, commit: string,
+): TaskOperationResult | undefined {
+  if (status !== 'succeeded') {
+    if (result !== undefined) throw new Refusal('an ambiguous or failed operation cannot carry a result');
+    return undefined;
+  }
+  const checked = exactKeys(result, ['remote_tip'], 'push operation result', ['reconciled']);
+  if (typeof checked.remote_tip !== 'string' || !/^[0-9a-f]{40}$/.test(checked.remote_tip)
+    || checked.remote_tip !== commit) {
+    throw new Refusal('a successful push needs a verified remote tip equal to the operation commit');
+  }
+  if (checked.reconciled !== undefined && typeof checked.reconciled !== 'boolean') {
+    throw new Refusal('push operation result reconciled must be a boolean');
+  }
+  return {
+    remote_tip: checked.remote_tip,
+    ...(checked.reconciled === undefined ? {} : { reconciled: checked.reconciled }),
+  };
+}
+
+async function remoteTip(executionUrl: string, branch: string, cwd: string): Promise<string> {
+  const listing = await run('git', ['ls-remote', '--heads', '--', executionUrl, `refs/heads/${branch}`], cwd);
+  return listing.code === 0 ? listing.stdout.split(/\s+/)[0] : '';
+}
+
+async function completeOperation(
+  root: string, reference: PushReference, remote: string, sha: string, branch: string, cwd: string,
+  status: 'succeeded' | 'ambiguous' | 'failed', result: TaskOperationResult | undefined,
+  env: NodeJS.ProcessEnv, registry: Registry,
+): Promise<void> {
+  await withHubLock(root, async () => {
+    const batch = await readQuestionBatch(root, reference.batch);
+    const decision = batch.answers?.find((answer) => answer.question === reference.question)?.decision;
+    const grant = decision?.grant;
+    if (batch.status !== 'answered' || batch.project !== reference.project || !grant?.consumedAt
+      || grant.operationId !== reference.operationId || grant.idempotencyKey !== reference.idempotencyKey) {
+      throw new Refusal('push operation or idempotency identity does not match');
+    }
+    const checkedResult = checkedOperationResult(status, result, grant.commit!);
+    if (status === 'succeeded') {
+      const now = Date.now();
+      await authorizePushConsumption(root, batch, grant, env, registry, now);
+      const fresh = await verifyDecisionFacts(root, { project: batch.project, agent: batch.agent }, {
+        ...decision!.facts, action: 'push',
+      }, now);
+      const canonical = buildDecision(fresh, 'complete operation', now).decision!;
+      if (decisionFingerprint(canonical.facts) !== grant.fingerprint) {
+        throw new Refusal('verified facts changed after approval');
+      }
+      const executionUrl = await verifyExecutionRepository(root, { project: batch.project, agent: batch.agent }, cwd);
+      if (repositoryFingerprint(executionUrl) !== fresh.repositoryFingerprint
+        || remote !== 'origin' || sha !== fresh.commit || branch !== fresh.branch) {
+        throw new Refusal('push arguments do not match the approved repository, commit, and branch');
+      }
+      const binding = await currentPushBinding(
+        root, batch, reference.question, fresh, { task: grant.task }, true, grant.rootLeaseEpoch,
+      );
+      assertCurrentGrantBinding(grant, binding);
+      if (await remoteTip(executionUrl, branch, cwd) !== grant.commit) {
+        throw new Refusal('approved branch does not contain the operation commit');
+      }
+    }
+    if (grant.operationStatus === 'succeeded') {
+      if (grant.operationResult?.remote_tip !== grant.commit) throw new Refusal('recorded push result does not match the operation commit');
+      if (status !== 'succeeded' || canonicalJson(checkedResult) !== canonicalJson(grant.operationResult)) {
+        throw new Refusal('a succeeded operation result cannot change');
+      }
+      return;
+    }
+    if (grant.operationStatus === status && canonicalJson(grant.operationResult) === canonicalJson(checkedResult)) return;
+    if ((grant.operationStatus === 'ambiguous' || grant.operationStatus === 'failed') && status !== 'succeeded') {
+      throw new Refusal('an ambiguous or failed operation can advance only through remote reconciliation');
+    }
+    grant.operationStatus = status;
+    grant.operationResult = checkedResult;
+    const operation = operationFromGrant(batch, grant, status, Date.now(), checkedResult);
+    await appendTaskEvent(root, {
+      id: grant.task!, project: batch.project, event: 'operation', at: operation.updated_at, operation,
+    });
+    await writeJson(batchPath(root, batch.id, true), batch, 0o600);
+  });
+}
+
+async function consumeApproval(
+  root: string, reference: PushReference, remote: string, sha: string, branch: string, cwd: string,
+  now: number, env: NodeJS.ProcessEnv, registry: Registry, operationMode: boolean,
+): Promise<PushConsumption> {
   return withHubLock(root, async () => {
     const [open, closed] = await Promise.all([
       readJson<QuestionBatch>(batchPath(root, reference.batch)),
       readJson<QuestionBatch>(batchPath(root, reference.batch, true)),
     ]);
-    if ((open && hasConsumedGrant(open)) || (closed && hasConsumedGrant(closed))) {
+    if (!operationMode && (open && hasConsumedGrant(open) || closed && hasConsumedGrant(closed))) {
       throw new Refusal('approval is already consumed');
     }
     const batch = await readQuestionBatch(root, reference.batch);
@@ -324,9 +534,11 @@ export async function consumePushApproval(
       throw new Refusal('approval identity does not match');
     }
     if (grant.executionAuthority !== 'push') throw new Refusal('approval has no push execution authority');
-    if (grant.consumedAt) throw new Refusal('approval is already consumed');
-    const expiresAt = Date.parse(grant.expiresAt);
-    if (!Number.isFinite(expiresAt) || now >= expiresAt) throw new Refusal('approval is expired');
+    if (grant.consumedAt && !operationMode) throw new Refusal('approval is already consumed');
+    if (!grant.consumedAt) {
+      const expiresAt = Date.parse(grant.expiresAt);
+      if (!Number.isFinite(expiresAt) || now >= expiresAt) throw new Refusal('approval is expired');
+    }
     await authorizePushConsumption(root, batch, grant, env, registry, now);
     const fresh = await verifyDecisionFacts(root, { project: batch.project, agent: batch.agent }, {
       ...decision.facts, action: 'push',
@@ -334,14 +546,129 @@ export async function consumePushApproval(
     const canonical = buildDecision(fresh, 'consume approval', now).decision!;
     if (decisionFingerprint(canonical.facts) !== grant.fingerprint) throw new Refusal('verified facts changed after approval');
     const executionUrl = await verifyExecutionRepository(root, { project: batch.project, agent: batch.agent }, cwd);
-    if (repositoryFingerprint(executionUrl) !== fresh.repositoryFingerprint) throw new Refusal('push origin does not match the approved repository');
+    if (repositoryFingerprint(executionUrl) !== fresh.repositoryFingerprint) {
+      throw new Refusal('push origin does not match the approved repository');
+    }
     if (remote !== 'origin' || sha !== fresh.commit || branch !== fresh.branch || fresh.destination !== `origin/${branch}`) {
       throw new Refusal('push arguments do not match the approved commit and branch');
     }
+    const binding = await currentPushBinding(
+      root, batch, reference.question, fresh, { task: grant.task }, Boolean(grant.consumedAt && operationMode), grant.rootLeaseEpoch,
+    );
+    assertCurrentGrantBinding(grant, binding);
+    if (operationMode) {
+      if (!binding || !reference.operationId || !reference.idempotencyKey
+        || reference.operationId !== grant.operationId || reference.idempotencyKey !== grant.idempotencyKey) {
+        throw new Refusal('push operation or idempotency identity does not match');
+      }
+    } else if (binding) {
+      throw new Refusal('a contract-bound push needs its operation ID and idempotency key');
+    }
+    if (grant.consumedAt) {
+      return {
+        executionUrl, status: grant.operationStatus === 'succeeded' ? 'succeeded' : 'reconcile',
+        operation: operationFromGrant(batch, grant, grant.operationStatus ?? 'ambiguous', now, grant.operationResult),
+      };
+    }
+    await assertExecutionAllowed(root, batch.project);
     grant.consumedAt = new Date(now).toISOString();
+    let operation: TaskOperation | undefined;
+    if (binding) {
+      grant.operationStatus = 'pending';
+      operation = operationFromGrant(batch, grant, 'pending', now);
+      if (binding.admission) {
+        await withTeamLock(binding.home, async () => {
+          await appendTaskEvent(root, {
+            id: binding.task.id, project: binding.task.project, event: 'operation', at: operation!.updated_at, operation,
+          });
+          await recordTmuxExternalOperationLocked(
+            root, binding.home, binding.task.id, binding.admission!.agent, binding.admission!.lease_id, operation!.operation_id,
+          );
+        });
+      } else {
+        await appendTaskEvent(root, {
+          id: binding.task.id, project: binding.task.project, event: 'operation', at: operation.updated_at, operation,
+        });
+      }
+    }
     await writeJson(batchPath(root, batch.id, true), batch, 0o600);
-    return executionUrl;
+    return { executionUrl, status: 'pending', operation };
   });
+}
+
+export async function consumePushApproval(
+  root: string, reference: PushReference, remote: string, sha: string, branch: string, cwd: string,
+  now = Date.now(), env: NodeJS.ProcessEnv = process.env, registry: Registry = registryFromEnv(env),
+): Promise<string> {
+  return (await consumeApproval(root, reference, remote, sha, branch, cwd, now, env, registry, false)).executionUrl;
+}
+
+export async function consumePushOperation(
+  root: string, reference: PushReference, remote: string, sha: string, branch: string, cwd: string,
+  now = Date.now(), env: NodeJS.ProcessEnv = process.env, registry: Registry = registryFromEnv(env),
+): Promise<PushConsumption> {
+  return consumeApproval(root, reference, remote, sha, branch, cwd, now, env, registry, true);
+}
+
+export async function assertPushDispatchCurrent(
+  root: string, reference: PushReference, remote: string, sha: string, branch: string, cwd: string,
+  now = Date.now(), env: NodeJS.ProcessEnv = process.env, registry: Registry = registryFromEnv(env),
+): Promise<void> {
+  await withHubLock(root, async () => {
+    const batch = await readQuestionBatch(root, reference.batch);
+    const decision = batch.answers?.find((answer) => answer.question === reference.question)?.decision;
+    const grant = decision?.grant;
+    if (!decision || !grant?.consumedAt || grant.operationId !== reference.operationId
+      || grant.idempotencyKey !== reference.idempotencyKey) {
+      throw new Refusal('push operation or idempotency identity does not match');
+    }
+    await authorizePushConsumption(root, batch, grant, env, registry, now);
+    const fresh = await verifyDecisionFacts(root, { project: batch.project, agent: batch.agent }, {
+      ...decision.facts, action: 'push',
+    }, now);
+    const canonical = buildDecision(fresh, 'dispatch approval', now).decision!;
+    if (decisionFingerprint(canonical.facts) !== grant.fingerprint) throw new Refusal('verified facts changed after approval');
+    const executionUrl = await verifyExecutionRepository(root, { project: batch.project, agent: batch.agent }, cwd);
+    if (repositoryFingerprint(executionUrl) !== fresh.repositoryFingerprint
+      || remote !== 'origin' || sha !== fresh.commit || branch !== fresh.branch) {
+      throw new Refusal('push arguments do not match the approved repository, commit, and branch');
+    }
+    const binding = await currentPushBinding(root, batch, reference.question, fresh, { task: grant.task });
+    assertCurrentGrantBinding(grant, binding);
+    await assertExecutionAllowed(root, batch.project);
+  });
+}
+
+export async function executePushOperation(
+  remote: string, sha: string, branch: string, cwd: string,
+  approval: PushReference & { root: string }, env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const registry = registryFromEnv(env);
+  const consumed = await consumeApproval(
+    approval.root, approval, remote, sha, branch, cwd, Date.now(), env, registry, true,
+  );
+  if (consumed.status === 'succeeded') {
+    if (consumed.operation?.result?.remote_tip !== sha) throw new Error('recorded push result does not match the operation commit');
+    if (await remoteTip(consumed.executionUrl, branch, cwd) !== sha) throw new Error('approved branch does not contain the operation commit');
+    return;
+  }
+  if (consumed.status === 'reconcile') {
+    if (await remoteTip(consumed.executionUrl, branch, cwd) === sha) {
+      await completeOperation(
+        approval.root, approval, remote, sha, branch, cwd, 'succeeded', { remote_tip: sha, reconciled: true }, env, registry,
+      );
+      return;
+    }
+    await completeOperation(approval.root, approval, remote, sha, branch, cwd, 'ambiguous', undefined, env, registry);
+    throw new Error('push outcome is ambiguous; reconcile the recorded operation before any retry');
+  }
+  await assertPushDispatchCurrent(approval.root, approval, remote, sha, branch, cwd, Date.now(), env, registry);
+  const pushed = await run('git', ['push', '--', consumed.executionUrl, `${sha}:refs/heads/${branch}`], cwd);
+  if (pushed.code !== 0 || await remoteTip(consumed.executionUrl, branch, cwd) !== sha) {
+    await completeOperation(approval.root, approval, remote, sha, branch, cwd, 'ambiguous', undefined, env, registry);
+    throw new Error('push outcome is ambiguous; reconcile the recorded operation before any retry');
+  }
+  await completeOperation(approval.root, approval, remote, sha, branch, cwd, 'succeeded', { remote_tip: sha }, env, registry);
 }
 
 export async function listOpenQuestionBatches(root: string): Promise<QuestionBatch[]> {
@@ -362,12 +689,25 @@ export async function listOpenQuestionBatches(root: string): Promise<QuestionBat
 
 async function closeBatchLocked(
   root: string, id: string, status: 'answered' | 'cancelled', rawAnswers?: unknown, audit?: string,
-  authorization?: ApprovalAuthorization,
+  authorization?: ApprovalAuthorization, revalidate?: () => Promise<void>,
 ): Promise<QuestionBatch> {
   const batch = await readQuestionBatch(root, id);
   if (batch.status !== 'open') throw new Refusal(`question batch ${id} is already ${batch.status}`);
-  const answers = status === 'answered' ? validateAnswers(batch, rawAnswers, Date.now(), authorization) : undefined;
+  const bound: ApprovalAuthorization = { ...authorization, bindings: { ...authorization?.bindings } };
+  let executionApproval = false;
+  if (status === 'answered' && Array.isArray(rawAnswers)) {
+    for (const answer of rawAnswers) {
+      const question = batch.questions.find((candidate) => candidate.id === answer?.question);
+      if (question?.decision?.action !== 'push' || question.choices.length !== 3 || answer?.choice !== 'c2') continue;
+      executionApproval = true;
+      const binding = await currentPushBinding(root, batch, question.id, question.decision.facts, authorization);
+      if (binding) bound.bindings![question.id] = binding.grant;
+    }
+  }
+  const answers = status === 'answered' ? validateAnswers(batch, rawAnswers, Date.now(), bound) : undefined;
   const closed: QuestionBatch = { ...batch, status, answers, closedAt: new Date().toISOString() };
+  if (executionApproval) await assertExecutionAllowed(root, batch.project);
+  await revalidate?.();
   // The terminal state lands at the open path first. A crash before the
   // move still leaves a terminal file: the listing filters it out and the
   // waiter reads it, so no answer is ever shadowed by a stale open copy.
@@ -389,18 +729,20 @@ async function closeBatchLocked(
 
 async function closeBatch(
   root: string, id: string, status: 'answered' | 'cancelled', rawAnswers?: unknown,
-  authorization?: ApprovalAuthorization,
+  authorization?: ApprovalAuthorization, revalidate?: () => Promise<void>,
 ): Promise<QuestionBatch> {
-  return withHubLock(root, () => closeBatchLocked(root, id, status, rawAnswers, undefined, authorization));
+  return withHubLock(root, () => closeBatchLocked(root, id, status, rawAnswers, undefined, authorization, revalidate));
 }
 
 export function answerQuestionBatch(root: string, id: string, answers: unknown,
-  authorization?: ApprovalAuthorization): Promise<QuestionBatch> {
-  return closeBatch(root, id, 'answered', answers, authorization);
+  authorization?: ApprovalAuthorization, revalidate?: () => Promise<void>): Promise<QuestionBatch> {
+  return closeBatch(root, id, 'answered', answers, authorization, revalidate);
 }
 
-export function cancelQuestionBatch(root: string, id: string): Promise<QuestionBatch> {
-  return closeBatch(root, id, 'cancelled');
+export function cancelQuestionBatch(
+  root: string, id: string, revalidate?: () => Promise<void>,
+): Promise<QuestionBatch> {
+  return closeBatch(root, id, 'cancelled', undefined, undefined, revalidate);
 }
 
 export const OPEN_BATCH_TTL_MS = 7 * 24 * 60 * 60_000;

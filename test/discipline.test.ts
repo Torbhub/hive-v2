@@ -63,3 +63,20 @@ describe('worker enforcement dependencies', () => {
     expect(result.stderr).toContain(file);
   });
 });
+
+describe('evidence dependency discipline', () => {
+  it('allows the real push adapter below evidence', () => {
+    expect(checkEnforcement(fixture('src/evidence.ts', "import { pushByHash } from './gate.js';\nexport const push = pushByHash;\n")).status).toBe(0);
+  });
+
+  it.each([
+    { name: 'gate imports evidence', file: 'src/gate.ts', source: "import { evaluate } from './evidence.js';\nexport { evaluate };\n" },
+    { name: 'evidence imports web', file: 'src/evidence.ts', source: "import { act } from '../web/actions.js';\nexport { act };\n" },
+    { name: 'evidence imports terminal UI', file: 'src/evidence.ts', source: "import { HubApp } from './ui/HubApp.js';\nexport { HubApp };\n" },
+    { name: 'gate imports terminal UI', file: 'src/gate.ts', source: "export async function load() { return import('./ui/look.js'); }\n" },
+  ])('rejects $name', ({ file, source }) => {
+    const result = checkEnforcement(fixture(file, source));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(file);
+  });
+});

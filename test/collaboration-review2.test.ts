@@ -46,6 +46,12 @@ async function post(base: string, pathname: string, body: unknown) {
   });
 }
 
+async function postHuman(base: string, pathname: string, body: unknown) {
+  return fetch(base + pathname, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify(body),
+  });
+}
+
 function taskGrant(task = 'demo-1') {
   return {
     pk: `ACL#demo#${task}#*`, sk: 'PRINCIPAL#agent:builder', project: 'demo', task,
@@ -115,7 +121,7 @@ describe('project-level authority and metadata', () => {
     expect((await post(base, '/api/answer', {
       project: 'demo', agent: 'builder', choice: '1', fingerprint: 'x',
     })).status).toBe(404);
-    expect((await post(base, '/api/answer', {
+    expect((await postHuman(base, '/api/answer', {
       project: 'demo', agent: 'builder@one', choice: '1', fingerprint: 'x',
     })).status).toBe(400);
   });

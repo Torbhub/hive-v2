@@ -94,6 +94,11 @@ export type TaskBlockerKind = 'execution' | 'child' | 'evidence';
 export type TaskResumeState = 'running' | 'reconciling';
 export const TASK_EVIDENCE_OUTCOMES = ['passed', 'failed', 'pending', 'skipped', 'adapter-error'] as const;
 export type TaskEvidenceOutcome = (typeof TASK_EVIDENCE_OUTCOMES)[number];
+export type TaskEvidenceVerification = {
+  adapter_id: 'task_receipt' | 'git_diff_scope';
+  evidence_type: 'task_receipt' | 'git_diff_scope';
+  provenance_digest: string;
+};
 export type TaskEvidence = {
   actor: string;
   plan_digest: string;
@@ -104,6 +109,7 @@ export type TaskEvidence = {
   content: unknown;
   artifact_digest: string;
   evidence_hash: string;
+  verification?: TaskEvidenceVerification;
 };
 export type TaskReceipt = {
   actor: string;
@@ -120,6 +126,41 @@ export type TaskReceipt = {
   // Informational only until a registered condition evaluator exists.
   unblock_condition?: string;
 };
+export type TaskOperationResult = { remote_tip: string; reconciled?: boolean };
+export type TaskOperation = {
+  operation_id: string;
+  idempotency_key: string;
+  kind: 'push';
+  actor: string;
+  plan_digest: string;
+  epoch: number;
+  lease_id?: string;
+  repository_fingerprint: string;
+  commit: string;
+  branch: string;
+  status: 'pending' | 'ambiguous' | 'succeeded' | 'failed';
+  updated_at: string;
+  result?: TaskOperationResult;
+  detail?: string;
+};
+export type TaskOutcome = 'done' | 'already_fixed' | 'duplicate' | 'no_op' | 'failed' | 'unknown' | 'superseded';
+export type TaskOutcomeInput = {
+  actor: string;
+  plan_digest: string;
+  epoch: number;
+  lease_id?: string;
+  covering_record?: string;
+  replacement_id?: string;
+  reason?: string;
+  acceptance_inapplicable?: boolean;
+};
+export type TaskHumanAcceptance = {
+  actor: string;
+  acceptance_id: string;
+  plan_digest: string;
+  epoch: number;
+  at: string;
+};
 
 export type TaskProvenance = {
   repository: string;
@@ -128,10 +169,11 @@ export type TaskProvenance = {
 };
 export type TaskAcceptance = {
   id: string;
-  predicate_id: 'task_receipt' | 'git_diff_scope';
+  predicate_id: string;
   version: number;
   configuration: Record<string, unknown>;
   required_evidence: string[];
+  required?: boolean;
 };
 export type RootContract = {
   schema_version: 1;
@@ -145,6 +187,7 @@ export type RootContract = {
   action_scope: string[];
   budget: { depth: number; active_children: number; active_project_records: number; attempts: number };
   delegation: { output_claims: string[]; adapters: ('tmux' | 'native')[] };
+  required_children?: string[];
   preflight_snapshot?: string;
   defect_fingerprint?: string;
 };
@@ -205,6 +248,8 @@ export type HubTask = {
   unblock_condition?: string | null;
   contract?: RootContract | null;
   admissions?: TmuxAdmission[];
+  operations?: TaskOperation[];
+  human_acceptance?: Record<string, TaskHumanAcceptance>;
 };
 
 export type HubDialogOption = {
@@ -251,6 +296,20 @@ export type DecisionGrant = {
   approverGrantId?: string;
   approverAclEpoch?: number;
   consumedAt?: string;
+  planDigest?: string;
+  scopeHash?: string;
+  actionScope?: string[];
+  budgetVersion?: string;
+  leaseId?: string;
+  leaseEpoch?: number;
+  rootLeaseEpoch?: number;
+  repositoryFingerprint?: string;
+  commit?: string;
+  branch?: string;
+  operationId?: string;
+  idempotencyKey?: string;
+  operationStatus?: TaskOperation['status'];
+  operationResult?: TaskOperationResult;
 };
 
 export type DecisionAnswer = {
@@ -454,6 +513,8 @@ export const TASK_EVENTS = [
   'asked', 'handed', 'plan', 'question', 'answered', 'blocked',
   'overnight', 'cleanup', 'decided', 'done', 'cancelled', 'note',
   'progress', 'planaccept', 'receipt', 'evidence', 'admission',
+  'already_fixed', 'duplicate', 'no_op', 'failed', 'unknown', 'superseded',
+  'operation', 'human_acceptance',
 ] as const;
 
 export type TaskEvent = {
@@ -472,10 +533,15 @@ export type TaskEvent = {
   contract?: RootContract;
   admission?: TmuxAdmission;
   supersedes?: string[];
+  operation?: TaskOperation;
+  outcome?: TaskOutcomeInput;
+  human_acceptance?: TaskHumanAcceptance;
 };
 
 export const NEEDS_OWNER_STATES = new Set(['plan', 'question', 'blocked']);
-export const CLOSED_STATES = new Set(['done', 'cancelled', 'failed']);
+export const CLOSED_STATES = new Set([
+  'done', 'cancelled', 'failed', 'already_fixed', 'duplicate', 'no_op', 'unknown', 'superseded',
+]);
 
 export type NativeBranchScope = { root: string; project: string };
 export type NativeBranchCreateScope = NativeBranchScope & { agent: string };

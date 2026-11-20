@@ -217,6 +217,23 @@ describe('storage and transitions', () => {
 });
 
 describe('validateAnswers', () => {
+  it('gives a non-push approval no operation identity or executor', async () => {
+    const r = await root();
+    const batch = await createQuestionBatch(r, meta, {
+      context: 'A bounded paid action needs review.',
+      questions: [{
+        priority: 1,
+        decision: {
+          action: 'paid_work', destination: 'the paid provider', reason: 'Bounded work.',
+          scope: 'one review', budget: 'USD 1.00',
+        },
+      }],
+    });
+    const answered = await answerQuestionBatch(r, batch.id, [{ question: 'q1', choice: 'c2' }]);
+    expect(answered.answers![0].decision?.grant).toMatchObject({ executionAuthority: 'none' });
+    expect(answered.answers![0].decision?.grant?.operationId).toBeUndefined();
+  });
+
   it('enforces one valid answer per question and the other-text rules', async () => {
     const r = await root();
     const batch = await createQuestionBatch(r, meta, input());
@@ -279,5 +296,18 @@ describe('sweepQuestionBatches', () => {
     const { stat } = await import('node:fs/promises');
     const oldestLeft = Math.min(...await Promise.all(left.map(async (f) => (await stat(`${dir}/${f}`)).mtimeMs)));
     expect(oldestLeft).toBeGreaterThanOrEqual(extra * 1000);
+  });
+});
+
+describe('question cancellation authority', () => {
+  it('revalidates inside the hub lock without changing batch or audit', async () => {
+    const r = await root();
+    const batch = await createQuestionBatch(r, meta, input());
+    const { cancelQuestionBatch } = await import('../src/questions.js');
+    await expect(cancelQuestionBatch(r, batch.id, async () => {
+      throw new Error('admin grant revoked');
+    })).rejects.toThrow(/revoked/);
+    expect((await readQuestionBatch(r, batch.id)).status).toBe('open');
+    await expect(readFile(hubPath(r, 'decisions.jsonl'), 'utf8').catch(() => '')).resolves.toBe('');
   });
 });

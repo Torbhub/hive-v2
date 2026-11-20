@@ -1,13 +1,19 @@
 import { paneExists } from './tmux.js';
-import type { Checkpoint, HubTask, RootContract, TaskEvidence, TaskEvent, TaskReceipt } from './types.js';
+import type {
+  Checkpoint, HubTask, RootContract, TaskEvidence, TaskEvent, TaskOperation, TaskOutcome, TaskOutcomeInput, TaskReceipt,
+} from './types.js';
 import { CLOSED_STATES, PROGRESS_STATUSES, TASK_EVIDENCE_OUTCOMES, TASK_EVENTS } from './types.js';
 import {
-  Refusal, appendDecision, appendTaskEvent, clearPendingPane, contractDigest, doneBlockers, foldTasks,
-  planDigest, readPendingPane, readProjects, readTaskEvents, taskEvidenceDigests, validCheckpoints, validateRootContract,
-  withHubLock, withTeamLock,
+  Refusal, appendDecision, appendTaskEvent, canonicalJson, clearPendingPane, contractDigest, doneBlockers, foldTasks,
+  planDigest, readPendingPane, readProjects, readTaskEvents, readTeam, taskEvidenceDigests, validCheckpoints,
+  validateRootContract, withHubLock, withTeamLock,
 } from './state.js';
-import { assertAdmissionCurrentLocked, revokeTaskAdmissionsLocked, transitionTmuxAdmissionLocked } from './admission.js';
-import { gitDiffScope } from './scope.js';
+import { containsInternalContent } from './decisions.js';
+import { assertAdmissionCurrentLocked, revokeTaskAdmissionsLocked } from './admission.js';
+import {
+  allowsLeaseLessFallback, canonicalActor, evaluateAcceptanceLocked, matchingEvidence,
+} from './evidence.js';
+export { evaluateTaskPredicate, TASK_PREDICATES } from './evidence.js';
 
 export type TaskRevalidate = () => Promise<void>;
 
@@ -17,9 +23,8 @@ function storedTask(events: TaskEvent[], id: string): HubTask {
   return task;
 }
 
-// hubLog's teeth: owner verdicts enter through plan-answer and accept, plans
-// carry checkpoints, handed needs an approved plan, done needs every
-// checkpoint terminal.
+// Owner verdicts enter through plan-answer and accept. Plans carry
+// checkpoints, and terminal outcomes use the registered outcome guards.
 export function assertLogAllowed(task: HubTask, event: string, checkpoints?: Checkpoint[]): void {
   if (event === 'answered' || event === 'planaccept') {
     throw new Refusal(`${event} is owner-only: use hive hub plan-answer or hive hub accept`);
@@ -51,6 +56,12 @@ export async function hubLog(
     const events = await readTaskEvents(root);
     const task = storedTask(events, id);
     assertLogAllowed(task, event, checkpoints);
+    if (OUTCOMES.has(event as TaskOutcome)) {
+      await recordOutcomeLocked(root, events, task, event as TaskOutcome, {
+        actor: 'legacy', plan_digest: task.plan_digest ?? '', epoch: task.lease_epoch ?? 0, reason: note,
+      });
+      return;
+    }
     await appendTaskEvent(root, {
       id, project: task.project, event: event as TaskEvent['event'], at: new Date().toISOString(), note,
       ...(event === 'plan' ? {
@@ -119,6 +130,9 @@ export async function hubResolve(
     const task = storedTask(await readTaskEvents(root), id);
     assertTaskProject(task, project);
     if (CLOSED_STATES.has(task.state)) throw new Refusal(`${id} is already ${task.state}`);
+    if (liveOperation(currentOperations(task))) {
+      throw new Refusal(`${id} ${action} is ambiguous while an external operation is unresolved`);
+    }
     const registered = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
     if (registered) await withTeamLock(registered.home, () => revokeTaskAdmissionsLocked(root, registered.home, id));
     await appendTaskEvent(root, {
@@ -215,19 +229,6 @@ function assertCurrentBinding(task: HubTask, binding: { actor: string; plan_dige
   }
 }
 
-function canonicalActor(actor: string): string {
-  return actor.startsWith('agent:') ? actor.slice('agent:'.length) : actor;
-}
-
-function allowsLeaseLessFallback(task: HubTask, actor: string): boolean {
-  const canonical = canonicalActor(actor);
-  if ((task.admissions ?? []).some((admission) => admission.agent === canonical)) return false;
-  if (actor.startsWith('agent:')) return !task.contract;
-  if (!task.contract) return true;
-  return ['legacy', 'orchestrator', `${task.project}-orchestrator`].includes(canonical)
-    || canonical.startsWith('user:');
-}
-
 async function assertWorkerBinding(
   root: string, task: HubTask, binding: { actor: string; lease_id?: string },
 ): Promise<void> {
@@ -250,46 +251,19 @@ async function assertWorkerBinding(
   });
 }
 
-function latestEvidence(events: TaskEvent[], id: string, hash: string): TaskEvidence | undefined {
-  for (let index = events.length - 1; index >= 0; index--) {
-    const event = events[index];
-    if (event.id === id && event.event === 'evidence' && event.evidence?.evidence_hash === hash) {
-      return event.evidence;
-    }
-  }
-  return undefined;
+export type TaskEvidenceInput = Omit<TaskEvidence, 'artifact_digest' | 'evidence_hash' | 'verification'>;
+
+function sensitiveEvidence(value: unknown): boolean {
+  if (typeof value === 'string') return containsInternalContent(value);
+  if (Array.isArray(value)) return value.some(sensitiveEvidence);
+  if (value && typeof value === 'object') return Object.values(value).some(sensitiveEvidence);
+  return false;
 }
 
-function matchingEvidence(
-  events: TaskEvent[], id: string, receipt: TaskReceipt, task: HubTask, recovery: boolean,
-): TaskEvidence[] | null {
-  const matches: TaskEvidence[] = [];
-  for (const hash of receipt.evidence_hashes) {
-    const evidence = latestEvidence(events, id, hash);
-    if (!evidence || evidence.artifact_digest !== receipt.artifact_digest
-      || evidence.lease_id !== receipt.lease_id) return null;
-    const digests = taskEvidenceDigests(evidence.artifact, evidence.content);
-    if (evidence.artifact_digest !== digests.artifact_digest || evidence.evidence_hash !== digests.evidence_hash) {
-      return null;
-    }
-    if (receipt.state === 'reconciling' && evidence.outcome !== 'passed') return null;
-    if (recovery) {
-      if (evidence.plan_digest !== receipt.plan_digest || evidence.epoch !== receipt.epoch) return null;
-    } else if (evidence.plan_digest !== task.plan_digest || evidence.epoch !== task.lease_epoch
-      || canonicalActor(evidence.actor) !== canonicalActor(receipt.actor)
-      || canonicalActor(receipt.actor) !== canonicalActor(task.receipt_actor ?? '')) {
-      return null;
-    }
-    matches.push(evidence);
-  }
-  return matches;
-}
-
-export type TaskEvidenceInput = Omit<TaskEvidence, 'artifact_digest' | 'evidence_hash'>;
+type TaskEvidenceOptions = { project?: string; revalidate?: TaskRevalidate };
 
 export async function recordTaskEvidence(
-  root: string, id: string, input: TaskEvidenceInput,
-  options: { project?: string; revalidate?: TaskRevalidate } = {},
+  root: string, id: string, input: TaskEvidenceInput, options: TaskEvidenceOptions = {},
 ): Promise<TaskEvidence> {
   return withHubLock(root, async () => {
     await options.revalidate?.();
@@ -300,11 +274,16 @@ export async function recordTaskEvidence(
       || input.artifact === undefined || input.content === undefined) {
       throw new Refusal('evidence needs an actor, plan digest, epoch, outcome, artifact, and content');
     }
+    const serialized = canonicalJson({ artifact: input.artifact, content: input.content });
+    if (Buffer.byteLength(serialized, 'utf8') > 64 * 1024
+      || sensitiveEvidence({ artifact: input.artifact, content: input.content })) {
+      throw new Refusal('evidence content exceeds the byte cap or contains sensitive instructions');
+    }
     const task = storedTask(await readTaskEvents(root), id);
     assertTaskProject(task, options.project);
     assertCurrentBinding(task, input);
     await assertWorkerBinding(root, task, input);
-    const evidence: TaskEvidence = { ...input, ...taskEvidenceDigests(input.artifact, input.content) };
+    const evidence: TaskEvidence = { ...input, ...taskEvidenceDigests(input.artifact, input.content), verification: undefined };
     await appendTaskEvent(root, { id, project: task.project, event: 'evidence', at: new Date().toISOString(), evidence });
     return evidence;
   });
@@ -348,100 +327,206 @@ export async function recordTaskReceipt(
   });
 }
 
-export type TaskReceiptPredicateConfig = {
-  plan_digest: string;
-  artifact_digest: string;
-  evidence_hashes?: string[];
-  lease_id?: string;
-};
-export type GitDiffScopePredicateConfig = {
-  lease_id: string;
-  base_revision: string;
-  artifact_revision: string;
-};
-export type TaskPredicateConfig = TaskReceiptPredicateConfig | GitDiffScopePredicateConfig;
+const SUCCESS_OUTCOMES = new Set<TaskOutcome>(['done', 'already_fixed', 'duplicate', 'no_op']);
+const OUTCOMES = new Set<TaskOutcome>([...SUCCESS_OUTCOMES, 'failed', 'unknown', 'superseded']);
 
-function currentReceiptLease(task: HubTask, receipt: TaskReceipt, config: TaskReceiptPredicateConfig): boolean {
-  if (!receipt.lease_id) return !config.lease_id && allowsLeaseLessFallback(task, receipt.actor);
-  return config.lease_id === receipt.lease_id && (task.admissions ?? []).some((admission) =>
-    admission.lease_id === receipt.lease_id && !admission.lease_revoked
-    && (admission.status === 'admitted' || admission.status === 'running'));
-}
-
-export const TASK_PREDICATES = {
-  task_receipt(events: TaskEvent[], id: string, config: TaskReceiptPredicateConfig): boolean {
-    const task = foldTasks(events).find((candidate) => candidate.id === id);
-    const receipt = task?.last_receipt;
-    if (!task || task.lease_revoked || task.state !== 'reconciling' || receipt?.state !== 'reconciling'
-      || receipt.plan_digest !== config.plan_digest || receipt.plan_digest !== task.plan_digest
-      || receipt.epoch !== task.lease_epoch || receipt.actor !== task.receipt_actor
-      || receipt.artifact_digest !== config.artifact_digest || !currentReceiptLease(task, receipt, config)) {
-      return false;
-    }
-    if (!matchingEvidence(events, id, receipt, task, false)) return false;
-    return (config.evidence_hashes ?? []).every((hash) => receipt.evidence_hashes.includes(hash));
-  },
-};
-
-async function evaluateGitDiffScope(root: string, id: string, config: GitDiffScopePredicateConfig): Promise<boolean> {
-  return withHubLock(root, async () => {
-    const task = storedTask(await readTaskEvents(root), id);
-    const admission = task.admissions?.find((candidate) => candidate.lease_id === config.lease_id);
-    if (!admission || !task.contract?.acceptance.some((acceptance) => acceptance.predicate_id === 'git_diff_scope'
-      && admission.acceptance_ids.includes(acceptance.id))) {
-      throw new Refusal(`${id} has no registered git_diff_scope allocation for this lease`);
-    }
-    if (config.base_revision !== admission.provenance.base_revision
-      || config.artifact_revision !== admission.provenance.artifact_revision) {
-      throw new Refusal('git_diff_scope revisions do not match the admitted provenance');
-    }
-    const project = (await readProjects(root)).projects.find((candidate) => candidate.name === task.project);
-    if (!project) throw new Refusal(`unknown project: ${task.project}`);
-    return withTeamLock(project.home, async () => {
-      const { entry } = await assertAdmissionCurrentLocked(root, project.home, id, admission.agent, admission.lease_id);
-      const result = await gitDiffScope({
-        repository: entry.worktree || project.home,
-        base_revision: config.base_revision,
-        artifact_revision: config.artifact_revision,
-        write_scope: admission.write_scope,
-        runtime: {
-          files: admission.runtime_files,
-          team_state_hash: admission.team_state_hash,
-          handoff_path: admission.handoff_path,
-          handoff_digest: admission.handoff_digest,
-          launch_claim_path: admission.launch_claim_path,
-          launch_claim_digest: admission.launch_claim_digest,
-          launch_claim_completed: admission.launch_claim_completed,
-          output_claim: admission.output_claim,
-        },
-      }).catch(async (error: unknown) => {
-        await transitionTmuxAdmissionLocked(root, project.home, admission, 'released', 'git_diff_scope adapter error');
-        throw error;
-      });
-      const digests = taskEvidenceDigests(result.changes, result);
-      await appendTaskEvent(root, {
-        id, project: task.project, event: 'evidence', at: new Date().toISOString(),
-        evidence: {
-          actor: `agent:${admission.agent}`, plan_digest: admission.plan_digest, epoch: admission.root_lease_epoch,
-          outcome: result.passed ? 'passed' : 'failed', lease_id: admission.lease_id,
-          artifact: result.changes, content: result, ...digests,
-        },
-      });
-      if (!result.passed) {
-        await transitionTmuxAdmissionLocked(root, project.home, admission, 'released', 'out-of-scope Git changes');
-      }
-      return result.passed;
-    });
+function operationIdentity(operation: TaskOperation): string {
+  return canonicalJson({
+    operation_id: operation.operation_id, idempotency_key: operation.idempotency_key, kind: operation.kind,
+    actor: operation.actor, plan_digest: operation.plan_digest, epoch: operation.epoch, lease_id: operation.lease_id,
+    repository_fingerprint: operation.repository_fingerprint, commit: operation.commit, branch: operation.branch,
   });
 }
 
-export async function evaluateTaskPredicate(
-  root: string, id: string, predicate: keyof typeof TASK_PREDICATES | 'git_diff_scope', config: TaskPredicateConfig,
-): Promise<boolean> {
-  if (predicate === 'git_diff_scope') return evaluateGitDiffScope(root, id, config as GitDiffScopePredicateConfig);
-  const evaluate = TASK_PREDICATES[predicate];
-  if (!evaluate) throw new Refusal(`unknown task predicate: ${predicate}`);
-  return evaluate(await readTaskEvents(root), id, config as TaskReceiptPredicateConfig);
+function currentOperations(task: HubTask): TaskOperation[] {
+  const latest = new Map<string, TaskOperation>();
+  const poisoned = new Set<string>();
+  for (const operation of task.operations ?? []) {
+    if (operation.plan_digest !== task.plan_digest || operation.epoch !== task.lease_epoch) continue;
+    const previous = latest.get(operation.operation_id);
+    if (previous && operationIdentity(previous) !== operationIdentity(operation)) {
+      poisoned.add(operation.operation_id);
+    }
+    latest.set(operation.operation_id, poisoned.has(operation.operation_id)
+      ? { ...operation, status: 'ambiguous', detail: 'operation identity changed' }
+      : operation);
+  }
+  return [...latest.values()];
+}
+
+function liveOperation(operations: TaskOperation[]): TaskOperation | undefined {
+  return operations.find((operation) => operation.status === 'pending' || operation.status === 'ambiguous');
+}
+
+function assertOperations(task: HubTask, outcome: TaskOutcome): void {
+  const operations = currentOperations(task);
+  const live = liveOperation(operations);
+  if (live) throw new Refusal(`${task.id} has a live external operation ${live.operation_id}`);
+  if (!SUCCESS_OUTCOMES.has(outcome)) return;
+  const invalidSuccess = operations.find((operation) => operation.result?.remote_tip !== operation.commit);
+  if (invalidSuccess) throw new Refusal(`${task.id} external operation ${invalidSuccess.operation_id} lacks a verified remote tip`);
+  const unsuccessful = operations.find((operation) => operation.status !== 'succeeded');
+  if (unsuccessful) throw new Refusal(`${task.id} external operation ${unsuccessful.operation_id} did not succeed`);
+}
+
+async function remainingWriters(root: string, task: HubTask): Promise<string[]> {
+  const active = (task.admissions ?? []).filter((admission) => !admission.lease_revoked
+    && (admission.status === 'admitted' || admission.status === 'running'));
+  const writers = active.map((admission) => admission.agent);
+  const project = (await readProjects(root)).projects.find((candidate) => candidate.name === task.project);
+  if (!project) return writers;
+  return withTeamLock(project.home, async () => {
+    const team = await readTeam(project.home);
+    for (const entry of team.agents) {
+      if (entry.task !== task.id || entry.orchestrator || entry.closed_at) continue;
+      if (!entry.lease_id || active.some((admission) => admission.lease_id === entry.lease_id)) {
+        if (!writers.includes(entry.name)) writers.push(entry.name);
+      }
+    }
+    return writers;
+  });
+}
+
+function outcomeDetails(events: TaskEvent[], task: HubTask): TaskOutcomeInput | undefined {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.id === task.id && event.event === task.state && event.outcome) return event.outcome;
+  }
+  return undefined;
+}
+
+function childReconciled(events: TaskEvent[], id: string, project: string, seen = new Set<string>()): boolean {
+  if (seen.has(id)) return false;
+  seen.add(id);
+  const task = foldTasks(events).find((candidate) => candidate.id === id && candidate.project === project);
+  if (!task) return false;
+  if (['done', 'already_fixed', 'no_op'].includes(task.state)) return true;
+  if (task.state !== 'duplicate') return false;
+  const covering = outcomeDetails(events, task)?.covering_record;
+  if (!covering) return false;
+  return foldTasks(events).some((candidate) => candidate.id === covering && candidate.project === project)
+    ? childReconciled(events, covering, project, seen) : false;
+}
+
+function assertChildren(events: TaskEvent[], task: HubTask): void {
+  for (const child of task.contract?.required_children ?? []) {
+    if (!childReconciled(events, child, task.project)) {
+      throw new Refusal(`${task.id} required child ${child} is not reconciled in project ${task.project}`);
+    }
+  }
+}
+
+function assertDuplicate(events: TaskEvent[], task: HubTask, input: TaskOutcomeInput): void {
+  const covering = foldTasks(events).find((candidate) => candidate.id === input.covering_record
+    && candidate.project === task.project && candidate.id !== task.id);
+  if (!input.covering_record?.trim() || !covering || !childReconciled(events, covering.id, task.project)) {
+    throw new Refusal(`${task.id} duplicate needs a reconciled covering record in project ${task.project}`);
+  }
+}
+
+async function assertAcceptance(root: string, task: HubTask, outcome: TaskOutcome, input: TaskOutcomeInput): Promise<void> {
+  const acceptance = await evaluateAcceptanceLocked(root, task);
+  const unsupported = acceptance.blockers.filter((blocker) => blocker.startsWith('blocked:unsupported_predicate'));
+  if (unsupported.length) {
+    await appendTaskEvent(root, {
+      id: task.id, project: task.project, event: 'blocked', at: new Date().toISOString(), note: unsupported.join('; '),
+    });
+    throw new Refusal(unsupported.join('; '));
+  }
+  if (acceptance.blockers.length && !(outcome === 'no_op' && input.acceptance_inapplicable)) {
+    throw new Refusal(`${task.id} registered acceptance failed: ${acceptance.blockers.join('; ')}`);
+  }
+}
+
+async function assertOutcomeGuards(root: string, events: TaskEvent[], task: HubTask, outcome: TaskOutcome, input: TaskOutcomeInput) {
+  if (!task.plan_approved) throw new Refusal(`${task.id} has no approved plan`);
+  if (outcome === 'done') {
+    const checkpoints = doneBlockers(task);
+    if (checkpoints.length) throw new Refusal(`${task.id} is not done: ${checkpoints.join('; ')}`);
+  }
+  if (outcome === 'duplicate') assertDuplicate(events, task, input);
+  const provenance = task.contract?.provenance;
+  if ((outcome === 'already_fixed' || outcome === 'no_op')
+    && (!provenance || provenance.base_revision !== provenance.artifact_revision)) {
+    throw new Refusal(`${task.id} ${outcome} needs current-base provenance`);
+  }
+  if (outcome === 'superseded') {
+    const replacement = foldTasks(events).find((candidate) => candidate.id === input.replacement_id
+      && candidate.project === task.project && candidate.id !== task.id);
+    if (!replacement) throw new Refusal(`${task.id} superseded needs a distinct existing replacement in project ${task.project}`);
+  }
+  assertOperations(task, outcome);
+  if ((outcome === 'failed' || outcome === 'unknown') && !input.reason?.trim()) {
+    throw new Refusal(`${task.id} ${outcome} needs a reason`);
+  }
+  const writers = await remainingWriters(root, task);
+  if (writers.length) throw new Refusal(`${task.id} still has writers: ${writers.join(', ')}`);
+  if (outcome === 'failed') {
+    const acceptance = await evaluateAcceptanceLocked(root, task);
+    if (acceptance.requiredBlockers.length === 0) {
+      throw new Refusal(`${task.id} failed needs unsatisfied required acceptance`);
+    }
+    return;
+  }
+  if (!SUCCESS_OUTCOMES.has(outcome)) return;
+  await assertAcceptance(root, task, outcome, input);
+  assertChildren(events, task);
+}
+
+function assertOutcomeBinding(task: HubTask, input: TaskOutcomeInput): void {
+  if (task.lease_revoked || CLOSED_STATES.has(task.state)) throw new Refusal(`${task.id} is already ${task.state}`);
+  if (!input.actor.trim() || input.plan_digest !== task.plan_digest || input.epoch !== task.lease_epoch) {
+    throw new Refusal(`${task.id} outcome has a stale actor, plan digest, or epoch`);
+  }
+}
+
+async function recordOutcomeLocked(
+  root: string, events: TaskEvent[], task: HubTask, outcome: TaskOutcome, input: TaskOutcomeInput,
+): Promise<void> {
+  assertOutcomeBinding(task, input);
+  await assertWorkerBinding(root, task, input);
+  await assertOutcomeGuards(root, events, task, outcome, input);
+  await appendTaskEvent(root, {
+    id: task.id, project: task.project, event: outcome, at: new Date().toISOString(), note: input.reason, outcome: input,
+  });
+}
+
+export async function recordTaskOutcome(
+  root: string, id: string, outcome: TaskOutcome, input: TaskOutcomeInput,
+  options: { project?: string; revalidate?: TaskRevalidate } = {},
+): Promise<TaskOutcomeInput> {
+  if (!OUTCOMES.has(outcome)) throw new Refusal(`unknown task outcome: ${outcome}`);
+  return withHubLock(root, async () => {
+    await options.revalidate?.();
+    const events = await readTaskEvents(root);
+    const task = storedTask(events, id);
+    assertTaskProject(task, options.project);
+    await recordOutcomeLocked(root, events, task, outcome, input);
+    return input;
+  });
+}
+
+export async function recordHumanAcceptance(
+  root: string, id: string, input: TaskOutcomeInput & { acceptance_id: string },
+  options: { project?: string; revalidate?: TaskRevalidate } = {},
+): Promise<void> {
+  await withHubLock(root, async () => {
+    await options.revalidate?.();
+    const task = storedTask(await readTaskEvents(root), id);
+    assertTaskProject(task, options.project);
+    assertOutcomeBinding(task, input);
+    const humanActor = input.actor.startsWith('user:') || input.actor === 'legacy';
+    if (!humanActor || !task.contract?.acceptance.some((item) => item.id === input.acceptance_id)) {
+      throw new Refusal('human acceptance needs a human actor and a contract acceptance ID');
+    }
+    await appendTaskEvent(root, {
+      id, project: task.project, event: 'human_acceptance', at: new Date().toISOString(),
+      human_acceptance: {
+        actor: input.actor, acceptance_id: input.acceptance_id, plan_digest: input.plan_digest,
+        epoch: input.epoch, at: new Date().toISOString(),
+      },
+    });
+  });
 }
 
 // A pending-pane record older than this is a crashed start, not a live one.

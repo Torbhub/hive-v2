@@ -25,7 +25,7 @@ import { assertExecutionAllowed } from './rollout.js';
 export { Refusal } from './state.js';
 export {
   evaluateTaskPredicate, hubAccept, hubLog, hubProgress, hubResolve, ledgerCommand,
-  recordTaskEvidence, recordTaskReceipt, TASK_PREDICATES,
+  recordHumanAcceptance, recordTaskEvidence, recordTaskOutcome, recordTaskReceipt, TASK_PREDICATES,
 } from './taskgate.js';
 
 export async function hubInit(root: string, name = 'hub'): Promise<void> {

@@ -12,7 +12,7 @@ import { appendTaskEvent, hivePath, hubPath, writeJson } from '../src/state.js';
 import type { QuestionBatch } from '../src/types.js';
 import { createServer } from '../web/server.js';
 import {
-  AGENT_CREDENTIAL, agentHeaders, configureSecurity, registryItems, startTestRegistry,
+  AGENT_CREDENTIAL, agentHeaders, authHeaders, configureSecurity, registryItems, startTestRegistry,
 } from './security-fixture.js';
 
 const servers: Server[] = [];
@@ -45,6 +45,12 @@ async function fixture() {
 async function post(base: string, pathname: string, body: unknown) {
   return fetch(base + pathname, {
     method: 'POST', headers: { 'content-type': 'application/json', ...agentHeaders() }, body: JSON.stringify(body),
+  });
+}
+
+async function postHuman(base: string, pathname: string, body: unknown) {
+  return fetch(base + pathname, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify(body),
   });
 }
 
@@ -200,7 +206,7 @@ describe('integration authorization and revocation', () => {
     approver.task = 'demo-1';
     expect((await post(base, '/api/questions/answer', {
       id: batch.id, answers: [{ question: 'q1', choice: 'c2' }],
-    })).status).toBe(400);
+    })).status).toBe(404);
     expect((await readQuestionBatch(root, batch.id)).status).toBe('open');
   });
 
@@ -257,7 +263,7 @@ describe('integration authorization and revocation', () => {
       ['/api/kill', { project: 'demo', agent: 'builder@one' }],
       ['/api/answer', { project: 'demo', agent: 'builder@one', choice: '1', fingerprint: 'x' }],
     ] as const) {
-      expect((await post(base, pathname, body)).status).toBe(200);
+      expect((await (pathname === '/api/answer' ? postHuman(base, pathname, body) : post(base, pathname, body))).status).toBe(200);
     }
   });
 
@@ -282,7 +288,7 @@ describe('integration authorization and revocation', () => {
       ['/api/start', { project: 'demo', task: 'demo-1' }],
       ['/api/answer', { project: 'demo', agent: 'builder@one', choice: '1', fingerprint: 'x' }],
     ] as const) {
-      const response = await post(base, pathname, body);
+      const response = pathname === '/api/answer' ? await postHuman(base, pathname, body) : await post(base, pathname, body);
       expect(response.status).toBe(409);
       expect(await response.json()).toEqual({ ok: false, detail: 'rollout paused for demo' });
     }
@@ -303,7 +309,7 @@ describe('integration authorization and revocation', () => {
         choices: [{ label: 'Yes', description: 'Continue.' }, { label: 'No', description: 'Stop.' }],
       }],
     });
-    expect((await post(base, '/api/questions/answer', {
+    expect((await postHuman(base, '/api/questions/answer', {
       id: general.id, answers: [{ question: 'q1', choice: 'c1' }],
     })).status).toBe(200);
     const cancellable = await createQuestionBatch(root, { project: 'demo', agent: 'builder@one' }, {
@@ -312,7 +318,7 @@ describe('integration authorization and revocation', () => {
         choices: [{ label: 'Yes', description: 'Continue.' }, { label: 'No', description: 'Stop.' }],
       }],
     });
-    expect((await post(base, '/api/questions/cancel', { id: cancellable.id })).status).toBe(200);
+    expect((await postHuman(base, '/api/questions/cancel', { id: cancellable.id })).status).toBe(200);
   });
 
   it('blocks execution-granting answers without closing the question', async () => {
