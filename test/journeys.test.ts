@@ -54,4 +54,15 @@ describe('journey registry coherence', () => {
     expect(INVARIANTS.find((invariant) => invariant.id === 'push-operation-binding')?.evidence)
       .toBe('test/push-consumption.test.ts::contract-bound push operations');
   });
+
+  it('links scoped auto, root deltas, and legacy migration to behavior tests', () => {
+    expect(JOURNEYS.find((journey) => journey.id === 'WATCH_SCOPED_AUTO')).toMatchObject({
+      status: 'USED', tracer: 'test/watch.test.ts',
+      criteria: ['scoped-auto-push', 'root-delta-version', 'legacy-auto-fenced', 'managed-auto-no-yolo',
+        'strict-auto-routing', 'pending-launch-provenance', 'delta-read-acl', 'agent-text-redacted',
+        'trust-lane-identity', 'approved-command-consumption'],
+    });
+    expect(INVARIANTS.find((invariant) => invariant.id === 'root-delta-version')?.evidence)
+      .toBe('test/questions.test.ts::root scope deltas');
+  });
 });

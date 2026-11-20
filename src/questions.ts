@@ -2,14 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import type {
-  DecisionAnswer, DecisionGrant, HubTask, OperatorQuestion, QuestionAnswer, QuestionBatch, TaskOperation, TaskOperationResult,
-  TmuxAdmission,
+  DecisionAnswer, DecisionGrant, HubTask, OperatorQuestion, QuestionAnswer, QuestionBatch, RootContract, RootDelta,
+  TaskOperation, TaskOperationResult, TmuxAdmission,
 } from './types.js';
 import { CLOSED_STATES } from './types.js';
 import { assertExecutionAllowed } from './rollout.js';
 import {
   Refusal, appendDecision, appendTaskEvent, canonicalJson, contractDigest, foldTasks, hubPath, readJson, readProjects,
-  readTaskEvents, readTeam, valueDigest, withHubLock, withTeamLock, writeJson,
+  readTaskEvents, readTeam, validateRootContract, valueDigest, withHubLock, withTeamLock, writeJson,
 } from './state.js';
 import {
   applyDecisionRewrite, buildDecision, buildHandoffFallback, cleanAgentText, containsSecurityInstruction,
@@ -21,7 +21,7 @@ import { storedAgentTask } from './agent-target.js';
 import { registryFromEnv, type Registry } from './registry.js';
 import { accountActive, authenticateBearer, authorizeExact, exactGrant } from './security.js';
 import { normalizeScope, repositoryIdentity } from './scope.js';
-import { assertAdmissionCurrentLocked, recordTmuxExternalOperationLocked } from './admission.js';
+import { applyRootDeltaLocked, assertAdmissionCurrentLocked, recordTmuxExternalOperationLocked } from './admission.js';
 import { run } from './tmux.js';
 
 export const QUESTION_LIMITS = {
@@ -141,7 +141,7 @@ function makePushBinding(
 ): PushBinding {
   const actionScope = [...new Set(task.contract!.action_scope)].sort();
   const scopeHash = valueDigest(scope);
-  const budgetVersion = valueDigest(task.contract!.budget);
+  const budgetVersion = valueDigest({ budget: task.contract!.budget, planDigest: task.plan_digest });
   const operationId = `push:${batch.id}:${questionId}`;
   const operationIdentity = {
     operationId, planDigest: task.plan_digest, scopeHash, actionScope, budgetVersion,
@@ -216,7 +216,7 @@ function withDecisionAnswer(batch: QuestionBatch, question: OperatorQuestion, an
   else if (answer.choice === 'c1') outcome = card.action === 'unknown' || card.missing.length ? 'details' : 'refresh';
   else if (answer.choice === 'c2' && question.choices.length === 3) outcome = 'approve';
   else outcome = 'cancel';
-  if (outcome === 'approve' && card.action === 'push' && authorization?.consumerGrantId
+  if (outcome === 'approve' && ['push', 'scope_delta'].includes(card.action) && authorization?.consumerGrantId
     && !authorization.approverSubject?.startsWith('user:')) {
     throw new Refusal('execution approvals require a human approver');
   }
@@ -290,10 +290,14 @@ async function writeBatch(root: string, id: string, batch: QuestionBatch): Promi
 
 export async function createQuestionBatch(
   root: string, meta: { project: string; agent: string }, raw: unknown,
-  opts: { rewrite?: DecisionRewriter; rewriteTimeoutMs?: number } = {},
+  opts: { rewrite?: DecisionRewriter; rewriteTimeoutMs?: number; rootDelta?: RootDelta } = {},
 ): Promise<QuestionBatch> {
   const now = Date.now();
   const { context, questions } = validateBatchInput(raw, now);
+  if (!opts.rootDelta && questions.some((question) => question.decision?.action === 'scope_delta')) {
+    throw new Refusal('root delta cards are created only by watch');
+  }
+  if (opts.rootDelta) validateRootContract(opts.rootDelta.nextContract);
   const verified = await Promise.all(questions.map(async (question): Promise<OperatorQuestion> => {
     const card = question.decision;
     if (!card || card.action === 'unknown') return question;
@@ -310,16 +314,90 @@ export async function createQuestionBatch(
   const batch: QuestionBatch = {
     id: randomUUID(), project: meta.project, agent: meta.agent,
     context, questions: presented, status: 'open', createdAt: new Date(now).toISOString(),
-    waitHeartbeatAt: new Date(now).toISOString(),
+    waitHeartbeatAt: new Date(now).toISOString(), rootDelta: opts.rootDelta,
   };
-  await withHubLock(root, async () => {
+  return withHubLock(root, async () => {
     const open = await listOpenQuestionBatches(root);
+    if (opts.rootDelta) {
+      const task = foldTasks(await readTaskEvents(root)).find((candidate) => candidate.id === opts.rootDelta!.task);
+      if (!task || task.project !== meta.project || task.plan_digest !== opts.rootDelta.basePlanDigest
+        || task.lease_epoch !== opts.rootDelta.baseEpoch || !task.contract
+        || contractDigest(opts.rootDelta.nextContract) === opts.rootDelta.basePlanDigest) {
+        throw new Refusal('root delta is stale; review the current contract again');
+      }
+      const existing = open.find((candidate) => candidate.rootDelta?.task === opts.rootDelta!.task);
+      if (existing) return existing;
+    }
     if (open.length >= OPEN_BATCH_CAP) {
       throw new Refusal(`${OPEN_BATCH_CAP} batches are already open; the operator must clear the Questions screen first`);
     }
     await writeBatch(root, batch.id, batch);
+    return batch;
   });
-  return batch;
+}
+
+export async function createRootDeltaQuestion(
+  root: string, taskId: string, nextContract: RootContract, detail: string,
+): Promise<QuestionBatch> {
+  const task = foldTasks(await readTaskEvents(root)).find((candidate) => candidate.id === taskId);
+  if (!task?.contract || !task.plan_digest || !task.lease_epoch) throw new Refusal('root delta needs a current contract');
+  const rootDelta = {
+    task: task.id, basePlanDigest: task.plan_digest, baseEpoch: task.lease_epoch, nextContract,
+  };
+  return createQuestionBatch(root, { project: task.project, agent: `${task.project}-orchestrator` }, {
+    context: 'Watch blocked an undeclared mutation. Review one root contract delta for all children.',
+    questions: [{
+      priority: 1,
+      decision: {
+        action: 'scope_delta', destination: task.id, reason: detail.slice(0, 240),
+        scope: `write: ${nextContract.write_scope.join(', ') || 'none'}; actions: ${nextContract.action_scope.join(', ') || 'none'}`.slice(0, 240),
+        budget: JSON.stringify(nextContract.budget),
+      },
+    }],
+  }, { rootDelta });
+}
+
+export type DeclaredPush = {
+  reference: PushReference & { root: string };
+  commit: string;
+  branch: string;
+  agent: string;
+};
+
+export async function findDeclaredPush(
+  root: string, project: string, agentRef: string | undefined, branch: string, commit?: string,
+): Promise<DeclaredPush | null> {
+  const expectedAgent = agentRef ?? `${project}-orchestrator`;
+  const entries = await fs.readdir(hubPath(root, 'questions', 'closed'), { withFileTypes: true }).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [] as Dirent[];
+    throw error;
+  });
+  const batches: QuestionBatch[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !UUID_RE.test(entry.name.replace(/\.json$/, '')) || !entry.name.endsWith('.json')) continue;
+    const batch = await readJson<QuestionBatch>(hubPath(root, 'questions', 'closed', entry.name));
+    if (batch?.status === 'answered') batches.push(batch);
+  }
+  batches.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  for (const batch of batches) {
+    if (batch.project !== project || batch.agent !== expectedAgent) continue;
+    for (const answer of batch.answers ?? []) {
+      const decision = answer.decision;
+      const grant = decision?.grant;
+      if (decision?.action !== 'push' || decision.outcome !== 'approve' || grant?.executionAuthority !== 'push'
+        || grant.batch !== batch.id || grant.question !== answer.question || grant.agent !== expectedAgent
+        || grant.branch !== branch || !grant.commit || commit !== undefined && grant.commit !== commit
+        || !grant.operationId || !grant.idempotencyKey) continue;
+      return {
+        reference: {
+          root, project, batch: batch.id, question: answer.question,
+          operationId: grant.operationId, idempotencyKey: grant.idempotencyKey,
+        },
+        commit: grant.commit, branch, agent: expectedAgent,
+      };
+    }
+  }
+  return null;
 }
 
 export async function heartbeatQuestionBatch(root: string, id: string): Promise<void> {
@@ -698,9 +776,11 @@ async function closeBatchLocked(
   if (status === 'answered' && Array.isArray(rawAnswers)) {
     for (const answer of rawAnswers) {
       const question = batch.questions.find((candidate) => candidate.id === answer?.question);
-      if (question?.decision?.action !== 'push' || question.choices.length !== 3 || answer?.choice !== 'c2') continue;
+      const action = question?.decision?.action;
+      if (!action || !['push', 'scope_delta'].includes(action) || question.choices.length !== 3 || answer?.choice !== 'c2') continue;
       executionApproval = true;
-      const binding = await currentPushBinding(root, batch, question.id, question.decision.facts, authorization);
+      if (action !== 'push') continue;
+      const binding = await currentPushBinding(root, batch, question.id, question.decision!.facts, authorization);
       if (binding) bound.bindings![question.id] = binding.grant;
     }
   }
@@ -708,6 +788,15 @@ async function closeBatchLocked(
   const closed: QuestionBatch = { ...batch, status, answers, closedAt: new Date().toISOString() };
   if (executionApproval) await assertExecutionAllowed(root, batch.project);
   await revalidate?.();
+  const deltaApproval = answers?.find((answer) => answer.decision?.action === 'scope_delta' && answer.decision.outcome === 'approve');
+  if (batch.rootDelta && deltaApproval) {
+    const project = (await readProjects(root)).projects.find((candidate) => candidate.name === batch.project);
+    if (!project) throw new Refusal(`unknown project: ${batch.project}`);
+    await applyRootDeltaLocked(
+      root, project.home, batch.rootDelta.task, batch.rootDelta.nextContract,
+      batch.rootDelta.basePlanDigest, batch.rootDelta.baseEpoch,
+    );
+  }
   // The terminal state lands at the open path first. A crash before the
   // move still leaves a terminal file: the listing filters it out and the
   // waiter reads it, so no answer is ever shadowed by a stale open copy.

@@ -195,7 +195,8 @@ export function isExecutionApprovalAnswer(batch: QuestionBatch, answers: unknown
   if (!Array.isArray(answers)) return false;
   return answers.some((answer) => {
     const question = batch.questions.find((candidate) => candidate.id === answer?.question);
-    return question?.decision?.action === 'push' && question.choices.length === 3 && answer?.choice === 'c2';
+    return (question?.decision?.action === 'push' || question?.decision?.action === 'scope_delta')
+      && question.choices.length === 3 && answer?.choice === 'c2';
   });
 }
 
@@ -211,7 +212,7 @@ export async function postScope(root: string, pathname: string,
       const pauseOnConfigFailure = pathname === '/api/questions/answer' && isExecutionApprovalAnswer(batch, body.answers);
       return {
         project: batch.project,
-        task: await storedAgentTask(root, batch.project, batch.agent, pauseOnConfigFailure),
+        task: batch.rootDelta?.task ?? await storedAgentTask(root, batch.project, batch.agent, pauseOnConfigFailure),
       };
     } catch (error) {
       if (error instanceof AuthorizationError || error instanceof RolloutPaused) throw error;

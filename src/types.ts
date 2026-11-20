@@ -321,6 +321,13 @@ export type DecisionAnswer = {
 
 export type QuestionAnswer = { question: string; choice: string; text?: string; decision?: DecisionAnswer };
 
+export type RootDelta = {
+  task: string;
+  basePlanDigest: string;
+  baseEpoch: number;
+  nextContract: RootContract;
+};
+
 export type QuestionBatch = {
   id: string;
   project: string;
@@ -332,6 +339,7 @@ export type QuestionBatch = {
   waitHeartbeatAt?: string;
   closedAt?: string;
   answers?: QuestionAnswer[];
+  rootDelta?: RootDelta;
 };
 
 export type HubView = {
@@ -478,6 +486,10 @@ export type TeamEntry = {
   wedged_at?: string;
   task?: string;
   model?: string;
+  launch_mode?: ProjectMode | 'supervised-auto';
+  launch_scoped_auto?: boolean;
+  watch_authority_revoked_at?: string;
+  migration_state?: 'legacy_auto_blocked' | 'unknown_identity_blocked' | 'natural_exit_ready';
   auto_compact?: boolean;
   daydream_automation?: boolean;
   compaction?: CompactionState;

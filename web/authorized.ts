@@ -62,7 +62,7 @@ async function filteredView(root: string, view: HubView, principal: Principal, r
   };
   const visibleAllOpen = [];
   for (const question of allOpen) {
-    const task = await agentTask(question.project, question.agent);
+    const task = question.rootDelta?.task ?? await agentTask(question.project, question.agent);
     if (task !== null && await allowed(question.project, task)) visibleAllOpen.push(question);
   }
   const visibleQuestionIds = new Set(visibleAllOpen.map((question) => question.id));
@@ -184,7 +184,7 @@ async function approvalAuthorization(context: RequestContext, principal: Princip
   const agentId = agentRef.split('@')[0];
   const [profile, task] = await Promise.all([
     context.registry.get(`AGENT#${agentId}`, 'PROFILE'),
-    storedAgentTask(context.root, batch.project, agentRef),
+    batch.rootDelta?.task ?? storedAgentTask(context.root, batch.project, agentRef),
   ]);
   if (!profile || await revoked(context.registry, profile) || profile.project !== batch.project
     || task !== scope.task || !Number.isSafeInteger(Number(profile.aclEpoch))

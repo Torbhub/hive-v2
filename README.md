@@ -55,10 +55,19 @@ by default, the legacy behavior is unchanged. With collaboration enabled,
 every request also needs a Nexus assertion or an individual agent credential.
 See `docs/collaboration-identity.md`. The screen also creates
 tasks, starts teams, and sets a project's permission mode (`ask`/`yolo`/`auto`).
-`ask` passes no flag to kimi. `yolo` and `auto` pass `-y` on the next launch,
-resume included. In `auto` mode, the watchdog immediately answers command and
-folder-trust dialogs with an offered non-saving option, regardless of stored
-approvals. It leaves other dialogs alone.
+`ask` and managed `auto` pass no approval flag to kimi. Explicit `yolo` passes
+`-y` on the next launch, resume included. In `auto` mode, the watchdog allows
+only a strict read-only command subset, a declared push, or the exact command
+from an approved root delta. A declared push closes the native prompt and runs
+through the grant-checked operation registry. Other actions have no executor.
+Every other command closes its native prompt and opens one root scope-delta
+card. Hard denies follow the same delta route and never native-Allow. A new
+command needs a new delta. `git diff` and `git show` are never managed-auto
+read-only commands, including `--no-textconv`, because configured diff drivers
+can execute helpers. JJ commands are never managed-auto read-only commands
+because default snapshot semantics apply globally. Startup dialogs stay visible. Only the spawn that
+created a lane can answer its exact canonical-path trust menu with the known
+pane identity. Existing worktrees and relaunches never auto-trust.
 
 ## Handy dictation
 
@@ -108,6 +117,26 @@ the web screen shows the latest eight under DECISIONS.
 plays a fake approval dialog, and the real watch cycle detects it, calls the
 classifier (a stub `kimi` on PATH), and answers the pane or correctly holds
 back.
+
+### Legacy auto process migration
+
+A process launched with `-y` before this enforcement change is not safe just
+because watch is running. Watch cannot remove that process flag. The recorded
+launch metadata marks the pane `legacy_auto_blocked` and revokes its watch
+authority. Watch does not approve dialogs, type, compact, kill, restart, or wake
+that pane. Unknown pane identity also blocks all watch actions. Pending
+orchestrator records need the same provenance before any continuation. A missing
+record blocks even when the project mode changed. Direct orchestrator dialog
+handling applies the same fence and records no auto-approval without an answer.
+Command text is secret-redacted in cards, decisions, and watch logs. Its exact
+digest does not change. Root-delta visibility uses the root task ACL. Project
+access alone does not expose its contract or provenance.
+
+Leave the process alone until it exits naturally, or use a separate explicit
+respawn as the migration action. After natural exit, watch marks
+`natural_exit_ready`. An explicit wake or respawn then launches without `-y`,
+clears the fence, and preserves task lineage and attempt counters. Watch never
+performs that migration automatically. Deployment must not restart tmux.
 
 ### Idle compaction
 

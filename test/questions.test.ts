@@ -311,3 +311,85 @@ describe('question cancellation authority', () => {
     await expect(readFile(hubPath(r, 'decisions.jsonl'), 'utf8').catch(() => '')).resolves.toBe('');
   });
 });
+
+async function rootDeltaFixture() {
+  const r = await root();
+  const home = path.join(r, 'demo');
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(home, { recursive: true });
+  const { taskContract } = await import('./task-contract.js');
+  const { appendTaskEvent, contractDigest, valueDigest } = await import('../src/state.js');
+  const contract = taskContract(home, ['src'], 'Return the bounded artifact.');
+  const at = new Date().toISOString();
+  const planDigest = contractDigest(contract);
+  await appendTaskEvent(r, { id: 'demo-1', project: 'demo', event: 'asked', at });
+  await appendTaskEvent(r, {
+    id: 'demo-1', project: 'demo', event: 'plan', at, contract, plan_digest: planDigest,
+    checkpoints: [{ id: 'work', desc: 'bounded work', etaMin: 5 }],
+  });
+  await appendTaskEvent(r, { id: 'demo-1', project: 'demo', event: 'answered', at, plan_digest: planDigest });
+  const admission = {
+    task: 'demo-1', project: 'demo', agent: 'builder', parent_id: 'demo-1', plan_digest: planDigest,
+    root_lease_epoch: 1, lease_id: 'lease-old', lease_epoch: 1 as const, lease_revoked: false,
+    output_claim: contract.deliverable, acceptance_ids: ['diff'], provenance: { ...contract.provenance },
+    provenance_digest: valueDigest(contract.provenance), write_scope: ['src'], adapter: 'tmux' as const,
+    lineage_id: 'builder-lineage', attempts_used: 2, status: 'running' as const,
+  };
+  await appendTaskEvent(r, { id: 'demo-1', project: 'demo', event: 'admission', at, admission });
+  await writeJson(hubPath(r, 'projects.json'), { projects: [{ name: 'demo', home, repos: [] }] });
+  await writeJson(path.join(home, '.hive', 'team.json'), {
+    agents: [{
+      name: 'builder', worktree: home, task: 'demo-1', parent_id: 'demo-1', plan_digest: planDigest,
+      root_lease_epoch: 1, lease_id: 'lease-old', lease_epoch: 1, lease_revoked: false,
+      output_claim: admission.output_claim, acceptance_ids: ['diff'], provenance: { ...contract.provenance },
+      provenance_digest: admission.provenance_digest, write_scope: ['src'], adapter: 'tmux',
+      lineage_id: 'builder-lineage', attempts_used: 2, admission_status: 'running',
+    }],
+  });
+  return { r, home, contract };
+}
+
+describe('root scope deltas', () => {
+  it('deduplicates one root card and re-admits only children valid under the new digest', async () => {
+    const { r, contract } = await rootDeltaFixture();
+    const { createRootDeltaQuestion } = await import('../src/questions.js');
+    const { contractDigest, foldTasks, readTaskEvents } = await import('../src/state.js');
+    const next = { ...contract, write_scope: ['docs'], action_scope: ['command:mutation'] };
+    const first = await createRootDeltaQuestion(r, 'demo-1', next, 'Approve the undeclared docs mutation.');
+    const second = await createRootDeltaQuestion(r, 'demo-1', next, 'A child asks for the same root delta.');
+    expect(second.id).toBe(first.id);
+    expect(first.agent).toBe('demo-orchestrator');
+    expect(first.questions).toHaveLength(1);
+    const answered = await answerQuestionBatch(r, first.id, [{ question: 'q1', choice: 'c2' }]);
+    expect(answered.answers![0].decision?.grant?.executionAuthority).toBe('none');
+    expect(answered.answers![0].decision?.grant?.operationId).toBeUndefined();
+    const task = foldTasks(await readTaskEvents(r))[0];
+    expect(task.plan_digest).toBe(contractDigest(next));
+    expect(task.lease_epoch).toBe(2);
+    expect(task.admissions?.filter((item) => !item.lease_revoked)).toEqual([]);
+    expect(task.admissions?.find((item) => item.lease_id === 'lease-old')).toMatchObject({
+      lease_revoked: true, lineage_id: 'builder-lineage', attempts_used: 2,
+    });
+  });
+
+  it('keeps a valid child lineage and attempt count under the new lease', async () => {
+    const { r, home, contract } = await rootDeltaFixture();
+    const { createRootDeltaQuestion } = await import('../src/questions.js');
+    const { contractDigest, foldTasks, readTaskEvents, readTeam } = await import('../src/state.js');
+    const next = { ...contract, write_scope: ['src', 'docs'] };
+    const batch = await createRootDeltaQuestion(r, 'demo-1', next, 'Approve the docs delta.');
+    await answerQuestionBatch(r, batch.id, [{ question: 'q1', choice: 'c2' }]);
+    const task = foldTasks(await readTaskEvents(r))[0];
+    const current = task.admissions?.filter((item) => !item.lease_revoked);
+    expect(current).toHaveLength(1);
+    expect(current![0]).toMatchObject({
+      plan_digest: contractDigest(next), root_lease_epoch: 2,
+      lineage_id: 'builder-lineage', attempts_used: 2, status: 'running',
+    });
+    expect(current![0].lease_id).not.toBe('lease-old');
+    expect((await readTeam(home)).agents[0]).toMatchObject({
+      lease_id: current![0].lease_id, plan_digest: contractDigest(next), root_lease_epoch: 2,
+      lineage_id: 'builder-lineage', attempts_used: 2,
+    });
+  });
+});

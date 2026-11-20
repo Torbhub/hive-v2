@@ -95,8 +95,10 @@ describe('enabled spawn credential files', () => {
     expect(await fs.stat(path.join(cwd, '.hive', 'team', 'builder', 'credential.env')).catch(() => null)).toBeNull();
   });
 
-  it('retains managed auto -y until scoped execution replaces it', () => {
-    expect(launchCommand(undefined, 'auto')).toContain(' -y ');
-    expect(launchCommand('session_b', 'auto')).toContain(' -y ');
+  it('removes managed auto -y on launch and resume but retains explicit yolo', () => {
+    expect(launchCommand(undefined, 'auto')).not.toContain(' -y ');
+    expect(launchCommand('session_b', 'auto')).not.toContain(' -y ');
+    expect(launchCommand(undefined, 'yolo')).toContain(' -y ');
+    expect(launchCommand('session_b', 'yolo')).toContain(' -y ');
   });
 });

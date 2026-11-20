@@ -94,38 +94,32 @@ export async function waitIdle(
   return 'timeout';
 }
 
-// The folder-trust menu on a spawn-created worktree is answered once: hive
-// made the folder, so the answer is always "Trust this folder".
-async function answerTrustMenu(pane: string): Promise<boolean> {
+type TrustTarget = { cwd: string; identity: PaneIdentity };
+
+async function answerTrustMenu(pane: string, target?: TrustTarget): Promise<boolean> {
+  if (!target || !(await paneIs(pane, target.identity))) return false;
   const raw = await capturePane(pane);
   if (raw === null) return false;
   const d = parseDialog(lines(raw));
   const opt = d.options.find((o) => o.label === 'Trust this folder');
   if (d.kind !== 'menu' || !opt) return false;
+  const displayed = lines(raw).map((line) => line.trim()).filter((line) => path.isAbsolute(line));
+  if (displayed.length !== 1) return false;
+  const [expected, actual] = await Promise.all([
+    fs.realpath(target.cwd).catch(() => null), fs.realpath(displayed[0]).catch(() => null),
+  ]);
+  if (!expected || expected !== actual) return false;
   const delta = opt.n - (d.cursor ?? 1);
-  for (let i = 0; i < Math.abs(delta); i++) await sendArrow(pane, delta > 0 ? 'Down' : 'Up');
-  await sendEnter(pane);
+  for (let i = 0; i < Math.abs(delta); i++) await sendArrow(pane, delta > 0 ? 'Down' : 'Up', target.identity);
+  await sendEnter(pane, target.identity);
   return true;
 }
 
-// waitIdle with one trust-menu answer in the middle; any other dialog surfaces as before.
-async function waitIdleTrust(pane: string, deadline?: number): Promise<'idle' | 'dialog' | 'timeout'> {
-  const options = () => deadline === undefined ? {} : { maxMs: Math.max(0, deadline - Date.now()) };
-  const idle = await waitIdle(pane, options());
+async function waitIdleTrust(pane: string, target?: TrustTarget): Promise<'idle' | 'dialog' | 'timeout'> {
+  const idle = await waitIdle(pane);
   if (idle !== 'dialog') return idle;
-  if (!(await answerTrustMenu(pane))) return 'dialog';
-  return waitIdle(pane, options());
-}
-
-async function waitIdleForMode(pane: string, mode: ProjectMode | 'supervised-auto'): Promise<'idle' | 'dialog' | 'timeout'> {
-  if (mode !== 'auto') return waitIdleTrust(pane);
-  const deadline = Date.now() + 120_000;
-  while (Date.now() < deadline) {
-    const idle = await waitIdleTrust(pane, deadline);
-    if (idle !== 'dialog') return idle;
-    await sleep(1000);
-  }
-  return 'timeout';
+  if (!(await answerTrustMenu(pane, target))) return 'dialog';
+  return waitIdle(pane);
 }
 
 export class PreInputError extends Error {}
@@ -189,7 +183,7 @@ export function launchCommand(
   const args = [
     sessionId ? `--session ${sessionId}` : '',
     !sessionId && profile ? `--agent-file ${quote(profile)}` : '',
-    mode === 'supervised-auto' ? '--auto' : mode === 'yolo' || mode === 'auto' ? '-y' : '',
+    mode === 'supervised-auto' ? '--auto' : mode === 'yolo' ? '-y' : '',
     `-m '${model}'`,
   ].filter(Boolean);
   // No session lock: kimi's take-over repair prompt is interactive, and a hive lane is already one client per session.
@@ -515,6 +509,7 @@ async function spawnRegisteredAgent(
   let registered: TeamEntry | undefined;
   let jjLane: { name: string; path: string } | null = null;
   let hookInstallFailed = false;
+  const worktreeExisted = existsSync(worktree);
   try {
     // Neither jj workspace add nor git worktree add creates missing parent dirs.
     await fs.mkdir(path.dirname(worktree), { recursive: true });
@@ -576,6 +571,8 @@ async function spawnRegisteredAgent(
     const patch = {
       pane, pane_pid: identity.pid, pane_started: identity.started,
       worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task, model, parent,
+      launch_mode: p.mode ?? 'ask', launch_scoped_auto: p.mode === 'auto',
+      migration_state: undefined, watch_authority_revoked_at: undefined,
       ...evidence!, team_state_hash: teamStateHash,
     };
     if (task && admission) {
@@ -596,7 +593,11 @@ async function spawnRegisteredAgent(
       }
     }
 
-    const idle = await waitIdleForMode(pane, p.mode ?? 'ask');
+    const idle = await waitIdleTrust(pane, worktreeExisted ? undefined : { cwd: worktree, identity });
+    if (idle === 'dialog' && p.mode === 'auto') {
+      await finishLaunch(root, launchClaim, { pane, identity, home, worktree, admission });
+      return { pane, identity, home, worktree, admission };
+    }
     if (idle !== 'idle') {
       throw new Error(idle === 'dialog'
         ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
@@ -681,6 +682,8 @@ async function relaunchRegisteredAgent(
     const patch = {
       pane, pane_pid: identity.pid, pane_started: identity.started,
       session_id: sessionId, model: old.model ?? DEFAULT_MODEL, closed_at: undefined, wedged_at: undefined,
+      launch_mode: mode, launch_scoped_auto: mode === 'auto',
+      migration_state: undefined, watch_authority_revoked_at: undefined,
       ...evidence, team_state_hash: teamStateHash,
     };
     let registered: TeamEntry | undefined;
@@ -694,7 +697,11 @@ async function relaunchRegisteredAgent(
         if (!registered) throw new Error(`${old.name} was killed while its new pane came up`);
       });
     }
-    const idle = await waitIdleForMode(pane, p.mode ?? 'ask');
+    const idle = await waitIdleTrust(pane);
+    if (idle === 'dialog' && p.mode === 'auto') {
+      await finishLaunch(root, launchClaim, { pane, identity, home, worktree, admission });
+      return { pane, identity, home, worktree, admission };
+    }
     if (idle !== 'idle') {
       throw new Error(idle === 'dialog'
         ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`

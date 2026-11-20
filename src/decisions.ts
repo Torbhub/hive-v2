@@ -1,6 +1,6 @@
 import type { OperatorQuestion, QuestionChoice } from './types.js';
 
-export const DECISION_ACTIONS = ['push', 'pr', 'merge', 'deploy', 'paid_work', 'deletion', 'credentials'] as const;
+export const DECISION_ACTIONS = ['push', 'pr', 'merge', 'deploy', 'paid_work', 'deletion', 'credentials', 'scope_delta'] as const;
 export type DecisionAction = typeof DECISION_ACTIONS[number];
 export type DecisionFacts = {
   action: DecisionAction | 'unknown';
@@ -46,12 +46,13 @@ const TEXT_FIELDS = [
 ] as const;
 const ACTION_LABEL: Record<DecisionAction, string> = {
   push: 'push', pr: 'pull request creation', merge: 'merge', deploy: 'deploy',
-  paid_work: 'paid work', deletion: 'deletion', credentials: 'credential grant',
+  paid_work: 'paid work', deletion: 'deletion', credentials: 'credential grant', scope_delta: 'root scope delta',
 };
 const APPROVE_LABEL: Record<DecisionAction, string> = {
   push: 'Approve push only', pr: 'Create pull request only', merge: 'Approve merge only',
   deploy: 'Approve deploy only', paid_work: 'Approve paid work only',
   deletion: 'Approve deletion only', credentials: 'Approve credential grant only',
+  scope_delta: 'Approve root delta only',
 };
 
 const INTERNAL_CONTENT = /structured owner approval|tool result was interrupted|do not duplicate the request|internal handoff|stack trace:?|(?:^|\n)\s*Error(?::|\n)|(?:^|\n)\s*at\s+\S+/i;
@@ -170,6 +171,7 @@ function questionText(card: DecisionCard): string {
     case 'paid_work': return `Start the named paid work with a fixed budget?`;
     case 'deletion': return 'Delete the named target?';
     case 'credentials': return 'Grant the named credential access?';
+    case 'scope_delta': return `Approve a new root contract for ${f.destination ?? 'the root task'}?`;
     case 'unknown': return 'More detail is needed before approval.';
   }
 }
@@ -184,6 +186,7 @@ function consequences(action: DecisionAction): string[] {
     case 'paid_work': return ['Start only the named paid work within the stated budget.', 'The work can incur cost. Push, pull request creation, merge, deploy, deletion, and credential grants are not included.'];
     case 'deletion': return ['Delete only the named target.', 'The data can be unrecoverable. No deploy, paid work, or credential grant is included.'];
     case 'credentials': return ['Grant only the named credential access.', 'The grant can expose access. No secret value is shown or approved for disclosure. No other action is included.'];
+    case 'scope_delta': return ['Replace the root contract and fence every old lease.', 'Only children that fit the new contract receive a new lease. No command or remote operation runs.'];
   }
 }
 
@@ -208,7 +211,7 @@ function choices(card: DecisionCard, now: number): QuestionChoice[] {
 }
 
 function destinationFor(facts: DecisionFacts): string | undefined {
-  if (['push', 'pr', 'merge', 'deploy'].includes(facts.action)) return facts.destination;
+  if (['push', 'pr', 'merge', 'deploy', 'scope_delta'].includes(facts.action)) return facts.destination;
   if (facts.action === 'paid_work') return 'the named paid-work provider';
   if (facts.action === 'deletion') return 'the named deletion target';
   if (facts.action === 'credentials') return 'the named credential audience';

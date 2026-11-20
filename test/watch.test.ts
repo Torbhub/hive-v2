@@ -1,4 +1,5 @@
 import { promises as fs, mkdtempSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -84,11 +85,12 @@ import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
 import { maybeCompact } from '../src/compact.js';
 import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep, tmux } from '../src/tmux.js';
 import { withTimeout } from '../src/view.js';
-import { appendDecision, contractDigest, hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, writePendingPane, hivePath } from '../src/state.js';
+import { appendDecision, appendTaskEvent, contractDigest, foldTasks, hubPath, readDecisions, readPendingPane, readTaskEvents, readTeam, upsertTeamEntry, valueDigest, writeJson, writePendingPane, hivePath } from '../src/state.js';
+import { answerQuestionBatch, createQuestionBatch, listOpenQuestionBatches, readQuestionBatch } from '../src/questions.js';
 import { loadProcessedKeys, recordProcessedKey } from '../src/watch-persist.js';
 import { disableExecution } from '../src/rollout.js';
 import {
-  extractCommand, neverApprove, tier1Approves, watch, watchCycle, WAKE_MAX_ATTEMPTS,
+  extractCommand, handleCurrentOrchestratorDialog, neverApprove, tier1Approves, watch, watchCycle, WAKE_MAX_ATTEMPTS,
 } from '../src/watch.js';
 
 function tmp(): string {
@@ -98,6 +100,7 @@ function tmp(): string {
 // Most factory implementations survive. Identity checks start fresh each test.
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(paneExists).mockImplementation(async () => true);
   vi.mocked(paneIs).mockImplementation(async () => true);
   vi.mocked(sleep).mockImplementation(async () => {});
 });
@@ -184,7 +187,9 @@ async function setupProject(opts: { approvals?: string; mode?: string; agents?: 
       ...('mode' in opts ? { mode: opts.mode } : {}),
     }],
   });
-  await writeJson(hivePath(home, 'team.json'), { agents: opts.agents ?? [] });
+  await writeJson(hivePath(home, 'team.json'), {
+    agents: (opts.agents ?? []).map((agent) => ({ launch_mode: 'ask', launch_scoped_auto: false, ...agent })),
+  });
   return { root, home };
 }
 
@@ -204,8 +209,70 @@ async function admittedWorker(root: string, home: string) {
   });
   await upsertTeamEntry(home, {
     name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b', worktree: home,
+    launch_mode: 'auto', launch_scoped_auto: true,
   });
   return { id, admission };
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+function jj(cwd: string, ...args: string[]): string {
+  return execFileSync('jj', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+async function declaredPushProject() {
+  const root = tmp();
+  const remote = path.join(root, 'remote.git');
+  const home = path.join(root, 'push-home');
+  git(root, 'init', '--bare', remote);
+  git(root, 'init', '-b', 'main', home);
+  git(home, 'config', 'user.email', 'test@example.invalid');
+  git(home, 'config', 'user.name', 'Test');
+  await fs.writeFile(path.join(home, 'a.txt'), 'base\n');
+  git(home, 'add', 'a.txt');
+  git(home, 'commit', '-m', 'feat: base');
+  const base = git(home, 'rev-parse', 'HEAD');
+  git(home, 'remote', 'add', 'origin', remote);
+  git(home, 'update-ref', 'refs/remotes/origin/main', base);
+  git(home, 'checkout', '-b', 'feat/watch');
+  await fs.writeFile(path.join(home, 'a.txt'), 'change\n');
+  git(home, 'add', 'a.txt');
+  git(home, 'commit', '-m', 'feat: declared watch push');
+  const commit = git(home, 'rev-parse', 'HEAD');
+  const output = 'Publish the bounded change and return evidence.';
+  const contract = {
+    ...taskContract(home, ['a.txt'], output),
+    provenance: { repository: home, base_revision: base, artifact_revision: commit },
+    action_scope: ['push'],
+  };
+  const at = new Date().toISOString();
+  const planDigest = contractDigest(contract);
+  await writeJson(hubPath(root, 'projects.json'), { projects: [{ name: 'demo', home, repos: [], mode: 'auto' }] });
+  await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'asked', at });
+  await appendTaskEvent(root, {
+    id: 'demo-1', project: 'demo', event: 'plan', at, contract, plan_digest: planDigest,
+    checkpoints: [{ id: 'publish', desc: 'push the reviewed commit', etaMin: 1 }],
+  });
+  await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'answered', at, plan_digest: planDigest });
+  const admission = await admitTmux(root, home, 'demo-1', 'builder', {
+    parent_id: 'demo-1', plan_digest: planDigest, output_claim: output,
+    acceptance_ids: ['diff'], provenance: contract.provenance, write_scope: ['a.txt'], adapter: 'tmux',
+  });
+  await upsertTeamEntry(home, {
+    name: 'builder', worktree: home, pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b',
+    launch_mode: 'auto', launch_scoped_auto: true,
+  });
+  const batch = await createQuestionBatch(root, { project: 'demo', agent: `builder@${home}` }, {
+    context: 'Publish the reviewed change.',
+    questions: [{
+      priority: 1,
+      decision: { action: 'push', branch: 'feat/watch', commit, reason: 'Reviewed.' },
+    }],
+  });
+  await answerQuestionBatch(root, batch.id, [{ question: 'q1', choice: 'c2' }]);
+  return { root, remote, home, commit, batch, admission };
 }
 
 describe('watchCycle watchdog', () => {
@@ -410,7 +477,7 @@ describe('watchCycle watchdog', () => {
 
 describe('watchCycle pending launch', () => {
   const pending = {
-    pane: '%1', kind: 'start', at: new Date().toISOString(), typed: false, line: 'pick up the project',
+    pane: '%1', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString(), typed: false, line: 'pick up the project',
   };
 
   function startingProject(name: string, starting: Record<string, unknown> = {}, question = false) {
@@ -418,7 +485,7 @@ describe('watchCycle pending launch', () => {
       name, home: '', repos: [], open_tasks: 0,
       orchestrator: {
         state: 'none', question,
-        starting: { pane: '%1', kind: 'start', at: pending.at, typed: false, question: false, ...starting },
+        starting: { pane: '%1', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: pending.at, typed: false, question: false, ...starting },
       },
       agents: [],
     };
@@ -472,6 +539,26 @@ describe('watchCycle pending launch', () => {
     await watchCycle(root);
 
     expect(continueProject).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('fences pending legacy provenance without continuation or scoped stamp: team entry %s', async (withTeam) => {
+    const { root, home } = await setupProject({
+      mode: 'ask',
+      agents: withTeam ? [{
+        name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'old', launch_mode: 'auto',
+      }] : [],
+    });
+    await writePendingPane(root, 'demo', { ...pending, launch_mode: undefined, launch_scoped_auto: undefined });
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' }, projects: [startingProject('demo')],
+    } as never);
+
+    await watchCycle(root);
+
+    expect(continueProject).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
+    expect((await readPendingPane(root, 'demo'))?.migration_state).toBe('legacy_auto_blocked');
+    if (withTeam) expect((await readTeam(home)).agents[0].launch_scoped_auto).not.toBe(true);
   });
 
   it('a failed continue does not skip another project', async () => {
@@ -844,21 +931,248 @@ describe('watchCycle auto-approver', () => {
     expect(s.verdicts.has('python3 check_two.py')).toBe(false);
   });
 
-  it.each([undefined, 'manual'] as const)('auto mode directly answers a command with %s stored approvals', async (approvals) => {
-    const { root } = await setupProject({ mode: 'auto', approvals });
-    withQuestion();
-    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 auto_mode_probe.py') as never);
-    vi.mocked(run).mockImplementation(async (cmd) => {
-      if (cmd === 'kimi') throw new Error('Auto must not classify');
-      return { code: 0, stdout: '', stderr: '' };
+  it.each(['python3 auto_mode_probe.py', 'git push origin feat/watch'])('auto revokes an undeclared mutation and creates only one root delta: %s', async (command) => {
+    const { root, home } = await setupProject({ mode: 'auto' });
+    await admittedWorker(root, home);
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 1,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: true, ref: 'builder' }],
+      }],
+    } as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith(`Run this command?\n  $ ${command}`) as never);
+
+    await cycle(root, freshApprover());
+    await cycle(root, freshApprover());
+
+    expect(answerDialog).toHaveBeenCalledTimes(2);
+    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', 'builder', 'esc', 'fp');
+    expect(answerDialog).not.toHaveBeenCalledWith(root, 'demo', 'builder', '1', 'fp');
+    const open = await listOpenQuestionBatches(root);
+    expect(open).toHaveLength(1);
+    expect(open[0]).toMatchObject({
+      agent: 'demo-orchestrator', rootDelta: { task: 'demo-1' }, questions: [{ decision: { action: 'scope_delta' } }],
+    });
+    expect(foldTasks(await readTaskEvents(root))[0].operations).toBeUndefined();
+  });
+
+  it.each([
+    'find . -delete',
+    'find . -fprint0',
+    'find . -cpio',
+    'rg --pre bash',
+    'rg --pre=./payload',
+    'git branch -D old-lane',
+    'git diff',
+    'git diff --no-textconv',
+    'git show HEAD',
+    'jj st',
+    'jj status',
+    'jj log',
+    'jj log --ignore-working-copy',
+    'jj diff',
+    'jj show',
+    'jj root',
+    'jj git root',
+    'jj bookmark list',
+    'rm -rf /tmp/unsafe',
+    'jj abandon',
+    'echo hva1.builder.0123456789abcdef.fake-secret-with-high-entropy > credential.env',
+    'cat password=supersecret > credential.env',
+    'git push --force origin main',
+    'git push origin unsupported/main',
+  ])('auto escapes and opens one root delta without allowing unsafe command: %s', async (command) => {
+    const { root, home } = await setupProject({ mode: 'auto' });
+    await admittedWorker(root, home);
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 1,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: true, ref: 'builder' }],
+      }],
+    } as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith(`Run this command?\n  $ ${command}`) as never);
+
+    await cycle(root, freshApprover());
+
+    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', 'builder', 'esc', 'fp');
+    expect(answerDialog).not.toHaveBeenCalledWith(root, 'demo', 'builder', '1', 'fp');
+    expect(await listOpenQuestionBatches(root)).toHaveLength(1);
+    expect(foldTasks(await readTaskEvents(root))[0].operations).toBeUndefined();
+  });
+
+  it.each([
+    { command: 'git diff', args: ['diff'] },
+    { command: 'git show HEAD', args: ['show', 'HEAD'] },
+  ])('never invokes a configured textconv helper for managed auto: $command', async ({ command, args }) => {
+    const actual = await vi.importActual<typeof import('../src/tmux.js')>('../src/tmux.js');
+    vi.mocked(run).mockImplementation(actual.run);
+    const { root, home } = await declaredPushProject();
+    const marker = path.join(root, 'textconv-invoked');
+    const helper = path.join(root, 'textconv.sh');
+    await fs.writeFile(helper, `#!/bin/sh\nprintf invoked >> "$1"\n`, { mode: 0o755 });
+    git(home, 'config', 'diff.marker.textconv', `${helper} ${marker}`);
+    await fs.writeFile(path.join(home, '.gitattributes'), 'a.txt diff=marker\n');
+    await fs.writeFile(path.join(home, 'a.txt'), 'working change\n');
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 1,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: true, ref: `builder@${home}` }],
+      }],
+    } as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith(`Run this command?\n  $ ${command}`) as never);
+    vi.mocked(answerDialog).mockImplementation(async (_root, _project, _agent, choice) => {
+      if (choice !== 'esc') git(home, ...args);
+      return { answered: true as const, session: 'builder', choice, option: choice, dialog_gone: true };
     });
 
     await cycle(root, freshApprover());
 
-    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, '1', 'fp');
+    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', `builder@${home}`, 'esc', 'fp');
+    expect(answerDialog).not.toHaveBeenCalledWith(root, 'demo', `builder@${home}`, '1', 'fp');
+    expect(await fs.stat(marker).catch(() => null)).toBeNull();
+    expect(await listOpenQuestionBatches(root)).toHaveLength(1);
+    expect(foldTasks(await readTaskEvents(root))[0].operations).toBeUndefined();
   });
 
-  it('auto mode answers folder trust but not unrelated dialogs', async () => {
+  it.each([
+    ['st'],
+    ['status'],
+    ['log'],
+    ['log', '--ignore-working-copy'],
+    ['diff'],
+    ['show'],
+    ['root'],
+    ['git', 'root'],
+    ['bookmark', 'list'],
+  ])('leaves the working-copy commit and operation log unchanged for managed auto: jj %s', async (...args) => {
+    const actual = await vi.importActual<typeof import('../src/tmux.js')>('../src/tmux.js');
+    vi.mocked(run).mockImplementation(actual.run);
+    const { root, home } = await declaredPushProject();
+    jj(home, 'git', 'init', '--colocate');
+    await fs.writeFile(path.join(home, 'a.txt'), 'dirty working copy\n');
+    const before = {
+      commit: jj(home, 'log', '-r', '@', '-T', 'commit_id', '--no-graph'),
+      operation: jj(home, 'op', 'log', '-T', 'id', '--limit', '1', '--no-graph'),
+    };
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 1,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: true, ref: `builder@${home}` }],
+      }],
+    } as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith(`Run this command?\n  $ jj ${args.join(' ')}`) as never);
+    vi.mocked(answerDialog).mockImplementation(async (_root, _project, _agent, choice) => {
+      if (choice !== 'esc') jj(home, ...args);
+      return { answered: true as const, session: 'builder', choice, option: choice, dialog_gone: true };
+    });
+
+    await cycle(root, freshApprover());
+
+    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', `builder@${home}`, 'esc', 'fp');
+    expect(answerDialog).not.toHaveBeenCalledWith(root, 'demo', `builder@${home}`, '1', 'fp');
+    expect({
+      commit: jj(home, 'log', '-r', '@', '-T', 'commit_id', '--no-graph'),
+      operation: jj(home, 'op', 'log', '-T', 'id', '--limit', '1', '--no-graph'),
+    }).toEqual(before);
+    expect(await listOpenQuestionBatches(root)).toHaveLength(1);
+    expect(foldTasks(await readTaskEvents(root))[0].operations).toBeUndefined();
+  });
+
+  it('redacts command secrets but preserves the exact delta digest', async () => {
+    const { root, home } = await setupProject({ mode: 'auto' });
+    await admittedWorker(root, home);
+    const command = 'echo hva1.builder.0123456789abcdef.fake-secret-with-high-entropy Authorization:Bearer fakebearer password=supersecret https://user:urlpass@example.com > credential.env';
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 1,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: true, ref: 'builder' }],
+      }],
+    } as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith(`Run this command?\n  $ ${command}`) as never);
+
+    await cycle(root, freshApprover());
+
+    const [batch] = await listOpenQuestionBatches(root);
+    expect(batch.rootDelta?.nextContract.action_scope).toContain(`command:${valueDigest(command)}`);
+    const persisted = JSON.stringify(batch) + await fs.readFile(hubPath(root, 'decisions.jsonl'), 'utf8')
+      + await fs.readFile(hubPath(root, 'watch.log'), 'utf8').catch(() => '');
+    for (const secret of ['hva1.builder.', 'fakebearer', 'supersecret', 'urlpass']) expect(persisted).not.toContain(secret);
+    expect(batch.questions[0].decision?.facts.reason).toContain('Blocked command:');
+    expect(batch.questions[0].decision?.facts.reason).toContain('[redacted]');
+  });
+
+  it('allows only the exact approved command after delta approval and opens a new delta for a different command', async () => {
+    const { root, home } = await setupProject({ mode: 'auto' });
+    await admittedWorker(root, home);
+    const command = 'python3 approved_probe.py';
+    const showCommand = (text: string) => {
+      vi.mocked(buildStatus).mockResolvedValue({
+        hub: { root: '' },
+        projects: [{
+          name: 'demo', home, repos: [], open_tasks: 1,
+          orchestrator: { state: 'running', question: false },
+          agents: [{ name: 'builder', state: 'running', question: true, ref: 'builder' }],
+        }],
+      } as never);
+      vi.mocked(readDialogFor).mockResolvedValue(dialogWith(`Run this command?\n  $ ${text}`) as never);
+    };
+    showCommand(command);
+    await cycle(root, freshApprover());
+    const [batch] = await listOpenQuestionBatches(root);
+    await answerQuestionBatch(root, batch.id, [{ question: 'q1', choice: 'c2' }]);
+    expect((await readQuestionBatch(root, batch.id)).answers![0].decision?.grant?.executionAuthority).toBe('none');
+
+    await cycle(root, freshApprover());
+
+    expect(answerDialog).toHaveBeenLastCalledWith(root, 'demo', 'builder', '1', 'fp');
+    expect(await listOpenQuestionBatches(root)).toEqual([]);
+    expect(foldTasks(await readTaskEvents(root))[0].operations).toBeUndefined();
+
+    showCommand('python3 different_probe.py');
+    await cycle(root, freshApprover());
+    expect(answerDialog).toHaveBeenLastCalledWith(root, 'demo', 'builder', 'esc', 'fp');
+    expect(await listOpenQuestionBatches(root)).toHaveLength(1);
+    expect(foldTasks(await readTaskEvents(root))[0].operations).toBeUndefined();
+  });
+
+  it('auto dispatches a declared push prompt-free through the real registry and local remote', async () => {
+    const actual = await vi.importActual<typeof import('../src/tmux.js')>('../src/tmux.js');
+    vi.mocked(run).mockImplementation(actual.run);
+    const { root, remote, home, commit, batch } = await declaredPushProject();
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 1,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: true, ref: `builder@${home}` }],
+      }],
+    } as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith(
+      `Run this command?\n  $ git push origin ${commit}:refs/heads/feat/watch`,
+    ) as never);
+
+    await cycle(root, freshApprover());
+
+    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', `builder@${home}`, 'esc', 'fp');
+    expect(answerDialog).not.toHaveBeenCalledWith(root, 'demo', `builder@${home}`, '1', 'fp');
+    expect(git(remote, 'rev-parse', 'refs/heads/feat/watch')).toBe(commit);
+    const stored = await readQuestionBatch(root, batch.id);
+    expect(stored.answers![0].decision?.grant).toMatchObject({ operationStatus: 'succeeded' });
+    expect(foldTasks(await readTaskEvents(root))[0].operations?.at(-1)).toMatchObject({ status: 'succeeded' });
+    expect(await listOpenQuestionBatches(root)).toEqual([]);
+  });
+
+  it('auto leaves folder trust and unrelated startup dialogs for the launch path and owner', async () => {
     const { root } = await setupProject({ mode: 'auto', approvals: 'manual' });
     withQuestion();
     vi.mocked(readDialogFor).mockResolvedValue({
@@ -867,19 +1181,28 @@ describe('watchCycle auto-approver', () => {
     } as never);
 
     await cycle(root, freshApprover());
-    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, '1', 'fp');
+    expect(answerDialog).not.toHaveBeenCalled();
 
-    vi.mocked(answerDialog).mockClear();
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Compact context?\nChoose how to compact') as never);
     await cycle(root, freshApprover());
     expect(answerDialog).not.toHaveBeenCalled();
   });
 
-  it('auto mode uses an offered non-saving option', async () => {
+  it.each([
+    'git status',
+    'git log --oneline',
+    'rg needle src',
+    'ls -la',
+    'cat README.md',
+    'head -n 5 README.md',
+    'grep -n needle src',
+    'pwd',
+    'tsc --noEmit',
+  ])('auto still uses a non-saving option for ordinary read-only command: %s', async (command) => {
     const { root } = await setupProject({ mode: 'auto' });
     withQuestion();
     vi.mocked(readDialogFor).mockResolvedValue({
-      ...dialogWith('Run this command?\n  $ python3 auto_mode_probe.py'),
+      ...dialogWith(`Run this command?\n  $ ${command}`),
       options: [
         { n: 1, label: 'Always allow', detail: '', offered: true, saves_rule: true },
         { n: 2, label: 'Approve once', detail: '', offered: true, saves_rule: false },
@@ -889,6 +1212,110 @@ describe('watchCycle auto-approver', () => {
     await cycle(root, freshApprover());
 
     expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, '2', 'fp');
+  });
+
+  it('direct orchestrator handling enforces legacy fences without keys or auto-approved decisions', async () => {
+    const { root, home } = await setupProject({
+      mode: 'auto',
+      agents: [{
+        name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'old', launch_mode: 'auto',
+      }],
+    });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ git status') as never);
+
+    await handleCurrentOrchestratorDialog(root, 'demo');
+    await handleCurrentOrchestratorDialog(root, 'demo');
+
+    expect((await readTeam(home)).agents[0].migration_state).toBe('legacy_auto_blocked');
+    expect(answerDialog).not.toHaveBeenCalled();
+    expect(sendEscape).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
+    expect((await readDecisions(root)).filter((decision) => decision.summary.includes('auto-approved'))).toEqual([]);
+  });
+
+  it('direct orchestrator handling still answers a genuine new pending read-only dialog', async () => {
+    const { root } = await setupProject({ approvals: 'safe' });
+    await writePendingPane(root, 'demo', {
+      pane: '%2', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false,
+      at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+    });
+    withQuestion();
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ git status') as never);
+
+    await handleCurrentOrchestratorDialog(root, 'demo');
+
+    expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, '1', 'fp');
+  });
+
+  it('fences a legacy auto pane without killing, waking, typing, or approving and marks natural exit', async () => {
+    const { root, home } = await setupProject({
+      mode: 'auto',
+      agents: [{
+        name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b',
+        launch_mode: 'auto',
+      }],
+    });
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 0,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: true, ref: 'builder' }],
+      }],
+    } as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ git push origin main') as never);
+
+    await cycle(root, freshApprover());
+
+    expect((await readTeam(home)).agents[0]).toMatchObject({
+      migration_state: 'legacy_auto_blocked', watch_authority_revoked_at: expect.any(String),
+    });
+    expect(answerDialog).not.toHaveBeenCalled();
+    expect(killWindow).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
+    expect(sendEscape).not.toHaveBeenCalled();
+    expect(maybeCompact).not.toHaveBeenCalled();
+
+    vi.mocked(paneExists).mockResolvedValue(false);
+    await cycle(root, freshApprover());
+    expect((await readTeam(home)).agents[0].migration_state).toBe('natural_exit_ready');
+    expect(wakeAgent).not.toHaveBeenCalled();
+    expect(killWindow).not.toHaveBeenCalled();
+  });
+
+  it('requires migration for missing launch provenance even in ask mode without any pane action', async () => {
+    const { root, home } = await setupProject({
+      mode: 'ask',
+      agents: [{
+        name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b',
+        launch_mode: undefined, launch_scoped_auto: undefined,
+      }],
+    });
+    vi.mocked(capturePane).mockResolvedValue('⠋ Working…\n');
+    vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 60 * 60_000);
+
+    await cycle(root, freshApprover());
+
+    expect((await readTeam(home)).agents[0]).toMatchObject({
+      migration_state: 'legacy_auto_blocked', watch_authority_revoked_at: expect.any(String),
+    });
+    expect(maybeCompact).not.toHaveBeenCalled();
+    expect(answerDialog).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
+    expect(killWindow).not.toHaveBeenCalled();
+    expect(wakeAgent).not.toHaveBeenCalled();
+  });
+
+  it('blocks watch authority when recorded pane identity is incomplete', async () => {
+    const { root, home } = await setupProject({
+      mode: 'auto',
+      agents: [{ name: 'builder', pane: '%2', launch_mode: 'auto', launch_scoped_auto: true }],
+    });
+    await cycle(root, freshApprover());
+    expect((await readTeam(home)).agents[0].migration_state).toBe('unknown_identity_blocked');
+    expect(killWindow).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
   });
 
   it('non-auto mode with manual approvals never answers', async () => {
@@ -1363,7 +1790,9 @@ describe('watchCycle hard denies in auto mode', () => {
 
     await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts: new Map(), marks: new Set() });
 
-    expect(answerDialog).not.toHaveBeenCalled();
+    expect(answerDialog).toHaveBeenCalledTimes(text.startsWith('Trust') ? 0 : 1);
+    if (!text.startsWith('Trust')) expect(answerDialog).toHaveBeenCalledWith(root, 'demo', undefined, 'esc', 'fp');
+    expect(answerDialog).not.toHaveBeenCalledWith(root, 'demo', undefined, '1', 'fp');
     expect(vi.mocked(run).mock.calls.filter((call) => call[0] === 'kimi')).toEqual([]);
   });
 });

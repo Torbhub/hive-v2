@@ -529,7 +529,10 @@ describe('POST settings with a current dialog', () => {
   ])('$pathname persists and answers before responding', async ({ pathname, change, expected }) => {
     const home = path.join(root, 'demo');
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
+      agents: [{
+        name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x',
+        launch_mode: 'auto', launch_scoped_auto: true,
+      }],
     });
     let answered = false;
     vi.mocked(paneExists).mockResolvedValue(true);
@@ -1101,6 +1104,95 @@ describe('operator question endpoints', () => {
     expect(view.questionsTotal).toBe(55);
     expect(view.projects[0].agents[54]).toMatchObject({ name: 'worker-54', operator_question: true, operator_waiting: true });
   });
+
+  it('approves a root delta through the existing question endpoint without an executor', async () => {
+    const home = path.join(questionRoot, 'demo');
+    await fs.mkdir(home, { recursive: true });
+    const contract = taskContract(home, ['src'], 'Return the bounded artifact.');
+    const at = new Date().toISOString();
+    const planDigest = contractDigest(contract);
+    await appendTaskEvent(questionRoot, { id: 'demo-1', project: 'demo', event: 'asked', at });
+    await appendTaskEvent(questionRoot, {
+      id: 'demo-1', project: 'demo', event: 'plan', at, contract, plan_digest: planDigest,
+      checkpoints: [{ id: 'work', desc: 'bounded work', etaMin: 5 }],
+    });
+    await appendTaskEvent(questionRoot, { id: 'demo-1', project: 'demo', event: 'answered', at, plan_digest: planDigest });
+    const next = { ...contract, action_scope: ['command:docs-mutation'] };
+    const { createRootDeltaQuestion } = await import('../src/questions.js');
+    const batch = await createRootDeltaQuestion(questionRoot, 'demo-1', next, 'Approve the docs mutation.');
+    const response = await questionPost('/api/questions/answer', {
+      id: batch.id, answers: [{ question: 'q1', choice: 'c2' }],
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      batch: { status: 'answered', answers: [{ decision: { action: 'scope_delta', grant: { executionAuthority: 'none' } } }] },
+    });
+    const task = foldTasks(await readTaskEvents(questionRoot))[0];
+    expect(task).toMatchObject({ plan_digest: contractDigest(next), lease_epoch: 2 });
+    expect(task.operations).toBeUndefined();
+  });
+});
+
+describe('root-delta question read authorization', () => {
+  async function deltaView(projectReadWithRevokedTask: boolean) {
+    const questionRoot = mkdtempSync(path.join(tmpdir(), 'hive-web-delta-acl-'));
+    const home = path.join(questionRoot, 'demo');
+    await fs.mkdir(home, { recursive: true });
+    await writeJson(hubPath(questionRoot, 'projects.json'), { projects: [{ name: 'demo', home, repos: [] }] });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
+    });
+    const contract = taskContract(home, ['src'], 'Return the bounded artifact.');
+    const at = new Date().toISOString();
+    const planDigest = contractDigest(contract);
+    await appendTaskEvent(questionRoot, { id: 'demo-1', project: 'demo', event: 'asked', at });
+    await appendTaskEvent(questionRoot, {
+      id: 'demo-1', project: 'demo', event: 'plan', at, contract, plan_digest: planDigest,
+      checkpoints: [{ id: 'work', desc: 'bounded work', etaMin: 5 }],
+    });
+    await appendTaskEvent(questionRoot, { id: 'demo-1', project: 'demo', event: 'answered', at, plan_digest: planDigest });
+    const next = { ...contract, action_scope: ['command:delta-acl'] };
+    const { createRootDeltaQuestion } = await import('../src/questions.js');
+    const batch = await createRootDeltaQuestion(questionRoot, 'demo-1', next, 'Review the delta.');
+    const { registryItems, startTestRegistry } = await import('./security-fixture.js');
+    const items = registryItems();
+    if (projectReadWithRevokedTask) {
+      items.push({
+        pk: 'ACL#demo#*#*', sk: 'PRINCIPAL#user:alice', project: 'demo', principal: 'user:alice',
+        grantId: 'project-read', actions: ['read'], aclEpoch: 1, revokedAt: null,
+      });
+      items.push({ pk: 'REVOCATION#ACL#demo#demo-1#*', sk: 'PRINCIPAL#user:alice' });
+    }
+    const { broker, registry } = await startTestRegistry(items);
+    configureSecurity();
+    const server = createServer(questionRoot, registry);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/view`);
+      return { view: await response.json(), batch, home };
+    } finally {
+      server.close();
+      broker.close();
+      configureSecurity(false);
+    }
+  }
+
+  it('shows the root delta to a principal with task-only read access', async () => {
+    const { view, batch, home } = await deltaView(false);
+    expect(view.questionsTotal).toBe(1);
+    expect(view.questions).toHaveLength(1);
+    expect(view.questions[0].id).toBe(batch.id);
+    expect(view.questions[0].rootDelta.nextContract.provenance.repository).toBe(home);
+  });
+
+  it('hides the root delta, total, contract, and provenance when project read does not include the root task', async () => {
+    const { view, home } = await deltaView(true);
+    expect(view.questions).toEqual([]);
+    expect(view.questionsTotal).toBe(0);
+    expect(JSON.stringify(view)).not.toContain('nextContract');
+    expect(JSON.stringify(view)).not.toContain(home);
+  });
 });
 
 describe('POST /api/project-delete', () => {
@@ -1162,7 +1254,7 @@ describe('POST /api/project-delete', () => {
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
     const release = new Promise<void>((resolve) => { releaseStart = resolve; });
     vi.mocked(startProject).mockImplementation(async () => {
-      await writePendingPane(deleteRoot, 'demo', { pane: '%9', kind: 'start', at: '2026-10-27T00:00:00Z' });
+      await writePendingPane(deleteRoot, 'demo', { pane: '%9', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: '2026-10-27T00:00:00Z' });
       markStarted();
       await release;
       return '%9';
@@ -1192,7 +1284,7 @@ describe('POST /api/project-delete', () => {
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
     const release = new Promise<string>((resolve) => { releaseStart = resolve; });
     vi.mocked(startProject).mockImplementation(async () => {
-      await writePendingPane(deleteRoot, 'demo', { pane: '%9', kind: 'start', at: '2026-10-27T00:00:00Z' });
+      await writePendingPane(deleteRoot, 'demo', { pane: '%9', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: '2026-10-27T00:00:00Z' });
       markStarted();
       return release;
     });
