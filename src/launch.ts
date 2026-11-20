@@ -3,8 +3,8 @@ import { promises as fs } from 'node:fs';
 import { capturePane, paneExists, paneIdentity, paneIs } from './tmux.js';
 import { lines, parseDialog } from './screen.js';
 import {
-  clearPendingPane, hasLiveSendingClaim, hivePath, hubPath, manifestAdd, readPendingPane, readTeam, Refusal,
-  upsertTeamEntry, withHubLock, writePendingPane, type ProjectsFile,
+  clearPendingPane, compareAndSwapTeamEntry, hasLiveSendingClaim, hivePath, hubPath, insertTeamEntry, manifestAdd,
+  readPendingPane, readTeam, Refusal, withHubLock, writePendingPane, type ProjectsFile,
 } from './state.js';
 import {
   assertEntryAlive, effectiveOrchestratorMode, ensureAgentFiles, findLatestSession,
@@ -17,6 +17,17 @@ import { assertExecutionAllowed } from './rollout.js';
 
 type ProjectEntry = ProjectsFile['projects'][number];
 type LaunchKind = 'wake' | 'start';
+
+async function recordOrchestrator(home: string, entry: Parameters<typeof insertTeamEntry>[1]): Promise<void> {
+  const current = (await readTeam(home)).agents.find((candidate) => candidate.name === entry.name);
+  if (!current) {
+    await insertTeamEntry(home, entry);
+    return;
+  }
+  if (!await compareAndSwapTeamEntry(home, current, entry)) {
+    throw new Refusal(`${entry.name} changed while its launch was being recorded`);
+  }
+}
 
 async function releasePendingSending(root: string, project: string, claimToken: string, question = false): Promise<void> {
   await withHubLock(root, async () => {
@@ -117,14 +128,14 @@ async function launchRegisteredOrchestrator(
       }
       await assertExecutionAllowed(root, project);
       await typeLine(pane, line, identity);
-      await upsertTeamEntry(p.home, {
+      await recordOrchestrator(p.home, {
         name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
         worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`), closed_at: undefined, wedged_at: undefined,
       });
       await writePendingPane(root, project, { ...current, typed: true, sending: false });
     });
     const sid = kind === 'wake' ? sessionId : await findLatestSession(cwd, name);
-    if (sid) await withProjectLock(root, project, () => upsertTeamEntry(p.home, { name, session_id: sid }));
+    if (sid) await withProjectLock(root, project, () => recordOrchestrator(p.home, { name, session_id: sid }));
     return pane;
   } catch (e) {
     await releasePendingSending(root, project, pending.claim_token);
@@ -184,7 +195,7 @@ async function continueRegisteredProject(root: string, p: ProjectEntry): Promise
       }
       await assertExecutionAllowed(root, project);
       await typeLine(pending.pane, pending.line, id);
-      await upsertTeamEntry(p.home, {
+      await recordOrchestrator(p.home, {
         name: orchestratorName(project), orchestrator: true,
         pane: pending.pane, pane_pid: id.pid, pane_started: id.started,
         worktree: p.home, handoff: hivePath(p.home, 'handoffs', `${orchestratorName(project)}.md`),
@@ -193,7 +204,9 @@ async function continueRegisteredProject(root: string, p: ProjectEntry): Promise
       await writePendingPane(root, project, { ...current, typed: true, sending: false });
     });
     const sid = await findLatestSession(p.home, orchestratorName(project));
-    if (sid) await withProjectLock(root, project, () => upsertTeamEntry(p.home, { name: orchestratorName(project), session_id: sid }));
+    if (sid) await withProjectLock(root, project, () => recordOrchestrator(p.home, {
+      name: orchestratorName(project), session_id: sid,
+    }));
     return pending.pane;
   } catch (e) {
     await releasePendingSending(root, project, pending.claim_token);

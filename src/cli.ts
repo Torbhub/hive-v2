@@ -114,7 +114,7 @@ async function hubCommand(args: string[]): Promise<void> {
     case 'progress':
     case 'accept': {
       if (args.length < (sub === 'progress' ? 4 : 3)) {
-        throw new UsageError(`usage: hive hub ${sub === 'log' ? 'log <id> <event> [note] [--checkpoints <json>]' : sub === 'accept' ? 'accept <task> <checkpoint>' : 'progress <task> <checkpoint> <started|ok|fail|skip> [note]'}`);
+        throw new UsageError(`usage: hive hub ${sub === 'log' ? 'log <id> <event> [note] [--checkpoints <json>] [--contract <json>]' : sub === 'accept' ? 'accept <task> <checkpoint>' : 'progress <task> <checkpoint> <started|ok|fail|skip> [note]'}`);
       }
       const out = await ledgerCommand(root, sub, args.slice(1));
       if (out) console.log(out);

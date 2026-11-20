@@ -94,7 +94,7 @@ export async function assertPane(pane: string, identity?: PaneIdentity): Promise
   }
 }
 
-export async function killWindow(pane: string, identity: PaneIdentity): Promise<void> {
+export async function killWindow(pane: string, identity?: PaneIdentity): Promise<void> {
   await assertPane(pane, identity);
   const r = await tmux(['kill-window', '-t', pane]);
   if (r.code !== 0) throw new Error(`tmux: cannot kill ${pane}: ${r.stderr.trim()}`);

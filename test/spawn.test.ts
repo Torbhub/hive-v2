@@ -65,10 +65,11 @@ beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
 
 import { closeAgent, effectiveOrchestratorMode, findLatestSession, launchCommand, respawnAgent, spawnAgent, waitIdle, wakeAgent } from '../src/spawn.js';
-import { hubAdd, hubInit, hubTask, setProjectApprovals, setProjectMode } from '../src/hub.js';
+import { hubAdd, hubInit, hubResolve, hubTask, setProjectApprovals, setProjectMode, startProject } from '../src/hub.js';
 import { removeProject } from '../src/project.js';
 import { appendTaskEvent, hivePath, manifestRead, readDecisions, readProjects, readTeam, writeJson, writeProjects } from '../src/state.js';
-import { capturePane, killWindow, newWindow, paneIs, run, sendArrow, sendEnter, sendLiteral } from '../src/tmux.js';
+import { capturePane, killWindow, newWindow, paneIdentity, paneIs, run, sendArrow, sendEnter, sendLiteral } from '../src/tmux.js';
+import { approveContract, taskContract } from './task-contract.js';
 
 function spawn(root: string, opts: Parameters<typeof spawnAgent>[2]): Promise<string> {
   return spawnAgent(root, 'demo', {
@@ -760,13 +761,9 @@ describe('orchestrator respawn mode', () => {
 });
 
 async function approvePlan(root: string, id: string): Promise<void> {
-  await appendTaskEvent(root, {
-    id, project: 'demo', event: 'plan', at: new Date().toISOString(), note: 'the plan',
-    checkpoints: [{ id: 'c1', desc: 'the step', etaMin: 5 }],
-  });
-  await appendTaskEvent(root, {
-    id, project: 'demo', event: 'answered', at: new Date().toISOString(), note: 'plan approved by owner',
-  });
+  await approveContract(root, id, taskContract(
+    path.join(root, 'demo'), [], 'Return the named artifact and its verification evidence to the orchestrator.',
+  ));
 }
 
 describe('worker output contracts', () => {
@@ -860,6 +857,172 @@ describe('spawn gate', () => {
     expect(vi.mocked(killWindow).mock.calls).toHaveLength(kills);
     await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/no approved plan/);
   });
+
+  it('keeps a reconcilable revoked reservation when launch fails', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const id = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, id);
+    vi.mocked(newWindow).mockRejectedValueOnce(new Error('tmux launch failed'));
+    await expect(spawn(root, { agent: 'worker1', task: id })).rejects.toThrow('tmux launch failed');
+    expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')).toMatchObject({
+      task: id, lease_epoch: 1, lease_revoked: true, admission_status: 'launch_failed',
+      launch_error: 'tmux launch failed', attempts_used: 1,
+    });
+  });
+
+  it('refuses registration and typing after the root grant changes post-launch', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const id = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, id);
+    const typed = vi.mocked(sendLiteral).mock.calls.length;
+    vi.mocked(newWindow).mockImplementationOnce(async () => {
+      await appendTaskEvent(root, { id, project: 'demo', event: 'asked', at: new Date().toISOString() });
+      return '%9';
+    });
+    await expect(spawn(root, { agent: 'worker1', task: id })).rejects.toThrow(/no approved plan|root contract grant|current digest/);
+    expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(0);
+    expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')).toMatchObject({
+      lease_revoked: true, admission_status: 'launch_failed',
+    });
+  });
+
+  it('re-wakes a tasked worker through replacement lineage', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const id = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, id);
+    await spawn(root, { agent: 'worker1', task: id });
+    const team = await readTeam(home);
+    const worker = team.agents.find((agent) => agent.name === 'worker1')!;
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: team.agents.map((agent) => agent.name === worker.name ? { ...agent, session_id: 'session_worker' } : agent),
+    });
+    vi.mocked(paneIs).mockResolvedValueOnce(false);
+    await wakeAgent(root, 'demo', 'worker1');
+    expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')).toMatchObject({
+      lease_epoch: 1, attempts_used: 2, retry_of: 'worker1', lineage_id: 'worker1',
+    });
+  }, 20_000);
+});
+
+describe('launchWindow identity cleanup', () => {
+  beforeEach(() => {
+    vi.mocked(killWindow).mockClear();
+    vi.mocked(paneIdentity).mockImplementation(async () => ({ pid: 4242, started: 'later' }));
+    vi.mocked(paneIs).mockImplementation(async () => true);
+  });
+  afterEach(() => {
+    vi.mocked(paneIdentity).mockImplementation(async () => ({ pid: 4242, started: 'later' }));
+  });
+  it('kills a fresh spawn pane when identity never arrives', async () => {
+    const { root } = await setup({ name: 'builder' });
+    vi.mocked(paneIdentity).mockResolvedValue(null);
+    await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow(/never got a process identity/);
+    expect(killWindow).toHaveBeenCalledWith('%9');
+  });
+
+  it('kills a respawn pane when identity query fails', async () => {
+    const { root } = await setup({ name: 'builder', pane: '%1', pane_pid: 1, pane_started: 'old' });
+    vi.mocked(paneIdentity).mockRejectedValueOnce(new Error('identity query failed'));
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow('identity query failed');
+    expect(killWindow).toHaveBeenCalledWith('%9', undefined);
+  });
+
+  it('kills a wake pane when identity never arrives', async () => {
+    const { root } = await setup({ name: 'builder', pane: '%1', pane_pid: 1, pane_started: 'old', session_id: 'session_b' });
+    vi.mocked(paneIs).mockResolvedValueOnce(false);
+    vi.mocked(paneIdentity).mockResolvedValue(null);
+    await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/never got a process identity/);
+    expect(killWindow).toHaveBeenCalledWith('%9');
+  });
+
+  it('kills an orchestrator pane when identity never arrives', async () => {
+    const { root } = await setup({ name: 'builder' });
+    const id = await hubTask(root, 'demo', 'start the orchestrator');
+    vi.mocked(paneIdentity).mockResolvedValue(null);
+    await expect(startProject(root, 'demo', id)).rejects.toThrow(/never got a process identity/);
+    expect(killWindow).toHaveBeenCalledWith('%9');
+  });
+});
+
+describe('tasked relaunch cleanup', () => {
+  async function launchedWorker() {
+    const { root, home } = await setup({ name: 'builder' });
+    vi.mocked(sendLiteral).mockReset().mockImplementation(async () => {});
+    vi.mocked(capturePane).mockReset().mockImplementation(async () => IDLE);
+    vi.mocked(newWindow).mockReset().mockImplementation(async () => '%9');
+    vi.mocked(killWindow).mockReset().mockImplementation(async () => {});
+    vi.mocked(paneIdentity).mockReset().mockImplementation(async () => ({ pid: 4242, started: 'later' }));
+    vi.mocked(paneIs).mockReset().mockImplementation(async () => true);
+    const id = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, id);
+    await spawn(root, { agent: 'worker1', task: id });
+    vi.mocked(killWindow).mockClear();
+    return { root, home, id };
+  }
+
+  async function allowWake(home: string) {
+    const team = await readTeam(home);
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: team.agents.map((agent) => agent.name === 'worker1' ? { ...agent, session_id: 'session_worker' } : agent),
+    });
+    vi.mocked(paneIs).mockResolvedValueOnce(false);
+  }
+
+  it.each(['respawn', 'wake'])('kills the new pane after %s registration when idle fails', async (kind) => {
+    const { root, home } = await launchedWorker();
+    vi.mocked(capturePane).mockImplementationOnce(async () => PERMISSION);
+    if (kind === 'wake') await allowWake(home);
+    const operation = kind === 'respawn' ? respawnAgent(root, 'demo', 'worker1') : wakeAgent(root, 'demo', 'worker1');
+    await expect(operation).rejects.toThrow(/dialog/);
+    expect(killWindow).toHaveBeenCalledWith('%9', { pid: 4242, started: 'later' });
+    expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')).toMatchObject({
+      lease_revoked: true, admission_status: 'launch_failed', closed_at: expect.any(String),
+    });
+  });
+
+  it.each(['respawn', 'wake'])('kills the new pane when %s input fails', async (kind) => {
+    const { root, home } = await launchedWorker();
+    vi.mocked(sendLiteral).mockRejectedValueOnce(new Error('input failed'));
+    if (kind === 'wake') await allowWake(home);
+    const operation = kind === 'respawn' ? respawnAgent(root, 'demo', 'worker1') : wakeAgent(root, 'demo', 'worker1');
+    await expect(operation).rejects.toThrow('input failed');
+    expect(killWindow).toHaveBeenCalledWith('%9', { pid: 4242, started: 'later' });
+    expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.closed_at).toBeTruthy();
+  });
+
+  it('kills the new pane when cancellation lands during relaunch', async () => {
+    const { root, home, id } = await launchedWorker();
+    vi.mocked(newWindow).mockImplementationOnce(async () => {
+      await hubResolve(root, 'demo', id, 'cancel', 'stop during relaunch');
+      return '%9';
+    });
+    await expect(respawnAgent(root, 'demo', 'worker1')).rejects.toThrow(/root contract grant|current/);
+    expect(killWindow).toHaveBeenCalledWith('%9', { pid: 4242, started: 'later' });
+    expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.closed_at).toBeTruthy();
+  });
+
+  it('surfaces new pane cleanup failure honestly', async () => {
+    const { root, home } = await launchedWorker();
+    await allowWake(home);
+    vi.mocked(sendLiteral).mockRejectedValueOnce(new Error('input failed'));
+    vi.mocked(killWindow).mockRejectedValueOnce(new Error('tmux cleanup failed'));
+    await expect(wakeAgent(root, 'demo', 'worker1')).rejects.toThrow(/new pane cleanup failed: tmux cleanup failed/);
+  });
+
+  it('preserves credential content, path, and permissions across respawn and wake', async () => {
+    const { root, home } = await launchedWorker();
+    const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+    const credential = hivePath(worker.worktree!, 'team', 'worker1', 'credential.env');
+    const secret = 'not-a-real-credential-value';
+    await fs.mkdir(path.dirname(credential), { recursive: true });
+    await fs.writeFile(credential, `HIVE_AGENT_CREDENTIAL='${secret}'\n`, { mode: 0o600 });
+    await respawnAgent(root, 'demo', 'worker1');
+    await allowWake(home);
+    await wakeAgent(root, 'demo', 'worker1');
+    expect(await fs.readFile(credential, 'utf8')).toBe(`HIVE_AGENT_CREDENTIAL='${secret}'\n`);
+    expect((await fs.stat(credential)).mode & 0o777).toBe(0o600);
+    expect(vi.mocked(newWindow).mock.calls.every((call) => !call[2].includes(secret))).toBe(true);
+  }, 20_000);
 });
 
 describe('spawn parent', () => {

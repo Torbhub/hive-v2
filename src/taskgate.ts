@@ -1,10 +1,13 @@
 import { paneExists } from './tmux.js';
-import type { Checkpoint, HubTask, TaskEvidence, TaskEvent, TaskReceipt } from './types.js';
+import type { Checkpoint, HubTask, RootContract, TaskEvidence, TaskEvent, TaskReceipt } from './types.js';
 import { CLOSED_STATES, PROGRESS_STATUSES, TASK_EVIDENCE_OUTCOMES, TASK_EVENTS } from './types.js';
 import {
-  Refusal, appendDecision, appendTaskEvent, clearPendingPane, doneBlockers, foldTasks,
-  planDigest, readPendingPane, readTaskEvents, taskEvidenceDigests, validCheckpoints, withHubLock,
+  Refusal, appendDecision, appendTaskEvent, clearPendingPane, contractDigest, doneBlockers, foldTasks,
+  planDigest, readPendingPane, readProjects, readTaskEvents, taskEvidenceDigests, validCheckpoints, validateRootContract,
+  withHubLock, withTeamLock,
 } from './state.js';
+import { assertAdmissionCurrentLocked, revokeTaskAdmissionsLocked, transitionTmuxAdmissionLocked } from './admission.js';
+import { gitDiffScope } from './scope.js';
 
 export type TaskRevalidate = () => Promise<void>;
 
@@ -38,8 +41,11 @@ export function assertLogAllowed(task: HubTask, event: string, checkpoints?: Che
 
 export async function hubLog(
   root: string, id: string, event: string, note?: string, checkpoints?: Checkpoint[], revalidate?: TaskRevalidate,
+  contract?: RootContract,
 ): Promise<void> {
   if (!(TASK_EVENTS as readonly string[]).includes(event)) throw new Error(`unknown task event: ${event}`);
+  if (contract !== undefined && event !== 'plan') throw new Refusal('a root contract belongs on a plan event');
+  if (contract) validateRootContract(contract);
   await withHubLock(root, async () => {
     await revalidate?.();
     const events = await readTaskEvents(root);
@@ -47,7 +53,11 @@ export async function hubLog(
     assertLogAllowed(task, event, checkpoints);
     await appendTaskEvent(root, {
       id, project: task.project, event: event as TaskEvent['event'], at: new Date().toISOString(), note,
-      ...(event === 'plan' ? { checkpoints, plan_digest: planDigest(checkpoints!, note) } : {}),
+      ...(event === 'plan' ? {
+        checkpoints,
+        plan_digest: contract ? contractDigest(contract) : planDigest(checkpoints!, note),
+        ...(contract ? { contract } : {}),
+      } : {}),
     });
     if (event === 'decided') {
       await appendDecision(root, { project: task.project, task: id, by: 'orchestrator', summary: note ?? '' });
@@ -109,6 +119,8 @@ export async function hubResolve(
     const task = storedTask(await readTaskEvents(root), id);
     assertTaskProject(task, project);
     if (CLOSED_STATES.has(task.state)) throw new Refusal(`${id} is already ${task.state}`);
+    const registered = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
+    if (registered) await withTeamLock(registered.home, () => revokeTaskAdmissionsLocked(root, registered.home, id));
     await appendTaskEvent(root, {
       id, project, event: action === 'cancel' ? 'cancelled' : 'asked',
       at: new Date().toISOString(), note: action === 'cancel' ? note || 'cancelled by the owner' : note,
@@ -198,9 +210,44 @@ function assertCurrentBinding(task: HubTask, binding: { actor: string; plan_dige
   if (binding.plan_digest !== task.plan_digest || binding.epoch !== task.lease_epoch) {
     throw new Refusal(`${task.id} receipt has a stale plan digest or epoch`);
   }
-  if (task.receipt_actor && binding.actor !== task.receipt_actor) {
+  if (task.receipt_actor && canonicalActor(binding.actor) !== canonicalActor(task.receipt_actor)) {
     throw new Refusal(`${task.id} receipt actor is stale`);
   }
+}
+
+function canonicalActor(actor: string): string {
+  return actor.startsWith('agent:') ? actor.slice('agent:'.length) : actor;
+}
+
+function allowsLeaseLessFallback(task: HubTask, actor: string): boolean {
+  const canonical = canonicalActor(actor);
+  if ((task.admissions ?? []).some((admission) => admission.agent === canonical)) return false;
+  if (actor.startsWith('agent:')) return !task.contract;
+  if (!task.contract) return true;
+  return ['legacy', 'orchestrator', `${task.project}-orchestrator`].includes(canonical)
+    || canonical.startsWith('user:');
+}
+
+async function assertWorkerBinding(
+  root: string, task: HubTask, binding: { actor: string; lease_id?: string },
+): Promise<void> {
+  const active = (task.admissions ?? []).filter((admission) => !admission.lease_revoked
+    && (admission.status === 'admitted' || admission.status === 'running'));
+  const actor = canonicalActor(binding.actor);
+  const actorAdmission = active.find((admission) => actor === admission.agent);
+  if (!binding.lease_id) {
+    if (!allowsLeaseLessFallback(task, binding.actor)) {
+      throw new Refusal(`${task.id} worker evidence needs a lease ID`);
+    }
+    return;
+  }
+  const admission = active.find((candidate) => candidate.lease_id === binding.lease_id);
+  if (!admission || admission !== actorAdmission) throw new Refusal(`${task.id} worker lease or actor is stale`);
+  const project = (await readProjects(root)).projects.find((candidate) => candidate.name === task.project);
+  if (!project) throw new Refusal(`unknown project: ${task.project}`);
+  await withTeamLock(project.home, async () => {
+    await assertAdmissionCurrentLocked(root, project.home, task.id, admission.agent, admission.lease_id);
+  });
 }
 
 function latestEvidence(events: TaskEvent[], id: string, hash: string): TaskEvidence | undefined {
@@ -219,7 +266,8 @@ function matchingEvidence(
   const matches: TaskEvidence[] = [];
   for (const hash of receipt.evidence_hashes) {
     const evidence = latestEvidence(events, id, hash);
-    if (!evidence || evidence.artifact_digest !== receipt.artifact_digest) return null;
+    if (!evidence || evidence.artifact_digest !== receipt.artifact_digest
+      || evidence.lease_id !== receipt.lease_id) return null;
     const digests = taskEvidenceDigests(evidence.artifact, evidence.content);
     if (evidence.artifact_digest !== digests.artifact_digest || evidence.evidence_hash !== digests.evidence_hash) {
       return null;
@@ -228,7 +276,8 @@ function matchingEvidence(
     if (recovery) {
       if (evidence.plan_digest !== receipt.plan_digest || evidence.epoch !== receipt.epoch) return null;
     } else if (evidence.plan_digest !== task.plan_digest || evidence.epoch !== task.lease_epoch
-      || evidence.actor !== receipt.actor || receipt.actor !== task.receipt_actor) {
+      || canonicalActor(evidence.actor) !== canonicalActor(receipt.actor)
+      || canonicalActor(receipt.actor) !== canonicalActor(task.receipt_actor ?? '')) {
       return null;
     }
     matches.push(evidence);
@@ -254,6 +303,7 @@ export async function recordTaskEvidence(
     const task = storedTask(await readTaskEvents(root), id);
     assertTaskProject(task, options.project);
     assertCurrentBinding(task, input);
+    await assertWorkerBinding(root, task, input);
     const evidence: TaskEvidence = { ...input, ...taskEvidenceDigests(input.artifact, input.content) };
     await appendTaskEvent(root, { id, project: task.project, event: 'evidence', at: new Date().toISOString(), evidence });
     return evidence;
@@ -283,6 +333,7 @@ export async function recordTaskReceipt(
       await options.revalidateReconciler();
     } else {
       assertCurrentBinding(task, receipt);
+      await assertWorkerBinding(root, task, receipt);
     }
     if (receipt.sequence !== (task.last_receipt_sequence ?? 0) + 1) {
       throw new Refusal(`${id} receipt sequence is duplicate or regressive`);
@@ -301,7 +352,21 @@ export type TaskReceiptPredicateConfig = {
   plan_digest: string;
   artifact_digest: string;
   evidence_hashes?: string[];
+  lease_id?: string;
 };
+export type GitDiffScopePredicateConfig = {
+  lease_id: string;
+  base_revision: string;
+  artifact_revision: string;
+};
+export type TaskPredicateConfig = TaskReceiptPredicateConfig | GitDiffScopePredicateConfig;
+
+function currentReceiptLease(task: HubTask, receipt: TaskReceipt, config: TaskReceiptPredicateConfig): boolean {
+  if (!receipt.lease_id) return !config.lease_id && allowsLeaseLessFallback(task, receipt.actor);
+  return config.lease_id === receipt.lease_id && (task.admissions ?? []).some((admission) =>
+    admission.lease_id === receipt.lease_id && !admission.lease_revoked
+    && (admission.status === 'admitted' || admission.status === 'running'));
+}
 
 export const TASK_PREDICATES = {
   task_receipt(events: TaskEvent[], id: string, config: TaskReceiptPredicateConfig): boolean {
@@ -310,7 +375,7 @@ export const TASK_PREDICATES = {
     if (!task || task.lease_revoked || task.state !== 'reconciling' || receipt?.state !== 'reconciling'
       || receipt.plan_digest !== config.plan_digest || receipt.plan_digest !== task.plan_digest
       || receipt.epoch !== task.lease_epoch || receipt.actor !== task.receipt_actor
-      || receipt.artifact_digest !== config.artifact_digest) {
+      || receipt.artifact_digest !== config.artifact_digest || !currentReceiptLease(task, receipt, config)) {
       return false;
     }
     if (!matchingEvidence(events, id, receipt, task, false)) return false;
@@ -318,12 +383,65 @@ export const TASK_PREDICATES = {
   },
 };
 
+async function evaluateGitDiffScope(root: string, id: string, config: GitDiffScopePredicateConfig): Promise<boolean> {
+  return withHubLock(root, async () => {
+    const task = storedTask(await readTaskEvents(root), id);
+    const admission = task.admissions?.find((candidate) => candidate.lease_id === config.lease_id);
+    if (!admission || !task.contract?.acceptance.some((acceptance) => acceptance.predicate_id === 'git_diff_scope'
+      && admission.acceptance_ids.includes(acceptance.id))) {
+      throw new Refusal(`${id} has no registered git_diff_scope allocation for this lease`);
+    }
+    if (config.base_revision !== admission.provenance.base_revision
+      || config.artifact_revision !== admission.provenance.artifact_revision) {
+      throw new Refusal('git_diff_scope revisions do not match the admitted provenance');
+    }
+    const project = (await readProjects(root)).projects.find((candidate) => candidate.name === task.project);
+    if (!project) throw new Refusal(`unknown project: ${task.project}`);
+    return withTeamLock(project.home, async () => {
+      const { entry } = await assertAdmissionCurrentLocked(root, project.home, id, admission.agent, admission.lease_id);
+      const result = await gitDiffScope({
+        repository: entry.worktree || project.home,
+        base_revision: config.base_revision,
+        artifact_revision: config.artifact_revision,
+        write_scope: admission.write_scope,
+        runtime: {
+          files: admission.runtime_files,
+          team_state_hash: admission.team_state_hash,
+          handoff_path: admission.handoff_path,
+          handoff_digest: admission.handoff_digest,
+          launch_claim_path: admission.launch_claim_path,
+          launch_claim_digest: admission.launch_claim_digest,
+          launch_claim_completed: admission.launch_claim_completed,
+          output_claim: admission.output_claim,
+        },
+      }).catch(async (error: unknown) => {
+        await transitionTmuxAdmissionLocked(root, project.home, admission, 'released', 'git_diff_scope adapter error');
+        throw error;
+      });
+      const digests = taskEvidenceDigests(result.changes, result);
+      await appendTaskEvent(root, {
+        id, project: task.project, event: 'evidence', at: new Date().toISOString(),
+        evidence: {
+          actor: `agent:${admission.agent}`, plan_digest: admission.plan_digest, epoch: admission.root_lease_epoch,
+          outcome: result.passed ? 'passed' : 'failed', lease_id: admission.lease_id,
+          artifact: result.changes, content: result, ...digests,
+        },
+      });
+      if (!result.passed) {
+        await transitionTmuxAdmissionLocked(root, project.home, admission, 'released', 'out-of-scope Git changes');
+      }
+      return result.passed;
+    });
+  });
+}
+
 export async function evaluateTaskPredicate(
-  root: string, id: string, predicate: keyof typeof TASK_PREDICATES, config: TaskReceiptPredicateConfig,
+  root: string, id: string, predicate: keyof typeof TASK_PREDICATES | 'git_diff_scope', config: TaskPredicateConfig,
 ): Promise<boolean> {
+  if (predicate === 'git_diff_scope') return evaluateGitDiffScope(root, id, config as GitDiffScopePredicateConfig);
   const evaluate = TASK_PREDICATES[predicate];
   if (!evaluate) throw new Refusal(`unknown task predicate: ${predicate}`);
-  return evaluate(await readTaskEvents(root), id, config);
+  return evaluate(await readTaskEvents(root), id, config as TaskReceiptPredicateConfig);
 }
 
 // A pending-pane record older than this is a crashed start, not a live one.
@@ -343,11 +461,13 @@ export async function settlePendingPane(root: string, project: string): Promise<
 // The cli's log/progress/accept handler; argument counts are checked by the caller.
 export async function ledgerCommand(root: string, sub: string, args: string[]): Promise<string> {
   if (sub === 'log') {
-    const ci = args.indexOf('--checkpoints');
-    const pos = ci === -1 ? args : args.filter((_, i) => i !== ci && i !== ci + 1);
+    const checkpointIndex = args.indexOf('--checkpoints');
+    const contractIndex = args.indexOf('--contract');
+    const flagIndexes = [checkpointIndex, contractIndex].filter((index) => index >= 0);
+    const pos = args.filter((_, index) => !flagIndexes.includes(index) && !flagIndexes.includes(index - 1));
     let checkpoints: Checkpoint[] | undefined;
-    if (ci !== -1) {
-      const raw = args[ci + 1];
+    if (checkpointIndex !== -1) {
+      const raw = args[checkpointIndex + 1];
       if (raw === undefined || raw.startsWith('--')) throw new Refusal('--checkpoints needs a value');
       try {
         checkpoints = JSON.parse(raw) as Checkpoint[];
@@ -355,7 +475,17 @@ export async function ledgerCommand(root: string, sub: string, args: string[]): 
         throw new Refusal('--checkpoints is a JSON array of {"id","desc","etaMin"}');
       }
     }
-    await hubLog(root, pos[0], pos[1], pos.length > 2 ? pos.slice(2).join(' ') : undefined, checkpoints);
+    let contract: RootContract | undefined;
+    if (contractIndex !== -1) {
+      const raw = args[contractIndex + 1];
+      if (raw === undefined || raw.startsWith('--')) throw new Refusal('--contract needs a value');
+      try {
+        contract = JSON.parse(raw) as RootContract;
+      } catch {
+        throw new Refusal('--contract is a JSON root contract');
+      }
+    }
+    await hubLog(root, pos[0], pos[1], pos.length > 2 ? pos.slice(2).join(' ') : undefined, checkpoints, undefined, contract);
     return '';
   }
   const [task, checkpoint, status, ...note] = args;

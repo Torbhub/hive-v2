@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PROJECT_NAME_RE } from './names.js';
 import {
-  hubPath, readPendingPane, readProjects, readTeam, Refusal, withHubLock, writeJson, writeProjects, type ProjectsFile,
+  hubPath, readPendingPane, readProjects, readTeam, Refusal, valueDigest, withHubLock, writeJson, writeProjects, type ProjectsFile,
 } from './state.js';
 import { APPROVALS_MODES, PROJECT_MODES } from './types.js';
 import type { Approvals, ProjectMode } from './types.js';
@@ -268,15 +268,17 @@ async function hasLaunchClaim(root: string, name: string): Promise<boolean> {
 export async function withLaunchClaim<T>(
   root: string,
   name: string,
-  fn: (project: ProjectEntry) => Promise<T>,
+  fn: (project: ProjectEntry, claim: string, digest: string) => Promise<T>,
 ): Promise<T> {
   const file = hubPath(root, 'launches', `${name}:${randomUUID()}.json`);
+  let digest = '';
   const project = await withProjectLock(root, name, async (registered) => {
     await writeJson(file, { project: name, at: new Date().toISOString() });
+    digest = valueDigest(await fs.readFile(file, 'utf8'));
     return registered;
   });
   try {
-    return await fn(project);
+    return await fn(project, path.relative(root, file).split(path.sep).join('/'), digest);
   } finally {
     await fs.rm(file, { force: true });
   }

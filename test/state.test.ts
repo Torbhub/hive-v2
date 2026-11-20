@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  appendDecision, hivePath, manifestRead, readDecisions, readJson, readProjects, withTeamLock, writeJson, writeProjects,
+  appendDecision, hivePath, manifestRead, readDecisions, readJson, readProjects, releaseDirLock, withTeamLock,
+  writeJson, writeProjects,
 } from '../src/state.js';
 
 function tmp(): string {
@@ -46,15 +47,35 @@ describe('manifestRead', () => {
 });
 
 describe('withTeamLock', () => {
-  it('breaks a lock older than the staleness window', async () => {
+  it('does not steal a stale lock from its owner', async () => {
     const home = tmp();
     const lock = hivePath(home, 'team.json.lock');
     await fs.mkdir(lock, { recursive: true });
+    await writeJson(path.join(lock, 'owner.json'), { token: 'owner' });
     const old = new Date(Date.now() - 20 * 60_000);
     await fs.utimes(lock, old, old);
-    await expect(withTeamLock(home, async () => 'ran')).resolves.toBe('ran');
-    await expect(fs.stat(lock)).rejects.toThrow();
+    await expect(withTeamLock(home, async () => 'ran', { waitMs: 50 })).rejects.toThrow(/locked/);
+    expect(await readJson(path.join(lock, 'owner.json'))).toEqual({ token: 'owner' });
+    await releaseDirLock(lock, 'owner');
   });
+
+  it('lets only the current owner generation release through a successor and third waiter', async () => {
+    const home = tmp();
+    const lock = hivePath(home, 'team.json.lock');
+    await fs.mkdir(lock, { recursive: true });
+    await writeJson(path.join(lock, 'owner.json'), { token: 'old' });
+    await releaseDirLock(lock, 'old');
+    await fs.mkdir(lock);
+    await writeJson(path.join(lock, 'owner.json'), { token: 'new' });
+    let settled = false;
+    const third = withTeamLock(home, async () => 'third', { waitMs: 250 }).finally(() => { settled = true; });
+    await releaseDirLock(lock, 'old');
+    expect(await readJson(path.join(lock, 'owner.json'))).toEqual({ token: 'new' });
+    expect(settled).toBe(false);
+    await releaseDirLock(lock, 'new');
+    await expect(third).resolves.toBe('third');
+  });
+
   it('waits on a fresh lock instead of breaking it', async () => {
     const home = tmp();
     await fs.mkdir(hivePath(home, 'team.json.lock'), { recursive: true });
@@ -62,6 +83,24 @@ describe('withTeamLock', () => {
     setTimeout(() => fs.rmdir(hivePath(home, 'team.json.lock')).catch(() => {}), 300);
     await expect(withTeamLock(home, async () => 'ran')).resolves.toBe('ran');
     expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+  });
+
+  it('keeps a live stalled holder exclusive beyond the stale interval', async () => {
+    const home = tmp();
+    let release!: () => void;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const first = withTeamLock(home, async () => {
+      started();
+      await new Promise<void>((resolve) => { release = resolve; });
+      return 'first';
+    }, { staleMs: 50 });
+    await entered;
+    const second = withTeamLock(home, async () => 'second', { staleMs: 50, waitMs: 250 });
+    await expect(second).rejects.toThrow(/locked/);
+    release();
+    await expect(first).resolves.toBe('first');
+    await expect(withTeamLock(home, async () => 'third')).resolves.toBe('third');
   });
 });
 

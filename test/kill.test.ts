@@ -172,7 +172,27 @@ describe('killAgent one agent', () => {
     const r = await killAgent(root, 'demo', 'builder');
     expect(r.killed).toEqual(['builder']);
     expect(vi.mocked(killWindow).mock.calls.map((c) => c[0])).toEqual(['%2']);
-    expect((await readTeam(home)).agents.map((a) => a.name)).toEqual(['demo-orchestrator', 'fixer', 'lone']);
+    const team = await readTeam(home);
+    expect(team.agents.map((a) => a.name)).toEqual(['demo-orchestrator', 'fixer', 'lone']);
+    expect(team.agents[0].closed_at).toBeUndefined();
+  });
+
+  it('revokes a tasked lease before killing without clearing maintenance or lineage fields', async () => {
+    const compaction = { session_id: 'session_b', status: 'submitted' as const, at: '2026-11-20T00:00:00Z', attempts: 1 };
+    const { root, home } = await setup([{
+      name: 'builder', task: 'demo-1', pane: '%2', pane_pid: 2, pane_started: 'y',
+      lease_id: 'lease-1', lease_epoch: 1, plan_digest: 'plan', root_lease_epoch: 1,
+      lineage_id: 'lineage-1', attempts_used: 2, compaction,
+    }]);
+    let atKill: Record<string, unknown> | undefined;
+    vi.mocked(killWindow).mockImplementationOnce(async () => {
+      atKill = (await readTeam(home)).agents[0] as unknown as Record<string, unknown>;
+    });
+    await killAgent(root, 'demo', 'builder');
+    expect(atKill).toMatchObject({
+      lease_revoked: true, admission_status: 'revoked', closed_at: expect.any(String),
+      lease_id: 'lease-1', lineage_id: 'lineage-1', attempts_used: 2, compaction,
+    });
   });
 
   it('refuses a bare name that matches two agents, takes name@worktree', async () => {

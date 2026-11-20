@@ -4,9 +4,10 @@ import { answerCacheExpiry, cacheExpiryChoice, type CacheExpiryChoice } from './
 import { wireActivityAt } from './death-bundle.js';
 import { maybeDaydreamAutomation } from './daydream-automation.js';
 import { checkName } from './names.js';
-import { appendDecision, hivePath, readProjects, readTeam, withTeamLock, writeJson } from './state.js';
+import { appendDecision, compareAndSwapTeamEntry, compareAndSwapTeamEntryLocked, readProjects, readTeam, withTeamLock } from './state.js';
 import { classify, isNativeQuestion, lines } from './screen.js';
 import { PreInputError, typeLine } from './spawn.js';
+import { withTmuxGrant } from './admission.js';
 import { capturePane } from './tmux.js';
 import type { CompactionState, DaydreamAutomationOptions, TeamEntry } from './types.js';
 
@@ -55,11 +56,10 @@ async function writeTransition(
 ): Promise<boolean> {
   return withTeamLock(home, async () => {
     const team = await readTeam(home);
-    const i = workerIndex(team, agent);
-    if (i < 0 || team.agents[i].session_id !== agent.session_id || !sameState(team.agents[i].compaction, expected)) return false;
-    team.agents[i] = { ...team.agents[i], compaction: next };
-    await writeJson(hivePath(home, 'team.json'), team);
-    return true;
+    const index = workerIndex(team, agent);
+    if (index < 0 || team.agents[index].session_id !== agent.session_id
+      || !sameState(team.agents[index].compaction, expected)) return false;
+    return await compareAndSwapTeamEntryLocked(home, team.agents[index], { compaction: next }) !== undefined;
   });
 }
 
@@ -159,41 +159,44 @@ async function normalizeLegacy(home: string, agent: TeamEntry, current: LegacySt
 }
 
 async function deliverClaimed(
-  root: string, project: string, home: string, agent: TeamEntry,
-  team: { agents: TeamEntry[] }, index: number, claimed: CompactionState, command: string | null,
-  state: ScreenState, fallback: CacheExpiryChoice | null,
+  root: string, project: string, home: string, agent: TeamEntry, claimedEntry: TeamEntry,
+  claimed: CompactionState, command: string | null, state: ScreenState, fallback: CacheExpiryChoice | null,
 ): Promise<string> {
-  team.agents[index] = { ...team.agents[index], compaction: claimed };
-  await writeJson(hivePath(home, 'team.json'), team);
-  let next: CompactionState;
-  let summary: string;
-  try {
-    if (fallback) {
-      const answered = await answerCacheExpiry(agent, fallback);
-      next = answered ? { ...claimed, status: 'submitted' } : ambiguous(claimed, Date.parse(claimed.at), 'cache dialog answer is unconfirmed');
-      summary = answered ? 'submitted auto-compaction' : 'auto-compaction is ambiguous';
-    } else {
-      await typeLine(
-        agent.pane!, command!, { pid: agent.pane_pid ?? 0, started: agent.pane_started ?? '' },
-        (raw) => compactionScreenGuard(agent.pane!, raw),
-      );
-      next = { ...claimed, status: state === 'working' ? 'queued' : 'submitted' };
-      summary = `${next.status === 'queued' ? 'queued' : 'submitted'} auto-compaction`;
+  const deliver = async () => {
+    let next: CompactionState;
+    let summary: string;
+    try {
+      if (fallback) {
+        const answered = await answerCacheExpiry(agent, fallback);
+        next = answered ? { ...claimed, status: 'submitted' } : ambiguous(claimed, Date.parse(claimed.at), 'cache dialog answer is unconfirmed');
+        summary = answered ? 'submitted auto-compaction' : 'auto-compaction is ambiguous';
+      } else {
+        await typeLine(
+          agent.pane!, command!, { pid: agent.pane_pid ?? 0, started: agent.pane_started ?? '' },
+          (raw) => compactionScreenGuard(agent.pane!, raw),
+        );
+        next = { ...claimed, status: state === 'working' ? 'queued' : 'submitted' };
+        summary = `${next.status === 'queued' ? 'queued' : 'submitted'} auto-compaction`;
+      }
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      if (e instanceof PreInputError) {
+        next = preInputFailure(claimed, Date.parse(claimed.at), detail);
+        summary = 'auto-compaction failed before input';
+      } else {
+        next = ambiguous(claimed, Date.parse(claimed.at), detail);
+        summary = 'auto-compaction is ambiguous';
+      }
     }
-  } catch (e) {
-    const detail = e instanceof Error ? e.message : String(e);
-    if (e instanceof PreInputError) {
-      next = preInputFailure(claimed, Date.parse(claimed.at), detail);
-      summary = 'auto-compaction failed before input';
-    } else {
-      next = ambiguous(claimed, Date.parse(claimed.at), detail);
-      summary = 'auto-compaction is ambiguous';
-    }
-  }
-  team.agents[index] = { ...team.agents[index], compaction: next };
-  await writeJson(hivePath(home, 'team.json'), team);
-  await appendDecision(root, { project, by: 'watch', summary: `${summary} for ${project}/${agent.name}` });
-  return summary;
+    if (agent.task && agent.lease_id) await compareAndSwapTeamEntryLocked(home, claimedEntry, { compaction: next });
+    else await compareAndSwapTeamEntry(home, claimedEntry, { compaction: next });
+    await appendDecision(root, { project, by: 'watch', summary: `${summary} for ${project}/${agent.name}` });
+    return summary;
+  };
+  if (!agent.task || !agent.lease_id) return deliver();
+  const registered = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
+  if (!registered) throw new Error(`unknown project: ${project}`);
+  return withTmuxGrant(root, registered.home, agent.task, agent.name, agent.lease_id, deliver);
 }
 
 async function screenDeliveryGuard(
@@ -224,11 +227,11 @@ async function deliverSerialized(
 ): Promise<string | null> {
   const sessionId = agent.session_id;
   if (!sessionId) return null;
-  const result = await withTeamLock(home, async (): Promise<string | CompactionState | null> => {
+  const claim = async (reserve = true): Promise<{ entry: TeamEntry; state: CompactionState } | null> => withTeamLock(home, async () => {
     const team = await readTeam(home);
-    const i = workerIndex(team, agent);
-    if (i < 0 || team.agents[i].auto_compact === false) return null;
-    const currentWorker = team.agents[i];
+    const index = workerIndex(team, agent);
+    if (index < 0 || team.agents[index].auto_compact === false) return null;
+    const currentWorker = team.agents[index];
     if (currentWorker.closed_at || currentWorker.session_id !== sessionId || currentWorker.pane !== agent.pane) return null;
     const current = currentWorker.compaction;
     if (expected) {
@@ -237,34 +240,22 @@ async function deliverSerialized(
       const epoch = current.activity_at ?? Number.POSITIVE_INFINITY;
       if (!rearmed || !terminal(current) || (sending.activity_at ?? 0) <= epoch) return null;
     }
-
     const raw = await capturePane(agent.pane!);
     if (raw === null || !await screenDeliveryGuard(sessionId, sending, originalRaw, state, fallback, rearmed, raw)) return null;
-
     const claimed = { ...sending, rejection_before: rejectionCount(raw), completion_before: completionCount(raw) };
-    if (beforeSend) return claimed;
-    return deliverClaimed(root, project, home, agent, team, i, claimed, command, state, fallback);
+    const entry = reserve ? await compareAndSwapTeamEntryLocked(home, currentWorker, { compaction: claimed }) : currentWorker;
+    return entry ? { entry, state: claimed } : null;
   });
-  if (result === null || typeof result === 'string') return result;
 
-  await beforeSend!();
-  return withTeamLock(home, async () => {
-    const team = await readTeam(home);
-    const i = workerIndex(team, agent);
-    if (i < 0 || team.agents[i].auto_compact === false) return null;
-    const currentWorker = team.agents[i];
-    if (currentWorker.closed_at || currentWorker.session_id !== sessionId || currentWorker.pane !== agent.pane) return null;
-    const current = currentWorker.compaction;
-    if (expected) {
-      if (!sameState(current, expected)) return null;
-    } else if (current && current.session_id === sessionId) {
-      const epoch = current.activity_at ?? Number.POSITIVE_INFINITY;
-      if (!rearmed || !terminal(current) || (result.activity_at ?? 0) <= epoch) return null;
-    }
-    const raw = await capturePane(agent.pane!);
-    if (raw === null || !await screenDeliveryGuard(sessionId, result, originalRaw, state, fallback, rearmed, raw)) return null;
-    return deliverClaimed(root, project, home, agent, team, i, result, command, state, fallback);
-  });
+  const first = await claim(!beforeSend);
+  if (!first) return null;
+  if (beforeSend) {
+    await beforeSend();
+    const second = await claim();
+    if (!second) return null;
+    return deliverClaimed(root, project, home, agent, second.entry, second.state, command, state, fallback);
+  }
+  return deliverClaimed(root, project, home, agent, first.entry, first.state, command, state, fallback);
 }
 
 export async function maybeCompact(
@@ -350,8 +341,7 @@ export async function setAutoCompact(
     if (matches.length > 1) throw new Error(`${project} has several agents named ${name}; say which: ${name}@<worktree>`);
     const i = matches.length === 1 ? team.agents.indexOf(matches[0]) : -1;
     if (i < 0) throw new Error(`${project} has no agent named ${agentRef ?? `${project}-orchestrator`}`);
-    team.agents[i] = { ...team.agents[i], auto_compact: enabled };
-    await writeJson(hivePath(p.home, 'team.json'), team);
+    await compareAndSwapTeamEntryLocked(p.home, team.agents[i], { auto_compact: enabled });
     await appendDecision(root, {
       project, by: 'owner', summary: `${enabled ? 'enabled' : 'disabled'} auto-compaction for ${project}/${team.agents[i].name}`,
     });

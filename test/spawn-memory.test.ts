@@ -16,6 +16,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     run: vi.fn(async () => ({ code: 0, stdout: '', stderr: '' })),
     newWindow: vi.fn(async () => '%9'),
     paneIdentity: vi.fn(async () => ({ pid: 4242, started: 'later' })),
+    paneExists: vi.fn(async () => true),
     paneIs: vi.fn(async () => true),
     capturePane: vi.fn(async () => IDLE),
     sendLiteral: vi.fn(async () => {}),
@@ -35,7 +36,8 @@ vi.mock('../src/memory.js', async (importOriginal) => {
 
 import { spawnAgent } from '../src/spawn.js';
 import { hubAdd, hubInit, hubTask } from '../src/hub.js';
-import { appendTaskEvent, hivePath, writeJson } from '../src/state.js';
+import { hivePath, writeJson } from '../src/state.js';
+import { approveContract, taskContract } from './task-contract.js';
 
 function spawn(root: string, opts: Parameters<typeof spawnAgent>[2]): Promise<string> {
   return spawnAgent(root, 'demo', {
@@ -57,13 +59,9 @@ async function setup() {
 
 async function approvedTask(root: string, text: string): Promise<string> {
   const id = await hubTask(root, 'demo', text);
-  await appendTaskEvent(root, {
-    id, project: 'demo', event: 'plan', at: new Date().toISOString(), note: 'the plan',
-    checkpoints: [{ id: 'c1', desc: 'the step', etaMin: 5 }],
-  });
-  await appendTaskEvent(root, {
-    id, project: 'demo', event: 'answered', at: new Date().toISOString(), note: 'plan approved by owner',
-  });
+  await approveContract(root, id, taskContract(
+    path.join(root, 'demo'), [], 'Return the named artifact and verification evidence to the orchestrator.',
+  ));
   return id;
 }
 

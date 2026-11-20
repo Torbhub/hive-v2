@@ -1,7 +1,9 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { killWindow, paneExists, paneIs, processStartTime, run, type PaneIdentity } from './tmux.js';
-import { hivePath, manifestRead, manifestWrite, readProjects, readTeam, upsertTeamEntry, type ManifestRecord } from './state.js';
+import { compareAndSwapTeamEntry, hivePath, manifestRead, manifestWrite, readProjects, readTeam, type ManifestRecord } from './state.js';
+import { revokeTmuxAdmission } from './admission.js';
+import type { TeamEntry } from './types.js';
 
 export type CleanupAction = { record: ManifestRecord; action: string; acted: boolean };
 
@@ -42,16 +44,25 @@ export async function cleanupProject(
       if (!dryRun) {
         // Stamp the intent before the kill so watch never reads it as a crash.
         const team = await readTeam(p.home);
-        const stamped = team.agents.filter((x) => x.pane === pane).map((x) => x.name);
-        for (const name of stamped) {
-          await upsertTeamEntry(p.home, { name, closed_at: new Date().toISOString() });
+        const stamped: TeamEntry[] = [];
+        for (const entry of team.agents.filter((candidate) => candidate.pane === pane)) {
+          const updated = await compareAndSwapTeamEntry(p.home, entry, {
+            closed_at: new Date().toISOString(),
+            ...(entry.task ? { lease_revoked: true, admission_status: 'revoked' as const } : {}),
+          });
+          if (updated) {
+            stamped.push(updated);
+            if (entry.task) await revokeTmuxAdmission(root, p.home, updated);
+          }
         }
         try {
           await killWindow(pane, identity);
         } catch (e) {
           // The pane survived; a surviving stamp would hide it from the watch.
-          for (const name of stamped) {
-            await upsertTeamEntry(p.home, { name, closed_at: undefined });
+          for (const entry of stamped) {
+            const current = entry.lease_id === undefined ? entry
+              : (await readTeam(p.home)).agents.find((candidate) => candidate.lease_id === entry.lease_id);
+            if (current) await compareAndSwapTeamEntry(p.home, current, { closed_at: undefined });
           }
           throw e;
         }

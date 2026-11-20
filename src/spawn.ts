@@ -9,12 +9,15 @@ import {
 } from './tmux.js';
 import { classify, lines, parseDialog } from './screen.js';
 import {
-  appendDecision, foldTasks, hivePath, hubPath, manifestAdd, readProjects, readTaskEvents, readTeam,
-  removeTeamEntry, upsertTeamEntry, clearPendingPane, withTeamLock, writeJson, type ProjectsFile,
+  appendDecision, compareAndSwapTeamEntry, foldTasks, hivePath, hubPath, insertTeamEntry, manifestAdd,
+  readProjects, readTaskEvents, readTeam, clearPendingPane, valueDigest, withTeamLock, type ProjectsFile,
 } from './state.js';
-import type { Approvals, ProjectMode, TeamEntry } from './types.js';
+import type { Approvals, ProjectMode, TeamEntry, TmuxAdmission } from './types.js';
 import { withLaunchClaim, withProjectLock } from './project.js';
-import { checkTaskScope } from './scope.js';
+import {
+  admitTmux, assertTmuxGrant, completeTmuxLaunch, recordTmuxLaunchOutcome, registerTmuxLaunch, withTmuxGrant,
+} from './admission.js';
+import { taskScope } from './scope.js';
 import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 import { assertEntryAlive, killEntry, recordedIdentity } from './kill.js';
 import { requireAgentCredential } from './collaboration-credentials.js';
@@ -207,6 +210,7 @@ export async function launchWindow(
   sessionId?: string,
   mode: LaunchMode = 'ask',
   model?: string,
+  beforeWindow?: () => Promise<void>,
 ): Promise<{ pane: string; identity: PaneIdentity }> {
   await assertExecutionAllowed(root, project);
   // HIVE_AGENT names the pane's own agent: a `hive spawn` run inside the pane
@@ -218,6 +222,7 @@ export async function launchWindow(
   const credentialFile = process.env.HIVE_COLLABORATION_ENABLED === '1'
     ? `HIVE_COLLABORATION_ENABLED=1 HIVE_AGENT_REF=${quote(`${agent}@${cwd}`)} HIVE_AGENT_CREDENTIAL= HIVE_AGENT_CREDENTIAL_FILE=${quote(hivePath(cwd, 'team', agent, 'credential.env'))} ` : '';
   await assertExecutionAllowed(root, project);
+  await beforeWindow?.();
   const pane = await newWindow(
     windowName(project, agent),
     cwd,
@@ -225,12 +230,74 @@ export async function launchWindow(
   );
   const deadline = Date.now() + 15_000;
   let identity: PaneIdentity | null = null;
-  while (Date.now() < deadline) {
-    identity = await paneIdentity(pane);
-    if (identity) return { pane, identity };
-    await sleep(500);
+  try {
+    while (Date.now() < deadline) {
+      identity = await paneIdentity(pane);
+      if (identity) return { pane, identity };
+      await sleep(500);
+    }
+  } catch (error) {
+    await killWindow(pane, identity ?? undefined).catch((cleanupError: unknown) => {
+      const detail = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      throw new Error(`new pane cleanup failed: ${detail}`, { cause: error });
+    });
+    throw error;
   }
+  await killWindow(pane).catch((cleanupError: unknown) => {
+    const detail = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+    throw new Error(`new pane cleanup failed: ${detail}`);
+  });
   throw new Error(`pane ${pane} never got a process identity`);
+}
+
+async function hashRuntimeDirectory(worktree: string, relative: string, runtime_files: Record<string, string>): Promise<void> {
+  const entries = await fs.readdir(path.join(worktree, relative), { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const child = path.posix.join(relative, entry.name);
+    if (child === '.hive-hub/launches') continue;
+    if (entry.isDirectory()) await hashRuntimeDirectory(worktree, child, runtime_files);
+    else if (entry.isFile()) runtime_files[child] = valueDigest(await fs.readFile(path.join(worktree, child), 'utf8'));
+  }
+}
+
+async function launchRuntimeEvidence(
+  worktree: string, agent: string, handoff: string, launchClaim: string, launchClaimDigest: string,
+) {
+  const runtime_files: Record<string, string> = {};
+  for (const relative of [`team/${agent}/role.md`, `team/${agent}/RULES.md`, `team/${agent}/agent.md`, `team/${agent}/credential.env`]) {
+    const content = await fs.readFile(hivePath(worktree, relative), 'utf8').catch(() => null);
+    if (content !== null) runtime_files[`.hive/${relative}`] = valueDigest(content);
+  }
+  await hashRuntimeDirectory(worktree, '.hive-hub', runtime_files);
+  const claim = await fs.readFile(path.join(worktree, launchClaim), 'utf8').catch(() => null);
+  return {
+    runtime_files,
+    launch_claim_path: launchClaim,
+    launch_claim_digest: launchClaimDigest,
+    launch_claim_in_worktree: claim !== null,
+    launch_claim_completed: false,
+    handoff_path: path.relative(worktree, handoff).split(path.sep).join('/'),
+    handoff_digest: valueDigest(await fs.readFile(handoff, 'utf8')),
+  };
+}
+
+async function captureTeamStateHash(home: string, worktree: string): Promise<string | undefined> {
+  return withTeamLock(home, async () => {
+    const content = await fs.readFile(hivePath(worktree, 'team.json'), 'utf8').catch(() => null);
+    return content === null ? undefined : valueDigest(content);
+  });
+}
+
+type LaunchResult = { pane: string; identity: PaneIdentity; home: string; worktree: string; admission?: TmuxAdmission };
+
+async function finishLaunch(root: string, claim: string, result: LaunchResult): Promise<void> {
+  if (!result.admission) {
+    await fs.rm(path.join(result.worktree, claim), { force: true });
+    return;
+  }
+  await completeTmuxLaunch(
+    root, result.home, result.admission.task, result.admission.agent, result.admission.lease_id, result.worktree, claim,
+  );
 }
 
 // Agents share a cwd, so a session counts only when its first prompt is that agent's pickup line.
@@ -275,12 +342,38 @@ async function projectEntry(root: string, project: string): Promise<ProjectsFile
   return p;
 }
 
-// Workers never launch on a task whose plan the owner has not approved.
-async function requireApprovedPlan(root: string, task: string): Promise<void> {
-  const t = foldTasks(await readTaskEvents(root)).find((x) => x.id === task);
-  if (!t?.plan_approved) {
-    throw new Error(`${task} has no approved plan; the owner approves the plan before workers spawn`);
+async function admissionRequest(
+  root: string, taskId: string, outputClaim: string, old?: TeamEntry,
+): Promise<Parameters<typeof admitTmux>[4]> {
+  const project = taskId.replace(/-\d+$/, '');
+  if (!new RegExp(`^${project}-\\d+$`).test(taskId) || project.includes('/')) {
+    throw new Error(`a task id is ${project}-<n>: ${taskId}`);
   }
+  const brief = await fs.readFile(hubPath(root, 'tasks', `${taskId}.md`), 'utf8').catch(() => null);
+  if (brief === null) throw new Error(`no task file for ${taskId}`);
+  const parsedScope = taskScope(brief);
+  if (parsedScope.kind === 'invalid') throw new Error(`${taskId}: ${parsedScope.why}; fix the brief before spawning on it`);
+  const task = foldTasks(await readTaskEvents(root)).find((candidate) => candidate.id === taskId);
+  if (!task?.plan_approved) {
+    throw new Error(`${taskId} has no approved plan; the owner approves the plan before workers spawn`);
+  }
+  if (!task.contract || !task.plan_digest) throw new Error(`${taskId} has no current root contract grant`);
+  return {
+    parent_id: taskId,
+    plan_digest: task.plan_digest,
+    output_claim: old?.output_claim ?? outputClaim,
+    acceptance_ids: old?.acceptance_ids ?? task.contract.acceptance.map((acceptance) => acceptance.id),
+    provenance: old?.provenance ?? task.contract.provenance,
+    write_scope: old?.write_scope ?? task.contract.write_scope,
+    adapter: 'tmux',
+    budget: { depth: 1, attempts: task.contract.budget.attempts },
+    ...(old ? {
+      retry_of: old.name,
+      retry_lease_id: old.lease_id,
+      retry_plan_digest: old.plan_digest,
+      lineage_id: old.lineage_id,
+    } : {}),
+  };
 }
 
 export type WorkerContract = { assignment: string; deliverable: string };
@@ -391,68 +484,61 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   checkWorkerContract(opts);
   checkModel(opts.model);
   await preflight();
-  return withLaunchClaim(root, project, (p) => spawnRegisteredAgent(root, p, opts));
+  const launched = await withLaunchClaim(root, project,
+    (p, launchClaim, launchClaimDigest) => spawnRegisteredAgent(root, p, opts, launchClaim, launchClaimDigest));
+  return launched.pane;
 }
 
 async function spawnRegisteredAgent(
   root: string,
   p: ProjectsFile['projects'][number],
   opts: SpawnOptions,
-): Promise<string> {
+  launchClaim: string,
+  launchClaimDigest: string,
+): Promise<LaunchResult> {
   const { agent, role = 'implementer' } = opts;
   const project = p.name;
   const home = p.home;
-  const team = await readTeam(home);
-  if (team.agents.some((a) => a.name === agent)) {
+  if ((await readTeam(home)).agents.some((entry) => entry.name === agent)) {
     throw new Error(`${project} already has an agent named ${agent} (close or respawn it)`);
   }
-  // Claim the scope and the name in one lock: two concurrent spawns on
-  // overlapping tasks must not both pass the check.
   const task = opts.task;
-  if (task) {
-    // The lock lives in .hive/, which a first spawn has not created yet.
-    await fs.mkdir(hivePath(home), { recursive: true });
-    await withTeamLock(home, async () => {
-      const fresh = await readTeam(home);
-      if (fresh.agents.some((a) => a.name === agent)) {
-        throw new Error(`${project} already has an agent named ${agent} (close or respawn it)`);
-      }
-      await checkTaskScope(root, project, home, task);
-      await requireApprovedPlan(root, task);
-      await writeJson(hivePath(home, 'team.json'), { agents: [...fresh.agents, { name: agent, task }] });
-    });
-  }
+  const worktree = opts.worktree ? path.resolve(home, opts.worktree) : hivePath(home, 'lanes', agent);
+  const parent = opts.parent ?? envParent(agent);
+  const model = opts.model ?? DEFAULT_MODEL;
+  const admission = task ? await admitTmux(
+    root, home, task, agent, await admissionRequest(root, task, opts.deliverable!),
+    { parent, worktree, model },
+  ) : undefined;
 
-  let pane: string;
-  let identity: PaneIdentity;
-  let worktree: string;
+  let launched: { pane: string; identity: PaneIdentity } | null = null;
+  let registered: TeamEntry | undefined;
   let jjLane: { name: string; path: string } | null = null;
   let hookInstallFailed = false;
   try {
-    const wt = opts.worktree ? path.resolve(home, opts.worktree) : hivePath(home, 'lanes', agent);
     // Neither jj workspace add nor git worktree add creates missing parent dirs.
-    await fs.mkdir(path.dirname(wt), { recursive: true });
+    await fs.mkdir(path.dirname(worktree), { recursive: true });
     // jj root answers only inside a jj repo; a failure tries git next.
     const jjRepo = (await run('jj', ['root'], home)).code === 0;
     const plainFolder = !opts.worktree && !jjRepo &&
       (await run('git', ['rev-parse', '--is-inside-work-tree'], home)).code !== 0;
     if (jjRepo) {
       const base = await jjBaseRev(home);
-      const existed = existsSync(wt);
-      const made = await run('jj', ['-R', home, 'workspace', 'add', wt, '-r', base], home);
+      const existed = existsSync(worktree);
+      const made = await run('jj', ['-R', home, 'workspace', 'add', worktree, '-r', base], home);
       if (made.code !== 0) {
         // jj can register the workspace and create the dir yet still fail.
-        if (!existed && existsSync(wt)) await undoJjWorkspace(home, path.basename(wt), wt);
+        if (!existed && existsSync(worktree)) await undoJjWorkspace(home, path.basename(worktree), worktree);
         throw new Error(`jj workspace add failed: ${made.stderr.trim()}`);
       }
-      jjLane = { name: path.basename(wt), path: wt };
-      if (existsSync(path.join(wt, 'scripts', 'install-git-hooks.sh'))) {
-        const hooks = await run('bash', ['scripts/install-git-hooks.sh'], wt);
+      jjLane = { name: path.basename(worktree), path: worktree };
+      if (existsSync(path.join(worktree, 'scripts', 'install-git-hooks.sh'))) {
+        const hooks = await run('bash', ['scripts/install-git-hooks.sh'], worktree);
         hookInstallFailed = hooks.code !== 0;
       }
-      await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: wt });
+      await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: worktree });
     } else if (plainFolder) {
-      await fs.mkdir(wt, { recursive: true });
+      await fs.mkdir(worktree, { recursive: true });
     } else {
       const branch = `${project}/${agent}`;
       const head = await run('git', ['rev-parse', '--verify', '-q', 'HEAD'], home);
@@ -460,13 +546,12 @@ async function spawnRegisteredAgent(
         throw new Error(`git HEAD lookup failed: ${head.stderr.trim() || `exit ${head.code}`}`);
       }
       const add = head.code === 0
-        ? ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD']
-        : ['worktree', 'add', '-q', '--orphan', '-b', branch, wt];
+        ? ['worktree', 'add', '-q', '-b', branch, worktree, 'HEAD']
+        : ['worktree', 'add', '-q', '--orphan', '-b', branch, worktree];
       const made = await run('git', add, home);
       if (made.code !== 0) throw new Error(`git worktree add failed: ${made.stderr.trim()}`);
-      await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: wt, branch });
+      await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: worktree, branch });
     }
-    worktree = wt;
 
     await ensureAgentFiles(worktree, agent, role);
     await writeWorkerContract(worktree, agent, opts);
@@ -475,18 +560,31 @@ async function spawnRegisteredAgent(
       const block = await memoryBlockFor(root, project, task);
       if (block) await applyMemoryBlock(hivePath(worktree, 'handoffs', `${agent}.md`), block);
     }
-    const model = opts.model ?? DEFAULT_MODEL;
-    ({ pane, identity } = await launchWindow(root, project, agent, worktree, undefined, p.mode ?? 'ask', model));
+    let evidence: Awaited<ReturnType<typeof launchRuntimeEvidence>> | undefined;
+    let teamStateHash: string | undefined;
+    launched = await launchWindow(root, project, agent, worktree, undefined, p.mode ?? 'ask', model, async () => {
+      evidence = await launchRuntimeEvidence(
+        worktree, agent, hivePath(worktree, 'handoffs', `${agent}.md`), launchClaim, launchClaimDigest,
+      );
+      teamStateHash = await captureTeamStateHash(home, worktree);
+    });
+    const { pane, identity } = launched;
     await manifestAdd(home, {
       kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(project, agent),
       pane_pid: identity.pid, pane_started: identity.started,
     });
-    const entry: TeamEntry = {
-      name: agent, pane, pane_pid: identity.pid, pane_started: identity.started,
-      worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task, model,
-      parent: opts.parent ?? envParent(agent),
+    const patch = {
+      pane, pane_pid: identity.pid, pane_started: identity.started,
+      worktree, handoff: hivePath(worktree, 'handoffs', `${agent}.md`), task, model, parent,
+      ...evidence!, team_state_hash: teamStateHash,
     };
-    await withProjectLock(root, project, () => upsertTeamEntry(home, entry));
+    if (task && admission) {
+      await projectEntry(root, project);
+      await assertTmuxGrant(root, home, task, agent, admission.lease_id);
+      registered = await registerTmuxLaunch(root, home, task, agent, admission.lease_id, patch);
+    } else {
+      registered = await withProjectLock(root, project, () => insertTeamEntry(home, { name: agent, ...patch }));
+    }
     if (hookInstallFailed) {
       try {
         await appendDecision(root, {
@@ -497,28 +595,38 @@ async function spawnRegisteredAgent(
         console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
       }
     }
-  } catch (e) {
-    if (jjLane) {
-      // A failed spawn must not strand a registered lane.
-      await undoJjWorkspace(home, jjLane.name, jjLane.path);
-    }
-    if (task) await removeTeamEntry(home, agent);
-    throw e;
-  }
 
-  const idle = await waitIdleForMode(pane, p.mode ?? 'ask');
-  if (idle !== 'idle') {
-    throw new Error(idle === 'dialog'
-      ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
-      : `${pane} never went idle; nothing was typed`);
+    const idle = await waitIdleForMode(pane, p.mode ?? 'ask');
+    if (idle !== 'idle') {
+      throw new Error(idle === 'dialog'
+        ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
+        : `${pane} never went idle; nothing was typed`);
+    }
+    if (task && admission) {
+      await withTmuxGrant(root, home, task, agent, admission.lease_id, async () => {
+        await assertExecutionAllowed(root, project);
+        await typeLine(pane, pickupLine(root, project, agent), identity);
+      });
+    } else {
+      await withProjectLock(root, project, async () => {
+        await assertExecutionAllowed(root, project);
+        await typeLine(pane, pickupLine(root, project, agent), identity);
+      });
+    }
+    const sessionId = await findLatestSession(worktree, agent);
+    if (sessionId && registered) {
+      await withProjectLock(root, project, () => compareAndSwapTeamEntry(home, registered!, { session_id: sessionId }));
+    }
+    await finishLaunch(root, launchClaim, { pane, identity, home, worktree, admission });
+    return { pane, identity, home, worktree, admission };
+  } catch (error) {
+    if (task) {
+      await recordTmuxLaunchOutcome(root, home, task, agent, admission!.lease_id, error instanceof Error ? error.message : String(error));
+    }
+    if (launched) await killWindow(launched.pane, launched.identity).catch(() => {});
+    if (jjLane) await undoJjWorkspace(home, jjLane.name, jjLane.path);
+    throw error;
   }
-  await withProjectLock(root, project, async () => {
-    await assertExecutionAllowed(root, project);
-    await typeLine(pane, pickupLine(root, project, agent), identity);
-  });
-  const sid = await findLatestSession(worktree, agent);
-  if (sid) await withProjectLock(root, project, () => upsertTeamEntry(home, { name: agent, session_id: sid }));
-  return pane;
 }
 
 export async function closeAgent(root: string, project: string, agent: string): Promise<void> {
@@ -526,7 +634,7 @@ export async function closeAgent(root: string, project: string, agent: string): 
   const team = await readTeam(home);
   const entry = team.agents.find((a) => a.name === agent);
   if (!entry) throw new Error(`${project} has no agent named ${agent}`);
-  await killEntry(home, entry);
+  await killEntry(root, home, entry);
   if (entry.orchestrator) await clearPendingPane(root, project);
 }
 
@@ -536,8 +644,11 @@ async function relaunchAgent(
   p: ProjectsFile['projects'][number],
   old: TeamEntry,
   sessionId: string | undefined,
+  admission?: TmuxAdmission,
 ): Promise<string> {
-  return withLaunchClaim(root, p.name, (registered) => relaunchRegisteredAgent(root, registered, old, sessionId));
+  const launched = await withLaunchClaim(root, p.name, (registered, launchClaim, launchClaimDigest) =>
+    relaunchRegisteredAgent(root, registered, old, sessionId, launchClaim, launchClaimDigest, admission));
+  return launched.pane;
 }
 
 async function relaunchRegisteredAgent(
@@ -545,38 +656,90 @@ async function relaunchRegisteredAgent(
   p: ProjectsFile['projects'][number],
   old: TeamEntry,
   sessionId: string | undefined,
-): Promise<string> {
+  launchClaim: string,
+  launchClaimDigest: string,
+  admission?: TmuxAdmission,
+): Promise<LaunchResult> {
   const home = p.home;
   const worktree = old.worktree || home;
   const mode = old.orchestrator ? effectiveOrchestratorMode(p.mode ?? 'ask', p.approvals) : p.mode ?? 'ask';
-  const { pane, identity } = await launchWindow(root, p.name, old.name, worktree, sessionId, mode, old.model);
-  await manifestAdd(home, {
-    kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(p.name, old.name),
-    pane_pid: identity.pid, pane_started: identity.started,
+  let evidence: Awaited<ReturnType<typeof launchRuntimeEvidence>> | undefined;
+  let teamStateHash: string | undefined;
+  const { pane, identity } = await launchWindow(root, p.name, old.name, worktree, sessionId, mode, old.model, async () => {
+    if (old.task) {
+      evidence = await launchRuntimeEvidence(
+        worktree, old.name, old.handoff ?? hivePath(worktree, 'handoffs', `${old.name}.md`), launchClaim, launchClaimDigest,
+      );
+      teamStateHash = await captureTeamStateHash(home, worktree);
+    }
   });
-  // A cascade that landed mid-launch dropped the entry; never re-register it.
-  // respawnAgent stamped the entry itself, so a stamp alone is not a kill.
-  await withProjectLock(root, p.name, async () => {
-    await assertEntryAlive(home, old, { pane, identity }, { allowStamped: true });
-    await upsertTeamEntry(home, {
-      name: old.name, pane, pane_pid: identity.pid, pane_started: identity.started,
-      session_id: sessionId, closed_at: undefined, wedged_at: undefined,
-      model: old.model ?? DEFAULT_MODEL,
+  try {
+    await manifestAdd(home, {
+      kind: 'tmux', at: new Date().toISOString(), pane, window: windowName(p.name, old.name),
+      pane_pid: identity.pid, pane_started: identity.started,
     });
-  });
-  const idle = await waitIdleForMode(pane, p.mode ?? 'ask');
-  if (idle !== 'idle') {
-    throw new Error(idle === 'dialog'
-      ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
-      : `${pane} never went idle; nothing was typed`);
+    const patch = {
+      pane, pane_pid: identity.pid, pane_started: identity.started,
+      session_id: sessionId, model: old.model ?? DEFAULT_MODEL, closed_at: undefined, wedged_at: undefined,
+      ...evidence, team_state_hash: teamStateHash,
+    };
+    let registered: TeamEntry | undefined;
+    if (old.task && admission) {
+      registered = await registerTmuxLaunch(root, home, old.task, old.name, admission.lease_id, patch, { allowClosed: true });
+    } else {
+      await withProjectLock(root, p.name, async () => {
+        await assertEntryAlive(home, old, { pane, identity }, { allowStamped: true, cleanup: false });
+        const fresh = (await readTeam(home)).agents.find((entry) => entry.name === old.name);
+        if (fresh) registered = await compareAndSwapTeamEntry(home, fresh, patch) ?? undefined;
+        if (!registered) throw new Error(`${old.name} was killed while its new pane came up`);
+      });
+    }
+    const idle = await waitIdleForMode(pane, p.mode ?? 'ask');
+    if (idle !== 'idle') {
+      throw new Error(idle === 'dialog'
+        ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
+        : `${pane} never went idle; nothing was typed`);
+    }
+    if (old.task && admission) {
+      await withTmuxGrant(root, home, old.task, old.name, admission.lease_id, async () => {
+        await assertExecutionAllowed(root, p.name);
+        await typeLine(pane, pickupLine(root, p.name, old.name, old.handoff), identity);
+      });
+    } else {
+      await withProjectLock(root, p.name, async () => {
+        await assertExecutionAllowed(root, p.name);
+        await typeLine(pane, pickupLine(root, p.name, old.name, old.handoff), identity);
+      });
+    }
+    const sessionIdFound = await findLatestSession(worktree, old.name);
+    if (sessionIdFound && registered) {
+      await withProjectLock(root, p.name, () => compareAndSwapTeamEntry(home, registered!, { session_id: sessionIdFound }));
+    }
+    await finishLaunch(root, launchClaim, { pane, identity, home, worktree, admission });
+    return { pane, identity, home, worktree, admission };
+  } catch (error) {
+    let cleanupError: unknown;
+    await killWindow(pane, identity).catch((cause: unknown) => { cleanupError = cause; });
+    if (cleanupError) {
+      const detail = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      throw new Error(`new pane cleanup failed: ${detail}`, { cause: error });
+    }
+    throw error;
   }
-  await withProjectLock(root, p.name, async () => {
-    await assertExecutionAllowed(root, p.name);
-    await typeLine(pane, pickupLine(root, p.name, old.name, old.handoff), identity);
+}
+
+async function admitReplacement(
+  root: string, home: string, old: TeamEntry, resumeExternal = false,
+): Promise<TmuxAdmission | undefined> {
+  if (!old.task || old.orchestrator) return undefined;
+  const externalResume = resumeExternal && old.external_operation_id !== undefined;
+  return admitTmux(root, home, old.task, old.name, await admissionRequest(root, old.task, '', old), {
+    parent: old.parent,
+    worktree: old.worktree,
+    model: old.model,
+    externalOperationId: externalResume ? old.external_operation_id : undefined,
+    resumeExternal: externalResume,
   });
-  const sid = await findLatestSession(worktree, old.name);
-  if (sid) await withProjectLock(root, p.name, () => upsertTeamEntry(home, { name: old.name, session_id: sid }));
-  return pane;
 }
 
 export async function respawnAgent(
@@ -585,27 +748,34 @@ export async function respawnAgent(
   await assertExecutionAllowed(root, project);
   const p = await projectEntry(root, project);
   const home = p.home;
-  const team = await readTeam(home);
-  const old = team.agents.find((a) => a.name === agent);
+  const old = (await readTeam(home)).agents.find((entry) => entry.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   const repair = !old.orchestrator && (options.assignment !== undefined || options.deliverable !== undefined);
   if (repair) checkWorkerContract(options);
   if (!old.orchestrator && !repair) await requireWorkerContract(old, home);
   checkModel(old.model);
   await preflight();
-  if (old.task && !old.orchestrator) await requireApprovedPlan(root, old.task);
+  if (old.task && !old.orchestrator) await admissionRequest(root, old.task, '', old);
   if (repair) await writeWorkerContract(old.worktree || home, agent, options, old.handoff);
   await assertExecutionAllowed(root, project);
-  await upsertTeamEntry(home, { name: agent, closed_at: new Date().toISOString() });
+  const admission = await admitReplacement(root, home, old);
+  const reserved = admission
+    ? (await readTeam(home)).agents.find((entry) => entry.lease_id === admission.lease_id)
+    : old;
+  const stamped = reserved
+    ? await compareAndSwapTeamEntry(home, reserved, { closed_at: new Date().toISOString() })
+    : null;
+  if (!stamped) throw new Error(`${agent} was replaced before respawn`);
   try {
     if (old.pane) await killWindow(old.pane, recordedIdentity(old));
-    return await relaunchAgent(root, p, old, undefined);
-  } catch (e) {
-    // A failed respawn must not leave the agent invisible to the watch — but
-    // when a cascade dropped the entry mid-flight, the kill owns the outcome.
-    const fresh = (await readTeam(home)).agents.find((a) => a.name === agent);
-    if (fresh) await upsertTeamEntry(home, { name: agent, closed_at: undefined });
-    throw e;
+    return await relaunchAgent(root, p, old, undefined, admission);
+  } catch (error) {
+    if (old.task && !old.orchestrator) {
+      await recordTmuxLaunchOutcome(root, home, old.task, agent, admission!.lease_id, error instanceof Error ? error.message : String(error));
+    } else {
+      await compareAndSwapTeamEntry(home, stamped, { closed_at: undefined });
+    }
+    throw error;
   }
 }
 
@@ -614,17 +784,24 @@ export async function respawnAgent(
 export async function wakeAgent(root: string, project: string, agent: string): Promise<string> {
   await assertExecutionAllowed(root, project);
   const p = await projectEntry(root, project);
-  const team = await readTeam(p.home);
-  const old = team.agents.find((a) => a.name === agent);
+  const old = (await readTeam(p.home)).agents.find((entry) => entry.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   if (old.closed_at) throw new Error(`${agent} was closed on purpose at ${old.closed_at}; not waking it`);
   if (!old.session_id) throw new Error(`${agent} has no recorded session to resume; respawn it instead`);
   if (!old.orchestrator) await requireWorkerContract(old, p.home);
   checkModel(old.model);
   await preflight();
-  if (old.task && !old.orchestrator) await requireApprovedPlan(root, old.task);
+  if (old.task && !old.orchestrator) await admissionRequest(root, old.task, '', old);
   if (old.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
     throw new Error(`${agent} is already running`);
   }
-  return relaunchAgent(root, p, old, old.session_id);
+  const admission = await admitReplacement(root, p.home, old, true);
+  try {
+    return await relaunchAgent(root, p, old, old.session_id, admission);
+  } catch (error) {
+    if (old.task && !old.orchestrator) {
+      await recordTmuxLaunchOutcome(root, p.home, old.task, agent, admission!.lease_id, error instanceof Error ? error.message : String(error));
+    }
+    throw error;
+  }
 }
