@@ -12,6 +12,7 @@ import { ProjectCard, StatusDot } from './project';
 import { NeedCard } from './needs';
 import { BatchCard, Questions } from './questions';
 import { AddProjectRow } from './rows';
+import { WorkTreeView } from './WorkTree';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
 import { Separator } from './components/ui/separator';
@@ -334,6 +335,8 @@ export function App() {
               ))}
             </section>
           )}
+
+          {view.workTree && <WorkTreeView tree={view.workTree} onChanged={refresh} />}
 
           {view.projects.map((p) => (
             <ProjectCard

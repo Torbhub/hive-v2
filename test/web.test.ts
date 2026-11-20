@@ -62,6 +62,7 @@ import { createServer } from '../web/server.js';
 import { appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readProjects, readTaskEvents, Refusal, writeJson } from '../src/state.js';
 import { authHeaders, configureSecurity } from './security-fixture.js';
 import { taskContract } from './task-contract.js';
+import { snapshotNativeMessages } from '../src/native-history.js';
 
 let server: Server;
 let base: string;
@@ -1617,6 +1618,126 @@ describe('POST /api/task-receipt', () => {
     } finally {
       fixture.receiptServer.close();
       fixture.broker.close();
+    }
+  });
+});
+
+
+describe('work-tree read authorization', () => {
+  async function treeFixture() {
+    const treeRoot = mkdtempSync(path.join(tmpdir(), 'hive-web-tree-'));
+    const home = path.join(treeRoot, 'demo');
+    const at = new Date().toISOString();
+    const rootContract = { ...taskContract(home, ['src'], 'Return the artifact.'), required_children: ['demo-2'] };
+    const planDigest = contractDigest(rootContract);
+    await writeJson(hubPath(treeRoot, 'projects.json'), { projects: [{ name: 'demo', home, repos: [] }] });
+    await writeJson(hubPath(treeRoot, 'hub.json'), { name: 'hub' });
+    await appendTaskEvent(treeRoot, { id: 'demo-1', project: 'demo', event: 'asked', at });
+    await appendTaskEvent(treeRoot, {
+      id: 'demo-1', project: 'demo', event: 'plan', at, contract: rootContract, plan_digest: planDigest,
+      checkpoints: [{ id: 'work', desc: 'bounded work', etaMin: 5 }],
+    });
+    await appendTaskEvent(treeRoot, { id: 'demo-2', project: 'demo', event: 'asked', at });
+    const admission = {
+      task: 'demo-1', project: 'demo', agent: 'builder', parent_id: 'demo-1', plan_digest: planDigest,
+      root_lease_epoch: 1, lease_id: 'lease-1', lease_epoch: 1 as const, lease_revoked: false,
+      output_claim: 'Return the artifact.', acceptance_ids: ['diff'], provenance: rootContract.provenance,
+      provenance_digest: 'proof', write_scope: ['src'], adapter: 'tmux' as const,
+      lineage_id: 'lineage-1', attempts_used: 2, status: 'running' as const,
+    };
+    await appendTaskEvent(treeRoot, { id: 'demo-1', project: 'demo', event: 'admission', at, admission });
+    await appendTaskEvent(treeRoot, {
+      id: 'demo-1', project: 'demo', event: 'admission', at,
+      admission: {
+        ...admission, agent: 'native-child', lease_id: 'lease-2', adapter: 'native' as const,
+        parent_lease_id: 'lease-1', depth: 2, lineage_id: 'lineage-2', attempts_used: 1, status: 'admitted' as const,
+      },
+    });
+    await appendTaskEvent(treeRoot, {
+      id: 'demo-1', project: 'demo', event: 'operation', at,
+      operation: {
+        operation_id: 'github-check-1', idempotency_key: 'key-1', kind: 'github_check' as const,
+        actor: 'adapter:github_check', plan_digest: planDigest, epoch: 1, repository_fingerprint: 'repo',
+        commit: 'a'.repeat(40), branch: 'check', status: 'blocked_external' as const, updated_at: at,
+        repository: 'octo/hive', external_id: 'external-check', external_run_id: 'external-run-1',
+        artifact_digest: 'b'.repeat(64), resume_condition: 'success', watcher_id: 'watcher-1',
+      },
+    });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [
+        { name: 'demo-orchestrator', orchestrator: true, pane: '%1', session_id: 'orchestrator-session' },
+        {
+          name: 'builder', task: 'demo-1', pane: '%7', session_id: 'parent-session', lease_id: 'lease-1',
+          admission_status: 'running', parent_id: 'demo-1', plan_digest: planDigest,
+        },
+      ],
+    });
+    const branch = {
+      schemaVersion: 1 as const, id: '7ca3c50b-8304-45f0-a925-f41d10a14cf2', kind: 'child' as const,
+      purpose: 'Review the stored result', parentSessionId: 'parent-session', childSessionId: 'child-session',
+      workspaceId: 'secret-workspace', cwd: '/secret-native',
+      scope: { project: 'demo', agent: 'builder', task: 'demo-1' },
+      parentSnapshot: snapshotNativeMessages([]),
+      childSnapshot: snapshotNativeMessages([]),
+      status: 'active' as const, createdAt: at, updatedAt: at, leaseId: 'lease-2', error: 'native blocker',
+    };
+    await writeJson(hivePath(home, 'branches', `${branch.id}.json`), branch);
+    return { treeRoot, home, branch };
+  }
+
+  it('projects root, tmux, and native descendants without writes or raw run data', async () => {
+    const { treeRoot, home, branch } = await treeFixture();
+    const listening = await listenOn(treeRoot);
+    const files = [hubPath(treeRoot, 'tasks.jsonl'), hivePath(home, 'team.json'), hivePath(home, 'branches', `${branch.id}.json`)];
+    const before = await Promise.all(files.map((file) => fs.readFile(file, 'utf8')));
+    try {
+      const response = await fetch(`${listening.url}/api/view`);
+      expect(response.status).toBe(200);
+      const view = await response.json();
+      const nodes = view.workTree.nodes;
+      expect(nodes.map((node: { kind: string }) => node.kind)).toEqual(['task', 'task', 'tmux', 'native']);
+      const native = nodes.find((node: { kind: string }) => node.kind === 'native');
+      expect(native).toMatchObject({ parentId: 'tmux:demo:lease-1', recordId: branch.id });
+      expect(native).not.toHaveProperty('externalId');
+      expect(native.details).toEqual(expect.arrayContaining([
+        { label: 'parent session', value: 'parent-session' }, { label: 'child session', value: 'child-session' },
+      ]));
+      expect(nodes[0].externalId).toBe('external-run-1');
+      expect(JSON.stringify(view.workTree)).not.toContain('/secret-native');
+      expect(JSON.stringify(view.workTree)).not.toContain('secret-workspace');
+      expect(await Promise.all(files.map((file) => fs.readFile(file, 'utf8')))).toEqual(before);
+    } finally {
+      listening.s.close();
+    }
+  });
+
+  it('removes a revoked parent and every external ID while keeping an authorized child as a root', async () => {
+    const { treeRoot } = await treeFixture();
+    const { registryItems, startTestRegistry } = await import('./security-fixture.js');
+    const items = registryItems();
+    items.push({
+      pk: 'ACL#demo#*#*', sk: 'PRINCIPAL#user:alice', project: 'demo', principal: 'user:alice',
+      grantId: 'project-read', actions: ['read'], aclEpoch: 1, revokedAt: null,
+    });
+    items.push({ pk: 'REVOCATION#ACL#demo#demo-1#*', sk: 'PRINCIPAL#user:alice' });
+    const { broker, registry } = await startTestRegistry(items);
+    configureSecurity();
+    const treeServer = createServer(treeRoot, registry);
+    await new Promise<void>((resolve) => treeServer.listen(0, '127.0.0.1', resolve));
+    try {
+      const response = await fetch(`http://127.0.0.1:${(treeServer.address() as AddressInfo).port}/api/view`);
+      const view = await response.json();
+      expect(view.workTree.nodes).toHaveLength(1);
+      expect(view.workTree.nodes[0]).toMatchObject({ id: 'task:demo:demo-2', parentId: null });
+      expect(view.workTree.nodes[0]).not.toHaveProperty('externalId');
+      expect(view.workTree.truncated).toBe(true);
+      expect(JSON.stringify(view.workTree)).not.toContain('external-run-1');
+      expect(JSON.stringify(view.workTree)).not.toContain('external-check');
+      expect(JSON.stringify(view.workTree)).not.toContain('/secret-native');
+    } finally {
+      treeServer.close();
+      broker.close();
+      configureSecurity(false);
     }
   });
 });

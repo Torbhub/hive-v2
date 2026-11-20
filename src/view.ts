@@ -1,7 +1,9 @@
-import type { Decision, HubProject, HubTask, HubView, QuestionBatch } from './types.js';
+import type { Decision, HubProject, HubTask, HubView, NativeBranchRecord, QuestionBatch, TaskEvent, TeamEntry } from './types.js';
 import { buildStatus, listTasks, readDialogFor } from './hub.js';
+import { listNativeBranches } from './branches.js';
 import { VIEW_BATCH_CAP, listOpenQuestionBatches, sweepQuestionBatches } from './questions.js';
-import { readDecisions } from './state.js';
+import { readDecisions, readTaskEvents, readTeam } from './state.js';
+import { buildWorkTree } from './supervision.js';
 
 export const READ_TIMEOUT_MS = 30_000;
 export const ACTION_TIMEOUT_MS = 150_000;
@@ -54,11 +56,20 @@ export async function buildView(root: string): Promise<HubView> {
     return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], questionsTotal: 0, updatedAt: 0, error: lastLine(e) };
   }
   let tasks: HubTask[] = [];
+  let events: TaskEvent[] = [];
   try {
     tasks = await withTimeout(listTasks(root), READ_TIMEOUT_MS, 'tasks');
+    events = await readTaskEvents(root).catch(() => []);
   } catch (e) {
     error = [error, `tasks not read: ${lastLine(e)}`].filter(Boolean).join(' · ');
   }
+  const teams: Record<string, TeamEntry[]> = {};
+  const branches: NativeBranchRecord[] = [];
+  for (const project of status.projects) {
+    teams[project.name] = await readTeam(project.home).then((team) => team.agents).catch(() => []);
+    branches.push(...await listNativeBranches(root, project.name).catch(() => []));
+  }
+  const workTree = buildWorkTree({ tasks, teams, branches, events });
   const dialogs = await readDialogs(root, status.projects);
   // Scan further back than the feed shows, so filtered noise cannot starve it.
   const decisions = await readDecisions(root, DECISIONS_SCANNED)
@@ -73,6 +84,7 @@ export async function buildView(root: string): Promise<HubView> {
     decisions,
     questions,
     questionsTotal,
+    workTree,
     updatedAt: Date.now(),
     error,
   };

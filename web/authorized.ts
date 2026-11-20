@@ -1,5 +1,5 @@
 import type http from 'node:http';
-import type { HubView } from '../src/types.js';
+import type { HubView, WorkTreeNode } from '../src/types.js';
 import { listOpenQuestionBatches, readQuestionBatch, type ApprovalAuthorization } from '../src/questions.js';
 import { readAgentLog, resolveLogTarget } from '../src/logview.js';
 import { RegistryUnavailable, type Registry, type RegistryRow } from '../src/registry.js';
@@ -23,6 +23,18 @@ function sendJson(res: http.ServerResponse, code: number, value: unknown): void 
     'cache-control': 'no-store',
   });
   res.end(JSON.stringify(value));
+}
+
+function publicNode(node: WorkTreeNode): WorkTreeNode {
+  return {
+    id: node.id, parentId: node.parentId, project: node.project, task: node.task, kind: node.kind,
+    recordId: node.recordId, adapter: node.adapter, state: node.state, active: node.active,
+    terminal: node.terminal, done: node.done, doneEnabled: node.doneEnabled,
+    doneBlockers: [...node.doneBlockers], planDigest: node.planDigest, epoch: node.epoch,
+    scope: [...node.scope], lineageId: node.lineageId, attempts: node.attempts, blocker: node.blocker,
+    externalId: node.externalId, evidenceOutcome: node.evidenceOutcome,
+    details: node.details.map(({ label, value }) => ({ label, value })),
+  };
 }
 
 async function filteredView(root: string, view: HubView, principal: Principal, registry: Registry,
@@ -97,6 +109,14 @@ async function filteredView(root: string, view: HubView, principal: Principal, r
       mode: undefined, approvals: undefined,
     });
   }
+  const treeNodes: WorkTreeNode[] = [];
+  for (const node of view.workTree?.nodes ?? []) {
+    if (await allowed(node.project, node.task)) treeNodes.push(publicNode(node));
+  }
+  const visibleNodeIds = new Set(treeNodes.map((node) => node.id));
+  for (const node of treeNodes) {
+    if (node.parentId && !visibleNodeIds.has(node.parentId)) node.parentId = null;
+  }
   return {
     ...view,
     projects,
@@ -105,6 +125,10 @@ async function filteredView(root: string, view: HubView, principal: Principal, r
     questionsTotal: visibleAllOpen.length,
     dialogs: Object.fromEntries(dialogs),
     decisions,
+    workTree: {
+      nodes: treeNodes,
+      truncated: (view.workTree?.truncated ?? false) || treeNodes.length !== (view.workTree?.nodes.length ?? 0),
+    },
   };
 }
 

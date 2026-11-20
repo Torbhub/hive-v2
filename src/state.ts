@@ -199,6 +199,13 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
       }
     } else if (ev.event === 'operation' && ev.operation) {
       (t.operations ??= []).push(ev.operation);
+      if (ev.operation.kind === 'github_check'
+        && (ev.operation.status === 'blocked_external' || ev.operation.status === 'closing_external')) {
+        t.state = ev.operation.status;
+        t.resume_state = 'reconciling';
+        t.unblock_condition = ev.operation.resume_condition ?? null;
+        t.last_note = ev.operation.detail ?? null;
+      }
     } else if (ev.event === 'human_acceptance' && ev.human_acceptance) {
       const acceptance = ev.human_acceptance;
       (t.human_acceptance ??= {})[acceptance.acceptance_id] = acceptance;

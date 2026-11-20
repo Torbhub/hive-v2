@@ -98,7 +98,7 @@ async function chromeExecutable(): Promise<string> {
 
 class ChromePage {
   private sequence = 0;
-  private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  private pending = new Map<number, { method: string; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
 
   private constructor(private socket: WebSocket) {}
 
@@ -125,7 +125,7 @@ class ChromePage {
       const pending = page.pending.get(message.id);
       if (!pending) return;
       page.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(message.error.message));
+      if (message.error) pending.reject(new Error(`${pending.method}: ${message.error.message}`));
       else pending.resolve(message.result);
     });
     await page.call('Page.enable');
@@ -136,7 +136,8 @@ class ChromePage {
   async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const label = method === 'Runtime.evaluate' ? `${method}: ${String(params.expression)}` : method;
+      this.pending.set(id, { method: label, resolve, reject });
       this.socket.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -340,6 +341,34 @@ async function fill(selector: string, value: string): Promise<void> {
   await cdp.call('Input.insertText', { text: value });
 }
 
+async function press(key: string): Promise<void> {
+  await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key });
+  await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key });
+}
+
+function treeNode(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: 'task:demo:demo-1', parentId: null, project: 'demo', task: 'demo-1', kind: 'task', recordId: 'demo-1',
+    adapter: 'root', state: 'running', active: true, terminal: false, done: false, doneEnabled: false,
+    doneBlockers: ['github has no passing registered evidence'], planDigest: 'c'.repeat(64), epoch: 1,
+    scope: ['src'], details: [], ...overrides,
+  };
+}
+
+function installTree(nodes: Record<string, unknown>[]): void {
+  Object.assign(VIEW, { workTree: { nodes, truncated: false }, questions: [] });
+}
+
+async function captureViewport(width: number, height: number, label: string): Promise<void> {
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+  await cdp.evaluate('new Promise((resolve) => requestAnimationFrame(() => resolve(true)))');
+  const directory = process.env.HIVE_TEST_ARTIFACTS;
+  if (!directory) return;
+  await fs.mkdir(directory, { recursive: true });
+  const screenshot = await cdp.call('Page.captureScreenshot', { format: 'png' }) as { data: string };
+  await fs.writeFile(path.join(directory, `${label}-${width}x${height}.png`), Buffer.from(screenshot.data, 'base64'));
+}
+
 describe('real Chrome dictation E2E', () => {
   it('uses real loopback HTTP, stops tracks, inserts for review, and never submits', async () => {
     await click('button[aria-label="Start dictation for new task for demo"]');
@@ -360,6 +389,117 @@ describe('real Chrome dictation E2E', () => {
     expect(await cdp.evaluate('window.__trackStops')).toBe(2);
     expect(await cdp.evaluate(`document.querySelector('input[aria-label="new task for demo"]').value`)).toBe(TRANSCRIPT);
     expect(submissions).toEqual([]);
+  }, 30_000);
+});
+
+describe('real Chrome work tree E2E', () => {
+  it('shows root, tmux, and native IDs with read-only keyboard and narrow-viewport navigation', async () => {
+    installTree([
+      treeNode({
+        state: 'blocked_external', externalId: 'external-run-1',
+        details: [{ label: 'orchestrator', value: 'demo-orchestrator' }, { label: 'pane', value: '%1' }],
+      }),
+      treeNode({
+        id: 'tmux:demo:lease-1', parentId: 'task:demo:demo-1', kind: 'tmux', recordId: 'lease-1', adapter: 'tmux',
+        state: 'running', lineageId: 'lineage-1', attempts: 2,
+        details: [{ label: 'agent', value: 'builder' }, { label: 'pane', value: '%7' }, { label: 'session', value: 'parent-session' }],
+      }),
+      treeNode({
+        id: 'native:demo:branch-1', parentId: 'tmux:demo:lease-1', kind: 'native', recordId: 'branch-1', adapter: 'native',
+        state: 'active', details: [{ label: 'kind', value: 'child' }, { label: 'child session', value: 'child-session' }],
+      }),
+    ]);
+    submissions = [];
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'refresh').click()`);
+    await cdp.waitFor(`document.querySelector('[data-work-tree-node="task:demo:demo-1"]')`);
+    for (const text of ['demo-1', 'lease-1', 'branch-1', 'blocked_external · active']) {
+      expect(await cdp.evaluate(`document.body.innerText.includes(${JSON.stringify(text)})`)).toBe(true);
+    }
+    await click('[data-work-tree-node="tmux:demo:lease-1"]');
+    const tmuxDetails = await cdp.evaluate(`document.querySelector('[data-work-tree-details]').textContent`);
+    for (const text of ['%7', 'parent-session', 'lineage-1', 'attempts: 2', 'scope: src']) {
+      expect(tmuxDetails).toContain(text);
+    }
+    await click('[data-work-tree-node="native:demo:branch-1"]');
+    expect(await cdp.evaluate(`document.querySelector('[data-work-tree-details]').textContent`)).toContain('child-session');
+
+    await cdp.evaluate(`document.querySelector('[data-work-tree-node="task:demo:demo-1"]').focus()`);
+    await press('ArrowDown');
+    expect(await cdp.evaluate(`document.querySelector('[data-work-tree-node="tmux:demo:lease-1"]').getAttribute('aria-selected')`)).toBe('true');
+    await press('ArrowDown');
+    expect(await cdp.evaluate(`document.querySelector('[data-work-tree-node="native:demo:branch-1"]').getAttribute('aria-selected')`)).toBe('true');
+    await cdp.evaluate(`document.querySelector('[data-work-tree-node="task:demo:demo-1"]').focus()`);
+    expect(await cdp.evaluate(`document.querySelector('[data-work-tree-node="task:demo:demo-1"]').getAttribute('aria-selected')`)).toBe('true');
+    await captureViewport(1280, 900, 'PROCESS_TREE_MONITOR-tree-states-desktop');
+    await captureViewport(390, 844, 'PROCESS_TREE_MONITOR-tree-states-narrow');
+    expect(await cdp.evaluate('document.documentElement.scrollWidth <= 390')).toBe(true);
+    await captureViewport(1280, 900, 'PROCESS_TREE_MONITOR-tree-states-desktop-restored');
+    expect(submissions).toEqual([]);
+  }, 30_000);
+
+  it('distinguishes active waits, evidence outcomes, done, and non-done terminal states', async () => {
+    installTree([
+      treeNode({ state: 'closing_external' }),
+      treeNode({ id: 'task:demo:fixed', task: 'fixed', recordId: 'fixed', state: 'already_fixed', active: false, terminal: true, evidenceOutcome: 'passed' }),
+      treeNode({ id: 'task:demo:duplicate', task: 'duplicate', recordId: 'duplicate', state: 'duplicate', active: false, terminal: true, evidenceOutcome: 'passed' }),
+      treeNode({ id: 'task:demo:noop', task: 'noop', recordId: 'noop', state: 'no_op', active: false, terminal: true, evidenceOutcome: 'passed' }),
+      treeNode({ id: 'task:demo:failed', task: 'failed', recordId: 'failed', state: 'failed', active: false, terminal: true }),
+      treeNode({ id: 'task:demo:superseded', task: 'superseded', recordId: 'superseded', state: 'superseded', active: false, terminal: true }),
+      treeNode({ id: 'task:demo:unknown', task: 'unknown', recordId: 'unknown', state: 'unknown', active: false, terminal: true }),
+      treeNode({ id: 'task:demo:done', task: 'done', recordId: 'done', state: 'done', active: false, terminal: true, done: true }),
+    ]);
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'refresh').click()`);
+    await cdp.waitFor(`document.body.innerText.includes('closing_external · active')`);
+    const body = await cdp.evaluate('document.body.innerText');
+    for (const text of [
+      'already_fixed · evidence: passed', 'duplicate · evidence: passed', 'no_op · evidence: passed',
+      'failed · not done', 'superseded · not done', 'unknown · not done',
+    ]) expect(body).toContain(text);
+    expect(body).not.toContain('done · not done');
+  }, 30_000);
+
+  it('disables Done for missing evidence, unresolved children and writers, and unsupported extra acceptance', async () => {
+    const cases = [
+      ['demo-1', ['github has no passing registered evidence']],
+      ['child-wait', ['required child demo-2 is unresolved']],
+      ['writer-wait', ['writer builder is active']],
+      ['extra-wait', ['Extra acceptance human-review needs a human. Required registered passes still apply.']],
+    ];
+    installTree(cases.map(([id, blockers]) => treeNode({ id: `task:demo:${id}`, task: id, recordId: id, doneBlockers: blockers })));
+    submissions = [];
+    for (const [id, blockers] of cases) {
+      await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'refresh').click()`);
+      await click(`[data-work-tree-node="task:demo:${id}"]`);
+      expect(await cdp.evaluate(`document.querySelector('[data-work-tree-done="${id}"]').disabled`)).toBe(true);
+      for (const blocker of blockers) {
+        expect(await cdp.evaluate(`document.querySelector('[data-work-tree-details]').textContent.includes(${JSON.stringify(blocker)})`)).toBe(true);
+      }
+    }
+    expect(submissions).toEqual([]);
+  }, 30_000);
+
+  it('keeps declared push free of cards and undeclared mutation to one root delta', async () => {
+    installTree([treeNode({})]);
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'refresh').click()`);
+    await cdp.waitFor(`document.querySelector('[data-work-tree]')`);
+    expect(await cdp.evaluate(`[...document.querySelectorAll('button')].some((button) => button.textContent.startsWith('Questions'))`)).toBe(false);
+    Object.assign(VIEW, {
+      questions: [{
+        id: 'root-delta-1', project: 'demo', agent: 'demo-orchestrator', context: 'Blocked command',
+        questions: [{
+          id: 'q1', question: 'Approve root delta?', context: 'One root change.', priority: 1,
+          choices: [{ id: 'c1', label: 'Approve', description: 'Review the root delta.' }], recommended: 'c1',
+        }],
+        status: 'open', createdAt: '2026-11-20T12:00:00.000Z',
+        rootDelta: { task: 'demo-1', basePlanDigest: 'c'.repeat(64), baseEpoch: 1, nextContract: {} },
+      }],
+    });
+    await cdp.evaluate(`[...document.querySelectorAll('button')].find((button) => button.textContent === 'refresh').click()`);
+    await cdp.waitFor(`document.body.innerText.includes('Approve root delta?')`);
+    expect(await cdp.evaluate(`[...document.querySelectorAll('button')].filter((button) => button.textContent === 'Questions 1').length`)).toBe(1);
+    expect(await cdp.evaluate(`[...document.querySelectorAll('button')].filter((button) => button.textContent === 'Submit').length`)).toBe(1);
+    expect(await cdp.evaluate(`document.body.innerText.includes('child delta')`)).toBe(false);
+    installTree([]);
   }, 30_000);
 });
 

@@ -95,8 +95,8 @@ export type TaskResumeState = 'running' | 'reconciling';
 export const TASK_EVIDENCE_OUTCOMES = ['passed', 'failed', 'pending', 'skipped', 'adapter-error'] as const;
 export type TaskEvidenceOutcome = (typeof TASK_EVIDENCE_OUTCOMES)[number];
 export type TaskEvidenceVerification = {
-  adapter_id: 'task_receipt' | 'git_diff_scope' | 'native_result';
-  evidence_type: 'task_receipt' | 'git_diff_scope' | 'native_result';
+  adapter_id: 'task_receipt' | 'git_diff_scope' | 'native_result' | 'github_check';
+  evidence_type: 'task_receipt' | 'git_diff_scope' | 'native_result' | 'github_check';
   provenance_digest: string;
 };
 export type TaskEvidence = {
@@ -130,7 +130,7 @@ export type TaskOperationResult = { remote_tip: string; reconciled?: boolean };
 export type TaskOperation = {
   operation_id: string;
   idempotency_key: string;
-  kind: 'push';
+  kind: 'push' | 'github_check';
   actor: string;
   plan_digest: string;
   epoch: number;
@@ -138,10 +138,22 @@ export type TaskOperation = {
   repository_fingerprint: string;
   commit: string;
   branch: string;
-  status: 'pending' | 'ambiguous' | 'succeeded' | 'failed';
+  status: 'pending' | 'ambiguous' | 'succeeded' | 'failed' | 'blocked_external' | 'closing_external';
   updated_at: string;
   result?: TaskOperationResult;
   detail?: string;
+  owner?: string;
+  repository?: string;
+  external_id?: string;
+  external_run_id?: string;
+  artifact_digest?: string;
+  resume_condition?: string;
+  deadline?: string;
+  watcher_id?: string;
+  acceptance_id?: string;
+  cancellation_requested?: boolean;
+  close_outcome?: 'cancelled' | 'superseded';
+  replacement_id?: string;
 };
 export type TaskOutcome = 'done' | 'already_fixed' | 'duplicate' | 'no_op' | 'failed' | 'unknown' | 'superseded';
 export type TaskOutcomeInput = {
@@ -344,6 +356,32 @@ export type QuestionBatch = {
   rootDelta?: RootDelta;
 };
 
+export type WorkTreeNode = {
+  id: string;
+  parentId: string | null;
+  project: string;
+  task: string;
+  kind: 'task' | 'tmux' | 'native';
+  recordId: string;
+  adapter: 'root' | 'tmux' | 'native' | 'github_check';
+  state: string;
+  active: boolean;
+  terminal: boolean;
+  done: boolean;
+  doneEnabled: boolean;
+  doneBlockers: string[];
+  planDigest?: string;
+  epoch?: number;
+  scope: string[];
+  lineageId?: string;
+  attempts?: number;
+  blocker?: string;
+  externalId?: string;
+  evidenceOutcome?: string;
+  details: { label: string; value: string }[];
+};
+export type WorkTree = { nodes: WorkTreeNode[]; truncated: boolean };
+
 export type HubView = {
   root: string;
   hubName: string;
@@ -352,6 +390,7 @@ export type HubView = {
   dialogs: Record<string, HubDialog>;
   decisions: Decision[];
   questions: QuestionBatch[];
+  workTree?: WorkTree;
   // Total open batches, including any beyond the view's first 50. Optional
   // so older fixtures and callers without a count stay valid.
   questionsTotal?: number;
