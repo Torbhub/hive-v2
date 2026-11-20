@@ -1,11 +1,13 @@
 import { assertAdmissionEvidenceLocked, transitionTmuxAdmissionLocked } from './admission.js';
+import { assertNativeBranchCurrentLocked, assertNativeResultFresh, listNativeBranches, readNativeBranch } from './branches.js';
 import { pushByHash } from './gate.js';
+import { createNativeBranchClient } from './native-client.js';
 import { gitDiffScope } from './scope.js';
 import {
   appendTaskEvent, contractDigest, foldTasks, readProjects, readTaskEvents, Refusal, taskEvidenceDigests,
   validateRootContract, valueDigest, withHubLock, withTeamLock,
 } from './state.js';
-import type { HubTask, TaskEvent, TaskEvidence, TaskReceipt } from './types.js';
+import type { HubTask, NativeBranchClient, TaskEvent, TaskEvidence, TaskReceipt } from './types.js';
 
 export type TaskReceiptPredicateConfig = {
   plan_digest: string;
@@ -18,7 +20,14 @@ export type GitDiffScopePredicateConfig = {
   base_revision: string;
   artifact_revision: string;
 };
-export type TaskPredicateConfig = TaskReceiptPredicateConfig | GitDiffScopePredicateConfig;
+export type NativeResultPredicateConfig = {
+  acceptance_id?: string;
+  lease_id?: string;
+  plan_digest: string;
+  artifact_digest?: string;
+  branch_id?: string;
+};
+export type TaskPredicateConfig = TaskReceiptPredicateConfig | GitDiffScopePredicateConfig | NativeResultPredicateConfig;
 
 export function canonicalActor(actor: string): string {
   return actor.startsWith('agent:') ? actor.slice('agent:'.length) : actor;
@@ -163,6 +172,92 @@ async function evaluateGitDiffScopeLocked(root: string, id: string, config: GitD
   });
 }
 
+async function evaluateNativeAdmissionLocked(
+  root: string, task: HubTask, admission: NonNullable<HubTask['admissions']>[number], config: NativeResultPredicateConfig,
+  native: NativeBranchClient,
+): Promise<boolean> {
+  const project = (await readProjects(root)).projects.find((candidate) => candidate.name === task.project);
+  if (!project) return false;
+  return withTeamLock(project.home, async () => {
+    const scope = { root, project: task.project };
+    const matches = config.branch_id
+      ? [await readNativeBranch(scope, config.branch_id)]
+      : (await listNativeBranches(root, task.project)).filter((candidate) => candidate.leaseId === admission.lease_id);
+    if (matches.length !== 1) return false;
+    const branch = matches[0];
+    if (branch.leaseId !== admission.lease_id || branch.scope.task !== task.id
+      || branch.status !== 'active' && branch.status !== 'rejoined'
+      || !branch.result || !branch.childSnapshot
+      || config.artifact_digest !== undefined && config.artifact_digest !== branch.result.digest
+      || branch.result.childHistoryHash !== branch.childSnapshot.historyHash) {
+      return false;
+    }
+    const nativeMessages = new Map(branch.childSnapshot.messages.map((entry) => [entry.id, entry.contentHash]));
+    const verifiedReferences = branch.result.findings.every((finding) => finding.nativeEvidence.every(
+      (reference) => nativeMessages.get(reference.messageId) === reference.contentHash,
+    ));
+    if (!verifiedReferences) return false;
+    try {
+      await assertNativeBranchCurrentLocked(scope, project.home, branch, true);
+      await assertNativeResultFresh(branch, native);
+    } catch {
+      return false;
+    }
+    const { digest, recordedAt: _recordedAt, ...artifact } = branch.result;
+    const content = { resultDigest: digest, childSnapshot: branch.childSnapshot };
+    const evidenceHash = taskEvidenceDigests(artifact, content).evidence_hash;
+    const events = await readTaskEvents(root);
+    const existing = latestEvidence(events, task.id, evidenceHash);
+    if (existing) {
+      return existing.outcome === 'passed' && existing.artifact_digest === digest
+        && existing.lease_id === admission.lease_id && existing.plan_digest === admission.plan_digest
+        && existing.epoch === admission.root_lease_epoch
+        && existing.verification?.adapter_id === 'native_result'
+        && existing.verification.evidence_type === 'native_result'
+        && existing.verification.provenance_digest === valueDigest(admission.provenance);
+    }
+    await appendTaskEvent(root, {
+      id: task.id, project: task.project, event: 'evidence', at: new Date().toISOString(),
+      evidence: {
+        actor: `agent:${admission.agent}`, plan_digest: admission.plan_digest, epoch: admission.root_lease_epoch,
+        outcome: 'passed', lease_id: admission.lease_id, artifact, content,
+        artifact_digest: digest, evidence_hash: evidenceHash,
+        verification: {
+          adapter_id: 'native_result', evidence_type: 'native_result',
+          provenance_digest: valueDigest(admission.provenance),
+        },
+      },
+    });
+    return true;
+  });
+}
+
+async function evaluateNativeResultLocked(
+  root: string, id: string, config: NativeResultPredicateConfig, native?: NativeBranchClient,
+): Promise<boolean> {
+  const task = foldTasks(await readTaskEvents(root)).find((candidate) => candidate.id === id);
+  if (!task?.contract || contractDigest(task.contract) !== task.plan_digest || config.plan_digest !== task.plan_digest) {
+    return false;
+  }
+  const acceptance = config.acceptance_id
+    ? task.contract.acceptance.find((candidate) => candidate.id === config.acceptance_id)
+    : undefined;
+  if (config.acceptance_id && acceptance?.predicate_id !== 'native_result') return false;
+  const admissions = (task.admissions ?? []).filter((admission) => admission.adapter === 'native'
+    && admission.plan_digest === task.plan_digest && admission.root_lease_epoch === task.lease_epoch
+    && (!config.lease_id || admission.lease_id === config.lease_id)
+    && (config.acceptance_id
+      ? admission.acceptance_ids.includes(config.acceptance_id)
+      : task.contract!.acceptance.some((candidate) => candidate.predicate_id === 'native_result'
+        && admission.acceptance_ids.includes(candidate.id))));
+  if (admissions.length === 0) return false;
+  const client = native ?? createNativeBranchClient();
+  for (const admission of admissions) {
+    if (await evaluateNativeAdmissionLocked(root, task, admission, config, client)) return true;
+  }
+  return false;
+}
+
 export const PREDICATE_REGISTRY = {
   task_receipt: {
     version: 1,
@@ -174,6 +269,10 @@ export const PREDICATE_REGISTRY = {
     version: 1,
     evaluate: evaluateGitDiffScopeLocked,
   },
+  native_result: {
+    version: 1,
+    evaluate: evaluateNativeResultLocked,
+  },
 };
 
 export const OPERATION_REGISTRY = {
@@ -181,19 +280,22 @@ export const OPERATION_REGISTRY = {
 };
 
 export async function evaluateTaskPredicate(
-  root: string, id: string, predicate: string, config: TaskPredicateConfig, version = 1,
+  root: string, id: string, predicate: string, config: TaskPredicateConfig, version = 1, native?: NativeBranchClient,
 ): Promise<boolean> {
   const entry = PREDICATE_REGISTRY[predicate as keyof typeof PREDICATE_REGISTRY];
   if (!entry || entry.version !== version) throw new Refusal(`blocked:unsupported_predicate: ${predicate} v${version}`);
   if (predicate === 'git_diff_scope') {
     return withHubLock(root, () => evaluateGitDiffScopeLocked(root, id, config as GitDiffScopePredicateConfig));
   }
+  if (predicate === 'native_result') {
+    return withHubLock(root, () => evaluateNativeResultLocked(root, id, config as NativeResultPredicateConfig, native));
+  }
   return entry.evaluate(root, id, config as never);
 }
 
 export type AcceptanceEvaluation = { blockers: string[]; requiredBlockers: string[]; passingRegistered: number };
 
-export async function evaluateAcceptanceLocked(root: string, task: HubTask): Promise<AcceptanceEvaluation> {
+export async function evaluateAcceptanceLocked(root: string, task: HubTask, native?: NativeBranchClient): Promise<AcceptanceEvaluation> {
   const blockers: string[] = [];
   const requiredBlockers: string[] = [];
   let passingRegistered = 0;
@@ -230,10 +332,14 @@ export async function evaluateAcceptanceLocked(root: string, task: HubTask): Pro
         base_revision: task.contract.provenance.base_revision,
         artifact_revision: task.contract.provenance.artifact_revision,
       });
+    } else if (acceptance.predicate_id === 'native_result') {
+      Object.assign(config, { plan_digest: task.plan_digest, acceptance_id: acceptance.id });
     }
     let passed = false;
     try {
-      passed = await entry.evaluate(root, task.id, config as never);
+      passed = acceptance.predicate_id === 'native_result'
+        ? await evaluateNativeResultLocked(root, task.id, config as NativeResultPredicateConfig, native)
+        : await entry.evaluate(root, task.id, config as never);
     } catch {
       passed = false;
     }

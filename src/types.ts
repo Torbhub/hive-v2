@@ -95,8 +95,8 @@ export type TaskResumeState = 'running' | 'reconciling';
 export const TASK_EVIDENCE_OUTCOMES = ['passed', 'failed', 'pending', 'skipped', 'adapter-error'] as const;
 export type TaskEvidenceOutcome = (typeof TASK_EVIDENCE_OUTCOMES)[number];
 export type TaskEvidenceVerification = {
-  adapter_id: 'task_receipt' | 'git_diff_scope';
-  evidence_type: 'task_receipt' | 'git_diff_scope';
+  adapter_id: 'task_receipt' | 'git_diff_scope' | 'native_result';
+  evidence_type: 'task_receipt' | 'git_diff_scope' | 'native_result';
   provenance_digest: string;
 };
 export type TaskEvidence = {
@@ -208,6 +208,8 @@ export type TmuxAdmission = {
   provenance_digest: string;
   write_scope: string[];
   adapter: 'tmux' | 'native';
+  parent_lease_id?: string;
+  depth?: number;
   retry_of?: string;
   lineage_id: string;
   attempts_used: number;
@@ -505,6 +507,7 @@ export type TeamEntry = {
   provenance_digest?: string;
   write_scope?: string[];
   adapter?: 'tmux' | 'native';
+  depth?: number;
   retry_of?: string;
   lineage_id?: string;
   attempts_used?: number;
@@ -618,7 +621,8 @@ export type NativeBranchRecord = {
   createdAt: string;
   updatedAt: string;
   error?: string;
-  result?: NativeBranchResult & { digest: string; recordedAt: string };
+  leaseId?: string;
+  result?: NativeBranchResult & { digest: string; recordedAt: string; resultMessageId?: string };
   review?: NativeBranchReview;
   rejoin?: NativeBranchRejoin;
 };
@@ -658,9 +662,24 @@ export type NativeBranchDetail = NativeBranchSummary & {
 };
 
 export type NativeTextPart = { type: 'text'; text: string };
+export type NativeReadOnlyPolicy = {
+  filesystem: 'read-only';
+  shell: 'denied';
+  side_effects: 'denied';
+  tools: readonly ['Read', 'Grep', 'Glob'];
+};
+export const NATIVE_READ_ONLY_POLICY: NativeReadOnlyPolicy = {
+  filesystem: 'read-only', shell: 'denied', side_effects: 'denied', tools: ['Read', 'Grep', 'Glob'],
+};
+export type NativeBranchCreateRequest = {
+  title: string;
+  metadata: Record<string, unknown>;
+  readOnly?: NativeReadOnlyPolicy;
+};
 export type NativeSession = {
   id: string;
   workspace_id: string;
+  read_only?: NativeReadOnlyPolicy;
   metadata: {
     cwd: string;
     hive_branch_id?: string;
@@ -686,8 +705,8 @@ export type NativePrompt = {
 };
 export type NativeBranchClient = {
   getSession(sessionId: string): Promise<NativeSession>;
-  createChild(sessionId: string, input: { title: string; metadata: Record<string, unknown> }): Promise<NativeSession>;
-  forkSession(sessionId: string, input: { title: string; metadata: Record<string, unknown> }): Promise<NativeSession>;
+  createChild(sessionId: string, input: NativeBranchCreateRequest): Promise<NativeSession>;
+  forkSession(sessionId: string, input: NativeBranchCreateRequest): Promise<NativeSession>;
   listChildren(sessionId: string, options?: { pageSize?: number }): Promise<{ items: NativeSession[]; has_more: boolean }>;
   listMessages(sessionId: string, options?: {
     beforeId?: string;

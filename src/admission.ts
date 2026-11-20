@@ -16,6 +16,7 @@ export type TmuxAdmissionRequest = {
   provenance: TaskProvenance;
   write_scope: string[];
   adapter: 'tmux' | 'native';
+  parent_lease_id?: string;
   budget?: { depth?: number; attempts?: number };
   retry_of?: string;
   retry_lease_id?: string;
@@ -86,8 +87,11 @@ function validateRequest(task: HubTask, request: TmuxAdmissionRequest): void {
     || request.acceptance_ids.some((id) => !acceptance.has(id))) {
     throw new Refusal('delegate acceptance IDs are not allocated by the root contract');
   }
-  if (request.adapter !== 'tmux' || !contract.delegation.adapters.includes(request.adapter)) {
-    throw new Refusal('delegate adapter is not an admitted tmux allocation');
+  if (!contract.delegation.adapters.includes(request.adapter)) {
+    throw new Refusal('delegate adapter is not allocated by the root contract');
+  }
+  if (request.adapter === 'native' && request.write_scope.length > 0) {
+    throw new Refusal('native admission is read-only; writable native scope is refused');
   }
   const depth = request.budget?.depth ?? 1;
   const attempts = request.budget?.attempts ?? contract.budget.attempts;
@@ -197,8 +201,9 @@ function reservation(
     lease_id: randomUUID(), lease_epoch: 1, lease_revoked: false,
     output_claim: request.output_claim, acceptance_ids: [...request.acceptance_ids],
     provenance: { ...request.provenance }, provenance_digest: valueDigest(request.provenance),
-    write_scope: writeScope, adapter: request.adapter, retry_of: request.retry_of,
-    lineage_id: previous?.lineage_id ?? agent, attempts_used: attemptsUsed, status: 'admitted',
+    write_scope: writeScope, adapter: request.adapter, parent_lease_id: request.parent_lease_id,
+    depth: request.budget?.depth ?? 1, retry_of: request.retry_of,
+    lineage_id: previous?.lineage_id ?? request.lineage_id ?? agent, attempts_used: attemptsUsed, status: 'admitted',
   };
 }
 
@@ -214,7 +219,7 @@ function entryFromAdmission(admission: TmuxAdmission, old: TeamEntry | undefined
     lease_epoch: admission.lease_epoch, lease_revoked: false,
     output_claim: admission.output_claim, acceptance_ids: [...admission.acceptance_ids],
     provenance: { ...admission.provenance }, provenance_digest: admission.provenance_digest,
-    write_scope: [...admission.write_scope], adapter: admission.adapter,
+    write_scope: [...admission.write_scope], adapter: admission.adapter, depth: admission.depth,
     retry_of: admission.retry_of, lineage_id: admission.lineage_id,
     attempts_used: admission.attempts_used, admission_status: admission.status,
     closed_at: undefined, launch_error: undefined,
@@ -228,71 +233,104 @@ async function appendAdmission(root: string, admission: TmuxAdmission, supersede
   });
 }
 
+async function admitLocked(
+  root: string, home: string, taskId: string, agent: string,
+  request: TmuxAdmissionRequest, options: TmuxAdmissionOptions, beforePreflight: string | undefined,
+): Promise<TmuxAdmission> {
+  const native = request.adapter === 'native';
+  const tasks = foldTasks(await readTaskEvents(root));
+  const task = storedTask(tasks, taskId);
+  await assertRegisteredHome(root, home, task);
+  validateRequest(task, request);
+  if (task.contract!.preflight_snapshot !== undefined
+    && (beforePreflight !== task.contract!.preflight_snapshot
+      || await options.readPreflightSnapshot?.() !== task.contract!.preflight_snapshot)) {
+    throw new Refusal('preflight snapshot changed before admission');
+  }
+  const writeScope = await normalizedAllocation(home, task.contract!, request);
+  const previous = previousAdmission(task, request);
+  if (previous && activeAdmission(previous) && previous.agent !== agent) {
+    throw new Refusal('replacement requires a fenced prior lease');
+  }
+  if (options.resumeExternal) {
+    if (native) throw new Refusal('native admission has no external tmux resume');
+    if (!options.externalOperationId) throw new Refusal('external resume needs the recorded operation ID');
+    const currentEntry = previous
+      ? (await readTeam(home)).agents.find((entry) => entry.lease_id === previous.lease_id)
+      : undefined;
+    if (!previous || previous.agent !== agent || !activeAdmission(previous)
+      || previous.plan_digest !== task.plan_digest || previous.root_lease_epoch !== task.lease_epoch
+      || previous.output_claim !== request.output_claim || !currentEntry || currentEntry.lease_revoked
+      || currentEntry.closed_at || currentEntry.plan_digest !== previous.plan_digest
+      || currentEntry.root_lease_epoch !== previous.root_lease_epoch
+      || previous.external_operation_id !== options.externalOperationId
+      || currentEntry.external_operation_id !== options.externalOperationId) {
+      throw new Refusal('external resume has no current matching admission and operation ID');
+    }
+    return previous;
+  }
+  if (native) {
+    const parent = task.admissions?.find((admission) => admission.lease_id === request.parent_lease_id);
+    if (!parent) throw new Refusal('native admission needs a current parent lease');
+    currentGrant(task, await readTeam(home), parent.agent, parent.lease_id, false);
+    if (request.budget?.depth !== (parent.depth ?? 1) + 1) {
+      throw new Refusal('native admission depth must be parent depth plus one');
+    }
+  }
+  await checkCollisions(root, home, tasks, agent, request, writeScope);
+  checkDuplicate(tasks, task, request, valueDigest(request.provenance));
+  await checkBudgets(root, home, tasks, task, request);
+  const attemptsUsed = (previous?.attempts_used ?? 0) + 1;
+  const attemptCap = Math.min(request.budget?.attempts ?? task.contract!.budget.attempts, task.contract!.budget.attempts);
+  if (attemptsUsed > attemptCap) {
+    if (previous) await transitionTmuxAdmissionLocked(root, home, previous, 'blocked:budget_exhausted');
+    throw new Refusal(`blocked:budget_exhausted for ${previous?.lineage_id ?? agent}`);
+  }
+  if (!native && !request.retry_of && (await readTeam(home)).agents.some((old) => old.name === agent)) {
+    throw new Refusal(`${task.project} already has an agent named ${agent}`);
+  }
+  const admitted = reservation(task, agent, request, writeScope, previous, attemptsUsed);
+  await appendAdmission(root, admitted, previous ? [previous.lease_id] : []);
+  if (native) return admitted;
+  const team = await readTeam(home);
+  const old = previous ? team.agents.find((candidate) => candidate.lease_id === previous.lease_id) : undefined;
+  const agents = previous ? team.agents.filter((candidate) => candidate.lease_id !== previous.lease_id) : [...team.agents];
+  agents.push(entryFromAdmission(admitted, old, options));
+  try {
+    await writeJson(hivePath(home, 'team.json'), { agents });
+  } catch (error) {
+    await appendAdmission(root, {
+      ...admitted, status: 'revoked', lease_revoked: true,
+      launch_error: `team reservation failed: ${error instanceof Error ? error.message : String(error)}`,
+    });
+    throw error;
+  }
+  return admitted;
+}
+
+export async function admitNativeLocked(
+  root: string, home: string, taskId: string, agent: string, request: TmuxAdmissionRequest,
+): Promise<TmuxAdmission> {
+  if (request.adapter !== 'native') throw new Refusal('native admission needs the native adapter');
+  return admitLocked(root, home, taskId, agent, request, {}, undefined);
+}
+
+export async function admitNative(
+  root: string, home: string, taskId: string, agent: string, request: TmuxAdmissionRequest,
+): Promise<TmuxAdmission> {
+  if (!await fs.realpath(home).catch(() => null)) throw new Refusal(`unresolved repository root: ${home}`);
+  return withHubLock(root, () => withTeamLock(home, () => admitNativeLocked(root, home, taskId, agent, request)));
+}
+
 export async function admitTmux(
   root: string, home: string, taskId: string, agent: string,
   request: TmuxAdmissionRequest, options: TmuxAdmissionOptions = {},
 ): Promise<TmuxAdmission> {
+  if (request.adapter !== 'tmux') throw new Refusal('tmux admission needs the tmux adapter');
   if (!await fs.realpath(home).catch(() => null)) throw new Refusal(`unresolved repository root: ${home}`);
   const beforePreflight = options.readPreflightSnapshot ? await options.readPreflightSnapshot() : undefined;
   return withHubLock(root, async () => withTeamLock(home, async () => {
-    const tasks = foldTasks(await readTaskEvents(root));
-    const task = storedTask(tasks, taskId);
-    await assertRegisteredHome(root, home, task);
-    validateRequest(task, request);
-    if (task.contract!.preflight_snapshot !== undefined
-      && (beforePreflight !== task.contract!.preflight_snapshot
-        || await options.readPreflightSnapshot?.() !== task.contract!.preflight_snapshot)) {
-      throw new Refusal('preflight snapshot changed before admission');
-    }
-    const writeScope = await normalizedAllocation(home, task.contract!, request);
-    const previous = previousAdmission(task, request);
-    if (previous && activeAdmission(previous) && previous.agent !== agent) {
-      throw new Refusal('replacement requires a fenced prior lease');
-    }
-    if (options.resumeExternal) {
-      if (!options.externalOperationId) throw new Refusal('external resume needs the recorded operation ID');
-      const currentEntry = previous
-        ? (await readTeam(home)).agents.find((entry) => entry.lease_id === previous.lease_id)
-        : undefined;
-      if (!previous || previous.agent !== agent || !activeAdmission(previous)
-        || previous.plan_digest !== task.plan_digest || previous.root_lease_epoch !== task.lease_epoch
-        || previous.output_claim !== request.output_claim || !currentEntry || currentEntry.lease_revoked
-        || currentEntry.closed_at || currentEntry.plan_digest !== previous.plan_digest
-        || currentEntry.root_lease_epoch !== previous.root_lease_epoch
-        || previous.external_operation_id !== options.externalOperationId
-        || currentEntry.external_operation_id !== options.externalOperationId) {
-        throw new Refusal('external resume has no current matching admission and operation ID');
-      }
-      return previous;
-    }
-    await checkCollisions(root, home, tasks, agent, request, writeScope);
-    checkDuplicate(tasks, task, request, valueDigest(request.provenance));
-    await checkBudgets(root, home, tasks, task, request);
-    const attemptsUsed = (previous?.attempts_used ?? 0) + 1;
-    const attemptCap = Math.min(request.budget?.attempts ?? task.contract!.budget.attempts, task.contract!.budget.attempts);
-    if (attemptsUsed > attemptCap) {
-      if (previous) await transitionTmuxAdmissionLocked(root, home, previous, 'blocked:budget_exhausted');
-      throw new Refusal(`blocked:budget_exhausted for ${previous?.lineage_id ?? agent}`);
-    }
-    if (!request.retry_of && (await readTeam(home)).agents.some((old) => old.name === agent)) {
-      throw new Refusal(`${task.project} already has an agent named ${agent}`);
-    }
-    const admitted = reservation(task, agent, request, writeScope, previous, attemptsUsed);
-    const team = await readTeam(home);
-    const old = previous ? team.agents.find((candidate) => candidate.lease_id === previous.lease_id) : undefined;
-    const agents = previous ? team.agents.filter((candidate) => candidate.lease_id !== previous.lease_id) : [...team.agents];
-    agents.push(entryFromAdmission(admitted, old, options));
-    await appendAdmission(root, admitted, previous ? [previous.lease_id] : []);
-    try {
-      await writeJson(hivePath(home, 'team.json'), { agents });
-    } catch (error) {
-      await appendAdmission(root, {
-        ...admitted, status: 'revoked', lease_revoked: true,
-        launch_error: `team reservation failed: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      throw error;
-    }
-    return admitted;
+    return admitLocked(root, home, taskId, agent, request, options, beforePreflight);
   }));
 }
 
@@ -315,6 +353,32 @@ export async function assertAdmissionCurrentLocked(
   const task = storedTask(foldTasks(await readTaskEvents(root)), taskId);
   await assertRegisteredHome(root, home, task);
   return currentGrant(task, await readTeam(home), agent, leaseId, allowClosed);
+}
+
+export type NativeGrant = { task: HubTask; admission: TmuxAdmission; parent: Grant };
+
+export async function assertNativeAdmissionCurrentLocked(
+  root: string, home: string, taskId: string, agent: string, leaseId: string, allowReleased = false,
+): Promise<NativeGrant> {
+  const task = storedTask(foldTasks(await readTaskEvents(root)), taskId);
+  await assertRegisteredHome(root, home, task);
+  const admission = task.admissions?.find((candidate) => candidate.lease_id === leaseId);
+  const active = admission && activeAdmission(admission);
+  const released = allowReleased && admission?.status === 'released' && admission.lease_revoked && !admission.launch_error;
+  if (!admission || admission.agent !== agent || admission.adapter !== 'native'
+    || admission.plan_digest !== task.plan_digest || admission.root_lease_epoch !== task.lease_epoch
+    || admission.lease_epoch !== 1 || admission.write_scope.length !== 0 || !admission.parent_lease_id
+    || !active && !released) {
+    throw new Refusal('native branch does not hold the current read lease, plan digest, and root epoch');
+  }
+  const parentAdmission = task.admissions?.find((candidate) => candidate.lease_id === admission.parent_lease_id);
+  if (!parentAdmission || admission.depth !== (parentAdmission.depth ?? 1) + 1) {
+    throw new Refusal('native branch parent lease or depth is stale');
+  }
+  const parent = allowReleased
+    ? await assertAdmissionEvidenceLocked(root, home, taskId, parentAdmission.agent, parentAdmission.lease_id)
+    : currentGrant(task, await readTeam(home), parentAdmission.agent, parentAdmission.lease_id, false);
+  return { task, admission, parent };
 }
 
 export async function assertAdmissionEvidenceLocked(
@@ -477,6 +541,7 @@ export async function applyRootDeltaLocked(
     const projectSlots = Math.max(0, nextContract.budget.active_project_records - otherProjectRecords);
     const replacements = new Map<string, TmuxAdmission>();
     for (const admission of active) {
+      if (admission.adapter === 'native') continue;
       const request: TmuxAdmissionRequest = {
         parent_id: admission.parent_id,
         plan_digest: nextDigest,

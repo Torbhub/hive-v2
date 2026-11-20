@@ -116,6 +116,12 @@ export const INVARIANTS: Invariant[] = [
     evidence: 'test/spawn.test.ts::trust dialog at spawn' },
   { id: 'approved-command-consumption', desc: 'only the exact approved command is declared after a root delta and different commands need a new delta',
     evidence: 'test/watch.test.ts::watchCycle auto-approver' },
+  { id: 'native-read-admission', desc: 'native branches reserve read-only leases from the root contract before creation',
+    evidence: 'test/admission.test.ts::native admission leases' },
+  { id: 'native-result-evidence', desc: 'native results pass only exact stored history and evidence hashes',
+    evidence: 'test/evidence.test.ts::native result evidence' },
+  { id: 'native-exact-rejoin', desc: 'human review and exact delivery proof govern native rejoin and lease release',
+    evidence: 'test/branches.test.ts::selective rejoin and exact delivery fencing' },
 ];
 
 export const JOURNEYS: Journey[] = [
@@ -154,6 +160,9 @@ export const JOURNEYS: Journey[] = [
     criteria: ['normalized-writer-leases', 'attempt-lineage-budget', 'current-grant-before-launch',
       'scope-diff-fences-lease', 'locked-team-mutations', 'public-contract-intake', 'exact-lease-revocation',
       'relaunch-cleanup', 'owned-lock-release'] },
+  { id: 'NATIVE_REVIEW_REJOIN', desc: 'a read-only native child produces evidence, human review, and exact rejoin',
+    status: USED, tracer: 'test/branches.test.ts',
+    criteria: ['native-read-admission', 'native-result-evidence', 'native-exact-rejoin'] },
   { id: 'WATCH_SAFE_TIER', desc: 'safe approvals: whitelisted read-only commands are approved, the rest held',
     status: USED, tracer: 'test/watch.test.ts',
     criteria: ['approve-once-only', 'destructive-never-classified', 'decisions-logged'] },

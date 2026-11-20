@@ -1,6 +1,7 @@
 import { paneExists } from './tmux.js';
 import type {
-  Checkpoint, HubTask, RootContract, TaskEvidence, TaskEvent, TaskOperation, TaskOutcome, TaskOutcomeInput, TaskReceipt,
+  Checkpoint, HubTask, NativeBranchClient, RootContract,
+  TaskEvidence, TaskEvent, TaskOperation, TaskOutcome, TaskOutcomeInput, TaskReceipt,
 } from './types.js';
 import { CLOSED_STATES, PROGRESS_STATUSES, TASK_EVIDENCE_OUTCOMES, TASK_EVENTS } from './types.js';
 import {
@@ -424,8 +425,10 @@ function assertDuplicate(events: TaskEvent[], task: HubTask, input: TaskOutcomeI
   }
 }
 
-async function assertAcceptance(root: string, task: HubTask, outcome: TaskOutcome, input: TaskOutcomeInput): Promise<void> {
-  const acceptance = await evaluateAcceptanceLocked(root, task);
+async function assertAcceptance(
+  root: string, task: HubTask, outcome: TaskOutcome, input: TaskOutcomeInput, native?: NativeBranchClient,
+): Promise<void> {
+  const acceptance = await evaluateAcceptanceLocked(root, task, native);
   const unsupported = acceptance.blockers.filter((blocker) => blocker.startsWith('blocked:unsupported_predicate'));
   if (unsupported.length) {
     await appendTaskEvent(root, {
@@ -438,7 +441,9 @@ async function assertAcceptance(root: string, task: HubTask, outcome: TaskOutcom
   }
 }
 
-async function assertOutcomeGuards(root: string, events: TaskEvent[], task: HubTask, outcome: TaskOutcome, input: TaskOutcomeInput) {
+async function assertOutcomeGuards(
+  root: string, events: TaskEvent[], task: HubTask, outcome: TaskOutcome, input: TaskOutcomeInput, native?: NativeBranchClient,
+) {
   if (!task.plan_approved) throw new Refusal(`${task.id} has no approved plan`);
   if (outcome === 'done') {
     const checkpoints = doneBlockers(task);
@@ -462,14 +467,14 @@ async function assertOutcomeGuards(root: string, events: TaskEvent[], task: HubT
   const writers = await remainingWriters(root, task);
   if (writers.length) throw new Refusal(`${task.id} still has writers: ${writers.join(', ')}`);
   if (outcome === 'failed') {
-    const acceptance = await evaluateAcceptanceLocked(root, task);
+    const acceptance = await evaluateAcceptanceLocked(root, task, native);
     if (acceptance.requiredBlockers.length === 0) {
       throw new Refusal(`${task.id} failed needs unsatisfied required acceptance`);
     }
     return;
   }
   if (!SUCCESS_OUTCOMES.has(outcome)) return;
-  await assertAcceptance(root, task, outcome, input);
+  await assertAcceptance(root, task, outcome, input, native);
   assertChildren(events, task);
 }
 
@@ -481,11 +486,11 @@ function assertOutcomeBinding(task: HubTask, input: TaskOutcomeInput): void {
 }
 
 async function recordOutcomeLocked(
-  root: string, events: TaskEvent[], task: HubTask, outcome: TaskOutcome, input: TaskOutcomeInput,
+  root: string, events: TaskEvent[], task: HubTask, outcome: TaskOutcome, input: TaskOutcomeInput, native?: NativeBranchClient,
 ): Promise<void> {
   assertOutcomeBinding(task, input);
   await assertWorkerBinding(root, task, input);
-  await assertOutcomeGuards(root, events, task, outcome, input);
+  await assertOutcomeGuards(root, events, task, outcome, input, native);
   await appendTaskEvent(root, {
     id: task.id, project: task.project, event: outcome, at: new Date().toISOString(), note: input.reason, outcome: input,
   });
@@ -493,7 +498,7 @@ async function recordOutcomeLocked(
 
 export async function recordTaskOutcome(
   root: string, id: string, outcome: TaskOutcome, input: TaskOutcomeInput,
-  options: { project?: string; revalidate?: TaskRevalidate } = {},
+  options: { project?: string; revalidate?: TaskRevalidate; native?: NativeBranchClient } = {},
 ): Promise<TaskOutcomeInput> {
   if (!OUTCOMES.has(outcome)) throw new Refusal(`unknown task outcome: ${outcome}`);
   return withHubLock(root, async () => {
@@ -501,7 +506,7 @@ export async function recordTaskOutcome(
     const events = await readTaskEvents(root);
     const task = storedTask(events, id);
     assertTaskProject(task, options.project);
-    await recordOutcomeLocked(root, events, task, outcome, input);
+    await recordOutcomeLocked(root, events, task, outcome, input, options.native);
     return input;
   });
 }

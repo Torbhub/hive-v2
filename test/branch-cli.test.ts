@@ -5,17 +5,27 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({
-  create: vi.fn(async () => ({ id: 'branch-1', status: 'active' })),
-  list: vi.fn(async () => [{ id: 'branch-1', status: 'active' }]),
-  refresh: vi.fn(async () => ({ id: 'branch-1', status: 'active' })),
-  result: vi.fn(async () => ({ id: 'branch-1', result: { digest: 'a'.repeat(64) } })),
-  read: vi.fn(),
-  reconcileCreation: vi.fn(async () => ({ id: 'branch-1', status: 'active' })),
-  reconcile: vi.fn(async () => ({ id: 'branch-1', rejoin: { status: 'unknown' } })),
-}));
+const mocks = vi.hoisted(() => {
+  const record = {
+    id: 'branch-1', kind: 'child', status: 'active', purpose: 'Review',
+    scope: { project: 'demo', agent: 'builder', task: 'demo-1' }, createdAt: 'created', updatedAt: 'updated',
+  };
+  return {
+    create: vi.fn(async () => ({ ...record })),
+    list: vi.fn(async () => [{ ...record }]),
+    refresh: vi.fn(async () => ({ ...record })),
+    result: vi.fn(async () => ({ ...record, result: { digest: 'a'.repeat(64), findings: [] } })),
+    read: vi.fn(),
+    reconcileCreation: vi.fn(async () => ({ ...record })),
+    reconcile: vi.fn(async () => ({
+      ...record,
+      rejoin: { status: 'unknown', reviewDigest: 'a'.repeat(64), promptId: 'prompt', promptHash: 'b'.repeat(64), intentAt: 'now' },
+    })),
+  };
+});
 
-vi.mock('../src/branches.js', () => ({
+vi.mock('../src/branches.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/branches.js')>(),
   MAX_NATIVE_BRANCH_RESULT_BYTES: 64,
   createNativeBranch: mocks.create,
   listNativeBranches: mocks.list,
@@ -75,6 +85,23 @@ describe('hive branch cli', () => {
     );
   });
 
+  it('passes only root allocation fields when creation needs disambiguation', async () => {
+    const root = tmp();
+    const native = {};
+    await branchCommand(root, [
+      ...createArgs(), '--output-claim', 'Review the native child.', '--acceptance', 'native', '--acceptance', 'native-extra',
+    ], { native });
+    expect(mocks.create).toHaveBeenCalledWith(
+      { root, project: 'demo', agent: 'builder' },
+      {
+        kind: 'child', purpose: 'inspect the boundary', outputClaim: 'Review the native child.',
+        acceptanceIds: ['native', 'native-extra'],
+      },
+      native,
+      expect.anything(),
+    );
+  });
+
   it('dispatches a current-boundary fork without a turn index', async () => {
     const root = tmp();
     const native = {};
@@ -88,7 +115,7 @@ describe('hive branch cli', () => {
   });
 
   it('rejects removed scope, review, ttl, and json flags', async () => {
-    for (const flag of ['task', 'session', 'generation', 'reviewer', 'ttl-ms', 'json', 'fork-turn']) {
+    for (const flag of ['task', 'session', 'generation', 'reviewer', 'ttl-ms', 'json', 'fork-turn', 'write-scope']) {
       const args = [...createArgs(), `--${flag}`];
       if (flag !== 'json') args.push('2');
       await expect(branchCommand(tmp(), args, { native: {} })).rejects.toThrow(/unknown branch flag|usage/);
@@ -102,7 +129,29 @@ describe('hive branch cli', () => {
     expect(mocks.list).toHaveBeenCalledWith(expect.any(String), 'demo');
     expect(mocks.refresh).not.toHaveBeenCalled();
     expect(mocks.create).not.toHaveBeenCalled();
-    expect(vi.mocked(console.log)).toHaveBeenCalledWith(JSON.stringify([{ id: 'branch-1', status: 'active' }], null, 2));
+    expect(vi.mocked(console.log)).toHaveBeenCalledWith(JSON.stringify([{
+      id: 'branch-1', status: 'active', purpose: 'Review', agent: 'builder', task: 'demo-1',
+      createdAt: 'created', updatedAt: 'updated', hasResult: false,
+    }], null, 2));
+  });
+
+  it('filters leases, sessions, paths, snapshots, grants, and native evidence from CLI output', async () => {
+    mocks.list.mockResolvedValueOnce([{
+      id: BRANCH, status: 'active', purpose: 'Review', scope: { project: 'demo', agent: 'builder', task: 'demo-1' },
+      createdAt: 'created', updatedAt: 'updated', hasResult: true,
+      leaseId: 'private-lease', parentSessionId: 'private-parent', childSessionId: 'private-child',
+      cwd: '/private/path', parentSnapshot: { historyHash: 'private-history' },
+      review: { approverGrantId: 'private-grant' }, result: { findings: [{ nativeEvidence: ['private-evidence'] }] },
+    }] as never);
+    await branchCommand(tmp(), ['status', 'demo'], { native: {} });
+    const output = vi.mocked(console.log).mock.calls[0][0] as string;
+    expect(JSON.parse(output)).toEqual([{
+      id: BRANCH, status: 'active', purpose: 'Review', agent: 'builder', task: 'demo-1',
+      createdAt: 'created', updatedAt: 'updated', hasResult: true,
+    }]);
+    for (const secret of ['private-lease', 'private-parent', 'private-child', '/private/path', 'private-history', 'private-grant', 'private-evidence']) {
+      expect(output).not.toContain(secret);
+    }
   });
 
   it('reads a regular result file as structured JSON and passes native evidence verification', async () => {

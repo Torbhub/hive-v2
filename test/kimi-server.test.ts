@@ -4,11 +4,15 @@ import type { DaydreamStatus, NativePromptInput } from '../src/types.js';
 
 const ORIGIN = 'http://127.0.0.1:58627';
 const TOKEN = 'synthetic-native-token';
+const READ_ONLY = {
+  filesystem: 'read-only', shell: 'denied', side_effects: 'denied', tools: ['Read', 'Grep', 'Glob'],
+} as const;
 
 function nativeSession(id: string) {
   return {
     id,
     workspace_id: 'workspace_test',
+    read_only: READ_ONLY,
     metadata: {
       cwd: '/tmp/hive-native-test', hive_branch_id: '7ca3c50b-8304-45f0-a925-f41d10a14cf2',
       parent_session_id: 'session_parent', child_session_kind: 'child',
@@ -39,10 +43,10 @@ describe('Kimi Server 2.5.3 native client', () => {
     const api = client(fetcher);
 
     await expect(api.createChild('session_parent', {
-      title: 'Hive child', metadata: { hive_branch_id: '7ca3c50b-8304-45f0-a925-f41d10a14cf2' },
-    })).resolves.toMatchObject({ id: 'session_child', workspace_id: 'workspace_test' });
+      title: 'Hive child', metadata: { hive_branch_id: '7ca3c50b-8304-45f0-a925-f41d10a14cf2' }, readOnly: READ_ONLY,
+    })).resolves.toMatchObject({ id: 'session_child', workspace_id: 'workspace_test', read_only: READ_ONLY });
     await api.forkSession('session_parent', {
-      title: 'Hive fork', metadata: { hive_branch_id: '7ca3c50b-8304-45f0-a925-f41d10a14cf2' },
+      title: 'Hive fork', metadata: { hive_branch_id: '7ca3c50b-8304-45f0-a925-f41d10a14cf2' }, readOnly: READ_ONLY,
     });
     await api.listChildren('session_parent', { pageSize: 100 });
 
@@ -53,7 +57,7 @@ describe('Kimi Server 2.5.3 native client', () => {
     ]);
     expect(JSON.parse(String(calls[0].init?.body))).not.toHaveProperty('turn_index');
     expect(JSON.parse(String(calls[1].init?.body))).toEqual({
-      title: 'Hive fork', metadata: { hive_branch_id: '7ca3c50b-8304-45f0-a925-f41d10a14cf2' },
+      title: 'Hive fork', metadata: { hive_branch_id: '7ca3c50b-8304-45f0-a925-f41d10a14cf2' }, read_only: READ_ONLY,
     });
     expect(new URL(calls[2].url).searchParams.get('page_size')).toBe('100');
   });

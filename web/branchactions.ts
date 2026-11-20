@@ -1,6 +1,7 @@
 import {
   listNativeBranches,
-  previewNativeBranchRejoin,
+  nativeBranchDetail as detail,
+  nativeBranchSummary as summary,
   readNativeBranch,
   rejoinNativeBranch,
   reviewNativeBranch,
@@ -23,55 +24,6 @@ function projectName(value: unknown): string {
   } catch (error) {
     throw new HttpError(400, error instanceof Error ? error.message : String(error));
   }
-}
-
-function summary(record: NativeBranchRecord): NativeBranchSummary {
-  return {
-    id: record.id,
-    status: record.status,
-    purpose: record.purpose,
-    agent: record.scope.agent,
-    task: record.scope.task,
-    createdAt: record.createdAt,
-    updatedAt: record.updatedAt,
-    hasResult: Boolean(record.result),
-    ...(record.error === undefined ? {} : { error: record.error }),
-  };
-}
-
-function detail(record: NativeBranchRecord): NativeBranchDetail {
-  const preview = record.review ? previewNativeBranchRejoin(record) : undefined;
-  return {
-    ...summary(record),
-    kind: record.kind,
-    findings: record.result?.findings.map((finding) => ({
-      id: finding.id,
-      answer: finding.answer,
-      recommendation: finding.recommendation,
-      uncertainty: finding.uncertainty,
-    })) ?? [],
-    ...(record.review ? {
-      review: {
-        digest: record.review.digest,
-        findingIds: [...record.review.findingIds],
-        createdAt: record.review.createdAt,
-        expiresAt: record.review.expiresAt,
-        promptId: preview!.promptId,
-        prompt: preview!.prompt,
-      },
-    } : {}),
-    ...(record.rejoin ? {
-      rejoin: {
-        status: record.rejoin.status,
-        reviewDigest: record.rejoin.reviewDigest,
-        promptId: record.rejoin.promptId,
-        ...(record.rejoin.status === 'rejoined' ? {
-          ...(record.rejoin.nativeMessageId === undefined ? {} : { nativeMessageId: record.rejoin.nativeMessageId }),
-          ...(record.rejoin.rejoinedAt === undefined ? {} : { rejoinedAt: record.rejoin.rejoinedAt }),
-        } : {}),
-      },
-    } : {}),
-  };
 }
 
 export async function branchListResponse(

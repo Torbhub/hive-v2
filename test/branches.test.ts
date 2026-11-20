@@ -18,10 +18,14 @@ import {
   reviewNativeBranch,
   type NativeBranchRecord,
 } from '../src/branches.js';
-import { buildStatus } from '../src/hub.js';
+import { admitTmux, applyRootDeltaLocked, transitionTmuxAdmission } from '../src/admission.js';
+import { buildStatus, evaluateTaskPredicate, recordTaskOutcome } from '../src/hub.js';
 import { disableExecution } from '../src/rollout.js';
-import { hivePath, hubPath, writeJson } from '../src/state.js';
+import {
+  appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readTaskEvents, readTeam, withHubLock, writeJson,
+} from '../src/state.js';
 import type { Principal } from '../src/security.js';
+import type { RootContract } from '../src/types.js';
 import { MemoryRegistry, registryItems } from './security-fixture.js';
 
 vi.mock('../src/kimi-server.js', () => ({
@@ -37,6 +41,9 @@ const CHILD = 'session_child';
 const BRANCH = '7ca3c50b-8304-45f0-a925-f41d10a14cf2';
 const HUMAN: Principal = { kind: 'human', subject: 'user:alice', aclEpoch: 1 };
 const AGENT: Principal = { kind: 'agent', subject: 'agent:builder', agentId: 'builder', project: 'demo', aclEpoch: 1 };
+const READ_ONLY = {
+  filesystem: 'read-only', shell: 'denied', side_effects: 'denied', tools: ['Read', 'Grep', 'Glob'],
+} as const;
 
 function sha(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -70,6 +77,7 @@ function nativeSession(id: string, branchId = BRANCH) {
   return {
     id,
     workspace_id: 'workspace_demo',
+    read_only: READ_ONLY,
     metadata: {
       cwd: path.join('/tmp', 'hive-native-metadata'), hive_branch_id: branchId,
       parent_session_id: PARENT, child_session_kind: 'child',
@@ -102,9 +110,14 @@ function fakeNative(home: string) {
     onListMessages: undefined as ((sessionId: string) => Promise<void>) | undefined,
     onHistoryRead: undefined as ((sessionId: string) => Promise<void>) | undefined,
     creationIntent: undefined as NativeBranchRecord | undefined,
+    denials: [] as string[],
   };
   const api = {
     state,
+    attemptSideEffect(kind: 'filesystem' | 'shell' | 'side_effect') {
+      state.denials.push(kind);
+      return 'denied';
+    },
     createChild: vi.fn(async (_parentId: string, input: { metadata: { hive_branch_id: string } }) => {
       state.creationIntent = JSON.parse(await fs.readFile(hivePath(home, 'branches', `${input.metadata.hive_branch_id}.json`), 'utf8')) as NativeBranchRecord;
       const base = nativeSession(CHILD, input.metadata.hive_branch_id);
@@ -120,7 +133,8 @@ function fakeNative(home: string) {
     forkSession: vi.fn(async (_parentId: string, input: { metadata: { hive_branch_id: string } }) => {
       expect(input).not.toHaveProperty('turnIndex');
       const base = {
-        id: 'session_fork', workspace_id: 'workspace_demo', metadata: { cwd: home, hive_branch_id: input.metadata.hive_branch_id },
+        id: 'session_fork', workspace_id: 'workspace_demo', read_only: READ_ONLY,
+        metadata: { cwd: home, hive_branch_id: input.metadata.hive_branch_id },
       };
       const fork = {
         ...base,
@@ -180,12 +194,45 @@ async function setup() {
   const home = path.join(root, 'demo');
   await fs.mkdir(home, { recursive: true });
   await writeJson(hubPath(root, 'projects.json'), { projects: [{ name: 'demo', home, repos: [] }] });
-  await writeJson(hivePath(home, 'team.json'), {
-    agents: [{ name: 'builder', session_id: PARENT, task: 'demo-1', worktree: home }],
+  const contract: RootContract = {
+    schema_version: 1,
+    objective: 'Review the bounded native result.',
+    consumer: 'demo-orchestrator',
+    deliverable: 'Return the bounded implementation and its evidence.',
+    kind: 'research',
+    acceptance: [
+      { id: 'diff', predicate_id: 'git_diff_scope', version: 1, configuration: {}, required_evidence: ['diff'] },
+      { id: 'native', predicate_id: 'native_result', version: 1, configuration: {}, required_evidence: ['native-result'] },
+    ],
+    provenance: { repository: home, base_revision: '0'.repeat(40), artifact_revision: '1'.repeat(40) },
+    write_scope: ['src'],
+    action_scope: [],
+    budget: { depth: 2, active_children: 8, active_project_records: 8, attempts: 3 },
+    delegation: {
+      output_claims: ['Return the bounded implementation and its evidence.', 'Review the native child.'],
+      adapters: ['tmux', 'native'],
+    },
+  };
+  await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'asked', at: NOW, lease_epoch: 1 });
+  await appendTaskEvent(root, {
+    id: 'demo-1', project: 'demo', event: 'plan', at: NOW,
+    checkpoints: [{ id: 'work', desc: 'bounded native review', etaMin: 5 }],
+    contract, plan_digest: contractDigest(contract),
   });
+  await appendTaskEvent(root, {
+    id: 'demo-1', project: 'demo', event: 'answered', at: NOW, plan_digest: contractDigest(contract),
+  });
+  await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'progress', at: NOW, checkpoint: 'work', status: 'ok' });
+  const parentAdmission = await admitTmux(root, home, 'demo-1', 'builder', {
+    parent_id: 'demo-1', plan_digest: contractDigest(contract),
+    output_claim: contract.deliverable, acceptance_ids: ['diff'], provenance: contract.provenance,
+    write_scope: ['src'], adapter: 'tmux', budget: { depth: 1, attempts: 3 },
+  }, { worktree: home });
+  const parentEntry = (await readTeam(home)).agents.find((agent) => agent.lease_id === parentAdmission.lease_id)!;
+  await writeJson(hivePath(home, 'team.json'), { agents: [{ ...parentEntry, session_id: PARENT }] });
   const selector = { root, project: 'demo' };
   const registry = new MemoryRegistry(registryItems());
-  return { root, home, selector, registry, principal: HUMAN };
+  return { root, home, selector, registry, principal: HUMAN, contract, parentAdmission };
 }
 
 async function reassignTeam(home: string): Promise<void> {
@@ -236,25 +283,36 @@ async function createFixture(kind: 'child' | 'fork' = 'child') {
 }
 
 function resultInput(fixture: Fixture) {
-  const evidence = fixture.native.state.histories.get(fixture.branch.childSessionId)![0];
+  const childSessionId = fixture.branch.childSessionId!;
+  const resultMessageId = 'msg_child_result';
+  const content = [{
+    answer: ' The child route has no turn_index. ',
+    recommendation: 'Use a plain fork for a historical checkpoint.',
+    uncertainty: 'Historical behavior remains unverified.',
+  }, {
+    answer: 'UNSELECTED FINDING: do not copy the transcript.',
+    recommendation: 'Return only reviewed findings.',
+    uncertainty: 'No uncertainty remains in this fixture.',
+  }];
+  const resultMessage = {
+    ...message(resultMessageId, childSessionId, JSON.stringify({
+      schemaVersion: 1, branchId: fixture.branch.id, findings: content,
+    })),
+    role: 'assistant',
+  };
+  fixture.native.state.histories.set(childSessionId, [
+    resultMessage,
+    ...fixture.native.state.histories.get(childSessionId)!.filter((entry) => entry.id !== resultMessageId),
+  ]);
+  fixture.branch.childSnapshot = snapshot(fixture.native.state.histories.get(childSessionId)!);
   return {
     schemaVersion: 1,
     branchId: fixture.branch.id,
     childHistoryHash: fixture.branch.childSnapshot.historyHash,
-    findings: [
-      {
-        answer: ' The child route has no turn_index. ',
-        recommendation: 'Use a plain fork for a historical checkpoint.',
-        uncertainty: 'Historical behavior remains unverified.',
-        nativeEvidence: [{ messageId: evidence.id, contentHash: contentHash(evidence) }],
-      },
-      {
-        answer: 'UNSELECTED FINDING: do not copy the transcript.',
-        recommendation: 'Return only reviewed findings.',
-        uncertainty: 'No uncertainty remains in this fixture.',
-        nativeEvidence: [{ messageId: evidence.id, contentHash: contentHash(evidence) }],
-      },
-    ],
+    findings: content.map((finding) => ({
+      ...finding,
+      nativeEvidence: [{ messageId: resultMessageId, contentHash: contentHash(resultMessage) }],
+    })),
   };
 }
 
@@ -291,16 +349,63 @@ afterEach(() => {
 
 describe('native creation and reconciliation', () => {
   it('derives durable scope and verifies child identity, workspace, metadata, and snapshots', async () => {
-    const { selector, branch, native } = await createFixture();
+    const { root, selector, branch, native } = await createFixture();
     expect(branch).toMatchObject({
       kind: 'child', parentSessionId: PARENT, childSessionId: CHILD,
       scope: { project: 'demo', agent: 'builder', task: 'demo-1' }, status: 'active', createdAt: NOW,
     });
+    expect(branch.leaseId).toMatch(/^[0-9a-f-]{36}$/);
     expect(branch).not.toHaveProperty('generation');
-    expect(native.state.creationIntent).toMatchObject({ status: 'creating', childSessionId: null });
+    expect(native.state.creationIntent).toMatchObject({
+      status: 'creating', childSessionId: null, leaseId: branch.leaseId,
+    });
+    const task = foldTasks(await readTaskEvents(root)).find((candidate) => candidate.id === 'demo-1')!;
+    expect(task.admissions?.find((admission) => admission.lease_id === branch.leaseId)).toMatchObject({
+      agent: branch.id, adapter: 'native', lease_epoch: 1, depth: 2, write_scope: [],
+    });
     expect(branch.parentSnapshot).toEqual(snapshot(native.state.histories.get(PARENT)!));
     expect(branch.childSnapshot).toEqual(snapshot(native.state.histories.get(CHILD)!));
     expect(await readNativeBranch(selector, branch.id)).toEqual(branch);
+  });
+
+  it('rejects every writable native scope before any native call or reservation', async () => {
+    const fixture = await setup();
+    const native = fakeNative(fixture.home);
+    await expect(createNativeBranch({ ...fixture.selector, agent: 'builder' }, {
+      kind: 'child', purpose: 'writable native scope', writeScope: ['src'],
+    }, native, { now: NOW })).rejects.toThrow(/read.only|writable|write scope/i);
+    expect(native.getSession).not.toHaveBeenCalled();
+    expect(native.createChild).not.toHaveBeenCalled();
+    expect(native.forkSession).not.toHaveBeenCalled();
+    const task = foldTasks(await readTaskEvents(fixture.root)).find((candidate) => candidate.id === 'demo-1')!;
+    expect(task.admissions?.filter((admission) => admission.adapter === 'native')).toHaveLength(0);
+  });
+
+  it.each(['child', 'fork'] as const)('requires and enforces the exact read-only policy for %s creation', async (kind) => {
+    const fixture = await setup();
+    const native = fakeNative(fixture.home);
+    const branch = await createNativeBranch({ ...fixture.selector, agent: 'builder' }, {
+      kind, purpose: 'read-only native execution',
+    }, native, { now: NOW });
+    const request = kind === 'child' ? native.createChild.mock.calls[0][1] : native.forkSession.mock.calls[0][1];
+    expect(request).toMatchObject({ readOnly: READ_ONLY });
+    expect(native.state.sessions.get(branch.childSessionId)).toMatchObject({ read_only: READ_ONLY });
+    expect(branch.status).toBe('active');
+    for (const effect of ['filesystem', 'shell', 'side_effect'] as const) {
+      expect(native.attemptSideEffect(effect)).toBe('denied');
+    }
+    expect(native.state.denials).toEqual(['filesystem', 'shell', 'side_effect']);
+  });
+
+  it.each(['child', 'fork'] as const)('never activates an unattested %s', async (kind) => {
+    const fixture = await setup();
+    const native = fakeNative(fixture.home);
+    native.state.childOverride = { read_only: undefined };
+    const branch = await createNativeBranch({ ...fixture.selector, agent: 'builder' }, {
+      kind, purpose: 'missing read-only attestation',
+    }, native, { now: NOW });
+    expect(branch.status).toBe('unknown');
+    expect(branch.status).not.toBe('active');
   });
 
   it('requires a plain fork to prove the exact current full-history snapshot', async () => {
@@ -478,10 +583,37 @@ describe('bounded verified structured results', () => {
     const repeated = await recordNativeBranchResult(fixture.selector, fixture.branch.id, raw, fixture.native, { now: '2026-11-18T12:01:00.000Z' });
     expect(repeated.result).toEqual(recorded.result);
     expect(recorded.result?.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(recorded.result?.resultMessageId).toBe('msg_child_result');
     await expect(recordNativeBranchResult(fixture.selector, fixture.branch.id, {
       ...raw,
       findings: [{ ...raw.findings[0], answer: 'A conflicting terminal answer.' }, raw.findings[1]],
     }, fixture.native, { now: NOW })).rejects.toThrow(/conflict|terminal|already/);
+  });
+
+  it('skips unrelated assistant prose and JSON before the exact structured result', async () => {
+    const fixture = await createFixture();
+    const raw = resultInput(fixture);
+    const history = fixture.native.state.histories.get(CHILD)!;
+    fixture.native.state.histories.set(CHILD, [
+      { ...message('msg_unrelated_json', CHILD, '{"schemaVersion":1,"branchId":"other","findings":[]}'), role: 'assistant' },
+      { ...message('msg_unrelated_prose', CHILD, 'assistant prose, not JSON'), role: 'assistant' },
+      ...history,
+    ]);
+    raw.childHistoryHash = snapshot(fixture.native.state.histories.get(CHILD)!).historyHash;
+    const recorded = await recordNativeBranchResult(fixture.selector, fixture.branch.id, raw, fixture.native, { now: NOW });
+    expect(recorded.status).toBe('active');
+    expect(recorded.result?.resultMessageId).toBe('msg_child_result');
+  });
+
+  it('rejects duplicate exact assistant result message IDs without mutation', async () => {
+    const fixture = await createFixture();
+    const raw = resultInput(fixture);
+    const history = fixture.native.state.histories.get(CHILD)!;
+    fixture.native.state.histories.set(CHILD, [history[0], ...history]);
+    raw.childHistoryHash = snapshot(fixture.native.state.histories.get(CHILD)!).historyHash;
+    await expect(recordNativeBranchResult(fixture.selector, fixture.branch.id, raw, fixture.native, { now: NOW }))
+      .rejects.toThrow(/duplicate|diverged|active/);
+    expect((await readNativeBranch(fixture.selector, fixture.branch.id)).result).toBeUndefined();
   });
 
   it.each([
@@ -495,6 +627,34 @@ describe('bounded verified structured results', () => {
     await expect(recordNativeBranchResult(fixture.selector, fixture.branch.id, raw, fixture.native, { now: NOW }))
       .rejects.toThrow(/evidence|snapshot|content/);
     expect((await readNativeBranch(fixture.selector, fixture.branch.id)).result).toBeUndefined();
+  });
+
+  it.each(['user', 'tool', 'parent'])('rejects a result message from %s origin', async (origin) => {
+    const fixture = await createFixture();
+    const raw = resultInput(fixture);
+    const history = fixture.native.state.histories.get(CHILD)!;
+    if (origin === 'parent') history[0].session_id = PARENT;
+    else history[0].role = origin;
+    await expect(recordNativeBranchResult(fixture.selector, fixture.branch.id, raw, fixture.native, { now: NOW }))
+      .rejects.toThrow(/assistant|session|result message|active|diverged/);
+    expect((await readNativeBranch(fixture.selector, fixture.branch.id)).result).toBeUndefined();
+  });
+
+  it('rejects unrelated real child citations and content that differs from the assistant result', async () => {
+    const unrelated = await createFixture();
+    const raw = resultInput(unrelated);
+    const unrelatedMessage = unrelated.native.state.histories.get(CHILD)!.find((entry) => entry.id === 'msg_child_0')!;
+    raw.findings[0].nativeEvidence = [{ messageId: unrelatedMessage.id, contentHash: contentHash(unrelatedMessage) }];
+    await expect(recordNativeBranchResult(unrelated.selector, unrelated.branch.id, raw, unrelated.native, { now: NOW }))
+      .rejects.toThrow(/evidence|result message|assistant/);
+    expect((await readNativeBranch(unrelated.selector, unrelated.branch.id)).result).toBeUndefined();
+
+    const different = await createFixture();
+    const changed = resultInput(different);
+    changed.findings[0].answer = 'This differs from the assistant result.';
+    await expect(recordNativeBranchResult(different.selector, different.branch.id, changed, different.native, { now: NOW }))
+      .rejects.toThrow(/content|result message|assistant/);
+    expect((await readNativeBranch(different.selector, different.branch.id)).result).toBeUndefined();
   });
 
   it('rejects a result bound to an earlier child snapshot', async () => {
@@ -648,6 +808,20 @@ describe('current team and grant authority', () => {
     expect(rejoin.native.submitPrompt).not.toHaveBeenCalled();
   });
 
+  it('does not let root execution authority substitute for the current native lease', async () => {
+    const fixture = await reviewedFixture();
+    const task = foldTasks(await readTaskEvents(fixture.root)).find((candidate) => candidate.id === 'demo-1')!;
+    const nativeAdmission = task.admissions?.find((admission) => admission.lease_id === fixture.branch.leaseId)!;
+    await appendTaskEvent(fixture.root, {
+      id: 'demo-1', project: 'demo', event: 'admission', at: NOW,
+      admission: { ...nativeAdmission, status: 'revoked', lease_revoked: true },
+    });
+    await expect(rejoinNativeBranch(fixture.selector, fixture.branch.id, {
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
+    }, fixture.native, { now: NOW })).rejects.toThrow(/native.*lease|lease.*current|revoked/i);
+    expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
+  });
+
   it('rechecks team scope on the final authorization check before submitPrompt', async () => {
     const fixture = await reviewedFixture();
     beforeThirdApproverCall(fixture, () => reassignTeam(fixture.home));
@@ -749,6 +923,13 @@ describe('selective rejoin and exact delivery fencing', () => {
       principal: fixture.principal, registry: fixture.registry, reviewDigest: fixture.branch.review!.digest,
     }, fixture.native, { now: NOW });
     expect(fixture.native.submitPrompt).toHaveBeenCalledTimes(1);
+    const task = foldTasks(await readTaskEvents(fixture.root)).find((candidate) => candidate.id === 'demo-1')!;
+    expect(task.admissions?.find((admission) => admission.lease_id === fixture.branch.leaseId)).toMatchObject({
+      status: 'released', lease_revoked: true,
+    });
+    expect(task.admissions?.find((admission) => admission.lease_id === fixture.parentAdmission.lease_id)).toMatchObject({
+      status: 'admitted', lease_revoked: false,
+    });
   });
 
   it('requires the displayed review digest before native refresh or submission', async () => {
@@ -956,6 +1137,17 @@ describe('stored record validation and hub isolation', () => {
     await expect(readNativeBranch(fixture.selector, fixture.branch.id)).rejects.toThrow(/schema|unknown field/);
   });
 
+  it('reads legacy records without synthesizing a writable lease', async () => {
+    const fixture = await createFixture();
+    const { leaseId: _leaseId, ...legacy } = fixture.branch;
+    await writeJson(hivePath(fixture.home, 'branches', `${fixture.branch.id}.json`), legacy);
+    expect(await readNativeBranch(fixture.selector, fixture.branch.id)).toEqual(legacy);
+    fixture.native.getSession.mockClear();
+    await expect(refreshNativeBranch(fixture.selector, fixture.branch.id, fixture.native, { now: NOW }))
+      .rejects.toThrow(/native.*lease|lease.*current/i);
+    expect(fixture.native.getSession).not.toHaveBeenCalled();
+  });
+
   it('refuses a symlinked stored record', async () => {
     const fixture = await createFixture();
     const file = hivePath(fixture.home, 'branches', `${fixture.branch.id}.json`);
@@ -972,5 +1164,66 @@ describe('stored record validation and hub isolation', () => {
     expect(fixture.native.getSession).not.toHaveBeenCalled();
     expect(fixture.native.listMessages).not.toHaveBeenCalled();
     expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
+  });
+});
+
+describe('native root contract deltas', () => {
+  it('revokes native leases without replacements and requires explicit fresh creation', async () => {
+    const fixture = await reviewedFixture();
+    const oldBranch = fixture.branch;
+    const oldTask = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    const nextContract: RootContract = {
+      ...fixture.contract,
+      objective: 'A replacement root contract.',
+      acceptance: fixture.contract.acceptance.map((acceptance) => acceptance.id === 'diff'
+        ? { ...acceptance, predicate_id: 'native_result', required: false }
+        : acceptance),
+    };
+    await withHubLock(fixture.root, () => applyRootDeltaLocked(
+      fixture.root, fixture.home, 'demo-1', nextContract, oldTask.plan_digest!, oldTask.lease_epoch!,
+    ));
+
+    const changed = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    const nativeAdmissions = changed.admissions!.filter((admission) => admission.adapter === 'native');
+    expect(nativeAdmissions).toHaveLength(1);
+    expect(nativeAdmissions[0]).toMatchObject({ lease_id: oldBranch.leaseId, lease_revoked: true, status: 'revoked' });
+    const parentReplacement = changed.admissions!.find((admission) => admission.adapter === 'tmux'
+      && admission.lease_id !== fixture.parentAdmission.lease_id && !admission.lease_revoked)!;
+    expect(parentReplacement).toBeDefined();
+    expect(await readNativeBranch(fixture.selector, oldBranch.id)).toEqual(oldBranch);
+
+    await expect(evaluateTaskPredicate(fixture.root, 'demo-1', 'native_result', {
+      lease_id: oldBranch.leaseId, plan_digest: changed.plan_digest!, artifact_digest: oldBranch.result!.digest,
+    }, 1, fixture.native)).resolves.toBe(false);
+    await expect(rejoinNativeBranch(fixture.selector, oldBranch.id, {
+      principal: fixture.principal, registry: fixture.registry, reviewDigest: oldBranch.review!.digest,
+    }, fixture.native, { now: NOW })).rejects.toThrow(/lease|epoch|stale|revoked/);
+    expect(fixture.native.submitPrompt).not.toHaveBeenCalled();
+
+    const recreated = await createNativeBranch({ ...fixture.selector, agent: 'builder' }, {
+      kind: 'child', purpose: 'Review the transport boundary',
+    }, fixture.native, { now: NOW });
+    expect(recreated.status).toBe('active');
+    expect(recreated.leaseId).not.toBe(oldBranch.leaseId);
+    const recreatedFixture = { ...fixture, branch: recreated };
+    const recorded = await recordNativeBranchResult(
+      fixture.selector, recreated.id, resultInput(recreatedFixture), fixture.native, { now: NOW },
+    );
+    const current = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    await expect(evaluateTaskPredicate(fixture.root, 'demo-1', 'native_result', {
+      lease_id: recreated.leaseId, plan_digest: current.plan_digest!, artifact_digest: recorded.result!.digest,
+    }, 1, fixture.native)).resolves.toBe(true);
+    await transitionTmuxAdmission(fixture.root, fixture.home, 'demo-1', recreated.id, recreated.leaseId!, 'released');
+    await transitionTmuxAdmission(fixture.root, fixture.home, 'demo-1', 'builder', parentReplacement.lease_id, 'released');
+    await expect(evaluateTaskPredicate(fixture.root, 'demo-1', 'native_result', {
+      acceptance_id: 'native', plan_digest: current.plan_digest!, artifact_digest: recorded.result!.digest,
+    }, 1, fixture.native)).resolves.toBe(true);
+    await appendTaskEvent(fixture.root, {
+      id: 'demo-1', project: 'demo', event: 'progress', at: NOW, checkpoint: 'work', status: 'ok',
+    });
+    await recordTaskOutcome(fixture.root, 'demo-1', 'done', {
+      actor: 'legacy', plan_digest: current.plan_digest!, epoch: current.lease_epoch!,
+    }, { native: fixture.native });
+    expect(foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')?.state).toBe('done');
   });
 });

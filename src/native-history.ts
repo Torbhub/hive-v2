@@ -75,13 +75,16 @@ export async function readNativeHistory(native: NativeBranchClient, sessionId: s
   return newest.reverse();
 }
 
+export function snapshotNativeMessages(history: NativeMessage[]): NativeBranchSnapshot {
+  const messages = history.map((message) => ({ id: message.id, contentHash: nativeSha(message.content) }));
+  return { count: messages.length, headId: messages.at(-1)?.id ?? null, historyHash: nativeSha(messages), messages };
+}
+
 export async function snapshotNativeHistory(
   native: NativeBranchClient,
   sessionId: string,
 ): Promise<NativeBranchSnapshot> {
-  const history = await readNativeHistory(native, sessionId);
-  const messages = history.map((message) => ({ id: message.id, contentHash: nativeSha(message.content) }));
-  return { count: messages.length, headId: messages.at(-1)?.id ?? null, historyHash: nativeSha(messages), messages };
+  return snapshotNativeMessages(await readNativeHistory(native, sessionId));
 }
 
 export function sameNativeSnapshot(a: NativeBranchSnapshot, b: NativeBranchSnapshot): boolean {

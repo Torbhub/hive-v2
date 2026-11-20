@@ -120,10 +120,14 @@ function sourceWorkerErrors(sourceFile, name) {
   const bannedEvidenceImport = (specifier) => name === 'src/gate.ts' && /(?:^|\/)evidence\.js$/.test(specifier)
     || ['src/gate.ts', 'src/evidence.ts'].includes(name)
       && (/(?:^|\/)(?:web|ui)\//.test(specifier) || ['react', 'ink'].includes(specifier));
+  const bannedNativeImport = (specifier) => name === 'src/branches.ts'
+      && /(?:^|\/)(?:evidence|taskgate|hub|native-client|kimi-server)\.js$/.test(specifier)
+    || name === 'src/evidence.ts' && /(?:^|\/)kimi-server\.js$/.test(specifier);
   const visit = (node) => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       if (name === 'src/admission.ts' && bannedAdmissionImport(node.moduleSpecifier.text)) errors.add(name);
       if (bannedEvidenceImport(node.moduleSpecifier.text)) errors.add(name);
+      if (bannedNativeImport(node.moduleSpecifier.text)) errors.add(name);
       if (node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
         for (const element of node.importClause.namedBindings.elements) {
           if ((element.propertyName?.text ?? element.name.text) === 'writeJson') writeAliases.add(element.name.text);
@@ -141,6 +145,7 @@ function sourceWorkerErrors(sourceFile, name) {
       if (ts.isImportKeyword(node.expression) && ts.isStringLiteral(node.arguments[0])) {
         if (name === 'src/admission.ts' && bannedAdmissionImport(node.arguments[0].text)) errors.add(name);
         if (bannedEvidenceImport(node.arguments[0].text)) errors.add(name);
+        if (bannedNativeImport(node.arguments[0].text)) errors.add(name);
       }
       const expression = node.expression;
       const writeCall = ts.isIdentifier(expression) && writeAliases.has(expression.text)

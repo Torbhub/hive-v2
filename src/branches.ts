@@ -1,6 +1,9 @@
 import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import {
+  admitNativeLocked, assertNativeAdmissionCurrentLocked, transitionTmuxAdmissionLocked,
+} from './admission.js';
 import { readBoundedFile } from './bounded-file.js';
 import { cleanAgentText, containsInternalContent, containsSecurityInstruction } from './decisions.js';
 import { withProjectLock } from './project.js';
@@ -12,21 +15,29 @@ import {
   parseNativeSnapshot,
   sameNativeForkSnapshot,
   sameNativeSnapshot,
+  readNativeHistory,
   snapshotNativeHistory,
+  snapshotNativeMessages,
 } from './native-history.js';
 import { assertExecutionAllowed } from './rollout.js';
 import { authorizeExact, exactGrant, revoked, type Principal } from './security.js';
-import { Refusal, hivePath, readProjects, readTeam, withTeamLock, writeJson } from './state.js';
+import {
+  Refusal, canonicalJson, foldTasks, hivePath, readProjects, readTaskEvents, readTeam, withTeamLock, writeJson,
+} from './state.js';
 import type { Registry, RegistryRow } from './registry.js';
+import { NATIVE_READ_ONLY_POLICY } from './types.js';
 import type {
   NativeBranchClient,
   NativeBranchCreateScope,
+  NativeBranchDetail,
   NativeBranchFinding,
   NativeBranchRecord,
   NativeBranchResult,
   NativeBranchReview,
   NativeBranchScope,
   NativeBranchSnapshot,
+  NativeBranchSummary,
+  NativeMessage,
   NativeSession,
 } from './types.js';
 
@@ -125,7 +136,7 @@ function resultDigest(result: NativeBranchResult): string {
 function resultFrom(branch: NativeBranchRecord, value: unknown, stored: boolean): NativeBranchResult {
   const raw = object(value, 'native result schema');
   keys(raw, stored
-    ? ['schemaVersion', 'branchId', 'childHistoryHash', 'findings', 'digest', 'recordedAt']
+    ? ['schemaVersion', 'branchId', 'childHistoryHash', 'findings', 'digest', 'recordedAt', 'resultMessageId']
     : ['schemaVersion', 'branchId', 'childHistoryHash', 'findings'], 'native result schema');
   const childHistoryHash = hash(raw.childHistoryHash, 'native result childHistoryHash');
   if (raw.schemaVersion !== 1 || raw.branchId !== branch.id || !branch.childSnapshot
@@ -144,6 +155,75 @@ function resultFrom(branch: NativeBranchRecord, value: unknown, stored: boolean)
     text(raw.recordedAt, 'native result recordedAt', 40);
   }
   return result;
+}
+function messageMatchesResult(branch: NativeBranchRecord, result: NativeBranchResult, message: NativeMessage): boolean {
+  if (message.role !== 'assistant' || message.session_id !== branch.childSessionId
+    || message.content.length !== 1 || message.content[0].type !== 'text' || typeof message.content[0].text !== 'string') {
+    return false;
+  }
+  try {
+    const structured = object(JSON.parse(message.content[0].text), 'native assistant result');
+    keys(structured, ['schemaVersion', 'branchId', 'findings'], 'native assistant result');
+    const contentHash = nativeSha(message.content);
+    if (!Array.isArray(structured.findings)) return false;
+    const findings = structured.findings.map((finding) => ({
+      ...object(finding, 'native assistant finding'),
+      nativeEvidence: [{ messageId: message.id, contentHash }],
+    }));
+    const parsed = resultFrom(branch, { ...structured, findings, childHistoryHash: result.childHistoryHash }, false);
+    if (canonicalJson(parsed) !== canonicalJson(result)) return false;
+    return result.findings.every((finding) => finding.nativeEvidence.length === 1
+      && finding.nativeEvidence[0].messageId === message.id
+      && finding.nativeEvidence[0].contentHash === contentHash);
+  } catch {
+    return false;
+  }
+}
+export function exactNativeResultMessage(
+  branch: NativeBranchRecord, result: NativeBranchResult, history: NativeMessage[], resultMessageId?: string,
+): NativeMessage {
+  const base = {
+    schemaVersion: 1 as const, branchId: result.branchId, childHistoryHash: result.childHistoryHash,
+    findings: result.findings,
+  };
+  const matches = history.filter((message) => (!resultMessageId || message.id === resultMessageId)
+    && messageMatchesResult(branch, base, message));
+  if (matches.length !== 1) throw new Refusal('native result evidence needs one exact assistant result message in the child session');
+  return matches[0];
+}
+export async function assertNativeResultFresh(branch: NativeBranchRecord, native: NativeBranchClient): Promise<void> {
+  if (!branch.result?.resultMessageId || !branch.childSnapshot) throw new Refusal('native result has no bound assistant message');
+  const [parent, child] = await Promise.all([
+    native.getSession(branch.parentSessionId), native.getSession(branch.childSessionId!),
+  ]);
+  verifySession(branch, parent, true);
+  verifySession(branch, child, false);
+  const [parentHistory, childHistory] = await Promise.all([
+    readNativeHistory(native, branch.parentSessionId), readNativeHistory(native, branch.childSessionId!),
+  ]);
+  if (!sameNativeSnapshot(branch.childSnapshot, snapshotNativeMessages(childHistory))) {
+    throw new Refusal('native result child history is stale');
+  }
+  exactNativeResultMessage(branch, branch.result, childHistory, branch.result.resultMessageId);
+  if (branch.status === 'active') {
+    if (!sameNativeSnapshot(branch.parentSnapshot, snapshotNativeMessages(parentHistory))) {
+      throw new Refusal('native result parent history is stale');
+    }
+    return;
+  }
+  if (branch.status !== 'rejoined' || !branch.review || !branch.rejoin?.nativeMessageId) {
+    throw new Refusal('native result status is not current');
+  }
+  const { promptId, prompt } = previewNativeBranchRejoin(branch);
+  const acknowledgement = parentHistory.at(-1);
+  if (branch.rejoin.promptId !== promptId || nativeSha(prompt) !== branch.rejoin.promptHash
+    || parentHistory.length !== branch.parentSnapshot.count + 1
+    || !nativeHistoryIsPrefix(branch.parentSnapshot, snapshotNativeMessages(parentHistory))
+    || !acknowledgement || acknowledgement.id !== branch.rejoin.nativeMessageId
+    || acknowledgement.session_id !== branch.parentSessionId || acknowledgement.role !== 'user'
+    || JSON.stringify(acknowledgement.content) !== JSON.stringify([{ type: 'text', text: prompt }])) {
+    throw new Refusal('native rejoin parent history is not the exact delivered result');
+  }
 }
 function reviewDigest(review: Omit<NativeBranchReview, 'digest'>): string {
   return nativeSha({
@@ -191,7 +271,8 @@ function recordFrom(value: unknown, id: string): NativeBranchRecord {
   const raw = object(value, 'native branch record');
   keys(raw, [
     'schemaVersion', 'id', 'kind', 'purpose', 'parentSessionId', 'childSessionId', 'workspaceId', 'cwd',
-    'scope', 'parentSnapshot', 'childSnapshot', 'status', 'createdAt', 'updatedAt', 'error', 'result', 'review', 'rejoin',
+    'scope', 'parentSnapshot', 'childSnapshot', 'status', 'createdAt', 'updatedAt', 'error', 'leaseId',
+    'result', 'review', 'rejoin',
   ], 'native branch record');
   if (raw.schemaVersion !== 1 || raw.id !== id || !['child', 'fork'].includes(String(raw.kind)) || !STATUSES.includes(String(raw.status))) {
     throw new Refusal('native branch record schema is invalid');
@@ -214,13 +295,17 @@ function recordFrom(value: unknown, id: string): NativeBranchRecord {
     status: raw.status as NativeBranchRecord['status'],
     createdAt: text(raw.createdAt, 'native createdAt', 40),
     updatedAt: text(raw.updatedAt, 'native updatedAt', 40),
+    ...(raw.leaseId === undefined ? {} : { leaseId: text(raw.leaseId, 'native leaseId') }),
     ...(raw.error === undefined ? {} : { error: text(raw.error, 'native error', 1_000) }),
   };
   if (['active', 'stale', 'rejoined'].includes(branch.status) && (!branch.childSessionId || !branch.childSnapshot)) throw new Refusal('active branch requires child identity and snapshot');
   if (raw.result !== undefined) {
     const result = resultFrom(branch, raw.result, true);
     const stored = object(raw.result, 'native stored result');
-    branch.result = { ...result, digest: resultDigest(result), recordedAt: String(stored.recordedAt) };
+    branch.result = {
+      ...result, digest: resultDigest(result), recordedAt: String(stored.recordedAt),
+      ...(stored.resultMessageId === undefined ? {} : { resultMessageId: text(stored.resultMessageId, 'native resultMessageId') }),
+    };
   }
   if (raw.review !== undefined) {
     const review = reviewFrom(raw.review);
@@ -277,10 +362,22 @@ async function homeFor(scope: NativeBranchScope): Promise<string> {
 async function withBranchLock<T>(scope: NativeBranchScope, fn: (home: string) => Promise<T>): Promise<T> {
   return withProjectLock(scope.root, scope.project, async (project) => withTeamLock(project.home, () => fn(project.home)));
 }
-async function assertCurrentTeam(home: string, branch: NativeBranchRecord): Promise<void> {
+async function assertCurrentTeam(home: string, branch: NativeBranchRecord) {
   const matches = (await readTeam(home)).agents.filter((agent) => !agent.orchestrator && agent.name === branch.scope.agent
     && agent.task === branch.scope.task && agent.session_id === branch.parentSessionId);
   if (matches.length !== 1) throw new Refusal('native branch requires one current TeamEntry matching agent, task, and parent session');
+  return matches[0];
+}
+export async function assertNativeBranchCurrentLocked(
+  scope: NativeBranchScope, home: string, branch: NativeBranchRecord, allowReleased = false,
+) {
+  if (!branch.leaseId) throw new Refusal('native branch has no current native read lease');
+  const entry = await assertCurrentTeam(home, branch);
+  const grant = await assertNativeAdmissionCurrentLocked(
+    scope.root, home, branch.scope.task, branch.id, branch.leaseId, allowReleased,
+  );
+  if (entry.lease_id !== grant.admission.parent_lease_id) throw new Refusal('native branch parent TeamEntry lease changed');
+  return grant;
 }
 export async function readNativeBranch(scope: NativeBranchScope, id: string): Promise<NativeBranchRecord> {
   const branch = await readBranchFile(await homeFor(scope), id);
@@ -303,6 +400,9 @@ function verifySession(branch: NativeBranchRecord, session: NativeSession, paren
   if (!session || session.id !== (parent ? branch.parentSessionId : branch.childSessionId)
     || session.workspace_id !== branch.workspaceId || session.metadata?.cwd !== branch.cwd) throw new Diverged('native workspace or session identity changed');
   if (parent) return;
+  if (JSON.stringify(session.read_only) !== JSON.stringify(NATIVE_READ_ONLY_POLICY)) {
+    throw new Diverged('native read-only attestation is missing or changed');
+  }
   if (session.metadata.hive_branch_id !== branch.id) throw new Diverged('native hive branch id changed');
   if (branch.kind === 'child' && (session.metadata.parent_session_id !== branch.parentSessionId || session.metadata.child_session_kind !== 'child')) {
     throw new Diverged('native child relationship changed');
@@ -357,9 +457,39 @@ async function unknown(home: string, expected: NativeBranchRecord, at: string, e
     return next;
   }
 }
+type CreateInput = {
+  kind: 'child' | 'fork';
+  purpose: string;
+  outputClaim?: string;
+  acceptanceIds?: string[];
+  writeScope?: string[];
+};
+
+async function nativeAllocation(root: string, taskId: string, parentLeaseId: string, input: CreateInput) {
+  const task = foldTasks(await readTaskEvents(root)).find((candidate) => candidate.id === taskId);
+  const parent = task?.admissions?.find((admission) => admission.lease_id === parentLeaseId);
+  if (!task?.contract || !task.plan_digest || !parent) throw new Refusal('native branch needs the current root contract and parent lease');
+  const outputClaims = task.contract.delegation.output_claims.filter((claim) => claim !== parent.output_claim);
+  const outputClaim = input.outputClaim ?? (outputClaims.length === 1 ? outputClaims[0] : undefined);
+  if (!outputClaim) throw new Refusal('native branch output claim is ambiguous; select a root allocation');
+  const allocatedAcceptance = task.contract.acceptance.filter((acceptance) => acceptance.predicate_id === 'native_result')
+    .map((acceptance) => acceptance.id);
+  return {
+    parent_id: task.id,
+    plan_digest: task.plan_digest,
+    output_claim: outputClaim,
+    acceptance_ids: input.acceptanceIds ?? allocatedAcceptance,
+    provenance: { ...task.contract.provenance },
+    write_scope: input.writeScope ?? [],
+    adapter: 'native' as const,
+    parent_lease_id: parentLeaseId,
+    budget: { depth: (parent.depth ?? 1) + 1, attempts: task.contract.budget.attempts },
+  };
+}
+
 export async function createNativeBranch(
   scope: NativeBranchCreateScope,
-  input: { kind: 'child' | 'fork'; purpose: string },
+  input: CreateInput,
   native: NativeBranchClient,
   options: TimeOptions = {},
 ): Promise<NativeBranchRecord> {
@@ -367,24 +497,38 @@ export async function createNativeBranch(
   return withBranchLock(scope, async (home) => {
     await assertExecutionAllowed(scope.root, scope.project);
     const agents = (await readTeam(home)).agents.filter((agent) => agent.name === scope.agent && !agent.orchestrator);
-    if (agents.length !== 1 || !agents[0].task || !agents[0].session_id) throw new Refusal('native branch requires one uniquely scoped TeamEntry');
+    if (agents.length !== 1 || !agents[0].task || !agents[0].session_id || !agents[0].lease_id) {
+      throw new Refusal('native branch requires one uniquely scoped TeamEntry with a current lease');
+    }
     const agent = agents[0];
     const purpose = text(input.purpose, 'native branch purpose', 4_000);
     if (input.kind !== 'child' && input.kind !== 'fork') throw new Refusal('native branch kind must be child or fork');
+    if (input.writeScope?.length) throw new Refusal('native admission is read-only; writable native scope is refused');
+    const allocation = await nativeAllocation(scope.root, agent.task!, agent.lease_id!, input);
     const parent = await native.getSession(agent.session_id!);
     if (!parent || parent.id !== agent.session_id || parent.metadata.cwd !== home) throw new Refusal('native parent workspace mismatch');
     const parentSnapshot = await snapshotHistory(native, parent.id);
     const at = now(options);
     const id = randomUUID();
+    const admission = await admitNativeLocked(scope.root, home, agent.task!, id, allocation);
     let current: NativeBranchRecord = {
       schemaVersion: 1, id, kind: input.kind, purpose,
       parentSessionId: parent.id, childSessionId: null, workspaceId: parent.workspace_id, cwd: home,
       scope: { project: scope.project, agent: scope.agent, task: agent.task! },
       parentSnapshot, childSnapshot: null, status: 'creating', createdAt: at, updatedAt: at,
+      leaseId: admission.lease_id,
     };
-    await writeJson(branchPath(home, id), current, 0o600);
     try {
-      const request = { title: `Hive branch ${id}`, metadata: { hive_branch_id: id, hive_purpose: purpose } };
+      await writeJson(branchPath(home, id), current, 0o600);
+    } catch (error) {
+      await transitionTmuxAdmissionLocked(scope.root, home, admission, 'failed', 'native branch intent write failed');
+      throw error;
+    }
+    try {
+      const request = {
+        title: `Hive branch ${id}`, metadata: { hive_branch_id: id, hive_purpose: purpose },
+        readOnly: NATIVE_READ_ONLY_POLICY,
+      };
       const child = input.kind === 'child'
         ? await native.createChild(parent.id, request)
         : await native.forkSession(parent.id, request);
@@ -407,7 +551,7 @@ export async function reconcileNativeBranchCreation(
   return withBranchLock(scope, async (home) => {
     await assertExecutionAllowed(scope.root, scope.project);
     let branch = await readNativeBranch(scope, id);
-    await assertCurrentTeam(home, branch);
+    await assertNativeBranchCurrentLocked(scope, home, branch);
     if (branch.status === 'active') return branch;
     const expected = branch;
     const at = now(options);
@@ -441,7 +585,7 @@ export async function refreshNativeBranch(
   return withBranchLock(scope, async (home) => {
     await assertExecutionAllowed(scope.root, scope.project);
     const branch = await readNativeBranch(scope, id);
-    await assertCurrentTeam(home, branch);
+    await assertNativeBranchCurrentLocked(scope, home, branch, branch.status === 'rejoined');
     return refreshLocked(home, branch, native, now(options));
   });
 }
@@ -463,7 +607,8 @@ export async function recordNativeBranchResult(
   return withBranchLock(scope, async (home) => {
     await assertExecutionAllowed(scope.root, scope.project);
     let branch = await readNativeBranch(scope, id);
-    await assertCurrentTeam(home, branch);
+    await assertNativeBranchCurrentLocked(scope, home, branch);
+    branch = await refreshLocked(home, branch, native, now(options));
     if (branch.status !== 'active') throw new Refusal('native branch is not active');
     const parsed = parseNativeBranchResult(branch, value);
     const [parent, child] = await Promise.all([native.getSession(branch.parentSessionId), native.getSession(branch.childSessionId!)]);
@@ -475,20 +620,18 @@ export async function recordNativeBranchResult(
     if (!sameNativeSnapshot(branch.parentSnapshot, parentSnapshot) || !sameNativeSnapshot(branch.childSnapshot!, childSnapshot)) {
       throw new Refusal('native result snapshot is stale');
     }
-    const evidence = new Map(childSnapshot.messages.map((entry) => [entry.id, entry.contentHash]));
-    for (const finding of parsed.findings) {
-      for (const reference of finding.nativeEvidence) {
-        if (evidence.get(reference.messageId) !== reference.contentHash) throw new Refusal('native result evidence does not match the child snapshot');
-      }
-    }
     const digest = resultDigest(parsed);
-    if (branch.result) {
-      if (branch.result.digest !== digest) throw new Refusal('native branch terminal result conflicts');
-      return branch;
-    }
+    if (branch.result && branch.result.digest !== digest) throw new Refusal('native branch terminal result conflicts');
+    const history = await readNativeHistory(native, branch.childSessionId!);
+    const resultMessage = exactNativeResultMessage(branch, parsed, history, branch.result?.resultMessageId);
+    if (branch.result) return branch;
     const at = now(options);
     const expected = branch;
-    return commit(home, expected, { ...expected, result: { ...parsed, digest, recordedAt: at }, updatedAt: at });
+    return commit(home, expected, {
+      ...expected,
+      result: { ...parsed, digest, recordedAt: at, resultMessageId: resultMessage.id },
+      updatedAt: at,
+    });
   });
 }
 async function grantValid(registry: Registry, row: RegistryRow, at: string): Promise<boolean> {
@@ -529,7 +672,7 @@ export async function reviewNativeBranch(
   return withBranchLock(scope, async (home) => {
     await assertExecutionAllowed(scope.root, scope.project);
     let branch = await readNativeBranch(scope, id);
-    await assertCurrentTeam(home, branch);
+    await assertNativeBranchCurrentLocked(scope, home, branch);
     if (branch.status !== 'active' || !branch.result || branch.rejoin) throw new Refusal('native branch has no active result to review');
     const authority = await reviewAuthority(branch, input, now(options));
     if (input.findingIds.length === 0 || new Set(input.findingIds).size !== input.findingIds.length
@@ -579,6 +722,55 @@ export function previewNativeBranchRejoin(branch: NativeBranchRecord): { promptI
   const promptId = `hive-rejoin-${branch.id}-${branch.review.digest.slice(0, 16)}`;
   return { promptId, prompt: rejoinPrompt(branch, promptId) };
 }
+export function nativeBranchSummary(record: NativeBranchRecord): NativeBranchSummary {
+  return {
+    id: record.id,
+    status: record.status,
+    purpose: record.purpose,
+    agent: record.scope.agent,
+    task: record.scope.task,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    hasResult: Boolean(record.result),
+    ...(record.error === undefined ? {} : { error: record.error }),
+  };
+}
+
+export function nativeBranchDetail(record: NativeBranchRecord): NativeBranchDetail {
+  const preview = record.review ? previewNativeBranchRejoin(record) : undefined;
+  return {
+    ...nativeBranchSummary(record),
+    kind: record.kind,
+    findings: record.result?.findings.map((finding) => ({
+      id: finding.id,
+      answer: finding.answer,
+      recommendation: finding.recommendation,
+      uncertainty: finding.uncertainty,
+    })) ?? [],
+    ...(record.review ? {
+      review: {
+        digest: record.review.digest,
+        findingIds: [...record.review.findingIds],
+        createdAt: record.review.createdAt,
+        expiresAt: record.review.expiresAt,
+        promptId: preview!.promptId,
+        prompt: preview!.prompt,
+      },
+    } : {}),
+    ...(record.rejoin ? {
+      rejoin: {
+        status: record.rejoin.status,
+        reviewDigest: record.rejoin.reviewDigest,
+        promptId: record.rejoin.promptId,
+        ...(record.rejoin.status === 'rejoined' ? {
+          ...(record.rejoin.nativeMessageId === undefined ? {} : { nativeMessageId: record.rejoin.nativeMessageId }),
+          ...(record.rejoin.rejoinedAt === undefined ? {} : { rejoinedAt: record.rejoin.rejoinedAt }),
+        } : {}),
+      },
+    } : {}),
+  };
+}
+
 async function verifyReview(branch: NativeBranchRecord, input: AuthInput, at: string): Promise<void> {
   const expiresAt = branch.review ? Date.parse(branch.review.expiresAt) : NaN;
   if (!branch.review || !Number.isFinite(expiresAt) || expiresAt <= Date.parse(at)) throw new Refusal('native branch review is expired or stale');
@@ -590,6 +782,12 @@ async function verifyReview(branch: NativeBranchRecord, input: AuthInput, at: st
 async function finishUnknown(home: string, intent: NativeBranchRecord, at: string, error: unknown): Promise<NativeBranchRecord> {
   return unknown(home, intent, at, error);
 }
+async function releaseNativeLease(scope: NativeBranchScope, home: string, branch: NativeBranchRecord): Promise<void> {
+  const grant = await assertNativeBranchCurrentLocked(scope, home, branch, true);
+  if (grant.admission.status !== 'released') {
+    await transitionTmuxAdmissionLocked(scope.root, home, grant.admission, 'released');
+  }
+}
 export async function rejoinNativeBranch(
   scope: NativeBranchScope, id: string, input: AuthInput & { reviewDigest: string }, native: NativeBranchClient, options: TimeOptions = {},
 ): Promise<NativeBranchRecord> {
@@ -597,11 +795,12 @@ export async function rejoinNativeBranch(
   return withBranchLock(scope, async (home) => {
     await assertExecutionAllowed(scope.root, scope.project);
     let branch = await readNativeBranch(scope, id);
-    await assertCurrentTeam(home, branch);
+    await assertNativeBranchCurrentLocked(scope, home, branch, branch.rejoin?.status === 'rejoined');
     if (input.reviewDigest !== branch.review?.digest) throw new Refusal('native review digest does not match the current review');
     const at = now(options);
     if (branch.rejoin?.status === 'rejoined' || branch.rejoin?.status === 'unknown') {
       await verifyReview(branch, input, at);
+      if (branch.rejoin.status === 'rejoined') await releaseNativeLease(scope, home, branch);
       return branch;
     }
     if (branch.rejoin?.status === 'submitting') return unknown(home, branch, at, 'previous prompt outcome is unknown');
@@ -610,7 +809,7 @@ export async function rejoinNativeBranch(
     branch = await refreshLocked(home, branch, native, at);
     if (branch.status !== 'active' || !branch.result || !branch.review) throw new Refusal(`native branch is ${branch.status}; no current review`);
     if (input.reviewDigest !== branch.review.digest) throw new Refusal('native review digest changed during refresh');
-    await assertCurrentTeam(home, branch);
+    await assertNativeBranchCurrentLocked(scope, home, branch);
     await verifyReview(branch, input, at);
     const review = branch.review;
     const { promptId, prompt } = previewNativeBranchRejoin(branch);
@@ -623,7 +822,7 @@ export async function rejoinNativeBranch(
     const finalAt = now(options);
     try {
       await verifyReview(delivery, input, finalAt);
-      await assertCurrentTeam(home, delivery);
+      await assertNativeBranchCurrentLocked(scope, home, delivery);
       if (input.reviewDigest !== delivery.review?.digest) throw new Refusal('native review digest changed before submission');
     } catch (error) {
       await commit(home, intent, branch);
@@ -641,12 +840,14 @@ export async function rejoinNativeBranch(
       });
       const delivered = await exactNativeDelivery(native, delivery.parentSessionId, content, ack.user_message_id);
       if (delivered.length !== 1) throw new Error('native acknowledgement message proof is unavailable');
-      return await commit(home, delivery, {
+      const rejoined = await commit(home, delivery, {
         ...delivery,
         status: 'rejoined',
         rejoin: { ...delivery.rejoin!, status: 'rejoined', nativeMessageId: delivered[0].id, rejoinedAt: finalAt },
         updatedAt: finalAt,
       });
+      await releaseNativeLease(scope, home, rejoined);
+      return rejoined;
     } catch (error) {
       return finishUnknown(home, delivery, finalAt, error);
     }
@@ -659,8 +860,11 @@ export async function reconcileNativeBranchRejoin(
   return withBranchLock(scope, async (home) => {
     await assertExecutionAllowed(scope.root, scope.project);
     const branch = await readNativeBranch(scope, id);
-    await assertCurrentTeam(home, branch);
-    if (branch.rejoin?.status === 'rejoined') return branch;
+    await assertNativeBranchCurrentLocked(scope, home, branch, branch.rejoin?.status === 'rejoined');
+    if (branch.rejoin?.status === 'rejoined') {
+      await releaseNativeLease(scope, home, branch);
+      return branch;
+    }
     if (!branch.rejoin || !branch.review || branch.review.digest !== branch.rejoin.reviewDigest) throw new Refusal('native branch has no rejoin intent');
     if (!branch.rejoin.nativeMessageId) return branch;
     const at = now(options);
@@ -669,12 +873,14 @@ export async function reconcileNativeBranchRejoin(
       if (nativeSha(prompt) !== branch.rejoin.promptHash) throw new Error('native rejoin prompt proof changed');
       const delivered = await exactNativeDelivery(native, branch.parentSessionId, [{ type: 'text', text: prompt }], branch.rejoin.nativeMessageId);
       if (delivered.length !== 1) return branch;
-      return await commit(home, branch, {
+      const rejoined = await commit(home, branch, {
         ...branch,
         status: 'rejoined',
         rejoin: { ...branch.rejoin, status: 'rejoined', nativeMessageId: delivered[0].id, rejoinedAt: at },
         updatedAt: at,
       });
+      await releaseNativeLease(scope, home, rejoined);
+      return rejoined;
     } catch (error) {
       return unknown(home, branch, at, error);
     }
