@@ -98,3 +98,23 @@ describe('native evidence dependency discipline', () => {
     expect(result.stderr).toContain(file);
   });
 });
+
+
+describe('supervision and work-tree dependency discipline', () => {
+  it('allows the stored-record and registry seams', () => {
+    expect(checkEnforcement(fixture('src/supervision.ts', "import { readTaskEvents } from './state.js';\nexport { readTaskEvents };\n")).status).toBe(0);
+    expect(checkEnforcement(fixture('web/App.tsx', "import type { HubView } from '../src/types.js';\nexport type { HubView };\n")).status).toBe(0);
+  });
+
+  it.each([
+    { name: 'watch import', file: 'src/supervision.ts', source: "import { watch } from './watch.js';\nexport { watch };\n" },
+    { name: 'hub import', file: 'src/supervision.ts', source: "export async function load() { return import('./hub.js'); }\n" },
+    { name: 'web import', file: 'src/supervision.ts', source: "import { act } from '../web/actions.js';\nexport { act };\n" },
+    { name: 'App persistence import', file: 'web/App.tsx', source: "import { readTaskEvents } from '../src/state.js';\nexport { readTaskEvents };\n" },
+    { name: 'tree adapter import', file: 'web/WorkTree.tsx', source: "import { buildWorkTree } from '../src/supervision.js';\nexport { buildWorkTree };\n" },
+  ])('rejects $name', ({ file, source }) => {
+    const result = checkEnforcement(fixture(file, source));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(file);
+  });
+});

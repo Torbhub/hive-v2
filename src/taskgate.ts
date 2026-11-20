@@ -131,9 +131,18 @@ export async function hubResolve(
     const task = storedTask(await readTaskEvents(root), id);
     assertTaskProject(task, project);
     if (CLOSED_STATES.has(task.state)) throw new Refusal(`${id} is already ${task.state}`);
-    if (liveOperation(currentOperations(task))) {
-      throw new Refusal(`${id} ${action} is ambiguous while an external operation is unresolved`);
+    const live = liveOperation(currentOperations(task));
+    if (live?.kind === 'github_check' && action === 'cancel') {
+      await appendTaskEvent(root, {
+        id, project, event: 'operation', at: new Date().toISOString(),
+        operation: {
+          ...live, status: 'closing_external', close_outcome: 'cancelled', cancellation_requested: false,
+          updated_at: new Date().toISOString(),
+        },
+      });
+      return;
     }
+    if (live) throw new Refusal(`${id} ${action} is ambiguous while an external operation is unresolved`);
     const registered = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
     if (registered) await withTeamLock(registered.home, () => revokeTaskAdmissionsLocked(root, registered.home, id));
     await appendTaskEvent(root, {
@@ -356,7 +365,7 @@ function currentOperations(task: HubTask): TaskOperation[] {
 }
 
 function liveOperation(operations: TaskOperation[]): TaskOperation | undefined {
-  return operations.find((operation) => operation.status === 'pending' || operation.status === 'ambiguous');
+  return operations.find((operation) => ['pending', 'ambiguous', 'blocked_external', 'closing_external'].includes(operation.status));
 }
 
 function assertOperations(task: HubTask, outcome: TaskOutcome): void {
@@ -490,6 +499,20 @@ async function recordOutcomeLocked(
 ): Promise<void> {
   assertOutcomeBinding(task, input);
   await assertWorkerBinding(root, task, input);
+  const live = liveOperation(currentOperations(task));
+  if (outcome === 'superseded' && live?.kind === 'github_check') {
+    const replacement = foldTasks(events).find((candidate) => candidate.id === input.replacement_id
+      && candidate.project === task.project && candidate.id !== task.id);
+    if (!replacement) throw new Refusal(`${task.id} superseded needs a distinct existing replacement in project ${task.project}`);
+    await appendTaskEvent(root, {
+      id: task.id, project: task.project, event: 'operation', at: new Date().toISOString(),
+      operation: {
+        ...live, status: 'closing_external', close_outcome: 'superseded', replacement_id: replacement.id,
+        cancellation_requested: false, updated_at: new Date().toISOString(),
+      },
+    });
+    return;
+  }
   await assertOutcomeGuards(root, events, task, outcome, input, native);
   await appendTaskEvent(root, {
     id: task.id, project: task.project, event: outcome, at: new Date().toISOString(), note: input.reason, outcome: input,

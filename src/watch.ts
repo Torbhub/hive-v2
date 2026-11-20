@@ -18,6 +18,7 @@ import { OPERATION_REGISTRY } from './evidence.js';
 import { createRootDeltaQuestion, findDeclaredPush } from './questions.js';
 import { redactSecrets } from './logview.js';
 import { pendingMigrationRequired } from './launch.js';
+import { supervisionPass, type GitHubOptions } from './supervision.js';
 
 // Read-only leaders: a chain segment must start with one of these to be
 // auto-approvable. Multi-word leaders match the subcommand, not just `git`.
@@ -656,14 +657,16 @@ export async function watchCycle(
   deaths: Set<string> = new Set(),
   wakes: WakeState = new Map(),
   stills: Stillness = new Map(),
-  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache, marks = inFlightMarks, nativeQuestions = nativeQuestionMarks, daydreamAutomation }: {
+  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache, marks = inFlightMarks, nativeQuestions = nativeQuestionMarks, daydreamAutomation, github }: {
     wedgeStillMs?: number;
     verdicts?: Map<string, true>;
     marks?: Set<string>;
     nativeQuestions?: Map<string, string>;
     daydreamAutomation?: DaydreamAutomationOptions;
+    github?: GitHubOptions;
   } = {},
 ): Promise<void> {
+  await supervisionPass(root, github);
   const pf = await readProjects(root);
   const status = await buildStatus(root);
   for (const p of pf.projects) {

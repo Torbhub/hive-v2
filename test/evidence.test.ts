@@ -551,7 +551,7 @@ describe('native result evidence', () => {
 
 describe('registered evidence dispatch', () => {
   it('wires only real predicates and the real push executor', async () => {
-    expect(Object.keys(PREDICATE_REGISTRY).sort()).toEqual(['git_diff_scope', 'native_result', 'task_receipt']);
+    expect(Object.keys(PREDICATE_REGISTRY).sort()).toEqual(['git_diff_scope', 'github_check', 'native_result', 'task_receipt']);
     expect(OPERATION_REGISTRY.push.dispatch).toBe(pushByHash);
     const { root, planDigest } = await setup({ acceptance: [receiptAcceptance()] });
     await passAcceptance(root);
