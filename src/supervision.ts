@@ -1,7 +1,7 @@
-import { revokeTaskAdmissionsLocked } from './admission.js';
+import { reconcileTaskBudgets, revokeTaskAdmissionsLocked } from './admission.js';
 import {
-  appendTaskEvent, contractDigest, doneBlockers, foldTasks, readProjects, readTaskEvents, Refusal,
-  taskEvidenceDigests, valueDigest, withHubLock, withTeamLock,
+  appendTaskEvent, assertTaskBudgetCurrent, contractDigest, doneBlockers, foldTasks, readProjects, readTaskEvents, Refusal,
+  taskBudgetExpired, taskEvidenceDigests, valueDigest, withHubLock, withTeamLock,
 } from './state.js';
 import { CLOSED_STATES } from './types.js';
 import type {
@@ -17,7 +17,7 @@ export type GitHubCheckConfig = {
   plan_digest?: string;
   acceptance_id?: string; owner?: string; deadline?: string;
 };
-export type GitHubOptions = { baseUrl?: string; token?: string; allowLoopback?: boolean };
+export type GitHubOptions = { baseUrl?: string; token?: string; allowLoopback?: boolean; now?: number };
 export type GitHubTransferOptions = GitHubOptions & { newOwner: string };
 
 type CheckRun = {
@@ -103,7 +103,8 @@ function registeredConfig(task: HubTask, config: GitHubCheckConfig): boolean {
 }
 
 function provenanceMatches(task: HubTask, config: GitHubCheckConfig): boolean {
-  return (config.repository === undefined || config.repository === task.contract?.provenance.repository)
+  return task.contract?.provenance.kind !== 'research'
+    && (config.repository === undefined || config.repository === task.contract?.provenance.repository)
     && (config.sha === undefined || config.sha === task.contract?.provenance.artifact_revision);
 }
 
@@ -125,8 +126,8 @@ function currentOperation(task: HubTask, operation: TaskOperation): boolean {
     && (operation.owner === config.owner || operation.previous_owner === config.owner);
 }
 
-function expired(operation: TaskOperation): boolean {
-  return operation.deadline !== undefined && Date.parse(operation.deadline) <= Date.now();
+function expired(operation: TaskOperation, now = Date.now()): boolean {
+  return operation.deadline !== undefined && Date.parse(operation.deadline) <= now;
 }
 
 async function currentTask(root: string, id: string): Promise<HubTask> {
@@ -300,7 +301,8 @@ async function failRun(
   });
 }
 
-async function passRun(root: string, task: HubTask, operation: TaskOperation, run: CheckRun): Promise<void> {
+async function passRun(root: string, task: HubTask, operation: TaskOperation, run: CheckRun, now?: number): Promise<void> {
+  if (taskBudgetExpired(task, now)) return;
   const evidence = await appendAdapterEvidence(root, task, operation, run, 'passed');
   await appendOperation(root, task, {
     ...operation, status: 'succeeded', result: { remote_tip: operation.commit, reconciled: true }, detail: undefined,
@@ -317,23 +319,28 @@ async function passRun(root: string, task: HubTask, operation: TaskOperation, ru
   }
 }
 
-async function finishCancellation(root: string, task: HubTask, operation: TaskOperation, run: CheckRun): Promise<void> {
-  if (CLOSED_STATES.has(task.state) || !currentOperation(task, operation) || !runBound(operation, run)
-    || run.status !== 'completed' || run.conclusion !== 'cancelled') return;
-  await appendOperation(root, task, {
-    ...operation, status: 'failed', detail: 'external_cancelled', result: { remote_tip: run.head_sha, reconciled: true },
-  });
+async function finishClose(
+  root: string, task: HubTask, operation: TaskOperation, run: CheckRun,
+  proof: 'external_cancelled' | 'ownership_transferred',
+): Promise<void> {
+  if (CLOSED_STATES.has(task.state) || !currentOperation(task, operation) || !runBound(operation, run)) return;
   const project = (await readProjects(root)).projects.find((candidate) => candidate.name === task.project);
-  if (project) await withTeamLock(project.home, () => revokeTaskAdmissionsLocked(root, project.home, task.id));
+  if (!project) throw new Refusal(`unknown project: ${task.project}`);
+  await withTeamLock(project.home, () => revokeTaskAdmissionsLocked(root, project.home, task.id));
+  const reason = proof === 'external_cancelled' ? 'external cancellation proved' : 'external ownership transfer proved';
   await appendTaskEvent(root, operation.close_outcome === 'superseded' ? {
     id: task.id, project: task.project, event: 'superseded', at: new Date().toISOString(),
-    note: `GitHub check ${run.id} was cancelled`, outcome: {
+    note: `GitHub check ${run.id} closed by ${proof}`, outcome: {
       actor: operation.actor, plan_digest: operation.plan_digest, epoch: operation.epoch,
-      replacement_id: operation.replacement_id, reason: 'external cancellation proved',
+      replacement_id: operation.replacement_id, reason,
     },
   } : {
     id: task.id, project: task.project, event: 'cancelled', at: new Date().toISOString(),
-    note: `GitHub check ${run.id} was cancelled`,
+    note: `GitHub check ${run.id} closed by ${proof}`,
+  });
+  await appendOperation(root, task, {
+    ...operation, status: 'failed', detail: proof, watcher_id: undefined,
+    result: { remote_tip: run.head_sha, reconciled: true },
   });
 }
 
@@ -344,10 +351,11 @@ async function reconcileLocked(
   const operation = latestOperation(task, operationId);
   if (!operation || operation.kind !== 'github_check' || operation.detail === 'identity_unknown'
     || CLOSED_STATES.has(task.state) || !currentOperation(task, operation)) return;
-  if (expired(operation)) {
+  if (expired(operation, options.now)) {
     await appendOperation(root, task, { ...operation, detail: 'deadline_exceeded' });
     return;
   }
+  if (operation.status !== 'closing_external' && taskBudgetExpired(task, options.now)) return;
   if (operation.status === 'succeeded' && task.state === 'reconciling') return;
   let run: CheckRun | undefined;
   try {
@@ -365,7 +373,9 @@ async function reconcileLocked(
     return;
   }
   if (operation.status === 'closing_external') {
-    if (run.status === 'completed' && run.conclusion === 'cancelled') await finishCancellation(root, task, operation, run);
+    if (run.status === 'completed' && run.conclusion === 'cancelled') {
+      await finishClose(root, task, operation, run, 'external_cancelled');
+    }
     return;
   }
   if (run.status !== 'completed') {
@@ -373,7 +383,7 @@ async function reconcileLocked(
     return;
   }
   if (run.conclusion === 'success') {
-    await passRun(root, task, operation, run);
+    await passRun(root, task, operation, run, options.now);
     return;
   }
   await appendAdapterEvidence(root, task, operation, run, 'failed', `GitHub conclusion: ${run.conclusion ?? 'unknown'}`);
@@ -389,6 +399,7 @@ export async function dispatchGithubCheck(
     const task = await currentTask(root, id);
     const operation = operationFor(task, config);
     if (!registeredConfig(task, config)) return operation;
+    assertTaskBudgetCurrent(task, options.now);
     if (!validIdentity(config)) {
       const wrongRepository = config.repository !== undefined && config.repository !== task.contract?.provenance.repository;
       const wrongSha = config.sha !== undefined && config.sha !== task.contract?.provenance.artifact_revision;
@@ -397,7 +408,7 @@ export async function dispatchGithubCheck(
       await appendOperation(root, task, unknown);
       return unknown;
     }
-    if (expired(operation)) {
+    if (expired(operation, options.now)) {
       const quarantined = { ...operation, detail: 'deadline_exceeded' };
       await appendOperation(root, task, quarantined);
       return quarantined;
@@ -453,7 +464,7 @@ export async function cancelGithubCheck(
     const operation = latestOperation(task, operationId);
     if (!operation || operation.kind !== 'github_check' || operation.detail === 'identity_unknown'
       || CLOSED_STATES.has(task.state) || !currentOperation(task, operation)) return;
-    if (expired(operation)) {
+    if (expired(operation, options.now)) {
       await appendOperation(root, task, { ...operation, detail: 'deadline_exceeded' });
       return;
     }
@@ -471,7 +482,7 @@ export async function cancelGithubCheck(
     const closing = { ...operation, status: 'closing_external' as const };
     if (run.status === 'completed' && run.conclusion === 'cancelled') {
       await appendOperation(root, task, closing);
-      await finishCancellation(root, task, closing, run);
+      await finishClose(root, task, closing, run, 'external_cancelled');
       return;
     }
     if (run.status === 'completed') {
@@ -504,7 +515,7 @@ export async function transferGithubCheck(
     const operation = latestOperation(task, operationId);
     if (!operation || operation.status !== 'closing_external' || operation.detail === 'identity_unknown'
       || CLOSED_STATES.has(task.state) || !currentOperation(task, operation)) return;
-    if (expired(operation)) {
+    if (expired(operation, options.now)) {
       await appendOperation(root, task, { ...operation, detail: 'deadline_exceeded' });
       return;
     }
@@ -513,17 +524,17 @@ export async function transferGithubCheck(
       await failRun(root, task, operation, run, 'adapter-error', 'ownership transfer proof does not match');
       return;
     }
-    await appendOperation(root, task, {
+    await finishClose(root, task, {
       ...operation, owner: options.newOwner, previous_owner: operation.owner,
-      status: 'blocked_external', cancellation_requested: false, detail: undefined,
-    });
+      cancellation_requested: false, detail: undefined,
+    }, run, 'ownership_transferred');
   });
 }
 
 export async function evaluateGithubCheck(root: string, id: string, config: GitHubCheckConfig): Promise<boolean> {
   const events = await readTaskEvents(root);
   const task = foldTasks(events).find((candidate) => candidate.id === id);
-  if (!task || config.plan_digest !== task.plan_digest || !validIdentity(config)) return false;
+  if (!task || taskBudgetExpired(task) || config.plan_digest !== task.plan_digest || !validIdentity(config)) return false;
   const operation = latestOperation(task, operationFor(task, config).operation_id);
   if (!operation || !currentOperation(task, operation)
     || operation.status !== 'succeeded' || operation.result?.remote_tip !== operation.commit) return false;
@@ -534,15 +545,17 @@ export async function evaluateGithubCheck(root: string, id: string, config: GitH
     && event.evidence.verification.provenance_digest === operation.idempotency_key);
 }
 
-export async function supervisionPass(root: string, options: GitHubOptions = {}): Promise<{ watchers: string[] }> {
+export async function supervisionPass(root: string, options: GitHubOptions = {}, now = Date.now()): Promise<{ watchers: string[] }> {
+  await reconcileTaskBudgets(root, now);
+  const passOptions = { ...options, now };
   const tasks = foldTasks(await readTaskEvents(root));
   for (const task of tasks) {
-    if (!task.contract || CLOSED_STATES.has(task.state)) continue;
+    if (!task.contract || CLOSED_STATES.has(task.state) || taskBudgetExpired(task, now)) continue;
     for (const acceptance of task.contract.acceptance) {
       if (acceptance.predicate_id !== 'github_check' || acceptance.version !== 1) continue;
       const config = { ...acceptance.configuration, acceptance_id: acceptance.id, plan_digest: task.plan_digest } as GitHubCheckConfig;
       const operation = latestOperation(task, operationFor(task, config).operation_id);
-      if (operation?.status !== 'closing_external') await dispatchGithubCheck(root, task.id, config, options);
+      if (operation?.status !== 'closing_external') await dispatchGithubCheck(root, task.id, config, passOptions);
     }
   }
   const watchers = new Set<string>();
@@ -554,15 +567,16 @@ export async function supervisionPass(root: string, options: GitHubOptions = {})
     for (const operation of latest.values()) {
       if (operation.status !== 'blocked_external' && operation.status !== 'closing_external') continue;
       if (!currentOperation(task, operation)) continue;
-      if (expired(operation)) {
-        await reconcileGithubCheck(root, task.id, operation.operation_id, options);
+      if (expired(operation, now)) {
+        await reconcileGithubCheck(root, task.id, operation.operation_id, passOptions);
         continue;
       }
+      if (operation.status !== 'closing_external' && taskBudgetExpired(task, now)) continue;
       if (operation.watcher_id) watchers.add(operation.watcher_id);
       if (operation.status === 'closing_external' && !operation.cancellation_requested) {
-        await cancelGithubCheck(root, task.id, operation.operation_id, options);
+        await cancelGithubCheck(root, task.id, operation.operation_id, passOptions);
       } else {
-        await reconcileGithubCheck(root, task.id, operation.operation_id, options);
+        await reconcileGithubCheck(root, task.id, operation.operation_id, passOptions);
       }
     }
   }

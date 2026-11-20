@@ -8,8 +8,8 @@ import type {
 import { CLOSED_STATES } from './types.js';
 import { assertExecutionAllowed } from './rollout.js';
 import {
-  Refusal, appendDecision, appendTaskEvent, canonicalJson, contractDigest, foldTasks, hubPath, readJson, readProjects,
-  readTaskEvents, readTeam, validateRootContract, valueDigest, withHubLock, withTeamLock, writeJson,
+  Refusal, appendDecision, appendTaskEvent, assertTaskBudgetCurrent, canonicalJson, contractDigest, foldTasks, hubPath,
+  readJson, readProjects, readTaskEvents, readTeam, validateRootContract, valueDigest, withHubLock, withTeamLock, writeJson,
 } from './state.js';
 import {
   applyDecisionRewrite, buildDecision, buildHandoffFallback, cleanAgentText, containsSecurityInstruction,
@@ -127,6 +127,7 @@ async function taskForPush(root: string, batch: QuestionBatch, authorization?: A
   if (!task) throw new Refusal('approval task does not match');
   if (CLOSED_STATES.has(task.state) && !allowClosed) throw new Refusal(`task is closed: ${task.state}`);
   if (!task.contract) return null;
+  if (!allowClosed) assertTaskBudgetCurrent(task);
   if (!task.plan_approved || !allowClosed && task.lease_revoked || !task.plan_digest || !task.lease_epoch
     || contractDigest(task.contract) !== task.plan_digest || !task.contract.action_scope.includes('push')) {
     throw new Refusal('push is outside the current approved action scope');
@@ -182,15 +183,17 @@ async function currentPushBinding(
       if (!agent.lease_id || !admission) throw new Refusal('push needs a current worker lease');
       if (!allowClosed) await assertAdmissionCurrentLocked(root, project.home, task.id, agent.name, agent.lease_id);
     }
+    const provenance = task.contract!.provenance;
+    if (provenance.kind === 'research') throw new Refusal('push needs code provenance');
     const [contractRepository, executionRepository] = await Promise.all([
-      repositoryIdentity(task.contract!.provenance.repository).catch(() => null),
+      repositoryIdentity(provenance.repository).catch(() => null),
       repositoryIdentity(agent.worktree || project.home).catch(() => null),
     ]);
     if (!contractRepository || contractRepository !== executionRepository
-      || facts.commit !== task.contract!.provenance.artifact_revision) {
+      || facts.commit !== provenance.artifact_revision) {
       throw new Refusal('push repository or commit does not match contract provenance');
     }
-    const scope = await normalizeScope(task.contract!.provenance.repository, task.contract!.write_scope);
+    const scope = await normalizeScope(provenance.repository, task.contract!.write_scope);
     return makePushBinding(batch, questionId, facts, task, project.home, admission, agent.worktree, scope, recordedRootEpoch);
   });
 }

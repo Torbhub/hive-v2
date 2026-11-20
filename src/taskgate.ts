@@ -5,14 +5,14 @@ import type {
 } from './types.js';
 import { CLOSED_STATES, PROGRESS_STATUSES, TASK_EVIDENCE_OUTCOMES, TASK_EVENTS } from './types.js';
 import {
-  Refusal, appendDecision, appendTaskEvent, canonicalJson, clearPendingPane, contractDigest, doneBlockers, foldTasks,
-  planDigest, readPendingPane, readProjects, readTaskEvents, readTeam, taskEvidenceDigests, validCheckpoints,
-  validateRootContract, withHubLock, withTeamLock,
+  Refusal, appendDecision, appendTaskEvent, assertTaskBudgetCurrent, canonicalJson, childReconciled, clearPendingPane,
+  contractDigest, doneBlockers, foldTasks, planDigest, readPendingPane, readProjects, readTaskEvents, readTeam,
+  taskBudgetExpired, taskEvidenceDigests, validCheckpoints, validateRootContract, withHubLock, withTeamLock,
 } from './state.js';
 import { containsInternalContent } from './decisions.js';
 import { assertAdmissionCurrentLocked, revokeTaskAdmissionsLocked } from './admission.js';
 import {
-  allowsLeaseLessFallback, canonicalActor, evaluateAcceptanceLocked, matchingEvidence,
+  allowsLeaseLessFallback, canonicalActor, evaluateAcceptanceLocked, evaluateRegisteredAcceptanceLocked, matchingEvidence,
 } from './evidence.js';
 export { evaluateTaskPredicate, TASK_PREDICATES } from './evidence.js';
 
@@ -88,6 +88,7 @@ export async function hubProgress(
   await withHubLock(root, async () => {
     await revalidate?.();
     const task = storedTask(await readTaskEvents(root), id);
+    assertTaskBudgetCurrent(task);
     assertTaskProject(task, project);
     if (!(task.checkpoints ?? []).some((c) => c.id === checkpoint)) {
       throw new Refusal(`${id} has no checkpoint ${checkpoint} in its plan`);
@@ -187,9 +188,14 @@ function validReceipt(receipt: TaskReceipt): void {
     || !Number.isSafeInteger(receipt.sequence) || receipt.sequence < 1) {
     throw new Refusal('receipt epoch and sequence must be positive integers');
   }
-  if (!Array.isArray(receipt.evidence_hashes) || receipt.evidence_hashes.length === 0
-    || receipt.evidence_hashes.some((hash) => typeof hash !== 'string' || !HASH.test(hash))) {
-    throw new Refusal('a receipt needs evidence hashes');
+  const hasOutput = typeof receipt.output_claim === 'string' && receipt.output_claim.trim().length > 0
+    && typeof receipt.artifact_path === 'string' && receipt.artifact_path.trim().length > 0;
+  const declaredOutput = receipt.state === 'reconciling' && hasOutput
+    && Array.isArray(receipt.evidence_hashes) && receipt.evidence_hashes.length === 0;
+  if (!Array.isArray(receipt.evidence_hashes) || !declaredOutput && receipt.evidence_hashes.length === 0
+    || receipt.evidence_hashes.some((hash) => typeof hash !== 'string' || !HASH.test(hash))
+    || (receipt.output_claim !== undefined || receipt.artifact_path !== undefined) && !hasOutput) {
+    throw new Refusal('a receipt needs evidence hashes or a declared output artifact');
   }
   if (!receipt.counters || typeof receipt.counters !== 'object' || Array.isArray(receipt.counters)
     || Object.values(receipt.counters).some((value) => !Number.isSafeInteger(value) || value < 0)) {
@@ -205,23 +211,92 @@ function validReceipt(receipt: TaskReceipt): void {
   if (receipt.blocker_kind !== undefined && !['execution', 'child', 'evidence'].includes(receipt.blocker_kind)) {
     throw new Refusal(`unknown blocker kind: ${receipt.blocker_kind}`);
   }
-  if (receipt.state === 'blocked' && (!receipt.blocker_kind || !receipt.unblock_condition?.trim())) {
-    throw new Refusal('a blocked receipt needs a blocker kind and unblock condition');
+  if (receipt.state === 'blocked') {
+    const condition = receipt.resume_condition;
+    const validCondition = receipt.blocker_kind === 'child'
+      ? condition?.type === 'child' && typeof condition.child_id === 'string' && condition.child_id.trim().length > 0
+      : condition?.type === 'predicate' && typeof condition.acceptance_id === 'string'
+        && condition.acceptance_id.trim().length > 0;
+    if (!receipt.blocker_kind || !validCondition) {
+      throw new Refusal('a blocked receipt needs a blocker kind and registered resume condition');
+    }
   }
 }
 
-function assertReceiptTransition(task: HubTask, receipt: TaskReceipt, recovery: boolean): void {
-  if (recovery) return;
+function declaredOutput(task: HubTask, receipt: TaskReceipt): boolean {
+  return task.state !== 'blocked' && receipt.state === 'reconciling'
+    && Boolean(receipt.output_claim && receipt.artifact_path) && receipt.evidence_hashes.length === 0;
+}
+
+function assertDeclaredOutputBinding(task: HubTask, receipt: TaskReceipt): void {
+  const acceptance = task.contract?.acceptance.find((candidate) => candidate.predicate_id === 'task_receipt'
+    && candidate.version === 1 && candidate.configuration.output_claim === receipt.output_claim
+    && candidate.configuration.artifact_path === receipt.artifact_path
+    && candidate.configuration.artifact_digest === receipt.artifact_digest);
+  const admission = (task.admissions ?? []).find((candidate) => candidate.lease_id === receipt.lease_id
+    && candidate.output_claim === receipt.output_claim && acceptance
+    && candidate.acceptance_ids.includes(acceptance.id));
+  if (!acceptance || !admission || receipt.evidence_hashes.length > 0) {
+    throw new Refusal(`${task.id} declared output is not bound to an admitted acceptance artifact`);
+  }
+}
+
+type ResumeEvaluation = {
+  evidenceHashes: string[];
+  after?: string | number;
+  adapterId: NonNullable<TaskEvidence['verification']>['adapter_id'] | 'any';
+};
+
+async function evaluateResumeConditionLocked(
+  root: string, events: TaskEvent[], task: HubTask, native?: NativeBranchClient,
+): Promise<ResumeEvaluation | null> {
+  const condition = task.resume_condition;
+  const blocked = task.last_receipt;
+  if (!condition || !blocked || !task.contract || contractDigest(task.contract) !== task.plan_digest) return null;
+  if (condition.type === 'child') {
+    const reconciled = blocked.blocker_kind === 'child'
+      && task.contract.required_children?.includes(condition.child_id) === true
+      && childReconciled(events, condition.child_id, task.project);
+    return reconciled ? { evidenceHashes: blocked.evidence_hashes, adapterId: 'any' } : null;
+  }
+  if (blocked.blocker_kind !== 'execution' && blocked.blocker_kind !== 'evidence') return null;
+  const acceptance = task.contract.acceptance.find((candidate) => candidate.id === condition.acceptance_id);
+  if (!acceptance || !await evaluateRegisteredAcceptanceLocked(root, task, acceptance, native, true)) return null;
+  const requiredHashes = acceptance.required_evidence.filter((item) => /^[0-9a-f]{64}$/.test(item));
+  const configuredArtifact = acceptance.configuration.artifact_digest;
+  const qualifying = (await readTaskEvents(root)).filter((event, index) => {
+    const evidence = event.evidence;
+    return index > events.length - 1 && event.id === task.id && event.event === 'evidence'
+      && evidence?.outcome === 'passed' && evidence.plan_digest === task.plan_digest && evidence.epoch === task.lease_epoch
+      && evidence.verification?.adapter_id === acceptance.predicate_id
+      && evidence.verification.evidence_type === acceptance.predicate_id
+      && (typeof configuredArtifact !== 'string' || evidence.artifact_digest === configuredArtifact);
+  });
+  if (qualifying.length === 0) return null;
+  const hashes = qualifying.map((event) => event.evidence!.evidence_hash);
+  if (!requiredHashes.every((hash) => hashes.includes(hash))) return null;
+  return { evidenceHashes: hashes, after: events.length - 1, adapterId: acceptance.predicate_id as ResumeEvaluation['adapterId'] };
+}
+
+async function assertReceiptTransition(
+  root: string, events: TaskEvent[], task: HubTask, receipt: TaskReceipt, recovery: boolean, native?: NativeBranchClient,
+): Promise<ResumeEvaluation | undefined> {
+  if (recovery) return undefined;
   if (receipt.state === 'blocked') {
     const expected = receipt.blocker_kind === 'execution' ? 'running' : 'reconciling';
     if (task.state !== expected) {
       throw new Refusal(`${task.id} cannot enter a ${receipt.blocker_kind} blocker from ${task.state}`);
     }
   }
-  if (task.state === 'blocked' && (receipt.state === 'running' || receipt.state === 'reconciling')
-    && task.resume_state !== receipt.state) {
-    throw new Refusal(`${task.id} cannot resume ${receipt.state} from this blocker`);
+  if (task.state === 'blocked' && (receipt.state === 'running' || receipt.state === 'reconciling')) {
+    if (task.resume_state !== receipt.state) {
+      throw new Refusal(`${task.id} cannot resume ${receipt.state} from this blocker`);
+    }
+    const evaluation = await evaluateResumeConditionLocked(root, events, task, native);
+    if (!evaluation) throw new Refusal(`${task.id} registered resume condition does not pass`);
+    return evaluation;
   }
+  return undefined;
 }
 
 function assertTaskProject(task: HubTask, project?: string): void {
@@ -229,6 +304,7 @@ function assertTaskProject(task: HubTask, project?: string): void {
 }
 
 function assertCurrentBinding(task: HubTask, binding: { actor: string; plan_digest: string; epoch: number }): void {
+  assertTaskBudgetCurrent(task);
   if (task.lease_revoked) throw new Refusal(`${task.id} lease is revoked`);
   if (CLOSED_STATES.has(task.state)) throw new Refusal(`${task.id} is already ${task.state}`);
   if (binding.plan_digest !== task.plan_digest || binding.epoch !== task.lease_epoch) {
@@ -306,6 +382,7 @@ export async function recordTaskReceipt(
     trustedReconciler?: boolean;
     revalidate?: TaskRevalidate;
     revalidateReconciler?: TaskRevalidate;
+    native?: NativeBranchClient;
   } = {},
 ): Promise<void> {
   await withHubLock(root, async () => {
@@ -327,14 +404,47 @@ export async function recordTaskReceipt(
     if (receipt.sequence !== (task.last_receipt_sequence ?? 0) + 1) {
       throw new Refusal(`${id} receipt sequence is duplicate or regressive`);
     }
-    if (!matchingEvidence(events, id, receipt, task, recovery)) {
+    const evaluation = await assertReceiptTransition(root, events, task, receipt, recovery, options.native);
+    if (declaredOutput(task, receipt)) assertDeclaredOutputBinding(task, receipt);
+    else if (!matchingEvidence(
+      evaluation ? await readTaskEvents(root) : events,
+      id, receipt, task, recovery, false, evaluation?.after, evaluation?.adapterId,
+    )) {
       throw new Refusal(`${id} receipt evidence is not bound to the current plan, epoch, actor, and artifact`);
     }
-    assertReceiptTransition(task, receipt, recovery);
     await appendTaskEvent(root, {
       id, project: task.project, event: 'receipt', at: new Date().toISOString(), receipt,
     });
   });
+}
+
+export async function reconcileBlockedTasks(root: string, native?: NativeBranchClient): Promise<void> {
+  const candidates = foldTasks(await readTaskEvents(root)).filter((task) => task.state === 'blocked'
+    && (task.resume_state === 'running' || task.resume_state === 'reconciling') && task.resume_condition);
+  for (const candidate of candidates) {
+    await withHubLock(root, async () => {
+      const events = await readTaskEvents(root);
+      const task = storedTask(events, candidate.id);
+      if (taskBudgetExpired(task)) return;
+      if (task.state !== 'blocked') return;
+      const evaluation = await evaluateResumeConditionLocked(root, events, task, native);
+      const previous = task.last_receipt;
+      if (!evaluation || !previous || !task.resume_state) return;
+      const receipt: TaskReceipt = {
+        ...previous, sequence: (task.last_receipt_sequence ?? 0) + 1, state: task.resume_state,
+        evidence_hashes: evaluation.evidenceHashes,
+        blocker_kind: undefined, unblock_condition: undefined, resume_condition: undefined,
+      };
+      if (!matchingEvidence(
+        await readTaskEvents(root), task.id, receipt, task, false, false, evaluation.after, evaluation.adapterId,
+      )) return;
+      assertCurrentBinding(task, receipt);
+      await assertWorkerBinding(root, task, receipt);
+      await appendTaskEvent(root, {
+        id: task.id, project: task.project, event: 'receipt', at: new Date().toISOString(), receipt,
+      });
+    });
+  }
 }
 
 const SUCCESS_OUTCOMES = new Set<TaskOutcome>(['done', 'already_fixed', 'duplicate', 'no_op']);
@@ -397,27 +507,6 @@ async function remainingWriters(root: string, task: HubTask): Promise<string[]> 
   });
 }
 
-function outcomeDetails(events: TaskEvent[], task: HubTask): TaskOutcomeInput | undefined {
-  for (let index = events.length - 1; index >= 0; index--) {
-    const event = events[index];
-    if (event.id === task.id && event.event === task.state && event.outcome) return event.outcome;
-  }
-  return undefined;
-}
-
-function childReconciled(events: TaskEvent[], id: string, project: string, seen = new Set<string>()): boolean {
-  if (seen.has(id)) return false;
-  seen.add(id);
-  const task = foldTasks(events).find((candidate) => candidate.id === id && candidate.project === project);
-  if (!task) return false;
-  if (['done', 'already_fixed', 'no_op'].includes(task.state)) return true;
-  if (task.state !== 'duplicate') return false;
-  const covering = outcomeDetails(events, task)?.covering_record;
-  if (!covering) return false;
-  return foldTasks(events).some((candidate) => candidate.id === covering && candidate.project === project)
-    ? childReconciled(events, covering, project, seen) : false;
-}
-
 function assertChildren(events: TaskEvent[], task: HubTask): void {
   for (const child of task.contract?.required_children ?? []) {
     if (!childReconciled(events, child, task.project)) {
@@ -461,7 +550,7 @@ async function assertOutcomeGuards(
   if (outcome === 'duplicate') assertDuplicate(events, task, input);
   const provenance = task.contract?.provenance;
   if ((outcome === 'already_fixed' || outcome === 'no_op')
-    && (!provenance || provenance.base_revision !== provenance.artifact_revision)) {
+    && (!provenance || provenance.kind === 'research' || provenance.base_revision !== provenance.artifact_revision)) {
     throw new Refusal(`${task.id} ${outcome} needs current-base provenance`);
   }
   if (outcome === 'superseded') {
@@ -488,6 +577,7 @@ async function assertOutcomeGuards(
 }
 
 function assertOutcomeBinding(task: HubTask, input: TaskOutcomeInput): void {
+  assertTaskBudgetCurrent(task);
   if (task.lease_revoked || CLOSED_STATES.has(task.state)) throw new Refusal(`${task.id} is already ${task.state}`);
   if (!input.actor.trim() || input.plan_digest !== task.plan_digest || input.epoch !== task.lease_epoch) {
     throw new Refusal(`${task.id} outcome has a stale actor, plan digest, or epoch`);

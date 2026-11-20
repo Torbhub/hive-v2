@@ -1406,6 +1406,7 @@ describe('POST /api/task-receipt', () => {
       const response = await send(fixture.receiptBase + '/api/task-receipt', {
         ...receiptBody(fixture.task, fixture.evidence), sequence: 2, state: 'blocked',
         actor: 'user:alice', blocker_kind: 'execution', unblock_condition: 'retry later',
+        resume_condition: { type: 'predicate', acceptance_id: 'missing' },
       }, authHeaders());
       expect(response.status).toBe(404);
       expect(await readTaskEvents(fixture.receiptRoot)).toEqual(before);

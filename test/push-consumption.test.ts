@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   answerQuestionBatch, consumePushApproval, createQuestionBatch, readQuestionBatch,
 } from '../src/questions.js';
-import { appendTaskEvent, hivePath, writeJson, writeProjects } from '../src/state.js';
+import { appendTaskEvent, hivePath, hubPath, writeJson, writeProjects } from '../src/state.js';
 import type { QuestionBatch } from '../src/types.js';
 import {
   AGENT_CREDENTIAL, ASSERTION_KEYS, MemoryRegistry, configureSecurity, registryItems, startTestRegistry,
@@ -340,7 +340,7 @@ describe('authenticated push consumption', () => {
   });
 });
 
-async function bindContract(root: string, home: string, commit: string) {
+async function bindContract(root: string, home: string, commit: string, wallSeconds?: number) {
   const { contractDigest, valueDigest } = await import('../src/state.js');
   const base = git(home, 'rev-parse', 'HEAD^');
   const contract = {
@@ -351,7 +351,7 @@ async function bindContract(root: string, home: string, commit: string) {
     }],
     provenance: { repository: home, base_revision: base, artifact_revision: commit },
     write_scope: ['a.txt', 'b.txt'], action_scope: ['push'],
-    budget: { depth: 1, active_children: 2, active_project_records: 2, attempts: 2 },
+    budget: { depth: 1, active_children: 2, active_project_records: 2, attempts: 2, wall_seconds: wallSeconds },
     delegation: { output_claims: ['the reviewed commit'], adapters: ['tmux'] },
   } satisfies import('../src/types.js').RootContract;
   const planDigest = contractDigest(contract);
@@ -739,5 +739,51 @@ describe('contract-bound push operations', () => {
     expect(await countPushes(remote)).toBe(0);
     const { foldTasks, readTaskEvents } = await import('../src/state.js');
     expect(foldTasks(await readTaskEvents(root))[0].plan_digest).toBe(planDigest);
+  });
+
+  it('fences lease-less orchestrator dispatch after wall expiry and preserves remote reconciliation', async () => {
+    const { root, remote, home, commit } = await setup();
+    await bindContract(root, home, commit, 60);
+    await writeFile(path.join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nprintf "push\\n" >> "$GIT_DIR/push-count"\n');
+    await chmod(path.join(remote, 'hooks', 'pre-receive'), 0o755);
+    const team = await import('../src/state.js').then(({ readTeam }) => readTeam(home));
+    team.agents[0].orchestrator = true;
+    await writeJson(hivePath(home, 'team.json'), team);
+    const batch = await approved(root, commit);
+    const events = await import('../src/state.js').then(({ readTaskEvents }) => readTaskEvents(root));
+    const aged = events.map((event) => ['plan', 'answered'].includes(event.event)
+      ? { ...event, at: '2000-01-01T00:00:00.000Z' }
+      : event);
+    await writeFile(hubPath(root, 'tasks.jsonl'), `${aged.map((event) => JSON.stringify(event)).join('\n')}\n`);
+    const before = runCli(home, root, batch, commit);
+    expect(before.status).not.toBe(0);
+    expect(await countPushes(remote)).toBe(0);
+    const { foldTasks, readTaskEvents } = await import('../src/state.js');
+    const expired = foldTasks(await readTaskEvents(root))[0];
+    const { reconcileTaskBudgets } = await import('../src/admission.js');
+    await reconcileTaskBudgets(root, Date.parse(expired.expires_at!) + 1);
+    const after = runCli(home, root, batch, commit);
+    expect(after.status).not.toBe(0);
+    expect(await countPushes(remote)).toBe(0);
+
+    const retained = await setup();
+    await bindContract(retained.root, retained.home, retained.commit, 60);
+    await writeFile(path.join(retained.remote, 'hooks', 'pre-receive'), '#!/bin/sh\nprintf "push\\n" >> "$GIT_DIR/push-count"\n');
+    await chmod(path.join(retained.remote, 'hooks', 'pre-receive'), 0o755);
+    const retainedTeam = await import('../src/state.js').then(({ readTeam }) => readTeam(retained.home));
+    retainedTeam.agents[0].orchestrator = true;
+    await writeJson(hivePath(retained.home, 'team.json'), retainedTeam);
+    const retainedBatch = await approved(retained.root, retained.commit);
+    expect(runCli(retained.home, retained.root, retainedBatch, retained.commit).status).toBe(0);
+    expect(await countPushes(retained.remote)).toBe(1);
+    const retainedEvents = await import('../src/state.js').then(({ readTaskEvents }) => readTaskEvents(retained.root));
+    const retainedAged = retainedEvents.map((event) => ['plan', 'answered'].includes(event.event)
+      ? { ...event, at: '2000-01-01T00:00:00.000Z' }
+      : event);
+    await writeFile(hubPath(retained.root, 'tasks.jsonl'), `${retainedAged.map((event) => JSON.stringify(event)).join('\n')}\n`);
+    const retainedExpired = foldTasks(await readTaskEvents(retained.root))[0];
+    await reconcileTaskBudgets(retained.root, Date.parse(retainedExpired.expires_at!) + 1);
+    expect(runCli(retained.home, retained.root, retainedBatch, retained.commit).status).toBe(0);
+    expect(await countPushes(retained.remote)).toBe(1);
   });
 });

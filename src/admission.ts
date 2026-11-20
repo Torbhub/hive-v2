@@ -3,9 +3,10 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { normalizeScope, pathsWithinScope, protectedClaim, repositoryIdentity, scopesOverlap, taskScope } from './scope.js';
 import {
-  appendTaskEvent, canonicalJson, contractDigest, foldTasks, hivePath, hubPath, readProjects, readTaskEvents, readTeam,
-  Refusal, validateRootContract, valueDigest, withHubLock, withTeamLock, writeJson,
+  appendTaskEvent, assertTaskBudgetCurrent, canonicalJson, contractDigest, foldTasks, hivePath, hubPath, readProjects,
+  readTaskEvents, readTeam, Refusal, taskBudgetExpired, validateRootContract, valueDigest, withHubLock, withTeamLock, writeJson,
 } from './state.js';
+import { CLOSED_STATES } from './types.js';
 import type { HubTask, RootContract, TaskProvenance, TeamEntry, TmuxAdmission } from './types.js';
 
 export type TmuxAdmissionRequest = {
@@ -31,6 +32,7 @@ export type TmuxAdmissionOptions = {
   externalOperationId?: string;
   resumeExternal?: boolean;
   readPreflightSnapshot?: () => Promise<string>;
+  now?: number;
 };
 
 type AdmissionStatus = TmuxAdmission['status'];
@@ -40,13 +42,15 @@ function positiveInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
 }
 
-function storedTask(tasks: HubTask[], id: string): HubTask {
+function storedTask(tasks: HubTask[], id: string, now = Date.now(), allowBudgetExhausted = false): HubTask {
   const task = tasks.find((candidate) => candidate.id === id);
   if (!task) throw new Refusal(`unknown task: ${id}`);
   if (!task.plan_approved) throw new Refusal(`${id} has no approved plan; the owner approves the plan before workers spawn`);
-  if (!task.contract || task.lease_revoked || !task.plan_digest || !task.lease_epoch) {
+  const budgetDelta = allowBudgetExhausted && task.state === 'blocked:budget_exhausted';
+  if (!task.contract || task.lease_revoked && !budgetDelta || !task.plan_digest || !task.lease_epoch) {
     throw new Refusal(`${id} has no current root contract grant`);
   }
+  if (!budgetDelta) assertTaskBudgetCurrent(task, now);
   validateRootContract(task.contract);
   if (contractDigest(task.contract) !== task.plan_digest) throw new Refusal(`${id} root contract digest does not match`);
   return task;
@@ -54,10 +58,11 @@ function storedTask(tasks: HubTask[], id: string): HubTask {
 
 async function assertRegisteredHome(root: string, home: string, task: HubTask): Promise<void> {
   const project = (await readProjects(root)).projects.find((candidate) => candidate.name === task.project);
+  const provenance = task.contract!.provenance;
   const [registeredHome, requestedHome, contractHome] = await Promise.all([
     project ? fs.realpath(project.home).catch(() => null) : null,
     fs.realpath(home).catch(() => null),
-    fs.realpath(task.contract!.provenance.repository).catch(() => null),
+    fs.realpath(provenance.kind === 'research' ? home : provenance.repository).catch(() => null),
   ]);
   if (!project || !registeredHome || registeredHome !== requestedHome || requestedHome !== contractHome
     || !task.id.startsWith(`${task.project}-`)) {
@@ -152,11 +157,16 @@ function checkDuplicate(tasks: HubTask[], task: HubTask, request: TmuxAdmissionR
   }
 }
 
-async function sameRepository(home: string, repository: string): Promise<boolean> {
+async function sameRepository(home: string, repository: string | undefined): Promise<boolean> {
+  if (!repository) return false;
   const [left, right] = await Promise.all([
     repositoryIdentity(home).catch(() => null), repositoryIdentity(repository).catch(() => null),
   ]);
   return Boolean(left && right && left === right);
+}
+
+function admittedRepository(admission: TmuxAdmission): string | undefined {
+  return admission.provenance.kind === 'research' ? admission.repository_root : admission.provenance.repository;
 }
 
 async function checkCollisions(
@@ -164,7 +174,7 @@ async function checkCollisions(
 ): Promise<void> {
   for (const { admission } of allAdmissions(tasks)) {
     if (!activeAdmission(admission) || admission.lease_id === request.retry_lease_id
-      || !await sameRepository(home, admission.provenance.repository)) continue;
+      || !await sameRepository(home, admittedRepository(admission))) continue;
     if (writeScope.length && admission.write_scope.length && scopesOverlap(writeScope, admission.write_scope)) {
       throw new Refusal(`writer scope collision with ${admission.agent}`);
     }
@@ -192,7 +202,7 @@ function taskProject(tasks: HubTask[], id: string): string {
 }
 
 function reservation(
-  task: HubTask, agent: string, request: TmuxAdmissionRequest, writeScope: string[],
+  task: HubTask, home: string, agent: string, request: TmuxAdmissionRequest, writeScope: string[],
   previous: TmuxAdmission | undefined, attemptsUsed: number,
 ): TmuxAdmission {
   return {
@@ -201,7 +211,7 @@ function reservation(
     lease_id: randomUUID(), lease_epoch: 1, lease_revoked: false,
     output_claim: request.output_claim, acceptance_ids: [...request.acceptance_ids],
     provenance: { ...request.provenance }, provenance_digest: valueDigest(request.provenance),
-    write_scope: writeScope, adapter: request.adapter, parent_lease_id: request.parent_lease_id,
+    repository_root: home, write_scope: writeScope, adapter: request.adapter, parent_lease_id: request.parent_lease_id,
     depth: request.budget?.depth ?? 1, retry_of: request.retry_of,
     lineage_id: previous?.lineage_id ?? request.lineage_id ?? agent, attempts_used: attemptsUsed, status: 'admitted',
   };
@@ -239,7 +249,7 @@ async function admitLocked(
 ): Promise<TmuxAdmission> {
   const native = request.adapter === 'native';
   const tasks = foldTasks(await readTaskEvents(root));
-  const task = storedTask(tasks, taskId);
+  const task = storedTask(tasks, taskId, options.now);
   await assertRegisteredHome(root, home, task);
   validateRequest(task, request);
   if (task.contract!.preflight_snapshot !== undefined
@@ -289,7 +299,7 @@ async function admitLocked(
   if (!native && !request.retry_of && (await readTeam(home)).agents.some((old) => old.name === agent)) {
     throw new Refusal(`${task.project} already has an agent named ${agent}`);
   }
-  const admitted = reservation(task, agent, request, writeScope, previous, attemptsUsed);
+  const admitted = reservation(task, home, agent, request, writeScope, previous, attemptsUsed);
   await appendAdmission(root, admitted, previous ? [previous.lease_id] : []);
   if (native) return admitted;
   const team = await readTeam(home);
@@ -523,6 +533,25 @@ export async function revokeTaskAdmissionsLocked(root: string, home: string, tas
   }
 }
 
+export async function reconcileTaskBudgets(root: string, now = Date.now()): Promise<void> {
+  const candidates = foldTasks(await readTaskEvents(root)).filter((task) =>
+    !CLOSED_STATES.has(task.state) && taskBudgetExpired(task, now));
+  for (const candidate of candidates) {
+    await withHubLock(root, async () => {
+      const task = foldTasks(await readTaskEvents(root)).find((current) => current.id === candidate.id);
+      if (!task || CLOSED_STATES.has(task.state) || !taskBudgetExpired(task, now)) return;
+      const project = (await readProjects(root)).projects.find((current) => current.name === task.project);
+      if (project) await withTeamLock(project.home, () => revokeTaskAdmissionsLocked(root, project.home, task.id));
+      if (task.state !== 'blocked:budget_exhausted') {
+        await appendTaskEvent(root, {
+          id: task.id, project: task.project, event: 'blocked', at: new Date(now).toISOString(),
+          note: 'blocked:budget_exhausted',
+        });
+      }
+    });
+  }
+}
+
 export async function applyRootDeltaLocked(
   root: string, home: string, taskId: string, nextContract: RootContract, basePlanDigest: string, baseEpoch: number,
 ): Promise<void> {
@@ -531,7 +560,7 @@ export async function applyRootDeltaLocked(
   if (nextDigest === basePlanDigest) throw new Refusal('a root delta must change the contract digest');
   await withTeamLock(home, async () => {
     const tasks = foldTasks(await readTaskEvents(root));
-    const task = storedTask(tasks, taskId);
+    const task = storedTask(tasks, taskId, Date.now(), true);
     if (task.plan_digest !== basePlanDigest || task.lease_epoch !== baseEpoch || !task.contract) {
       throw new Refusal('root delta is stale; review the current contract again');
     }

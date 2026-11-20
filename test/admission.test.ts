@@ -1,13 +1,19 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  admitNative, admitTmux, assertTmuxGrant, recordTmuxLaunchOutcome, transitionTmuxAdmission, type TmuxAdmissionRequest,
+  admitNative, admitTmux, applyRootDeltaLocked, assertTmuxGrant, reconcileTaskBudgets, recordTmuxLaunchOutcome,
+  transitionTmuxAdmission, type TmuxAdmissionRequest,
 } from '../src/admission.js';
-import { evaluateTaskPredicate, hubLog, hubResolve, hubTask, planAnswer, recordTaskEvidence, recordTaskReceipt } from '../src/hub.js';
-import { appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readTaskEvents, readTeam, writeJson } from '../src/state.js';
+import {
+  evaluateTaskPredicate, hubLog, hubProgress, hubResolve, hubTask, planAnswer, recordTaskEvidence, recordTaskReceipt,
+} from '../src/hub.js';
+import {
+  appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readTaskEvents, readTeam, withHubLock, writeJson,
+} from '../src/state.js';
 import type { RootContract } from '../src/types.js';
 
 const IDLE = await fs.readFile(new URL('./fixtures/idle-empty-prompt.txt', import.meta.url), 'utf8');
@@ -61,7 +67,7 @@ async function setup(contractChanges: Partial<RootContract> = {}) {
 async function seedTask(root: string, contract: RootContract, id = 'demo-1') {
   const project = id.replace(/-\d+$/, '');
   expect(await hubTask(root, project, 'Implement the bounded change.')).toBe(id);
-  const home = contract.provenance.repository;
+  const home = contract.provenance.kind === 'research' ? path.join(root, project) : contract.provenance.repository;
   const team = await readTeam(home);
   if (!team.agents.some((agent) => agent.orchestrator)) {
     await writeJson(hivePath(home, 'team.json'), {
@@ -80,7 +86,9 @@ function request(home: string, contract: RootContract, changes: Partial<TmuxAdmi
     plan_digest: contractDigest(contract),
     output_claim: OUTPUT,
     acceptance_ids: ['diff'],
-    provenance: { ...contract.provenance, repository: home },
+    provenance: contract.provenance.kind === 'research'
+      ? { ...contract.provenance }
+      : { ...contract.provenance, repository: home },
     write_scope: ['src'],
     adapter: 'tmux',
     budget: { depth: 1, attempts: contract.budget.attempts },
@@ -624,5 +632,88 @@ describe('native admission leases', () => {
       ...nativeRequest, retry_of: second.agent,
     }))).rejects.toThrow(/blocked:budget_exhausted/);
     expect(contract.budget.attempts).toBe(2);
+  });
+});
+
+describe('research provenance and root wall budgets', () => {
+  it('admits research with source and evidence ranges and no Git revisions', async () => {
+    const digest = 'a'.repeat(64);
+    const fixture = await setup({
+      kind: 'research',
+      acceptance: [{
+        id: 'diff', predicate_id: 'task_receipt', version: 1,
+        configuration: { output_claim: OUTPUT, artifact_path: 'src/result.md', artifact_digest: digest },
+        required_evidence: ['server-read-artifact'],
+      }],
+      provenance: {
+        kind: 'research',
+        source_range: {
+          start: 'session:first', end: 'session:first',
+          sources: [{
+            id: 'session:first', path: 'src/result.md',
+            sha256: createHash('sha256').update('research\n').digest('hex'),
+            observed_at: '2026-11-20T12:00:00.000Z',
+          }],
+        },
+        evidence_window: { starts_at: '2026-11-20T00:00:00.000Z', ends_at: '2026-11-21T00:00:00.000Z' },
+      },
+    });
+    await fs.mkdir(path.join(fixture.home, 'src'), { recursive: true });
+    await fs.writeFile(path.join(fixture.home, 'src', 'result.md'), 'research\n');
+    await seedTask(fixture.root, fixture.contract);
+    const admitted = await admit(fixture.root, fixture.home, fixture.contract, 'researcher', {
+      write_scope: ['src'],
+    });
+    expect(admitted).toMatchObject({ repository_root: fixture.home, status: 'admitted' });
+    expect(admitted.provenance).toEqual(fixture.contract.provenance);
+    expect(admitted.provenance.repository).toBeUndefined();
+    expect(admitted.provenance.base_revision).toBeUndefined();
+    expect(admitted.provenance.artifact_revision).toBeUndefined();
+  });
+
+  it('expires writers once and extends only by root delta without resetting attempts', async () => {
+    const fixture = await setup({
+      budget: { depth: 1, active_children: 4, active_project_records: 4, attempts: 3, wall_seconds: 60 },
+    });
+    await seedTask(fixture.root, fixture.contract);
+    const admitted = await admit(fixture.root, fixture.home, fixture.contract, 'builder');
+    const before = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    const expiry = Date.parse(before.expires_at!);
+    expect(expiry).toBe(Date.parse(before.admitted_at!) + 60_000);
+    const expired = expiry + 1;
+    await reconcileTaskBudgets(fixture.root, expired);
+    await reconcileTaskBudgets(fixture.root, expired);
+    const blocked = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    expect(blocked).toMatchObject({ state: 'blocked:budget_exhausted', lease_revoked: true });
+    expect((await readTaskEvents(fixture.root)).filter((event) => event.note === 'blocked:budget_exhausted')).toHaveLength(1);
+    expect((await readTeam(fixture.home)).agents.find((agent) => agent.lease_id === admitted.lease_id))
+      .toMatchObject({ lease_revoked: true, admission_status: 'revoked' });
+    await expect(assertTmuxGrant(fixture.root, fixture.home, 'demo-1', 'builder', admitted.lease_id))
+      .rejects.toThrow(/budget|grant|revoked/);
+    await expect(admitTmux(fixture.root, fixture.home, 'demo-1', 'other', request(fixture.home, fixture.contract), {
+      now: expired,
+    })).rejects.toThrow(/budget|grant/);
+    const beforeProgress = await readTaskEvents(fixture.root);
+    await expect(hubProgress(fixture.root, 'demo-1', 'work', 'started')).rejects.toThrow(/budget/);
+    const { handleTaskAction } = await import('../web/taskactions.js');
+    await expect(handleTaskAction(fixture.root, 'demo', '/api/progress', {
+      task: 'demo-1', checkpoint: 'work', status: 'started',
+    })).rejects.toThrow(/budget/);
+    expect(await readTaskEvents(fixture.root)).toEqual(beforeProgress);
+
+    const nextContract = {
+      ...fixture.contract,
+      budget: { ...fixture.contract.budget, wall_seconds: 120 },
+    };
+    await withHubLock(fixture.root, () => applyRootDeltaLocked(
+      fixture.root, fixture.home, 'demo-1', nextContract, contractDigest(fixture.contract), 1,
+    ));
+    const replacement = await admit(fixture.root, fixture.home, nextContract, 'builder-replacement', {
+      retry_of: 'builder',
+    });
+    expect(replacement.attempts_used).toBe(2);
+    const extended = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    expect(Date.parse(extended.expires_at!)).toBe(Date.parse(before.admitted_at!) + 120_000);
+    expect(extended.state).not.toBe('blocked:budget_exhausted');
   });
 });
