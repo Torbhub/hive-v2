@@ -110,6 +110,7 @@ async function writeAutomationState(home: string, state: AutomationStateFile): P
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.spyOn(Date, 'now').mockReturnValue(NOW);
   vi.stubEnv('HIVE_DAYDREAM_AUTOMATION', '1');
   vi.stubEnv('HIVE_DAYDREAM', '1');
   vi.stubEnv('HIVE_NATIVE_BRANCHES', '1');
