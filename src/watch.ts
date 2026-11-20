@@ -6,12 +6,13 @@ import { maybeCompact } from './compact.js';
 import { answerDialog, buildStatus, continueProject, readDialogFor, Refusal, wake } from './hub.js';
 import { DEFAULT_MODEL, typeLine, wakeAgent } from './spawn.js';
 import { classify, isNativeQuestion, lines } from './screen.js';
-import { appendDecision, hasLiveSendingClaim, hivePath, hubPath, readPendingPane, readProjects, readTeam, upsertTeamEntry, writeJson } from './state.js';
+import { appendDecision, compareAndSwapTeamEntry, hasLiveSendingClaim, hivePath, hubPath, readPendingPane, readProjects, readTeam, writeJson } from './state.js';
 import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
 import { loadProcessedKeys, migrateLegacyStaleKey, recordProcessedKey } from './watch-persist.js';
 import type { Approvals, DaydreamAutomationOptions, TeamEntry } from './types.js';
 import { assertExecutionAllowed, RolloutPaused } from './rollout.js';
+import { withTmuxGrant } from './admission.js';
 
 // Read-only leaders: a chain segment must start with one of these to be
 // auto-approvable. Multi-word leaders match the subcommand, not just `git`.
@@ -89,6 +90,33 @@ async function appendWatchLog(root: string, line: string): Promise<void> {
   await fs.appendFile(hubPath(root, 'watch.log'), `${line}\n`);
 }
 
+async function withTaskBoundPane<T>(
+  root: string, project: string, agent: TeamEntry, fn: () => Promise<T>,
+): Promise<T | undefined> {
+  try {
+    if (!agent.task || !agent.lease_id) return await fn();
+    return await withTmuxGrant(root, (await readProjects(root)).projects.find((candidate) => candidate.name === project)!.home,
+      agent.task, agent.name, agent.lease_id, fn);
+  } catch (error) {
+    if (error instanceof Refusal) return undefined;
+    throw error;
+  }
+}
+
+async function withResolvedTaskBoundPane<T>(
+  root: string, project: string, agentRef: string | undefined, fn: () => Promise<T>,
+): Promise<T | undefined> {
+  const registered = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
+  if (!registered) return fn();
+  const [name, worktree] = agentRef?.split('@') ?? [];
+  const matches = (await readTeam(registered.home)).agents.filter((agent) => agentRef === undefined
+    ? agent.orchestrator
+    : !agent.orchestrator && agent.name === name && (worktree === undefined || agent.worktree === worktree));
+  if (matches.length > 1) return undefined;
+  if (matches.length === 0) return fn();
+  return withTaskBoundPane(root, project, matches[0], fn);
+}
+
 async function maybeAutoApprove(
   root: string,
   project: string,
@@ -115,7 +143,8 @@ async function maybeAutoApprove(
       trust ? /^Trust\b/i.test(o.label) : /^(Approve|Allow)\b/i.test(o.label)
     ));
     if (!opt) return;
-    await answerDialog(root, project, agentRef, String(opt.n), dialog.fingerprint);
+    await withResolvedTaskBoundPane(root, project, agentRef,
+      () => answerDialog(root, project, agentRef, String(opt.n), dialog.fingerprint));
     await appendDecision(root, {
       project, by: 'watch',
       summary: command ? `auto-approved "${opt.label}" for: $ ${command}` : `auto-approved "${opt.label}"`,
@@ -143,7 +172,8 @@ async function maybeAutoApprove(
   // Only ever option 1 ("Approve once"); a saves-rule option is the owner's call.
   const opt = dialog.options.find((o) => o.n === 1);
   if (!opt || !opt.offered || opt.saves_rule) return;
-  await answerDialog(root, project, agentRef, '1', dialog.fingerprint);
+  await withResolvedTaskBoundPane(root, project, agentRef,
+    () => answerDialog(root, project, agentRef, '1', dialog.fingerprint));
   await appendDecision(root, {
     project, by: 'watch', summary: `auto-approved "${opt.label}" for: $ ${command}`,
   });
@@ -312,7 +342,8 @@ async function treeCpuTime(pid: number): Promise<number | null> {
 }
 
 async function clearWedged(root: string, home: string, project: string, a: TeamEntry): Promise<void> {
-  await upsertTeamEntry(home, { name: a.name, wedged_at: undefined });
+  const updated = await compareAndSwapTeamEntry(home, a, { wedged_at: undefined });
+  if (!updated) return;
   await appendWatchLog(root, `${new Date().toISOString()} ${project} ${a.name} is moving again; cleared the wedged mark`);
 }
 
@@ -355,7 +386,8 @@ async function judgeWedge(
     if (wireAt !== null && Date.now() - wireAt < stillMs) return;
   }
   if (a.wedged_at) return;
-  await upsertTeamEntry(home, { name: a.name, wedged_at: new Date().toISOString() });
+  const updated = await compareAndSwapTeamEntry(home, a, { wedged_at: new Date().toISOString() });
+  if (!updated) return;
   await appendWatchLog(
     root,
     `${new Date().toISOString()} ${project} ${a.name} looks wedged: pane ${pane} frozen on a spinner for ${Math.round(stillMs / 60_000)}m`,
@@ -377,37 +409,41 @@ async function judgeWedge(
     await appendWatchLog(root, `${new Date().toISOString()} ${project} ${a.name} has no recorded pane identity; refusing to kill ${pane}`);
     return;
   }
-  await killWindow(pane, { pid: a.pane_pid, started: a.pane_started }).catch(async (e: unknown) => {
-    await appendWatchLog(root, `${new Date().toISOString()} ${project} killing the wedged pane failed: ${lastLine(e)}`);
-  });
+  await withTaskBoundPane(root, project, a,
+    () => killWindow(pane, { pid: a.pane_pid!, started: a.pane_started! })).catch(async (e: unknown) => {
+      await appendWatchLog(root, `${new Date().toISOString()} ${project} killing the wedged pane failed: ${lastLine(e)}`);
+    });
   // The death path re-wakes it on the next tick.
 }
 
 async function redirectNativeQuestion(
   root: string, project: string, a: TeamEntry, seen: Map<string, string>,
 ): Promise<boolean> {
-  if (!a.pane) return false;
-  const key = `${a.pane}:${a.pane_pid}`;
-  const raw = await capturePane(a.pane);
+  const pane = a.pane;
+  if (!pane) return false;
+  const key = `${pane}:${a.pane_pid}`;
+  const raw = await capturePane(pane);
   if (raw === null || !isNativeQuestion(lines(raw))) {
     seen.delete(key);
     return false;
   }
   if (seen.get(key) === raw) return true;
-  const identity = { pid: a.pane_pid ?? 0, started: a.pane_started ?? '' };
-  await sendEscape(a.pane, identity);
-  await sleep(250);
-  await typeLine(a.pane, 'Hive blocked native AskUserQuestion. Use mcp__hive-operator__ask_operator for every operator decision.', identity);
-  const after = await capturePane(a.pane);
-  if (after === null || isNativeQuestion(lines(after))) {
-    throw new Error(`native AskUserQuestion dismissal is not confirmed on ${a.pane}`);
-  }
-  seen.set(key, raw);
-  await appendDecision(root, {
-    project, by: 'watch',
-    summary: `blocked native AskUserQuestion for ${project}/${a.name}; redirected to mcp__hive-operator__ask_operator`,
-  });
-  return true;
+  return (await withTaskBoundPane(root, project, a, async () => {
+    const identity = { pid: a.pane_pid ?? 0, started: a.pane_started ?? '' };
+    await sendEscape(pane, identity);
+    await sleep(250);
+    await typeLine(pane, 'Hive blocked native AskUserQuestion. Use mcp__hive-operator__ask_operator for every operator decision.', identity);
+    const after = await capturePane(pane);
+    if (after === null || isNativeQuestion(lines(after))) {
+      throw new Error(`native AskUserQuestion dismissal is not confirmed on ${a.pane}`);
+    }
+    seen.set(key, raw);
+    await appendDecision(root, {
+      project, by: 'watch',
+      summary: `blocked native AskUserQuestion for ${project}/${a.name}; redirected to mcp__hive-operator__ask_operator`,
+    });
+    return true;
+  })) ?? false;
 }
 
 export async function watchCycle(

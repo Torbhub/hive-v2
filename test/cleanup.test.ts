@@ -148,6 +148,22 @@ describe('cleanupProject tmux records', () => {
     expect(team.agents[0].closed_at).toBeTruthy();
   });
 
+  it('revokes a tasked lease without clearing compaction or lineage', async () => {
+    const { root, home } = await setupTmux();
+    const compaction = { session_id: 'session_b', status: 'submitted' as const, at: '2026-11-20T00:00:00Z', attempts: 1 };
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{
+        name: 'builder', task: 'demo-1', pane: '%1', pane_pid: 11, pane_started: 'a',
+        lease_id: 'lease-1', lease_epoch: 1, lineage_id: 'lineage-1', attempts_used: 2, compaction,
+      }],
+    });
+    await cleanupProject(root, 'proj');
+    expect((await readTeam(home)).agents[0]).toMatchObject({
+      lease_revoked: true, admission_status: 'revoked', lease_id: 'lease-1',
+      lineage_id: 'lineage-1', attempts_used: 2, compaction,
+    });
+  });
+
   it('a dry run stamps nothing and kills nothing', async () => {
     const { root, home } = await setupTmux();
     const actions = await cleanupProject(root, 'proj', { dryRun: true });
@@ -157,11 +173,18 @@ describe('cleanupProject tmux records', () => {
     expect(team.agents[0].closed_at).toBeUndefined();
   });
 
-  it('unstamps the team entry when the kill fails', async () => {
+  it('unstamps only the failed target when the kill fails', async () => {
     const { root, home } = await setupTmux();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [
+        { name: 'proj-orchestrator', orchestrator: true, pane: '%9', pane_pid: 99, pane_started: 'other' },
+        { name: 'builder', pane: '%1', pane_pid: 11, pane_started: 'a' },
+      ],
+    });
     vi.mocked(killWindow).mockRejectedValueOnce(new Error('tmux down'));
     await expect(cleanupProject(root, 'proj')).rejects.toThrow('tmux down');
     const team = await readTeam(home);
     expect(team.agents[0].closed_at).toBeUndefined();
+    expect(team.agents[1].closed_at).toBeUndefined();
   });
 });

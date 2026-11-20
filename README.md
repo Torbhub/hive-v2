@@ -166,12 +166,18 @@ tmux -L hive-v2 attach
    its concrete slice and the artifact required back. hive persists both in
    the handoff before launch and refuses a launch or relaunch without them.
    Explicit respawn can repair a legacy handoff with both options. With
-   `--task <id>` the spawn binds the agent to a task whose brief claims a
-   file scope. hive refuses the spawn when the scope overlaps another live
-   agent's task scope, and when either brief's scope does not parse. Two
-   agents on the same task never collide. A task with no scope claim spawns
-   unchecked. Every state change is a ledger event: `plan`, `question`,
-   `blocked`, `done`.
+   `--task <id>` the spawn binds the agent to a task whose approved root
+   contract allocates output, provenance, acceptance, scope, and budgets.
+   Record that contract with `hive hub log <id> plan [note] --checkpoints
+   <json> --contract <json>`. The web task-plan action accepts the same object.
+   hive reserves the worker lease before it creates a worktree or pane.
+   Paths are repository-relative prefixes. hive refuses overlapping writers,
+   including writers on the same task. Empty write scope is read-only.
+   Read-only leases may overlap. Respawn and wake recheck the current digest,
+   epoch, and lease. Replacement attempts keep one cumulative lineage budget.
+   `git_diff_scope` includes ignored files and resolves existing path ancestors.
+   An out-of-scope change releases the exact worker lease.
+   Every state change is a ledger event: `plan`, `question`, `blocked`, `done`.
 4. The hub screen (`hive ui`) is where you see all of it: tasks that need you,
    dialogs waiting on any agent's screen (answerable from the screen, with a
    fingerprint check so a changed dialog is never blindly answered), context

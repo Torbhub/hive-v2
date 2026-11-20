@@ -99,6 +99,7 @@ export type TaskEvidence = {
   plan_digest: string;
   epoch: number;
   outcome: TaskEvidenceOutcome;
+  lease_id?: string;
   artifact: unknown;
   content: unknown;
   artifact_digest: string;
@@ -109,6 +110,7 @@ export type TaskReceipt = {
   plan_digest: string;
   epoch: number;
   sequence: number;
+  lease_id?: string;
   artifact_digest: string;
   counters: Record<string, number>;
   external_ids: Record<string, string>;
@@ -117,6 +119,66 @@ export type TaskReceipt = {
   blocker_kind?: TaskBlockerKind;
   // Informational only until a registered condition evaluator exists.
   unblock_condition?: string;
+};
+
+export type TaskProvenance = {
+  repository: string;
+  base_revision: string;
+  artifact_revision: string;
+};
+export type TaskAcceptance = {
+  id: string;
+  predicate_id: 'task_receipt' | 'git_diff_scope';
+  version: number;
+  configuration: Record<string, unknown>;
+  required_evidence: string[];
+};
+export type RootContract = {
+  schema_version: 1;
+  objective: string;
+  consumer: string;
+  deliverable: string;
+  kind: 'build' | 'research' | 'remediation';
+  acceptance: TaskAcceptance[];
+  provenance: TaskProvenance;
+  write_scope: string[];
+  action_scope: string[];
+  budget: { depth: number; active_children: number; active_project_records: number; attempts: number };
+  delegation: { output_claims: string[]; adapters: ('tmux' | 'native')[] };
+  preflight_snapshot?: string;
+  defect_fingerprint?: string;
+};
+export type TmuxAdmissionStatus = 'admitted' | 'running' | 'launch_failed' | 'failed' | 'superseded' | 'revoked' | 'released' | 'blocked:budget_exhausted';
+export type TmuxAdmission = {
+  task: string;
+  project: string;
+  agent: string;
+  parent_id: string;
+  plan_digest: string;
+  root_lease_epoch: number;
+  lease_id: string;
+  lease_epoch: 1;
+  lease_revoked: boolean;
+  output_claim: string;
+  acceptance_ids: string[];
+  provenance: TaskProvenance;
+  provenance_digest: string;
+  write_scope: string[];
+  adapter: 'tmux' | 'native';
+  retry_of?: string;
+  lineage_id: string;
+  attempts_used: number;
+  status: TmuxAdmissionStatus;
+  runtime_files?: Record<string, string>;
+  team_state_hash?: string;
+  handoff_path?: string;
+  handoff_digest?: string;
+  launch_claim_path?: string;
+  launch_claim_digest?: string;
+  launch_claim_in_worktree?: boolean;
+  launch_claim_completed?: boolean;
+  external_operation_id?: string;
+  launch_error?: string;
 };
 
 export type HubTask = {
@@ -141,6 +203,8 @@ export type HubTask = {
   last_receipt?: TaskReceipt | null;
   resume_state?: TaskResumeState | null;
   unblock_condition?: string | null;
+  contract?: RootContract | null;
+  admissions?: TmuxAdmission[];
 };
 
 export type HubDialogOption = {
@@ -358,12 +422,38 @@ export type TeamEntry = {
   auto_compact?: boolean;
   daydream_automation?: boolean;
   compaction?: CompactionState;
+  parent_id?: string;
+  plan_digest?: string;
+  root_lease_epoch?: number;
+  lease_id?: string;
+  lease_epoch?: number;
+  lease_revoked?: boolean;
+  output_claim?: string;
+  acceptance_ids?: string[];
+  provenance?: TaskProvenance;
+  provenance_digest?: string;
+  write_scope?: string[];
+  adapter?: 'tmux' | 'native';
+  retry_of?: string;
+  lineage_id?: string;
+  attempts_used?: number;
+  admission_status?: TmuxAdmissionStatus;
+  runtime_files?: Record<string, string>;
+  team_state_hash?: string;
+  handoff_path?: string;
+  handoff_digest?: string;
+  launch_claim_path?: string;
+  launch_claim_digest?: string;
+  launch_claim_in_worktree?: boolean;
+  launch_claim_completed?: boolean;
+  external_operation_id?: string;
+  launch_error?: string;
 };
 
 export const TASK_EVENTS = [
   'asked', 'handed', 'plan', 'question', 'answered', 'blocked',
   'overnight', 'cleanup', 'decided', 'done', 'cancelled', 'note',
-  'progress', 'planaccept', 'receipt', 'evidence',
+  'progress', 'planaccept', 'receipt', 'evidence', 'admission',
 ] as const;
 
 export type TaskEvent = {
@@ -379,6 +469,9 @@ export type TaskEvent = {
   lease_epoch?: number;
   receipt?: TaskReceipt;
   evidence?: TaskEvidence;
+  contract?: RootContract;
+  admission?: TmuxAdmission;
+  supersedes?: string[];
 };
 
 export const NEEDS_OWNER_STATES = new Set(['plan', 'question', 'blocked']);

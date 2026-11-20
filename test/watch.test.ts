@@ -12,6 +12,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     run: vi.fn(orig.run),
     tmux: vi.fn(async () => ({ code: 1, stdout: '', stderr: 'tmux not stubbed in test' })),
     paneExists: vi.fn(async () => true),
+    paneIdentity: vi.fn(async () => ({ pid: 1, started: 'x' })),
     paneIs: vi.fn(async () => true),
     capturePane: vi.fn(async () => null),
     killWindow: vi.fn(async () => {}),
@@ -75,13 +76,15 @@ vi.mock('../src/state.js', async (importOriginal) => {
 });
 
 vi.mock('../src/compact.js', () => ({ maybeCompact: vi.fn(async () => {}) }));
-import { buildStatus, continueProject, readDialogFor, answerDialog, wake } from '../src/hub.js';
+import { buildStatus, continueProject, readDialogFor, answerDialog, hubResolve, hubTask, wake } from '../src/hub.js';
+import { admitTmux } from '../src/admission.js';
+import { approveContract, taskContract } from './task-contract.js';
 import { typeLine, wakeAgent } from '../src/spawn.js';
 import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
 import { maybeCompact } from '../src/compact.js';
 import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep, tmux } from '../src/tmux.js';
 import { withTimeout } from '../src/view.js';
-import { appendDecision, hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, writePendingPane, hivePath } from '../src/state.js';
+import { appendDecision, contractDigest, hubPath, readDecisions, readTeam, upsertTeamEntry, writeJson, writePendingPane, hivePath } from '../src/state.js';
 import { loadProcessedKeys, recordProcessedKey } from '../src/watch-persist.js';
 import { disableExecution } from '../src/rollout.js';
 import {
@@ -183,6 +186,26 @@ async function setupProject(opts: { approvals?: string; mode?: string; agents?: 
   });
   await writeJson(hivePath(home, 'team.json'), { agents: opts.agents ?? [] });
   return { root, home };
+}
+
+async function admittedWorker(root: string, home: string) {
+  const output = 'Review the bounded change and return evidence.';
+  const contract = taskContract(home, [], output);
+  const id = await hubTask(root, 'demo', 'Review the bounded change.');
+  await approveContract(root, id, contract);
+  const admission = await admitTmux(root, home, id, 'builder', {
+    parent_id: id,
+    plan_digest: contractDigest(contract),
+    output_claim: output,
+    acceptance_ids: ['diff'],
+    provenance: contract.provenance,
+    write_scope: [],
+    adapter: 'tmux',
+  });
+  await upsertTeamEntry(home, {
+    name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b', worktree: home,
+  });
+  return { id, admission };
 }
 
 describe('watchCycle watchdog', () => {
@@ -566,6 +589,18 @@ describe('watchCycle wedge detection', () => {
     ]);
   });
 
+  it('does not escape or type into a revoked worker native question', async () => {
+    const { root, home } = await setupProject();
+    await admittedWorker(root, home);
+    vi.mocked(typeLine).mockClear();
+    const raw = await fs.readFile(path.join(import.meta.dirname, 'fixtures', 'dialog-ask-user-question.txt'), 'utf8');
+    vi.mocked(capturePane).mockImplementation(async (pane) => pane === '%2' ? raw : '');
+    await hubResolve(root, 'demo', 'demo-1', 'cancel', 'stop the worker');
+    await watchCycle(root);
+    expect(sendEscape).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
+  });
+
   it('retries when the post-redirect capture fails instead of recording success', async () => {
     const { root } = await setupProject({
       agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b' }],
@@ -618,6 +653,19 @@ describe('watchCycle wedge detection', () => {
     expect((await readTeam(home)).agents[0].wedged_at).toBeUndefined();
     expect(killWindow).not.toHaveBeenCalled();
     expect((await readDecisions(root)).map((d) => d.summary)).toEqual(['stale: demo/builder no output for 60m']);
+  });
+
+  it('does not clear a newer compaction through a stale wedge snapshot', async () => {
+    const compaction = { session_id: 'session_b', status: 'submitted' as const, at: '2026-11-20T00:00:00Z', attempts: 1 };
+    const { root, home } = await setupProject({
+      agents: [{ name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'b', session_id: 'session_b', wedged_at: 'old' }],
+    });
+    vi.mocked(maybeCompact).mockImplementationOnce(async () => {
+      await upsertTeamEntry(home, { name: 'builder', compaction });
+    });
+    vi.mocked(capturePane).mockResolvedValue(null);
+    await watchCycle(root, {}, new Set(), new Map());
+    expect((await readTeam(home)).agents[0]).toMatchObject({ wedged_at: 'old', compaction });
   });
 
   it('a frozen screen with an advancing CPU tree is working, not wedged', async () => {
@@ -717,6 +765,23 @@ describe('watchCycle auto-approver', () => {
   const freshApprover = () => ({ verdicts: new Map<string, true>(), marks: new Set<string>() });
   const cycle = (root: string, s: { verdicts: Map<string, true>; marks: Set<string> }, env: NodeJS.ProcessEnv = {}) =>
     watchCycle(root, env, new Set(), new Map(), new Map(), { verdicts: s.verdicts, marks: s.marks });
+
+  it('does not answer a revoked worker dialog', async () => {
+    const { root, home } = await setupProject({ mode: 'auto' });
+    await admittedWorker(root, home);
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 0,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: true, ref: 'builder' }],
+      }],
+    } as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ git status') as never);
+    await hubResolve(root, 'demo', 'demo-1', 'cancel', 'stop the worker');
+    await cycle(root, freshApprover());
+    expect(answerDialog).not.toHaveBeenCalled();
+  });
 
   it('safe mode approves a whitelisted command with option 1', async () => {
     const { root } = await setupProject({ approvals: 'safe' });

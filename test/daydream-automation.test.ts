@@ -394,11 +394,17 @@ describe('manual automation CLI', () => {
   });
 
   it('keeps automation independent from the existing auto_compact control', async () => {
-    const entry = { ...worker(), auto_compact: true, daydream_automation: false };
+    const entry = {
+      ...worker(), auto_compact: true, daydream_automation: false,
+      lease_id: 'lease-1', lease_epoch: 1, lineage_id: 'lineage-1', attempts_used: 2,
+    };
     const { root, home } = await setup([entry]);
 
     await setDaydreamAutomation(root, 'demo', 'builder', true);
 
-    expect((await readTeam(home)).agents[0]).toMatchObject({ auto_compact: true, daydream_automation: true });
+    expect((await readTeam(home)).agents[0]).toMatchObject({
+      auto_compact: true, daydream_automation: true,
+      lease_id: 'lease-1', lease_epoch: 1, lineage_id: 'lineage-1', attempts_used: 2,
+    });
   });
 });

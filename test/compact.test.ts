@@ -8,6 +8,8 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   return {
     ...orig,
     capturePane: vi.fn(async () => 'done\n│ > \n'),
+    paneExists: vi.fn(async () => true),
+    paneIdentity: vi.fn(async () => ({ pid: 1, started: 'x' })),
     paneIs: vi.fn(async () => true),
     sendEnter: vi.fn(async () => {}),
     sendArrow: vi.fn(async () => {}),
@@ -37,7 +39,10 @@ import {
 } from '../src/daydream-automation.js';
 import { wireActivityAt } from '../src/death-bundle.js';
 import { PreInputError, typeLine } from '../src/spawn.js';
-import { appendTaskEvent, hivePath, hubPath, readTeam, upsertTeamEntry, writeJson } from '../src/state.js';
+import { admitTmux } from '../src/admission.js';
+import { hubResolve, hubTask } from '../src/hub.js';
+import { approveContract, taskContract } from './task-contract.js';
+import { appendTaskEvent, contractDigest, hivePath, hubPath, readTeam, upsertTeamEntry, writeJson } from '../src/state.js';
 import { capturePane, paneIs, sendEnter } from '../src/tmux.js';
 import type { TeamEntry } from '../src/types.js';
 
@@ -103,6 +108,38 @@ describe('idle compaction threshold', () => {
       instruction_hash: expect.any(String),
     });
     expect(stored).not.toHaveProperty('instruction');
+  });
+
+  it('refuses input when cancellation lands after the delivery claim', async () => {
+    const { root, home } = await setup();
+    const output = 'Review the bounded change and return evidence.';
+    const contract = taskContract(home, [], output);
+    await hubTask(root, 'demo', 'Review the bounded change.');
+    await approveContract(root, 'demo-1', contract);
+    const approvedTeam = await readTeam(home);
+    await writeJson(hivePath(home, 'team.json'), { agents: approvedTeam.agents.filter((agent) => agent.orchestrator) });
+    const admission = await admitTmux(root, home, 'demo-1', 'builder', {
+      parent_id: 'demo-1', plan_digest: contractDigest(contract), output_claim: output,
+      acceptance_ids: ['diff'], provenance: contract.provenance, write_scope: [], adapter: 'tmux',
+    }, { worktree: '/lane' });
+    await upsertTeamEntry(home, {
+      name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'start', session_id: 'session_b', worktree: '/lane',
+    });
+    const state = await import('../src/state.js');
+    const original = state.withTeamLock;
+    const spy = vi.spyOn(state, 'withTeamLock').mockImplementationOnce(async (projectHome, fn) => {
+      const claimed = await original(projectHome, fn);
+      await hubResolve(root, 'demo', 'demo-1', 'cancel', 'stop before compaction input');
+      return claimed;
+    });
+    try {
+      const entry = (await readTeam(home)).agents.find((agent) => agent.lease_id === admission.lease_id)!;
+      vi.mocked(typeLine).mockClear();
+      await expect(maybeCompact(root, 'demo', entry, { now: NOW })).rejects.toThrow(/root contract grant|current/);
+      expect(typeLine).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('rejects a newly completed turn at the final activity check', async () => {
@@ -771,8 +808,13 @@ describe('delivery security', () => {
 describe('per-worker compaction control', () => {
   it('changes one worker without a respawn and records the choice', async () => {
     const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ ...worker(), lease_id: 'lease-1', lease_epoch: 1, lineage_id: 'lineage-1', attempts_used: 2 }],
+    });
     await setAutoCompact(root, 'demo', 'builder', false);
-    expect((await readTeam(home)).agents[0].auto_compact).toBe(false);
+    expect((await readTeam(home)).agents[0]).toMatchObject({
+      auto_compact: false, lease_id: 'lease-1', lease_epoch: 1, lineage_id: 'lineage-1', attempts_used: 2,
+    });
     await setAutoCompact(root, 'demo', 'builder', true);
     expect((await readTeam(home)).agents[0].auto_compact).toBe(true);
     await expect(setAutoCompact(root, 'demo', 'missing', false)).rejects.toThrow('no agent named missing');

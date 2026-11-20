@@ -98,7 +98,7 @@ export async function handlePost(root: string, pathname: string, body: Record<st
   if (branchAction !== null) return branchAction;
   const questionAction = await handleQuestionAction(root, pathname, body, authorization);
   if (questionAction !== null) return questionAction;
-  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/project-delete', '/api/task-resolve', '/api/progress', '/api/task-receipt'].includes(pathname)) {
+  if (!['/api/wake', '/api/continue', '/api/answer', '/api/task', '/api/start', '/api/mode', '/api/approvals', '/api/plan-answer', '/api/message', '/api/interrupt', '/api/kill', '/api/stretch-opened', '/api/project', '/api/project-delete', '/api/task-resolve', '/api/task-plan', '/api/progress', '/api/task-receipt'].includes(pathname)) {
     throw new HttpError(404, `unknown endpoint: ${pathname}`);
   }
   if (pathname === '/api/stretch-opened') return recordStretchOpened(body);
@@ -169,7 +169,7 @@ export async function handlePost(root: string, pathname: string, body: Record<st
     const r = await answerDialog(root, project, requestAgentRef(body, principal), String(body.choice ?? ''), String(body.fingerprint ?? ''));
     return { ok: true, option: r.option, choice: r.choice, session: r.session, dialog_gone: r.dialog_gone };
   });
-  if (['/api/mode', '/api/approvals', '/api/task', '/api/task-resolve', '/api/progress', '/api/task-receipt'].includes(pathname)) return action;
+  if (['/api/mode', '/api/approvals', '/api/task', '/api/task-resolve', '/api/task-plan', '/api/progress', '/api/task-receipt'].includes(pathname)) return action;
   return withTimeout(action, pathname === '/api/answer' ? ANSWER_TIMEOUT_MS : ACTION_TIMEOUT_MS, pathname.slice(5));
 }
 

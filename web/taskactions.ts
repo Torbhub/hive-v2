@@ -1,7 +1,7 @@
-import { Refusal, hubProgress, hubResolve, recordTaskReceipt } from '../src/hub.js';
+import { Refusal, hubLog, hubProgress, hubResolve, recordTaskReceipt } from '../src/hub.js';
 import type { TaskRevalidate } from '../src/taskgate.js';
 import type { Principal } from '../src/security.js';
-import type { TaskReceipt } from '../src/types.js';
+import type { Checkpoint, RootContract, TaskReceipt } from '../src/types.js';
 
 // Same cap as a task brief.
 const RESOLVE_NOTE_CAP = 4000;
@@ -31,6 +31,21 @@ async function taskResolve(
     throw new Refusal('the note holds control characters; they are not typeable');
   }
   await hubResolve(root, project, taskId, action, brief, revalidate);
+  return { ok: true };
+}
+
+async function taskPlan(
+  root: string,
+  project: string,
+  body: Record<string, unknown>,
+  revalidate?: TaskRevalidate,
+): Promise<{ ok: true }> {
+  const taskId = String(body.task ?? '').trim();
+  if (!taskId) throw new Refusal('task is required');
+  await hubLog(
+    root, taskId, 'plan', body.note === undefined ? undefined : String(body.note),
+    body.checkpoints as Checkpoint[], revalidate, body.contract as RootContract,
+  );
   return { ok: true };
 }
 
@@ -68,6 +83,7 @@ async function taskReceipt(
     counters: body.counters,
     external_ids: body.external_ids,
     evidence_hashes: body.evidence_hashes,
+    ...(body.lease_id === undefined ? {} : { lease_id: String(body.lease_id) }),
     ...(body.state === undefined ? {} : { state: body.state }),
     ...(body.blocker_kind === undefined ? {} : { blocker_kind: body.blocker_kind }),
     ...(body.unblock_condition === undefined ? {} : { unblock_condition: String(body.unblock_condition) }),
@@ -89,6 +105,7 @@ export async function handleTaskAction(
   revalidateReconciler?: TaskRevalidate,
 ): Promise<unknown | null> {
   if (pathname === '/api/task-resolve') return taskResolve(root, project, body, revalidate);
+  if (pathname === '/api/task-plan') return taskPlan(root, project, body, revalidate);
   if (pathname === '/api/progress') return recordProgress(root, project, body, revalidate);
   if (pathname === '/api/task-receipt') {
     return taskReceipt(root, project, body, principal, revalidate, revalidateReconciler);

@@ -12,6 +12,7 @@ import { redactSecrets } from './logview.js';
 import { assertExecutionAllowed } from './rollout.js';
 import {
   appendDecision,
+  compareAndSwapTeamEntryLocked,
   hivePath,
   readJson,
   readProjects,
@@ -469,8 +470,7 @@ export async function setDaydreamAutomation(
     if (matches.length > 1) throw new Refusal(`${project} has several agents named ${name}; say which: ${name}@<worktree>`);
     const index = matches.length === 1 ? team.agents.indexOf(matches[0]) : -1;
     if (index < 0) throw new Refusal(`${project} has no agent named ${agentRef ?? `${project}-orchestrator`}`);
-    team.agents[index] = { ...team.agents[index], daydream_automation: enabled };
-    await writeJson(hivePath(registered.home, 'team.json'), team);
+    await compareAndSwapTeamEntryLocked(registered.home, team.agents[index], { daydream_automation: enabled });
     await appendDecision(root, {
       project,
       by: 'owner',

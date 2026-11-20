@@ -59,8 +59,9 @@ import { sendOwnerMessage } from '../src/message.js';
 import { typeLine } from '../src/spawn.js';
 import { capturePane, paneExists, paneIs, run, sendLiteral, sleep } from '../src/tmux.js';
 import { createServer } from '../web/server.js';
-import { appendTaskEvent, hivePath, hubPath, readProjects, Refusal, writeJson } from '../src/state.js';
+import { appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readProjects, readTaskEvents, Refusal, writeJson } from '../src/state.js';
 import { authHeaders, configureSecurity } from './security-fixture.js';
+import { taskContract } from './task-contract.js';
 
 let server: Server;
 let base: string;
@@ -373,6 +374,29 @@ describe('POST /api/task', () => {
   it('text past the cap is a 413', async () => {
     const r = await post('/api/task', { project: 'demo', text: 'x'.repeat(4001) });
     expect(r.status).toBe(413);
+  });
+});
+
+describe('POST /api/task-plan', () => {
+  it('persists a validated root contract with its canonical digest', async () => {
+    const contract = taskContract(path.join(root, 'demo'), [], 'Return the bounded artifact.');
+    const response = await post('/api/task-plan', {
+      project: 'demo', task: 'demo-1', note: 'the plan',
+      checkpoints: [{ id: 'work', desc: 'bounded work', etaMin: 5 }], contract,
+    });
+    expect(response.status).toBe(200);
+    const task = foldTasks(await readTaskEvents(root)).find((candidate) => candidate.id === 'demo-1')!;
+    expect(task.contract).toEqual(contract);
+    expect(task.plan_digest).toBe(contractDigest(contract));
+  });
+
+  it('refuses an invalid contract without appending it', async () => {
+    const contract = { ...taskContract(path.join(root, 'demo'), [], 'Return the bounded artifact.'), acceptance: [] };
+    const response = await post('/api/task-plan', {
+      project: 'demo', task: 'demo-1', checkpoints: [{ id: 'work', desc: 'bounded work', etaMin: 5 }], contract,
+    });
+    expect(response.status).toBe(400);
+    expect((await response.json()).detail).toMatch(/acceptance/);
   });
 });
 

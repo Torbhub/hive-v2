@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { Approvals, Checkpoint, Decision, HubTask, ProjectMode, TaskEvent, TeamEntry } from './types.js';
+import type { Approvals, Checkpoint, Decision, HubTask, ProjectMode, RootContract, TaskEvent, TeamEntry } from './types.js';
 import { APPROVALS_MODES, NEEDS_OWNER_STATES, PROJECT_MODES, TASK_EVENTS } from './types.js';
 
 export const HUB_DIR = '.hive-hub';
@@ -93,7 +93,7 @@ export async function readTaskEvents(root: string): Promise<TaskEvent[]> {
   return out;
 }
 
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value && typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
@@ -102,6 +102,55 @@ function canonicalJson(value: unknown): string {
     return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
   }
   return JSON.stringify(value) ?? 'null';
+}
+
+export function valueDigest(value: unknown): string {
+  return createHash('sha256').update(canonicalJson(value)).digest('hex');
+}
+
+export function contractDigest(contract: RootContract): string {
+  return valueDigest(contract);
+}
+
+export function validateRootContract(contract: RootContract): void {
+  const nonEmpty = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
+  const positive = (value: unknown) => Number.isSafeInteger(value) && Number(value) > 0;
+  if (!contract || contract.schema_version !== 1
+    || ![contract.objective, contract.consumer, contract.deliverable].every(nonEmpty)
+    || !['build', 'research', 'remediation'].includes(contract.kind)) {
+    throw new Refusal('the root contract is incomplete');
+  }
+  if (!Array.isArray(contract.acceptance) || contract.acceptance.length === 0) {
+    throw new Refusal('the root contract needs registered acceptance predicates');
+  }
+  const ids = new Set<string>();
+  for (const acceptance of contract.acceptance) {
+    if (!nonEmpty(acceptance.id) || ids.has(acceptance.id)
+      || !['task_receipt', 'git_diff_scope'].includes(acceptance.predicate_id)
+      || !positive(acceptance.version) || !acceptance.configuration || Array.isArray(acceptance.configuration)
+      || !Array.isArray(acceptance.required_evidence) || acceptance.required_evidence.length === 0
+      || !acceptance.required_evidence.every(nonEmpty)) {
+      throw new Refusal('the root contract has an invalid acceptance predicate');
+    }
+    ids.add(acceptance.id);
+  }
+  if (!contract.provenance || !nonEmpty(contract.provenance.repository)
+    || !/^[0-9a-f]{40}$/i.test(contract.provenance.base_revision)
+    || !/^[0-9a-f]{40}$/i.test(contract.provenance.artifact_revision)
+    || !Array.isArray(contract.write_scope) || !Array.isArray(contract.action_scope)
+    || !contract.write_scope.every(nonEmpty) || !contract.action_scope.every(nonEmpty)) {
+    throw new Refusal('the root contract has invalid provenance or scope');
+  }
+  if (!contract.budget || !(['depth', 'active_children', 'active_project_records', 'attempts'] as const)
+    .every((key) => positive(contract.budget[key]))
+    || !contract.delegation || !Array.isArray(contract.delegation.output_claims)
+    || !contract.delegation.output_claims.every(nonEmpty) || contract.delegation.output_claims.length === 0
+    || !Array.isArray(contract.delegation.adapters) || contract.delegation.adapters.length === 0) {
+    throw new Refusal('the root contract has invalid budgets or delegation');
+  }
+  if (contract.kind === 'remediation' && !nonEmpty(contract.defect_fingerprint)) {
+    throw new Refusal('remediation needs a defect fingerprint');
+  }
 }
 
 export function planDigest(checkpoints: Checkpoint[], note?: string): string {
@@ -132,8 +181,21 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
     }
     t.updated = ev.at;
     if (ev.lease_epoch !== undefined) t.lease_epoch = ev.lease_epoch;
-    // Notes, evidence, progress, and planaccept never rewrite the headline state.
-    if (ev.event === 'note') {
+    // Notes, admissions, evidence, progress, and planaccept never rewrite the headline state.
+    if (ev.event === 'admission') {
+      if (ev.admission) {
+        const admissions = t.admissions ??= [];
+        for (const old of admissions) {
+          if (ev.supersedes?.includes(old.lease_id)) {
+            old.status = 'superseded';
+            old.lease_revoked = true;
+          }
+        }
+        const index = admissions.findIndex((old) => old.lease_id === ev.admission!.lease_id);
+        if (index < 0) admissions.push(ev.admission);
+        else admissions[index] = ev.admission;
+      }
+    } else if (ev.event === 'note') {
       t.last_note = ev.note ?? null;
     } else if (ev.event === 'progress') {
       if (ev.checkpoint && ev.status) {
@@ -169,6 +231,7 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         // A fresh plan replaces the old one: checkpoints and their progress reset.
         t.checkpoints = validCheckpoints(ev.checkpoints) ?? [];
         t.plan_digest = ev.plan_digest ?? (t.checkpoints.length ? planDigest(t.checkpoints, ev.note) : null);
+        t.contract = ev.contract ?? null;
         t.lease_epoch ??= 1;
         t.progress = {};
         t.checkpoint_accepts = {};
@@ -187,6 +250,7 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         }
         t.checkpoints = [];
         t.plan_digest = null;
+        t.contract = null;
         t.progress = {};
         t.checkpoint_accepts = {};
         t.plan_approved = false;
@@ -266,42 +330,76 @@ export async function readTeam(projectHome: string): Promise<{ agents: TeamEntry
   return (await readJson<{ agents: TeamEntry[] }>(hivePath(projectHome, 'team.json'))) ?? { agents: [] };
 }
 
-const LOCK_STALE_MS = 10 * 60_000;
+type LockOptions = { staleMs?: number; waitMs?: number };
 
-// mkdir is the lock: atomic on every filesystem hive runs on. A lock older
-// than LOCK_STALE_MS is a crashed holder, not a live one.
-async function withDirLock<T>(lock: string, fn: () => Promise<T>): Promise<T> {
-  // A fresh root has no state dir yet; the lock's parent must exist first.
+export async function releaseDirLock(lock: string, token: string): Promise<void> {
+  const owner = await readJson<{ token: string }>(path.join(lock, 'owner.json'));
+  if (owner?.token !== token) return;
+  await fs.rm(lock, { recursive: true, force: true });
+}
+
+async function withDirLock<T>(lock: string, fn: () => Promise<T>, options: LockOptions = {}): Promise<T> {
+  const { waitMs = 10_000 } = options;
   await fs.mkdir(path.dirname(lock), { recursive: true });
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + waitMs;
+  const token = randomUUID();
   for (;;) {
     try {
       await fs.mkdir(lock);
+      await writeJson(path.join(lock, 'owner.json'), { token });
       break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      if (Date.now() > deadline) throw new Error(`locked: ${lock}`);
-      const st = await fs.stat(lock).catch(() => null);
-      if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         await fs.rmdir(lock).catch(() => {});
-        continue;
+        throw error;
       }
-      await new Promise((r) => setTimeout(r, 100));
+      if (Date.now() > deadline) throw new Error(`locked: ${lock}`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
   try {
     return await fn();
   } finally {
-    await fs.rmdir(lock).catch(() => {});
+    await releaseDirLock(lock, token);
   }
 }
 
-export async function withTeamLock<T>(projectHome: string, fn: () => Promise<T>): Promise<T> {
-  return withDirLock(hivePath(projectHome, 'team.json.lock'), fn);
+export async function withTeamLock<T>(projectHome: string, fn: () => Promise<T>, options?: LockOptions): Promise<T> {
+  return withDirLock(hivePath(projectHome, 'team.json.lock'), fn, options);
 }
 
 export async function withHubLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
   return withDirLock(hubPath(root, 'lock'), fn);
+}
+
+export async function insertTeamEntry(projectHome: string, entry: TeamEntry): Promise<TeamEntry> {
+  return withTeamLock(projectHome, async () => {
+    const team = await readTeam(projectHome);
+    if (team.agents.some((old) => old.name === entry.name && old.worktree === entry.worktree)) {
+      throw new Refusal(`${projectHome} already has an agent named ${entry.name}`);
+    }
+    await writeJson(hivePath(projectHome, 'team.json'), { agents: [...team.agents, entry] });
+    return entry;
+  });
+}
+
+export async function compareAndSwapTeamEntryLocked(
+  projectHome: string, expected: TeamEntry, update: Partial<TeamEntry> | null,
+): Promise<TeamEntry | null | undefined> {
+  const team = await readTeam(projectHome);
+  const index = team.agents.findIndex((old) => canonicalJson(old) === canonicalJson(expected));
+  if (index < 0) return undefined;
+  const next = update === null ? null : { ...team.agents[index], ...update };
+  const agents = team.agents.filter((_, candidate) => candidate !== index);
+  if (next) agents.splice(index, 0, next);
+  await writeJson(hivePath(projectHome, 'team.json'), { agents });
+  return next;
+}
+
+export async function compareAndSwapTeamEntry(
+  projectHome: string, expected: TeamEntry, update: Partial<TeamEntry> | null,
+): Promise<TeamEntry | null | undefined> {
+  return withTeamLock(projectHome, () => compareAndSwapTeamEntryLocked(projectHome, expected, update));
 }
 
 export async function upsertTeamEntry(projectHome: string, entry: TeamEntry): Promise<void> {
@@ -311,15 +409,6 @@ export async function upsertTeamEntry(projectHome: string, entry: TeamEntry): Pr
     if (i >= 0) team.agents[i] = { ...team.agents[i], ...entry };
     else team.agents.push(entry);
     await writeJson(hivePath(projectHome, 'team.json'), team);
-  });
-}
-
-export async function removeTeamEntry(projectHome: string, name: string): Promise<void> {
-  await withTeamLock(projectHome, async () => {
-    const team = await readTeam(projectHome);
-    await writeJson(hivePath(projectHome, 'team.json'), {
-      agents: team.agents.filter((a) => a.name !== name),
-    });
   });
 }
 

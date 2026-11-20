@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AGENT_CREDENTIAL } from './security-fixture.js';
 
 const tmux = await import('../src/tmux.js');
-const { launchWindow } = await import('../src/spawn.js');
+const { launchCommand, launchWindow } = await import('../src/spawn.js');
 const { authenticateBearer } = await import('../src/security.js');
 const { MemoryRegistry, registryItems } = await import('./security-fixture.js');
 const { hubPath, writeJson } = await import('../src/state.js');
@@ -93,5 +93,10 @@ describe('enabled spawn credential files', () => {
     expect(command).not.toContain('HIVE_AGENT_CREDENTIAL_FILE');
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await fs.stat(path.join(cwd, '.hive', 'team', 'builder', 'credential.env')).catch(() => null)).toBeNull();
+  });
+
+  it('retains managed auto -y until scoped execution replaces it', () => {
+    expect(launchCommand(undefined, 'auto')).toContain(' -y ');
+    expect(launchCommand('session_b', 'auto')).toContain(' -y ');
   });
 });
