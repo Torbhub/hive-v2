@@ -459,6 +459,72 @@ export async function revokeTaskAdmissionsLocked(root: string, home: string, tas
   }
 }
 
+export async function applyRootDeltaLocked(
+  root: string, home: string, taskId: string, nextContract: RootContract, basePlanDigest: string, baseEpoch: number,
+): Promise<void> {
+  validateRootContract(nextContract);
+  const nextDigest = contractDigest(nextContract);
+  if (nextDigest === basePlanDigest) throw new Refusal('a root delta must change the contract digest');
+  await withTeamLock(home, async () => {
+    const tasks = foldTasks(await readTaskEvents(root));
+    const task = storedTask(tasks, taskId);
+    if (task.plan_digest !== basePlanDigest || task.lease_epoch !== baseEpoch || !task.contract) {
+      throw new Refusal('root delta is stale; review the current contract again');
+    }
+    const active = (task.admissions ?? []).filter(activeAdmission);
+    const otherProjectRecords = allAdmissions(tasks).filter(({ task: owner, admission }) =>
+      owner.id !== task.id && owner.project === task.project && activeAdmission(admission)).length;
+    const projectSlots = Math.max(0, nextContract.budget.active_project_records - otherProjectRecords);
+    const replacements = new Map<string, TmuxAdmission>();
+    for (const admission of active) {
+      const request: TmuxAdmissionRequest = {
+        parent_id: admission.parent_id,
+        plan_digest: nextDigest,
+        output_claim: admission.output_claim,
+        acceptance_ids: admission.acceptance_ids,
+        provenance: admission.provenance,
+        write_scope: admission.write_scope,
+        adapter: admission.adapter,
+      };
+      const valid = nextContract.delegation.output_claims.includes(admission.output_claim)
+        && admission.acceptance_ids.length > 0
+        && admission.acceptance_ids.every((id) => nextContract.acceptance.some((acceptance) => acceptance.id === id))
+        && canonicalJson(admission.provenance) === canonicalJson(nextContract.provenance)
+        && nextContract.delegation.adapters.includes(admission.adapter)
+        && admission.attempts_used <= nextContract.budget.attempts
+        && replacements.size < nextContract.budget.active_children
+        && replacements.size < projectSlots
+        && await normalizedAllocation(home, nextContract, request).then(() => true).catch(() => false);
+      if (!valid) continue;
+      replacements.set(admission.lease_id, {
+        ...admission, plan_digest: nextDigest, root_lease_epoch: baseEpoch + 1,
+        lease_id: randomUUID(), lease_revoked: false, external_operation_id: undefined, launch_error: undefined,
+      });
+    }
+    for (const admission of active) {
+      await transitionTmuxAdmissionLocked(root, home, admission, 'revoked', 'root contract delta fenced the old lease');
+    }
+    const at = new Date().toISOString();
+    await appendTaskEvent(root, {
+      id: task.id, project: task.project, event: 'plan', at,
+      checkpoints: task.checkpoints, contract: nextContract, plan_digest: nextDigest, lease_epoch: baseEpoch + 1,
+      note: 'owner approved a root contract delta',
+    });
+    await appendTaskEvent(root, {
+      id: task.id, project: task.project, event: 'answered', at,
+      plan_digest: nextDigest, lease_epoch: baseEpoch + 1, note: 'root contract delta approved by owner',
+    });
+    for (const admission of replacements.values()) await appendAdmission(root, admission);
+    const team = await readTeam(home);
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: team.agents.map((entry) => {
+        const replacement = entry.lease_id ? replacements.get(entry.lease_id) : undefined;
+        return replacement ? entryFromAdmission(replacement, entry, {}) : entry;
+      }),
+    });
+  });
+}
+
 export async function recordTmuxLaunchOutcome(
   root: string, home: string, taskId: string, agent: string, leaseId: string, detail: string,
 ): Promise<void> {

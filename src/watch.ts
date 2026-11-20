@@ -6,13 +6,18 @@ import { maybeCompact } from './compact.js';
 import { answerDialog, buildStatus, continueProject, readDialogFor, Refusal, wake } from './hub.js';
 import { DEFAULT_MODEL, typeLine, wakeAgent } from './spawn.js';
 import { classify, isNativeQuestion, lines } from './screen.js';
-import { appendDecision, compareAndSwapTeamEntry, hasLiveSendingClaim, hivePath, hubPath, readPendingPane, readProjects, readTeam, writeJson } from './state.js';
+import { appendDecision, compareAndSwapTeamEntry, foldTasks, hasLiveSendingClaim, hivePath, hubPath, readPendingPane, readProjects, readTaskEvents, readTeam, valueDigest, writeJson, writePendingPane } from './state.js';
 import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep } from './tmux.js';
 import { lastLine, withTimeout } from './view.js';
 import { loadProcessedKeys, migrateLegacyStaleKey, recordProcessedKey } from './watch-persist.js';
 import type { Approvals, DaydreamAutomationOptions, TeamEntry } from './types.js';
+import { CLOSED_STATES } from './types.js';
 import { assertExecutionAllowed, RolloutPaused } from './rollout.js';
 import { withTmuxGrant } from './admission.js';
+import { OPERATION_REGISTRY } from './evidence.js';
+import { createRootDeltaQuestion, findDeclaredPush } from './questions.js';
+import { redactSecrets } from './logview.js';
+import { pendingMigrationRequired } from './launch.js';
 
 // Read-only leaders: a chain segment must start with one of these to be
 // auto-approvable. Multi-word leaders match the subcommand, not just `git`.
@@ -26,8 +31,9 @@ const SAFE_LEADERS = [
 ];
 
 // Destructive shapes are never auto-approved, by either tier.
+const GIT_PUSH_RE = /git\s+push/;
 const NEVER_RES = [
-  /\brm\s/, /git\s+push/, /git\s+reset/, /\bsudo\b/, /\bdd\s/, /\bmkfs\b/,
+  /\brm\s/, GIT_PUSH_RE, /git\s+reset/, /\bsudo\b/, /\bdd\s/, /\bmkfs\b/,
   /\bjj\s+push\b/, /\bjj\s+abandon\b/, /jj\s+workspace\s+forget/,
   /chmod\s+-R/, /(?:curl|wget)[^|]*\|\s*(?:ba|z)?sh\b/, />\s*\/(etc|usr|bin|sbin|var|boot|lib)(\/|\s|$)/,
   // Heavy compute waits for a human: box policy bans local builds and suites.
@@ -40,14 +46,56 @@ export function extractCommand(dialogText: string): string | null {
   return m ? m[1].trim() : null;
 }
 
-export function neverApprove(dialogText: string): boolean {
-  return NEVER_RES.some((re) => re.test(dialogText));
+export function neverApprove(dialogText: string, scopedPush = false): boolean {
+  return NEVER_RES.some((re) => (!scopedPush || re !== GIT_PUSH_RE) && re.test(dialogText));
 }
 
 export function tier1Approves(command: string): boolean {
   const segments = command.split(/\s*(?:&&|\|\||[;|])\s*/).map((s) => s.trim()).filter(Boolean);
   if (segments.length === 0) return false;
   return segments.every((seg) => SAFE_LEADERS.some((w) => seg === w || seg.startsWith(`${w} `)));
+}
+
+const AUTO_TOKEN = /^[A-Za-z0-9_./:@%+=,-]+$/;
+const AUTO_OPTIONS: Record<string, ReadonlySet<string>> = {
+  ls: new Set(['-a', '-l', '-la', '-lh', '-R', '-r', '-t', '-S', '-X', '-v', '-1', '--all', '--long', '--reverse', '--sort', '--time', '--ignore']),
+  cat: new Set(['-n', '-b', '-s', '-E', '-T', '-v', '--number', '--number-nonblank', '--squeeze-blank', '--show-ends', '--show-tabs', '--show-nonprinting']),
+  head: new Set(['-n', '-c', '-q', '-v', '--lines', '--bytes', '--quiet', '--verbose']),
+  tail: new Set(['-n', '-c', '-q', '-v', '--lines', '--bytes', '--quiet', '--verbose']),
+  grep: new Set(['-i', '-n', '-r', '-R', '-l', '-c', '-v', '-E', '-F', '--include', '--exclude', '--exclude-dir', '--color']),
+  rg: new Set(),
+  pwd: new Set(['-L', '-P']),
+  echo: new Set(['-n', '-e', '-E']),
+  wc: new Set(['-l', '-w', '-m', '-c', '-L', '--lines', '--words', '--chars', '--bytes', '--max-line-length']),
+};
+const GIT_OPTIONS: Record<string, ReadonlySet<string>> = {
+  status: new Set(['-s', '-b', '-u', '--short', '--long', '--porcelain', '--branch', '--untracked-files', '--show-stash', '--ignored', '--no-renames', '--no-color', '--ahead-behind', '--no-ahead-behind']),
+  log: new Set(['-n', '-1', '--oneline', '--stat', '--name-only', '--name-status', '--no-renames', '--no-color', '--decorate', '--abbrev-commit', '--max-count', '--follow']),
+  branch: new Set(['-a', '-r', '-v', '-vv', '--all', '--remotes', '--verbose', '--list', '--show-current']),
+};
+
+function allowedOptions(parts: string[], options: ReadonlySet<string>): boolean {
+  return parts.every((part) => !part.startsWith('-') || options.has(part));
+}
+
+function autoReadOnlySegment(parts: string[]): boolean {
+  if (parts.length === 0 || parts.some((part) => !AUTO_TOKEN.test(part))) return false;
+  const [command, subcommand, ...rest] = parts;
+  if (command === 'find') return false;
+  if (AUTO_OPTIONS[command]) return allowedOptions(parts.slice(1), AUTO_OPTIONS[command]);
+  if (command === 'tsc') return parts.length === 2 && subcommand === '--noEmit';
+  if (command === 'git') {
+    const options = GIT_OPTIONS[subcommand];
+    return options !== undefined && allowedOptions(rest, options);
+  }
+  if (command !== 'hive' || subcommand !== 'hub') return false;
+  return ['status', 'tasks', 'dialog'].includes(rest[0]) && allowedOptions(rest.slice(1), new Set(['--json']));
+}
+
+function autoReadOnly(command: string): boolean {
+  if (/(?:&&|\|\||[;|])\s*$/.test(command)) return false;
+  return command.split(/\s*(?:&&|\|\||[;|])\s*/)
+    .every((segment) => autoReadOnlySegment(segment.trim().split(/\s+/)));
 }
 
 const CLASSIFY_TIMEOUT_MS = 60_000;
@@ -87,13 +135,14 @@ const nativeQuestionMarks = new Map<string, string>();
 
 async function appendWatchLog(root: string, line: string): Promise<void> {
   await fs.mkdir(hubPath(root), { recursive: true });
-  await fs.appendFile(hubPath(root, 'watch.log'), `${line}\n`);
+  await fs.appendFile(hubPath(root, 'watch.log'), `${redactSecrets(line)}\n`);
 }
 
 async function withTaskBoundPane<T>(
   root: string, project: string, agent: TeamEntry, fn: () => Promise<T>,
 ): Promise<T | undefined> {
   try {
+    if (agent.migration_state || agent.watch_authority_revoked_at) return undefined;
     if (!agent.task || !agent.lease_id) return await fn();
     return await withTmuxGrant(root, (await readProjects(root)).projects.find((candidate) => candidate.name === project)!.home,
       agent.task, agent.name, agent.lease_id, fn);
@@ -117,6 +166,108 @@ async function withResolvedTaskBoundPane<T>(
   return withTaskBoundPane(root, project, matches[0], fn);
 }
 
+type PushDialog = { branch: string; commit?: string };
+
+function parseGitPush(command: string): PushDialog | null {
+  const parts = command.split(/\s+/);
+  if (parts.length !== 4 || parts[0] !== 'git' || parts[1] !== 'push' || parts[2] !== 'origin') return null;
+  const target = parts[3];
+  const match = target.match(/^([0-9a-f]{40}):refs\/heads\/(.+)$/);
+  const branch = match?.[2] ?? target;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(branch)
+    || branch.includes('..') || branch.includes('//') || branch.includes('@{') || branch.startsWith('-')) return null;
+  return match ? { branch, commit: match[1] } : { branch };
+}
+
+async function watchAgent(root: string, project: string, agentRef: string | undefined) {
+  const registered = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
+  if (!registered) throw new Refusal(`unknown project: ${project}`);
+  const [name, worktree] = agentRef?.split('@') ?? [];
+  const matches = (await readTeam(registered.home)).agents.filter((agent) => agentRef === undefined
+    ? agent.orchestrator
+    : !agent.orchestrator && agent.name === name && (worktree === undefined || agent.worktree === worktree));
+  if (matches.length > 1 || agentRef !== undefined && matches.length === 0) {
+    throw new Refusal('watch agent identity is unknown');
+  }
+  return { home: registered.home, entry: matches[0] as TeamEntry | undefined };
+}
+
+async function cancelNativeDialog(
+  root: string, project: string, agentRef: string | undefined,
+  dialog: NonNullable<Awaited<ReturnType<typeof readDialogFor>>>,
+): Promise<void> {
+  const answer = await answerDialog(root, project, agentRef, 'esc', dialog.fingerprint);
+  if (!answer.dialog_gone) throw new Refusal('native mutation dialog did not close; no operation ran');
+}
+
+async function dispatchDeclaredPush(
+  root: string, project: string, agentRef: string | undefined,
+  dialog: NonNullable<Awaited<ReturnType<typeof readDialogFor>>>, push: PushDialog,
+): Promise<boolean> {
+  const declared = await findDeclaredPush(root, project, agentRef, push.branch, push.commit);
+  if (!declared) return false;
+  const current = await withResolvedTaskBoundPane(root, project, agentRef, async () => true);
+  if (!current) return true;
+  const { home, entry } = await watchAgent(root, project, agentRef);
+  await cancelNativeDialog(root, project, agentRef, dialog);
+  const cwd = entry?.worktree || home;
+  const agentName = declared.agent.split('@')[0];
+  const env = {
+    ...process.env, HIVE_HUB_ROOT: root, HIVE_PROJECT: project, HIVE_AGENT_REF: declared.agent,
+    HIVE_AGENT_CREDENTIAL: '', HIVE_AGENT_CREDENTIAL_FILE: hivePath(cwd, 'team', agentName, 'credential.env'),
+  };
+  await OPERATION_REGISTRY.push.dispatch('origin', declared.commit, declared.branch, cwd, declared.reference, env);
+  await appendDecision(root, {
+    project, by: 'watch', task: entry?.task,
+    summary: `dispatched declared push ${declared.commit} to origin/${declared.branch} without native approval`,
+  });
+  return true;
+}
+
+async function watchRootTask(root: string, project: string, agentRef: string | undefined) {
+  const { entry } = await watchAgent(root, project, agentRef);
+  const tasks = foldTasks(await readTaskEvents(root));
+  const candidates = tasks.filter((candidate) => candidate.project === project
+    && candidate.contract && !CLOSED_STATES.has(candidate.state));
+  const task = entry?.task
+    ? tasks.find((candidate) => candidate.id === entry.task)
+    : candidates.length === 1 ? candidates[0] : undefined;
+  return task?.contract && task.plan_digest && task.lease_epoch ? task : undefined;
+}
+
+async function declaredCommand(root: string, project: string, agentRef: string | undefined, command: string) {
+  const current = await withResolvedTaskBoundPane(root, project, agentRef, async () => true);
+  if (!current) return true;
+  const task = await watchRootTask(root, project, agentRef);
+  return task?.contract!.action_scope.includes(`command:${valueDigest(command)}`) ?? false;
+}
+
+async function requestRootDelta(
+  root: string, project: string, agentRef: string | undefined,
+  dialog: NonNullable<Awaited<ReturnType<typeof readDialogFor>>>, command: string,
+): Promise<void> {
+  const current = await withResolvedTaskBoundPane(root, project, agentRef, async () => true);
+  if (!current) return;
+  const task = await watchRootTask(root, project, agentRef);
+  if (!task) {
+    await cancelNativeDialog(root, project, agentRef, dialog);
+    await appendDecision(root, {
+      project, by: 'watch',
+      summary: `blocked undeclared mutation without a root contract: $ ${redactSecrets(command)}`,
+    });
+    return;
+  }
+  const actionScope = new Set([...task.contract!.action_scope, `command:${valueDigest(command)}`]);
+  if (parseGitPush(command)) actionScope.add('push');
+  const nextContract = { ...task.contract!, action_scope: [...actionScope] };
+  const batch = await createRootDeltaQuestion(root, task.id, nextContract, `Blocked command: ${redactSecrets(command)}`);
+  await cancelNativeDialog(root, project, agentRef, dialog);
+  await appendDecision(root, {
+    project, by: 'watch', task: task.id,
+    summary: `blocked undeclared mutation and opened root delta ${batch.id}: $ ${redactSecrets(command)}`,
+  });
+}
+
 async function maybeAutoApprove(
   root: string,
   project: string,
@@ -134,28 +285,27 @@ async function maybeAutoApprove(
     if (error instanceof RolloutPaused) return;
     throw error;
   }
-  if (neverApprove(dialog.text)) return;
   const command = extractCommand(dialog.text);
+  const push = auto && command ? parseGitPush(command) : null;
+  const hardDeny = neverApprove(dialog.text, push !== null);
+  if (!auto && hardDeny) return;
   if (auto) {
-    const trust = !command && dialog.text.includes('Trust this folder?');
-    if (!command && !trust) return;
-    const opt = dialog.options.find((o) => o.offered && !o.saves_rule && (
-      trust ? /^Trust\b/i.test(o.label) : /^(Approve|Allow)\b/i.test(o.label)
-    ));
-    if (!opt) return;
-    await withResolvedTaskBoundPane(root, project, agentRef,
-      () => answerDialog(root, project, agentRef, String(opt.n), dialog.fingerprint));
-    await appendDecision(root, {
-      project, by: 'watch',
-      summary: command ? `auto-approved "${opt.label}" for: $ ${command}` : `auto-approved "${opt.label}"`,
-    });
-    return;
+    if (!command) return;
+    if (push && !hardDeny && await dispatchDeclaredPush(root, project, agentRef, dialog, push)) return;
+    if (!autoReadOnly(command) || hardDeny) {
+      if (await declaredCommand(root, project, agentRef, command)) {
+        if (hardDeny) return;
+      } else {
+        await requestRootDelta(root, project, agentRef, dialog, command);
+        return;
+      }
+    }
   }
   if (!command) return;
   // Whitespace-collapsed key: `git  status` and `git status` share a verdict.
   const cacheKey = command.replace(/\s+/g, ' ');
-  let ok = tier1Approves(command);
-  if (!ok && approvals === 'smart') {
+  let ok = auto || tier1Approves(command);
+  if (!auto && !ok && approvals === 'smart') {
     if (verdicts.has(cacheKey)) {
       ok = true;
     } else if (!marks.has(dialog.fingerprint)) {
@@ -169,19 +319,27 @@ async function maybeAutoApprove(
     }
   }
   if (!ok) return;
-  // Only ever option 1 ("Approve once"); a saves-rule option is the owner's call.
-  const opt = dialog.options.find((o) => o.n === 1);
+  const opt = auto
+    ? dialog.options.find((option) => option.offered && !option.saves_rule && /^(Approve|Allow)\b/i.test(option.label))
+    : dialog.options.find((option) => option.n === 1);
   if (!opt || !opt.offered || opt.saves_rule) return;
-  await withResolvedTaskBoundPane(root, project, agentRef,
-    () => answerDialog(root, project, agentRef, '1', dialog.fingerprint));
+  const answered = await withResolvedTaskBoundPane(root, project, agentRef,
+    () => answerDialog(root, project, agentRef, String(opt.n), dialog.fingerprint));
+  if (answered === undefined) return;
   await appendDecision(root, {
-    project, by: 'watch', summary: `auto-approved "${opt.label}" for: $ ${command}`,
+    project, by: 'watch', summary: `auto-approved "${opt.label}" for: $ ${redactSecrets(command)}`,
   });
 }
 
 export async function handleCurrentOrchestratorDialog(root: string, project: string): Promise<void> {
   const p = (await readProjects(root)).projects.find((x) => x.name === project);
   if (!p) throw new Refusal(`unknown project: ${project}`);
+  const recorded = (await readTeam(p.home)).agents.find((agent) => agent.orchestrator);
+  const orchestrator = recorded
+    ? await fenceLegacyPane(root, project, p.home, recorded)
+    : undefined;
+  const pending = await readPendingPane(root, project);
+  if (orchestrator?.migration_state || pending && await fencePendingOrchestrator(root, project, pending, orchestrator)) return;
   const approvals = p.approvals ?? 'manual';
   if (p.mode !== 'auto' && approvals === 'manual') return;
   const dialog = await readDialogFor(root, project).catch((e: unknown) => {
@@ -446,6 +604,52 @@ async function redirectNativeQuestion(
   })) ?? false;
 }
 
+async function fencePendingOrchestrator(
+  root: string, project: string,
+  pending: NonNullable<Awaited<ReturnType<typeof readPendingPane>>>, orchestrator?: TeamEntry,
+): Promise<boolean> {
+  if (!pendingMigrationRequired(pending, orchestrator)) return false;
+  if (!pending.migration_state) {
+    await writePendingPane(root, project, {
+      ...pending, migration_state: 'legacy_auto_blocked', watch_authority_revoked_at: new Date().toISOString(),
+    });
+  }
+  return true;
+}
+
+async function fenceLegacyPane(
+  root: string, project: string, home: string, agent: TeamEntry,
+): Promise<TeamEntry> {
+  if (agent.closed_at || agent.migration_state) return agent;
+  const unknownIdentity = Boolean(agent.pane && (!agent.pane_pid || !agent.pane_started));
+  const legacyAuto = agent.launch_mode === undefined
+    || agent.launch_mode === 'auto' && agent.launch_scoped_auto !== true;
+  if (!unknownIdentity && !legacyAuto) return agent;
+  const migrationState = unknownIdentity ? 'unknown_identity_blocked' : 'legacy_auto_blocked';
+  const updated = await compareAndSwapTeamEntry(home, agent, {
+    migration_state: migrationState, watch_authority_revoked_at: new Date().toISOString(),
+  });
+  if (!updated) return (await readTeam(home)).agents.find((candidate) => candidate.name === agent.name) ?? agent;
+  await appendDecision(root, {
+    project, by: 'watch', task: agent.task,
+    summary: unknownIdentity
+      ? `blocked ${agent.name}: recorded pane identity is incomplete; explicit migration is required`
+      : `blocked legacy auto ${agent.name}: watch authority revoked; natural exit or explicit migration is required`,
+  });
+  return updated;
+}
+
+async function markLegacyNaturalExit(root: string, project: string, home: string, agent: TeamEntry): Promise<void> {
+  if (agent.migration_state === 'natural_exit_ready') return;
+  const updated = await compareAndSwapTeamEntry(home, agent, { migration_state: 'natural_exit_ready' });
+  if (!updated) return;
+  await appendWatchLog(root, `${new Date().toISOString()} ${project} ${agent.name} exited naturally; resume needs explicit migration`);
+  await appendDecision(root, {
+    project, by: 'watch', task: agent.task,
+    summary: `${agent.name} exited naturally with its legacy fence intact; explicit migration can resume its lineage`,
+  });
+}
+
 export async function watchCycle(
   root: string,
   env: NodeJS.ProcessEnv = {},
@@ -465,7 +669,14 @@ export async function watchCycle(
   for (const p of pf.projects) {
     const proj = status.projects.find((x) => x.name === p.name);
     const team = await readTeam(p.home);
-    for (const a of team.agents) {
+    for (const recorded of team.agents) {
+      const a = await fenceLegacyPane(root, p.name, p.home, recorded);
+      if (a.migration_state) {
+        if (a.pane && !a.closed_at && !(await paneExists(a.pane))) {
+          await markLegacyNaturalExit(root, p.name, p.home, a);
+        }
+        continue;
+      }
       const automation = a.daydream_automation === true
         && (process.env.HIVE_DAYDREAM_AUTOMATION === '1' || daydreamAutomation !== undefined);
       if (automation) {
@@ -499,8 +710,13 @@ export async function watchCycle(
     }
 
     const starting = proj?.orchestrator.starting;
-    if (proj && starting?.typed === false && starting.question === false && !proj.orchestrator.question) {
-      const pending = await readPendingPane(root, p.name);
+    const orchestrator = (await readTeam(p.home)).agents.find((agent) => agent.orchestrator);
+    const pending = await readPendingPane(root, p.name);
+    const pendingFenced = pending
+      ? await fencePendingOrchestrator(root, p.name, pending, orchestrator)
+      : false;
+    if (proj && !pendingFenced && !orchestrator?.migration_state
+      && starting?.typed === false && starting.question === false && !proj.orchestrator.question) {
       if (pending?.typed === false && !hasLiveSendingClaim(pending)) {
         await continueProject(root, p.name).catch(async (e: unknown) => {
           if (!(e instanceof Refusal)) {

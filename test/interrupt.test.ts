@@ -118,7 +118,7 @@ describe('interruptAgent', () => {
 
   it('a starting orchestrator is reached through its pending pane', async () => {
     const { root } = await setup();
-    await writePendingPane(root, 'demo', { pane: '%5', kind: 'start', at: new Date().toISOString() });
+    await writePendingPane(root, 'demo', { pane: '%5', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString() });
     const r = await interruptAgent(root, 'demo');
     expect(r).toEqual({ target: 'demo-orchestrator', pane: '%5' });
     // A pending pane carries no recorded identity, so the live one is read.

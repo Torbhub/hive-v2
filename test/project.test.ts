@@ -128,7 +128,7 @@ describe('removeProject', () => {
 
   it('refuses a pending launch and keeps its record', async () => {
     const { root } = await setup();
-    await writePendingPane(root, 'demo', { pane: '%9', kind: 'start', at: '2026-10-27T00:00:00Z' });
+    await writePendingPane(root, 'demo', { pane: '%9', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: '2026-10-27T00:00:00Z' });
     await expect(removeProject(root, 'demo')).rejects.toThrow(/launch is pending/);
     expect((await readProjects(root)).projects.map((p) => p.name)).toEqual(['demo', 'other']);
     expect(JSON.parse(await fs.readFile(hubPath(root, 'panes', 'demo.json'), 'utf8')).pane).toBe('%9');

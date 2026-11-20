@@ -18,6 +18,7 @@ import { addProject } from './project.js';
 import { listOpenQuestionBatches } from './questions.js';
 import type { QuestionBatch } from './types.js';
 import { orchestratorName, typeLine } from './spawn.js';
+import { redactSecrets } from './logview.js';
 import { planVerdict, type TaskRevalidate } from './taskgate.js';
 import { taskScope } from './scope.js';
 import { assertExecutionAllowed } from './rollout.js';
@@ -356,7 +357,7 @@ export async function answerDialog(
   const after = await readDialogFor(root, project, agentRefArg);
   const firstLine = dialog.text.split('\n').map((l) => l.trim()).find((l) => l && !/^[─╌-]+$/.test(l)) ?? '';
   const command = extractCommand(dialog.text);
-  const subject = command ? `$ ${command}` : firstLine;
+  const subject = command ? `$ ${redactSecrets(command)}` : redactSecrets(firstLine);
   try {
     await appendDecision(root, { project, by: 'owner', summary: `answered "${option}" for: ${subject}` });
   } catch (e) {

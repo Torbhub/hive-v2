@@ -718,4 +718,26 @@ describe('contract-bound push operations', () => {
     expect(task.state).not.toBe('asked');
     expect((await readQuestionBatch(root, batch.id)).answers![0].decision?.grant?.operationStatus).not.toBe('succeeded');
   });
+
+  it('fences a queued approved push when its worker lease is revoked', async () => {
+    const { root, remote, home, commit } = await setup();
+    const { planDigest, admission } = await bindContract(root, home, commit);
+    await writeFile(path.join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nprintf "push\\n" >> "$GIT_DIR/push-count"\n');
+    await chmod(path.join(remote, 'hooks', 'pre-receive'), 0o755);
+    const batch = await approved(root, commit);
+    await appendTaskEvent(root, {
+      id: 'demo-1', project: 'demo', event: 'admission', at: new Date().toISOString(),
+      admission: { ...admission, status: 'revoked', lease_revoked: true },
+    });
+    const team = await import('../src/state.js').then(({ readTeam }) => readTeam(home));
+    team.agents[0].lease_revoked = true;
+    await writeJson(hivePath(home, 'team.json'), team);
+    const { OPERATION_REGISTRY } = await import('../src/evidence.js');
+    await expect(OPERATION_REGISTRY.push.dispatch(
+      'origin', commit, 'feat/t16', home, operationApproval(batch, root), contractEnvironment(root, home),
+    )).rejects.toThrow(/lease|revoked|current/);
+    expect(await countPushes(remote)).toBe(0);
+    const { foldTasks, readTaskEvents } = await import('../src/state.js');
+    expect(foldTasks(await readTaskEvents(root))[0].plan_digest).toBe(planDigest);
+  });
 });

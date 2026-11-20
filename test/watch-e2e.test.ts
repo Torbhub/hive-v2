@@ -85,7 +85,10 @@ async function setupDecoy(command: string) {
     projects: [{ name: 'demo', home, repos: [], approvals: 'smart' }],
   });
   await writeJson(hivePath(home, 'team.json'), {
-    agents: [{ name: 'demo-orchestrator', orchestrator: true, pane, pane_pid: id!.pid, pane_started: id!.started }],
+    agents: [{
+      name: 'demo-orchestrator', orchestrator: true, pane, pane_pid: id!.pid, pane_started: id!.started,
+      launch_mode: 'ask', launch_scoped_auto: false,
+    }],
   });
   for (let i = 0; i < 50; i++) {
     if ((await capturePane(pane))?.includes('Run this command?')) break;

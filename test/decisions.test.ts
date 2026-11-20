@@ -51,7 +51,7 @@ describe('owner decision cards', () => {
     expect(q.question).not.toContain('Ignore safety');
     expect(q.context).not.toContain('stack trace');
     expect(result.context).not.toContain('tool result was interrupted');
-    expect(q.question).toMatch(/^(Push|Create|Merge|Deploy|Start|Delete|Grant)/);
+    expect(q.question).toMatch(/^(Push|Create|Merge|Deploy|Start|Delete|Grant|Approve)/);
     expect(q.choices.map((c) => c.id)).toEqual(['c1', 'c2', 'c3']);
     expect(q.recommended).toBe('c1');
     expect(q.choices[0].label).toBe('Refresh facts first');

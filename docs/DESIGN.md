@@ -59,7 +59,7 @@ src/
   gate.ts      — gate runner + gate-verify (log, commits)
   handy.ts     — loopback-only Handy CLI bridge for browser dictation
   cleanup.ts   — manifest-driven cleanup, trash-not-delete
-  watch.ts     — watchdog (dead-pane log + wake), safe/smart auto-approver, and direct Auto dialog answers
+  watch.ts     — watchdog (dead-pane log + wake), safe/smart approvals, and grant-checked Auto operations
   compact.ts   — idle compaction policy, durable attempts, and per-worker controls
   cache-expiry.ts — exact cache-dialog parsing and identity-checked cursor input
   ui/HubApp.tsx   — the hub screen (spec docs/hub-ui-spec.md)
@@ -222,16 +222,21 @@ hive ui                                  — the hub screen
   hook misses a dialog, the watchdog detects its exact footer, sends Escape once,
   and types one MCP redirect. It never selects a native answer.
   The project's `mode` in projects.json (`ask`/`yolo`/`auto`, default `ask`)
-  maps to no flag for `ask` and `-y` for `yolo` and `auto`, on fresh starts and
-  resumes alike. Derived `ask` plus `safe` or `smart` orchestrator launches use
-  supervised `--auto` instead. The model
+  maps to no flag for `ask` and managed `auto`, and `-y` only for explicit
+  `yolo`, on fresh starts and resumes alike. Derived `ask` plus `safe` or
+  `smart` orchestrator launches use supervised `--auto` instead. The model
   is the house default `kimi-code/k3.1-pro` unless the spawn passed `--model`,
   and the effective model is stamped into team.json. HIVE_AGENT and HIVE_PROJECT
   remain pane and hook metadata. They cannot select MCP identity. An individual
   agent credential selects that identity. The root is shell-quoted.
   `exec` so
   the pane process IS the CLI (identity check). Pre-flight: `teamkimi status`
-  must succeed, else refuse.
+  must succeed, else refuse. Pending orchestrator records carry launch mode and
+  scoped-auto provenance. Missing provenance is a legacy migration state.
+  Watch and direct continuation re-read it before typing. The trust menu is
+  answered only for the exact canonical path of a lane created by this spawn.
+  Existing worktrees and relaunches never auto-trust. Every trust key carries
+  the known pane identity.
 - Worker pickup starts from the persisted Assignment and Deliverable. It does
   not wait for another brief. The worker returns the named artifact to the
   orchestrator.

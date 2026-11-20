@@ -4,7 +4,7 @@ import { capturePane, paneExists, paneIdentity, paneIs } from './tmux.js';
 import { lines, parseDialog } from './screen.js';
 import {
   clearPendingPane, compareAndSwapTeamEntry, hasLiveSendingClaim, hivePath, hubPath, insertTeamEntry, manifestAdd,
-  readPendingPane, readTeam, Refusal, withHubLock, writePendingPane, type ProjectsFile,
+  readPendingPane, readTeam, Refusal, withHubLock, writePendingPane, type PendingPane, type ProjectsFile,
 } from './state.js';
 import {
   assertEntryAlive, effectiveOrchestratorMode, ensureAgentFiles, findLatestSession,
@@ -14,9 +14,16 @@ import { withLaunchClaim, withProjectLock } from './project.js';
 import { settlePendingPane } from './taskgate.js';
 import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 import { assertExecutionAllowed } from './rollout.js';
+import type { TeamEntry } from './types.js';
 
 type ProjectEntry = ProjectsFile['projects'][number];
 type LaunchKind = 'wake' | 'start';
+
+export function pendingMigrationRequired(pending: PendingPane, orchestrator?: TeamEntry): boolean {
+  return pending.launch_scoped_auto === undefined || pending.launch_mode === undefined
+    || pending.migration_state !== undefined || pending.watch_authority_revoked_at !== undefined
+    || orchestrator?.migration_state !== undefined || orchestrator?.watch_authority_revoked_at !== undefined;
+}
 
 async function recordOrchestrator(home: string, entry: Parameters<typeof insertTeamEntry>[1]): Promise<void> {
   const current = (await readTeam(home)).agents.find((candidate) => candidate.name === entry.name);
@@ -103,6 +110,7 @@ async function launchRegisteredOrchestrator(
     if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
     const pending = {
       pane, kind, at: new Date().toISOString(), typed: false, sending: true, claim_token: randomUUID(), task, line,
+      launch_mode: mode, launch_scoped_auto: mode === 'auto',
     };
     await writePendingPane(root, project, pending);
     return { pane, identity, pending, sessionId, name, cwd, old };
@@ -126,11 +134,14 @@ async function launchRegisteredOrchestrator(
       if (!current || current.typed || !current.sending || current.claim_token !== pending.claim_token) {
         throw new Refusal(`${project}'s sending claim is no longer active`);
       }
+      if (pendingMigrationRequired(current)) throw new Refusal(`${project}'s pending launch needs explicit migration`);
       await assertExecutionAllowed(root, project);
       await typeLine(pane, line, identity);
       await recordOrchestrator(p.home, {
         name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
         worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`), closed_at: undefined, wedged_at: undefined,
+        launch_mode: current.launch_mode, launch_scoped_auto: current.launch_scoped_auto,
+        migration_state: undefined, watch_authority_revoked_at: undefined,
       });
       await writePendingPane(root, project, { ...current, typed: true, sending: false });
     });
@@ -193,6 +204,10 @@ async function continueRegisteredProject(root: string, p: ProjectEntry): Promise
       if (!current || current.typed || !current.sending || current.claim_token !== pending.claim_token) {
         throw new Refusal(`${project}'s sending claim is no longer active`);
       }
+      const orchestrator = (await readTeam(p.home)).agents.find((agent) => agent.orchestrator);
+      if (pendingMigrationRequired(current, orchestrator)) {
+        throw new Refusal(`${project}'s pending launch provenance requires explicit migration`);
+      }
       await assertExecutionAllowed(root, project);
       await typeLine(pending.pane, pending.line, id);
       await recordOrchestrator(p.home, {
@@ -200,6 +215,8 @@ async function continueRegisteredProject(root: string, p: ProjectEntry): Promise
         pane: pending.pane, pane_pid: id.pid, pane_started: id.started,
         worktree: p.home, handoff: hivePath(p.home, 'handoffs', `${orchestratorName(project)}.md`),
         closed_at: undefined, wedged_at: undefined,
+        launch_mode: current.launch_mode, launch_scoped_auto: current.launch_scoped_auto,
+        migration_state: undefined, watch_authority_revoked_at: undefined,
       });
       await writePendingPane(root, project, { ...current, typed: true, sending: false });
     });

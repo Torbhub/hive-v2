@@ -673,11 +673,11 @@ describe('launchCommand', () => {
   it('builds the teamkimi run line per mode, resume included, K3.1 Pro by default', () => {
     expect(launchCommand(undefined, 'ask')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'");
     expect(launchCommand(undefined, 'yolo')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -y -m 'kimi-code/k3.1-pro'");
-    expect(launchCommand(undefined, 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -y -m 'kimi-code/k3.1-pro'");
+    expect(launchCommand(undefined, 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'");
     expect(launchCommand(undefined, 'supervised-auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --auto -m 'kimi-code/k3.1-pro'");
     expect(launchCommand('session_abc', 'ask')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro'");
     expect(launchCommand('session_abc', 'yolo')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -y -m 'kimi-code/k3.1-pro'");
-    expect(launchCommand('session_abc', 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -y -m 'kimi-code/k3.1-pro'");
+    expect(launchCommand('session_abc', 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro'");
   });
 
   it('a per-agent model overrides the default, combined with session and mode', () => {
@@ -750,13 +750,19 @@ describe('orchestrator respawn mode', () => {
     expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=builder HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --agent-file '${root}/demo/.hive/team/builder/agent.md' -m 'kimi-code/k3.1-pro'`);
   }, 20_000);
 
-  it('relaunches a plain agent with -y in auto mode', async () => {
-    const { root } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+  it('relaunches a plain agent without -y in auto mode and clears its migration fence', async () => {
+    const { root, home } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier',
+      launch_mode: 'auto', migration_state: 'legacy_auto_blocked', watch_authority_revoked_at: '2026-11-20T00:00:00Z',
+    });
     await setProjectMode(root, 'demo', 'auto');
     await respawnAgent(root, 'demo', 'builder');
     const cmd = vi.mocked(newWindow).mock.calls.at(-1)?.[2];
-    expect(cmd).toContain('-y');
+    expect(cmd).not.toContain(' -y ');
     expect(cmd).not.toContain('--auto');
+    expect((await readTeam(home)).agents[0]).toMatchObject({ launch_mode: 'auto', launch_scoped_auto: true });
+    expect((await readTeam(home)).agents[0].migration_state).toBeUndefined();
+    expect((await readTeam(home)).agents[0].watch_authority_revoked_at).toBeUndefined();
   }, 20_000);
 });
 
@@ -1044,72 +1050,128 @@ describe('spawn parent', () => {
 });
 
 describe('trust dialog at spawn', () => {
-  it('answers the folder-trust menu once, then finishes the spawn', async () => {
-    const { root } = await setup({ name: 'builder' });
+  const trustAt = (folder: string, second = false) => (second ? TRUST_MENU_2 : TRUST_MENU).replaceAll('/tmp', folder);
+
+  it('answers only an exact new-lane path with the known pane identity, then finishes', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
     let calls = 0;
-    vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? TRUST_MENU : IDLE));
+    vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? trustAt(worktree) : IDLE));
     try {
       const pane = await spawn(root, { agent: 'builder2' });
       expect(pane).toBe('%9');
       expect(vi.mocked(sendArrow).mock.calls).toEqual([]);
-      expect(vi.mocked(sendEnter).mock.calls.length).toBeGreaterThanOrEqual(1);
+      expect(vi.mocked(sendEnter).mock.calls).toContainEqual(['%9', { pid: 4242, started: 'later' }]);
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
     }
   }, 20_000);
 
-  it('walks the menu when Trust is not under the cursor', async () => {
-    const { root } = await setup({ name: 'builder' });
+  it('walks the exact new-lane menu with pane identity on every arrow', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
     let calls = 0;
-    vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? TRUST_MENU_2 : IDLE));
+    vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? trustAt(worktree, true) : IDLE));
     vi.mocked(sendArrow).mockClear();
     try {
       await spawn(root, { agent: 'builder2' });
-      expect(vi.mocked(sendArrow).mock.calls).toEqual([['%9', 'Down']]);
+      expect(vi.mocked(sendArrow).mock.calls).toEqual([['%9', 'Down', { pid: 4242, started: 'later' }]]);
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
     }
   }, 20_000);
 
-  it('waits through a startup dialog in explicit auto mode, then types once', async () => {
+  it('surfaces an undeclared startup dialog in managed auto mode without typing or killing', async () => {
     const { root } = await setup({ name: 'builder' });
     await setProjectMode(root, 'demo', 'auto');
     let calls = 0;
     const typed = vi.mocked(sendLiteral).mock.calls.length;
+    const kills = vi.mocked(killWindow).mock.calls.length;
     vi.mocked(capturePane).mockImplementation(async () => (++calls === 1 ? PERMISSION : IDLE));
     try {
       await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
-      expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(1);
+      expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(0);
+      expect(vi.mocked(killWindow).mock.calls.slice(kills)).toHaveLength(0);
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
     }
   }, 20_000);
 
-  it('answers the trust menu in explicit auto mode, then types once', async () => {
-    const { root } = await setup({ name: 'builder' });
+  it('answers only the Hive-created folder trust menu in managed auto mode, then types once', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
     await setProjectMode(root, 'demo', 'auto');
     let calls = 0;
     const typed = vi.mocked(sendLiteral).mock.calls.length;
     const entered = vi.mocked(sendEnter).mock.calls.length;
-    vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? TRUST_MENU : IDLE));
+    vi.mocked(capturePane).mockImplementation(async () => (++calls <= 2 ? trustAt(worktree) : IDLE));
     try {
       await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
-      expect(vi.mocked(sendEnter).mock.calls.slice(entered)).toContainEqual(['%9']);
+      expect(vi.mocked(sendEnter).mock.calls.slice(entered)).toContainEqual(['%9', { pid: 4242, started: 'later' }]);
       expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(1);
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
     }
   }, 20_000);
 
-  it('waits through a startup dialog on auto relaunch, then types once', async () => {
+  it('surfaces an undeclared dialog on managed auto relaunch without typing or killing the new pane', async () => {
     const { root } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
     await setProjectMode(root, 'demo', 'auto');
     let calls = 0;
     const typed = vi.mocked(sendLiteral).mock.calls.length;
+    const kills = vi.mocked(killWindow).mock.calls.length;
     vi.mocked(capturePane).mockImplementation(async () => (++calls === 1 ? PERMISSION : IDLE));
     try {
       await expect(respawnAgent(root, 'demo', 'builder')).resolves.toBe('%9');
-      expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(1);
+      expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(0);
+      expect(vi.mocked(killWindow).mock.calls.slice(kills).filter((call) => call[0] === '%9')).toHaveLength(0);
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('never auto-trusts a caller-supplied existing worktree even when its path matches', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = path.join(home, 'lane');
+    await fs.mkdir(worktree, { recursive: true });
+    await setProjectMode(root, 'demo', 'auto');
+    vi.mocked(capturePane).mockImplementation(async () => trustAt(worktree));
+    vi.mocked(sendArrow).mockClear();
+    vi.mocked(sendEnter).mockClear();
+    try {
+      await expect(spawn(root, { agent: 'builder2', worktree: 'lane' })).resolves.toBe('%9');
+      expect(sendArrow).not.toHaveBeenCalled();
+      expect(sendEnter).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('never auto-trusts a mismatched displayed path', async () => {
+    const { root } = await setup({ name: 'builder' });
+    await setProjectMode(root, 'demo', 'auto');
+    vi.mocked(capturePane).mockImplementation(async () => TRUST_MENU);
+    vi.mocked(sendArrow).mockClear();
+    vi.mocked(sendEnter).mockClear();
+    try {
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
+      expect(sendArrow).not.toHaveBeenCalled();
+      expect(sendEnter).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('never auto-trusts during relaunch', async () => {
+    const { root, home } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    await setProjectMode(root, 'demo', 'auto');
+    vi.mocked(capturePane).mockImplementation(async () => trustAt(home));
+    vi.mocked(sendArrow).mockClear();
+    vi.mocked(sendEnter).mockClear();
+    try {
+      await expect(respawnAgent(root, 'demo', 'builder')).resolves.toBe('%9');
+      expect(sendArrow).not.toHaveBeenCalled();
+      expect(sendEnter).not.toHaveBeenCalled();
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
     }
