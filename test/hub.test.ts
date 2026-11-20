@@ -1077,3 +1077,294 @@ describe('orchestrator launch mode', () => {
       .toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro'`);
   });
 });
+
+describe('atomic task transitions', () => {
+  it.each(['cancel', 'rebrief'] as const)('a plan answer cannot overwrite a concurrent %s', async (action) => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
+    });
+    const id = await hubTask(root, 'demo', 'build it');
+    await hubLog(root, id, 'plan', 'the plan', CPS);
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    let markTyping!: () => void;
+    let releaseTyping!: () => void;
+    const typing = new Promise<void>((resolve) => { markTyping = resolve; });
+    const release = new Promise<void>((resolve) => { releaseTyping = resolve; });
+    vi.mocked(typeLine).mockImplementationOnce(async () => { markTyping(); await release; });
+    const answering = planAnswer(root, 'demo', id, 'approve');
+    try {
+      await typing;
+      const { handleTaskAction } = await import('../web/taskactions.js');
+      const resolving = handleTaskAction(root, 'demo', '/api/task-resolve', {
+        task: id, action, ...(action === 'rebrief' ? { note: 'new brief' } : {}),
+      });
+      releaseTyping();
+      await Promise.all([answering, resolving]);
+      const task = (await listTasks(root)).find((candidate) => candidate.id === id);
+      expect(task?.state).toBe(action === 'cancel' ? 'cancelled' : 'asked');
+      const { readTaskEvents } = await import('../src/state.js');
+      expect((await readTaskEvents(root)).slice(-2).map((event) => event.event)).toEqual([
+        'answered', action === 'cancel' ? 'cancelled' : 'asked',
+      ]);
+    } finally {
+      releaseTyping();
+      await answering.catch(() => {});
+    }
+  });
+
+  it('rejects an old answer after rebrief and an identical replan', async () => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
+    });
+    const id = await hubTask(root, 'demo', 'build it');
+    await hubLog(root, id, 'plan', 'the plan', CPS);
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    vi.mocked(typeLine).mockClear();
+    const { paneIdentity } = await import('../src/tmux.js');
+    const { handleTaskAction } = await import('../web/taskactions.js');
+    const { readTaskEvents } = await import('../src/state.js');
+    let before: unknown;
+    vi.mocked(paneIdentity).mockImplementationOnce(async () => {
+      await handleTaskAction(root, 'demo', '/api/task-resolve', { task: id, action: 'rebrief', note: 'same brief' });
+      await hubLog(root, id, 'plan', 'the plan', CPS);
+      before = await readTaskEvents(root);
+      return { pid: 1, started: 'x' };
+    });
+
+    await expect(planAnswer(root, 'demo', id, 'approve')).rejects.toThrow(/lease epoch|plan changed/);
+    expect(await readTaskEvents(root)).toEqual(before);
+    expect(typeLine).not.toHaveBeenCalled();
+  });
+});
+
+describe('plan verdict validation', () => {
+  it.each([
+    [[{ id: 'a', desc: 'one', etaMin: 1 }, { id: 'a', desc: 'two', etaMin: 1 }]],
+    [[{ id: 'a', desc: ' ', etaMin: 1 }]],
+    [[{ id: 'a', desc: 'one', etaMin: Number.POSITIVE_INFINITY }]],
+    [[{ id: 'a', desc: 'one', etaMin: Number.NaN }]],
+  ])('sends an invalid plan back instead of approving it', async (checkpoints) => {
+    const { planVerdict } = await import('../src/taskgate.js');
+    const verdict = planVerdict({ id: 'demo-1', checkpoints } as never, 'approve', '');
+    expect(verdict.event).toBe('handed');
+  });
+});
+
+describe('task receipts', () => {
+  async function receiptSetup(outcome: 'passed' | 'failed' | 'pending' | 'skipped' | 'adapter-error' = 'passed') {
+    const { root } = await setup();
+    const id = await hubTask(root, 'demo', 'build it');
+    await hubLog(root, id, 'plan', 'the plan', CPS);
+    const task = (await listTasks(root)).find((candidate) => candidate.id === id)!;
+    const { recordTaskEvidence } = await import('../src/hub.js');
+    const evidence = await recordTaskEvidence(root, id, {
+      actor: 'agent:builder', plan_digest: task.plan_digest!, epoch: task.lease_epoch!, outcome,
+      artifact: { diff: 'src/a.ts' }, content: { check: 'unit', status: outcome },
+    });
+    return { root, id, task, evidence };
+  }
+
+  function receipt(
+    task: Record<string, unknown>,
+    evidence: { artifact_digest: string; evidence_hash: string },
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      actor: 'agent:builder', plan_digest: task.plan_digest, epoch: task.lease_epoch,
+      sequence: 1, artifact_digest: evidence.artifact_digest, counters: { files: 1 },
+      external_ids: { pr: '12' }, evidence_hashes: [evidence.evidence_hash], state: 'reconciling', ...overrides,
+    };
+  }
+
+  function config(task: Record<string, unknown>, evidence: { artifact_digest: string; evidence_hash: string }) {
+    return {
+      plan_digest: task.plan_digest, artifact_digest: evidence.artifact_digest,
+      evidence_hashes: [evidence.evidence_hash],
+    };
+  }
+
+  it('passes only the current reconciling candidate with server-hashed evidence', async () => {
+    const { root, id, task, evidence } = await receiptSetup();
+    const { evaluateTaskPredicate, recordTaskReceipt, TASK_PREDICATES } = await import('../src/hub.js');
+    const { readTaskEvents } = await import('../src/state.js');
+    await recordTaskReceipt(root, id, receipt(task as never, evidence) as never);
+    expect((await listTasks(root))[0]).toMatchObject({
+      state: 'reconciling', receipt_actor: 'agent:builder', last_receipt_sequence: 1,
+    });
+    expect((await readTaskEvents(root)).find((event) => event.event === 'evidence')).toMatchObject({
+      evidence: { content: { check: 'unit', status: 'passed' }, evidence_hash: evidence.evidence_hash },
+    });
+    await expect(evaluateTaskPredicate(root, id, 'task_receipt', config(task as never, evidence) as never))
+      .resolves.toBe(true);
+    const events = await readTaskEvents(root);
+    const tampered = events.map((event) => event.event === 'evidence'
+      ? { ...event, evidence: { ...event.evidence!, content: { check: 'unit', status: 'failed' } } }
+      : event);
+    expect(TASK_PREDICATES.task_receipt(tampered, id, config(task as never, evidence) as never)).toBe(false);
+    expect(TASK_PREDICATES.task_receipt([
+      ...events, { ...events.at(-1)!, event: 'superseded' } as never,
+    ], id, config(task as never, evidence) as never)).toBe(false);
+    const passes = () => evaluateTaskPredicate(root, id, 'task_receipt', config(task as never, evidence) as never);
+    await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 2, state: 'running' }) as never);
+    await expect(passes()).resolves.toBe(false);
+    await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 3, state: 'reconciling' }) as never);
+    await expect(passes()).resolves.toBe(true);
+    await recordTaskReceipt(root, id, receipt(task as never, evidence, {
+      sequence: 4, state: 'blocked', blocker_kind: 'evidence', unblock_condition: 'fresh evidence',
+    }) as never);
+    await expect(passes()).resolves.toBe(false);
+    await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 5, state: 'reconciling' }) as never);
+    await expect(passes()).resolves.toBe(true);
+    await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 6, state: 'failed' }) as never);
+    await expect(passes()).resolves.toBe(false);
+  });
+
+  it.each(['failed', 'pending', 'skipped', 'adapter-error'] as const)(
+    'rejects %s evidence with valid server hashes', async (outcome) => {
+      const { root, id, task, evidence } = await receiptSetup(outcome);
+      const { evaluateTaskPredicate, recordTaskReceipt } = await import('../src/hub.js');
+      const { readTaskEvents } = await import('../src/state.js');
+      const before = await readTaskEvents(root);
+      expect(before.at(-1)).toMatchObject({ event: 'evidence', evidence: { outcome, evidence_hash: evidence.evidence_hash } });
+      await expect(recordTaskReceipt(root, id, receipt(task as never, evidence) as never))
+        .rejects.toThrow(/evidence/);
+      expect(await readTaskEvents(root)).toEqual(before);
+      await expect(evaluateTaskPredicate(root, id, 'task_receipt', config(task as never, evidence) as never))
+        .resolves.toBe(false);
+    },
+  );
+
+  it.each([
+    { sequence: 2, actor: 'agent:stale' },
+    { sequence: 1 },
+    { sequence: 0 },
+    { sequence: 2, epoch: 99 },
+    { sequence: 2, plan_digest: 'stale' },
+    { sequence: 2, artifact_digest: 'f'.repeat(64) },
+  ])('rejects a stale or regressive receipt without mutation: $actor $sequence $epoch $plan_digest', async (overrides) => {
+    const { root, id, task, evidence } = await receiptSetup();
+    const { recordTaskReceipt } = await import('../src/hub.js');
+    const { readTaskEvents } = await import('../src/state.js');
+    await recordTaskReceipt(root, id, receipt(task as never, evidence) as never);
+    const before = await readTaskEvents(root);
+    await expect(recordTaskReceipt(
+      root, id, receipt(task as never, evidence, overrides) as never,
+    )).rejects.toThrow();
+    expect(await readTaskEvents(root)).toEqual(before);
+  });
+
+  it('allows exactly one append in a genuinely concurrent same-sequence race', async () => {
+    const { root, id, task, evidence } = await receiptSetup();
+    const { recordTaskReceipt } = await import('../src/hub.js');
+    const { readTaskEvents } = await import('../src/state.js');
+    const results = await Promise.allSettled([
+      recordTaskReceipt(root, id, receipt(task as never, evidence) as never),
+      recordTaskReceipt(root, id, receipt(task as never, evidence) as never),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+    expect((await readTaskEvents(root)).filter((event) => event.event === 'receipt')).toHaveLength(1);
+  });
+
+  it.each(['asked', 'note', 'blocked', 'manual-failure', 'receipt'] as const)(
+    'rejects %s as receipt evidence', async (kind) => {
+      const { root, id, task, evidence } = await receiptSetup();
+      const { recordTaskReceipt } = await import('../src/hub.js');
+      const { readTaskEvents } = await import('../src/state.js');
+      const { createHash } = await import('node:crypto');
+      if (kind === 'note') await hubLog(root, id, 'note', 'manual note');
+      if (kind === 'blocked') await hubLog(root, id, 'blocked', 'manual blocker');
+      if (kind === 'manual-failure') await hubProgress(root, id, 'c1', 'fail', 'manual failure');
+      if (kind === 'receipt') await recordTaskReceipt(root, id, receipt(task as never, evidence) as never);
+      const before = await readTaskEvents(root);
+      const claimed = createHash('sha256').update(JSON.stringify(before[kind === 'asked' ? 0 : before.length - 1])).digest('hex');
+      await expect(recordTaskReceipt(root, id, receipt(task as never, evidence, {
+        sequence: kind === 'receipt' ? 2 : 1, evidence_hashes: [claimed],
+      }) as never)).rejects.toThrow(/evidence/);
+      expect(await readTaskEvents(root)).toEqual(before);
+    },
+  );
+
+  it('rejects evidence from an old plan epoch after an identical replan', async () => {
+    const { root, id, task, evidence } = await receiptSetup();
+    const { recordTaskReceipt } = await import('../src/hub.js');
+    const { handleTaskAction } = await import('../web/taskactions.js');
+    const { readTaskEvents } = await import('../src/state.js');
+    await handleTaskAction(root, 'demo', '/api/task-resolve', { task: id, action: 'rebrief', note: 'same brief' });
+    await hubLog(root, id, 'plan', 'the plan', CPS);
+    const current = (await listTasks(root))[0];
+    expect(current.plan_digest).toBe(task.plan_digest);
+    const before = await readTaskEvents(root);
+    await expect(recordTaskReceipt(root, id, receipt(current as never, evidence) as never))
+      .rejects.toThrow(/evidence/);
+    expect(await readTaskEvents(root)).toEqual(before);
+  });
+
+  it('uses fresh identical evidence after an identical rebrief and replan', async () => {
+    const { root, id, task, evidence } = await receiptSetup();
+    const { evaluateTaskPredicate, recordTaskEvidence, recordTaskReceipt } = await import('../src/hub.js');
+    const { handleTaskAction } = await import('../web/taskactions.js');
+    await handleTaskAction(root, 'demo', '/api/task-resolve', { task: id, action: 'rebrief', note: 'same brief' });
+    await hubLog(root, id, 'plan', 'the plan', CPS);
+    const current = (await listTasks(root))[0];
+    const fresh = await recordTaskEvidence(root, id, {
+      actor: 'agent:builder', plan_digest: current.plan_digest!, epoch: current.lease_epoch!, outcome: 'passed',
+      artifact: { diff: 'src/a.ts' }, content: { check: 'unit', status: 'passed' },
+    });
+    expect(fresh.evidence_hash).toBe(evidence.evidence_hash);
+    await recordTaskReceipt(root, id, receipt(current as never, fresh) as never);
+    await expect(evaluateTaskPredicate(root, id, 'task_receipt', config(current as never, fresh) as never))
+      .resolves.toBe(true);
+  });
+
+  it('uses blocker kind for resume state and keeps unblock text informational', async () => {
+    const { root, id, task, evidence } = await receiptSetup();
+    const { recordTaskReceipt } = await import('../src/hub.js');
+    const record = (sequence: number, state: string, extra: Record<string, unknown> = {}) =>
+      recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence, state, ...extra }) as never);
+    await record(1, 'running');
+    await record(2, 'blocked', { blocker_kind: 'execution', unblock_condition: 'build passes' });
+    expect((await listTasks(root))[0]).toMatchObject({ state: 'blocked', resume_state: 'running' });
+    await record(3, 'running');
+    await record(4, 'reconciling');
+    await record(5, 'blocked', { blocker_kind: 'child', unblock_condition: 'child done' });
+    expect((await listTasks(root))[0]).toMatchObject({ state: 'blocked', resume_state: 'reconciling' });
+    await record(6, 'reconciling');
+    await record(7, 'blocked', { blocker_kind: 'evidence', unblock_condition: 'evidence passes' });
+    expect((await listTasks(root))[0]).toMatchObject({ state: 'blocked', resume_state: 'reconciling' });
+    await record(8, 'reconciling');
+    expect((await listTasks(root))[0]).toMatchObject({ state: 'reconciling', resume_state: null });
+  });
+
+  it.each(['blocked', 'failed'] as const)('allows an authorized reconciler to record %s after revocation', async (state) => {
+    const { root, id, task, evidence } = await receiptSetup();
+    const { recordTaskReceipt } = await import('../src/hub.js');
+    await recordTaskReceipt(root, id, receipt(task as never, evidence) as never);
+    await hubLog(root, id, 'cancelled', 'owner revoked the lease');
+    await recordTaskReceipt(root, id, receipt(task as never, evidence, {
+      sequence: 2, state, actor: 'user:alice', blocker_kind: 'execution', unblock_condition: 'retry later',
+    }) as never, { trustedReconciler: true, revalidateReconciler: async () => {} });
+    expect((await listTasks(root))[0]).toMatchObject({ state, lease_revoked: true });
+  });
+
+  it.each([
+    { state: 'running', actor: 'agent:builder' },
+    { state: 'reconciling', actor: 'user:alice' },
+  ] as const)('denies $state for $actor after cancellation and trusted blocked', async ({ state, actor }) => {
+    const { root, id, task, evidence } = await receiptSetup();
+    const { recordTaskReceipt } = await import('../src/hub.js');
+    const { readTaskEvents } = await import('../src/state.js');
+    await recordTaskReceipt(root, id, receipt(task as never, evidence) as never);
+    await hubLog(root, id, 'cancelled', 'owner revoked the lease');
+    await recordTaskReceipt(root, id, receipt(task as never, evidence, {
+      sequence: 2, state: 'blocked', actor: 'user:alice', blocker_kind: 'execution', unblock_condition: 'retry later',
+    }) as never, { trustedReconciler: true, revalidateReconciler: async () => {} });
+    const before = await readTaskEvents(root);
+    const current = (await listTasks(root))[0];
+    await expect(recordTaskReceipt(root, id, receipt(current as never, evidence, {
+      sequence: 3, state, actor,
+    }) as never, { trustedReconciler: true, revalidateReconciler: async () => {} })).rejects.toThrow(/revoked/);
+    expect(await readTaskEvents(root)).toEqual(before);
+  });
+});

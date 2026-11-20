@@ -18,12 +18,15 @@ import { addProject } from './project.js';
 import { listOpenQuestionBatches } from './questions.js';
 import type { QuestionBatch } from './types.js';
 import { orchestratorName, typeLine } from './spawn.js';
-import { planVerdict } from './taskgate.js';
+import { planVerdict, type TaskRevalidate } from './taskgate.js';
 import { taskScope } from './scope.js';
 import { assertExecutionAllowed } from './rollout.js';
 
 export { Refusal } from './state.js';
-export { hubAccept, hubLog, hubProgress, ledgerCommand } from './taskgate.js';
+export {
+  evaluateTaskPredicate, hubAccept, hubLog, hubProgress, hubResolve, ledgerCommand,
+  recordTaskEvidence, recordTaskReceipt, TASK_PREDICATES,
+} from './taskgate.js';
 
 export async function hubInit(root: string, name = 'hub'): Promise<void> {
   await fs.mkdir(hubPath(root), { recursive: true });
@@ -91,7 +94,7 @@ export async function hubTask(root: string, project: string, text: string): Prom
     // A brief keeps its frontmatter at the top of the file.
     const body = text.startsWith('---') ? `${text.trimEnd()}\n` : `# ${id}\n\n${text}\n`;
     await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), body);
-    await appendTaskEvent(root, { id, project, event: 'asked', at: new Date().toISOString() });
+    await appendTaskEvent(root, { id, project, event: 'asked', at: new Date().toISOString(), lease_epoch: 1 });
     return id;
   });
 }
@@ -372,6 +375,7 @@ export async function planAnswer(
   taskId: string,
   verdict: string,
   feedback?: string,
+  revalidate?: TaskRevalidate,
 ): Promise<{ typed: string }> {
   if (verdict !== 'approve' && verdict !== 'sendback') {
     throw new Refusal(`a plan verdict is approve|sendback: ${verdict}`);
@@ -379,12 +383,11 @@ export async function planAnswer(
   const pf = await readProjects(root);
   const p = pf.projects.find((x) => x.name === project);
   if (!p) throw new Refusal(`unknown project: ${project}`);
-  const task = (await listTasks(root)).find((t) => t.id === taskId);
-  if (!task || task.project !== project) throw new Refusal(`unknown task: ${taskId}`);
-  if (task.state !== 'plan') {
-    throw new Refusal(`${taskId} is ${task.state}, not waiting on a plan answer`);
+  const previous = (await listTasks(root)).find((candidate) => candidate.id === taskId);
+  if (!previous || previous.project !== project) throw new Refusal(`unknown task: ${taskId}`);
+  if (previous.state !== 'plan') {
+    throw new Refusal(`${taskId} is ${previous.state}, not waiting on a plan answer`);
   }
-
   const team = await readTeam(p.home);
   const orch = team.agents.find((a) => a.orchestrator);
   if (!orch?.pane || !(await paneExists(orch.pane))) {
@@ -398,18 +401,30 @@ export async function planAnswer(
   if (!identity) throw new Refusal(`cannot verify the identity of ${orch.pane}`);
 
   const fb = (feedback ?? '').replace(/\s+/g, ' ').trim().slice(0, PLAN_FEEDBACK_CAP);
-  const v = planVerdict(task, verdict, fb);
-  await typeLine(orch.pane, v.line, identity);
-
-  await appendTaskEvent(root, {
-    id: taskId, project, event: v.event, at: new Date().toISOString(), note: v.note,
+  return withHubLock(root, async () => {
+    await revalidate?.();
+    const task = (await listTasks(root)).find((candidate) => candidate.id === taskId);
+    if (!task || task.project !== project) throw new Refusal(`unknown task: ${taskId}`);
+    if (task.state !== 'plan') {
+      throw new Refusal(`${taskId} is ${task.state}, not waiting on a plan answer`);
+    }
+    if (task.plan_digest !== previous.plan_digest || task.lease_epoch !== previous.lease_epoch) {
+      throw new Refusal(`${taskId} plan or lease epoch changed; read it again before answering`);
+    }
+    const v = planVerdict(task, verdict, fb);
+    await typeLine(orch.pane!, v.line, identity);
+    await appendTaskEvent(root, {
+      id: taskId, project, event: v.event, at: new Date().toISOString(), note: v.note,
+      ...(task.plan_digest ? { plan_digest: task.plan_digest } : {}),
+      ...(task.lease_epoch !== undefined ? { lease_epoch: task.lease_epoch } : {}),
+    });
+    try {
+      await appendDecision(root, { project, task: taskId, by: 'owner', summary: v.summary });
+    } catch (e) {
+      console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
+    }
+    return { typed: v.line };
   });
-  try {
-    await appendDecision(root, { project, task: taskId, by: 'owner', summary: v.summary });
-  } catch (e) {
-    console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
-  }
-  return { typed: v.line };
 }
 
 export { continueProject, startProject, wake } from './launch.js';

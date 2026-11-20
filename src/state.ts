@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Approvals, Checkpoint, Decision, HubTask, ProjectMode, TaskEvent, TeamEntry } from './types.js';
@@ -92,10 +93,35 @@ export async function readTaskEvents(root: string): Promise<TaskEvent[]> {
   return out;
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+export function planDigest(checkpoints: Checkpoint[], note?: string): string {
+  return createHash('sha256').update(canonicalJson({ schema_version: 1, checkpoints, note: note ?? '' })).digest('hex');
+}
+
+export function taskEvidenceDigests(artifact: unknown, content: unknown): {
+  artifact_digest: string; evidence_hash: string;
+} {
+  return {
+    artifact_digest: createHash('sha256').update(canonicalJson(artifact)).digest('hex'),
+    evidence_hash: createHash('sha256').update(canonicalJson({ artifact, content })).digest('hex'),
+  };
+}
+
 export function foldTasks(events: TaskEvent[]): HubTask[] {
   const byId = new Map<string, HubTask & { decisions: { at: string; reason: string }[] }>();
   for (const ev of events) {
-    let t = byId.get(ev.id);
+    const previous = byId.get(ev.id);
+    let t = previous;
     if (!t) {
       t = {
         id: ev.id, project: ev.project, asked: ev.at, state: ev.event,
@@ -105,7 +131,8 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
       byId.set(ev.id, t);
     }
     t.updated = ev.at;
-    // note, progress, and planaccept never rewrite the headline state.
+    if (ev.lease_epoch !== undefined) t.lease_epoch = ev.lease_epoch;
+    // Notes, evidence, progress, and planaccept never rewrite the headline state.
     if (ev.event === 'note') {
       t.last_note = ev.note ?? null;
     } else if (ev.event === 'progress') {
@@ -117,25 +144,60 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
       }
     } else if (ev.event === 'planaccept') {
       if (ev.checkpoint) t.checkpoint_accepts![ev.checkpoint] = ev.at;
+    } else if (ev.event === 'evidence' && ev.evidence) {
+      t.receipt_actor ??= ev.evidence.actor;
+    } else if (ev.event === 'receipt' && ev.receipt) {
+      const receipt = ev.receipt;
+      t.last_receipt = receipt;
+      t.receipt_actor = receipt.actor;
+      t.last_receipt_sequence = receipt.sequence;
+      if (receipt.state) t.state = receipt.state;
+      if (receipt.state === 'blocked') {
+        t.resume_state = receipt.blocker_kind === 'execution' ? 'running' : 'reconciling';
+        t.unblock_condition = receipt.unblock_condition ?? null;
+      } else if (receipt.state) {
+        t.resume_state = null;
+        t.unblock_condition = null;
+      }
+      if (ev.note) t.last_note = ev.note;
     } else {
       const prev = t.state;
       t.state = ev.event;
+      t.resume_state = null;
+      t.unblock_condition = null;
       if (ev.event === 'plan') {
         // A fresh plan replaces the old one: checkpoints and their progress reset.
         t.checkpoints = validCheckpoints(ev.checkpoints) ?? [];
+        t.plan_digest = ev.plan_digest ?? (t.checkpoints.length ? planDigest(t.checkpoints, ev.note) : null);
+        t.lease_epoch ??= 1;
         t.progress = {};
         t.checkpoint_accepts = {};
         t.plan_approved = false;
+        t.receipt_actor = null;
+        t.last_receipt_sequence = 0;
+        t.last_receipt = null;
       }
       if (ev.event === 'asked') {
         // A rebrief is an asked event on an existing task: the old plan, its
         // approval, and its trail must not carry over. On task creation these
         // fields already hold their initial values, so the reset is a no-op.
+        if (previous) {
+          t.lease_epoch = (t.lease_epoch ?? 1) + 1;
+          t.lease_revoked = false;
+        }
         t.checkpoints = [];
+        t.plan_digest = null;
         t.progress = {};
         t.checkpoint_accepts = {};
         t.plan_approved = false;
         t.last_progress_at = null;
+        t.receipt_actor = null;
+        t.last_receipt_sequence = 0;
+        t.last_receipt = null;
+      }
+      if (ev.event === 'cancelled') {
+        t.lease_epoch = (t.lease_epoch ?? 1) + 1;
+        t.lease_revoked = true;
       }
       if (ev.event === 'answered' && prev === 'plan') t.plan_approved = true;
       if (ev.event === 'decided') t.decisions.push({ at: ev.at, reason: ev.note ?? '' });
@@ -157,10 +219,10 @@ export function validCheckpoints(cps: unknown): Checkpoint[] | null {
     if (!c || typeof c !== 'object') return null;
     const { id, desc, etaMin } = c as Checkpoint;
     if (typeof id !== 'string' || !id.trim()) return null;
-    if (ids.has(id)) return null;
-    ids.add(id);
+    if (ids.has(id.trim())) return null;
+    ids.add(id.trim());
     if (typeof desc !== 'string' || !desc.trim()) return null;
-    if (typeof etaMin !== 'number' || !(etaMin > 0)) return null;
+    if (typeof etaMin !== 'number' || !Number.isFinite(etaMin) || !(etaMin > 0)) return null;
   }
   return cps as Checkpoint[];
 }

@@ -89,6 +89,36 @@ export type Checkpoint = { id: string; desc: string; etaMin: number };
 export type ProgressStatus = 'started' | 'ok' | 'fail' | 'skip';
 export const PROGRESS_STATUSES = ['started', 'ok', 'fail', 'skip'] as const;
 
+export type TaskReceiptState = 'running' | 'reconciling' | 'blocked' | 'failed';
+export type TaskBlockerKind = 'execution' | 'child' | 'evidence';
+export type TaskResumeState = 'running' | 'reconciling';
+export const TASK_EVIDENCE_OUTCOMES = ['passed', 'failed', 'pending', 'skipped', 'adapter-error'] as const;
+export type TaskEvidenceOutcome = (typeof TASK_EVIDENCE_OUTCOMES)[number];
+export type TaskEvidence = {
+  actor: string;
+  plan_digest: string;
+  epoch: number;
+  outcome: TaskEvidenceOutcome;
+  artifact: unknown;
+  content: unknown;
+  artifact_digest: string;
+  evidence_hash: string;
+};
+export type TaskReceipt = {
+  actor: string;
+  plan_digest: string;
+  epoch: number;
+  sequence: number;
+  artifact_digest: string;
+  counters: Record<string, number>;
+  external_ids: Record<string, string>;
+  evidence_hashes: string[];
+  state?: TaskReceiptState;
+  blocker_kind?: TaskBlockerKind;
+  // Informational only until a registered condition evaluator exists.
+  unblock_condition?: string;
+};
+
 export type HubTask = {
   id: string;
   project: string;
@@ -103,6 +133,14 @@ export type HubTask = {
   last_progress_at?: string | null;
   plan_approved?: boolean;
   checkpoint_accepts?: Record<string, string>;
+  plan_digest?: string | null;
+  lease_epoch?: number;
+  lease_revoked?: boolean;
+  receipt_actor?: string | null;
+  last_receipt_sequence?: number;
+  last_receipt?: TaskReceipt | null;
+  resume_state?: TaskResumeState | null;
+  unblock_condition?: string | null;
 };
 
 export type HubDialogOption = {
@@ -325,7 +363,7 @@ export type TeamEntry = {
 export const TASK_EVENTS = [
   'asked', 'handed', 'plan', 'question', 'answered', 'blocked',
   'overnight', 'cleanup', 'decided', 'done', 'cancelled', 'note',
-  'progress', 'planaccept',
+  'progress', 'planaccept', 'receipt', 'evidence',
 ] as const;
 
 export type TaskEvent = {
@@ -337,10 +375,14 @@ export type TaskEvent = {
   checkpoints?: Checkpoint[];
   checkpoint?: string;
   status?: ProgressStatus;
+  plan_digest?: string;
+  lease_epoch?: number;
+  receipt?: TaskReceipt;
+  evidence?: TaskEvidence;
 };
 
 export const NEEDS_OWNER_STATES = new Set(['plan', 'question', 'blocked']);
-export const CLOSED_STATES = new Set(['done', 'cancelled']);
+export const CLOSED_STATES = new Set(['done', 'cancelled', 'failed']);
 
 export type NativeBranchScope = { root: string; project: string };
 export type NativeBranchCreateScope = NativeBranchScope & { agent: string };

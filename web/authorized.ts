@@ -252,9 +252,18 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   if (exactExecution || pathname === '/api/answer') {
     await assertExecutionAllowed(context.root, scope.project);
   }
-  const result = await handlePost(context.root, pathname, body, principal, authorization, context.registry);
-  const current = await context.authenticate();
-  await authorizeAction(current, context.registry, action, scope);
+  const revalidate = async () => {
+    const current = await context.authenticate();
+    await authorizeAction(current, context.registry, action, scope);
+  };
+  const revalidateReconciler = async () => {
+    const current = await context.authenticate();
+    await authorize(current, context.registry, 'admin', scope);
+  };
+  const result = await handlePost(
+    context.root, pathname, body, principal, authorization, context.registry, revalidate, revalidateReconciler,
+  );
+  await revalidate();
   sendJson(res, 200, result);
 }
 

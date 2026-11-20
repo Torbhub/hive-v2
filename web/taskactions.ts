@@ -1,6 +1,7 @@
-import { Refusal, hubLog, hubProgress, listTasks } from '../src/hub.js';
-import { appendDecision } from '../src/state.js';
-import { CLOSED_STATES } from '../src/types.js';
+import { Refusal, hubProgress, hubResolve, recordTaskReceipt } from '../src/hub.js';
+import type { TaskRevalidate } from '../src/taskgate.js';
+import type { Principal } from '../src/security.js';
+import type { TaskReceipt } from '../src/types.js';
 
 // Same cap as a task brief.
 const RESOLVE_NOTE_CAP = 4000;
@@ -11,6 +12,7 @@ async function taskResolve(
   root: string,
   project: string,
   body: Record<string, unknown>,
+  revalidate?: TaskRevalidate,
 ): Promise<{ ok: true }> {
   const taskId = String(body.task ?? '');
   const action = String(body.action ?? '');
@@ -28,18 +30,7 @@ async function taskResolve(
   if (/[\x00-\x1f\x7f]/.test(brief)) {
     throw new Refusal('the note holds control characters; they are not typeable');
   }
-  const task = (await listTasks(root)).find((t) => t.id === taskId);
-  if (!task || task.project !== project) throw new Refusal(`unknown task: ${taskId}`);
-  if (CLOSED_STATES.has(task.state)) throw new Refusal(`${taskId} is already ${task.state}`);
-  if (action === 'cancel') {
-    await hubLog(root, taskId, 'cancelled', brief || 'cancelled by the owner');
-    await appendDecision(root, { project, task: taskId, by: 'owner', summary: `cancelled ${taskId}` });
-  } else {
-    await hubLog(root, taskId, 'asked', brief);
-    await appendDecision(root, {
-      project, task: taskId, by: 'owner', summary: `rebriefed ${taskId}: ${brief.slice(0, 120)}`,
-    });
-  }
+  await hubResolve(root, project, taskId, action, brief, revalidate);
   return { ok: true };
 }
 
@@ -48,16 +39,42 @@ async function recordProgress(
   root: string,
   project: string,
   body: Record<string, unknown>,
+  revalidate?: TaskRevalidate,
 ): Promise<{ ok: true }> {
   const taskId = String(body.task ?? '').trim();
   const checkpoint = String(body.checkpoint ?? '').trim();
   if (!taskId || !checkpoint) throw new Refusal('task and checkpoint are required');
-  const task = (await listTasks(root)).find((t) => t.id === taskId);
-  if (!task || task.project !== project) throw new Refusal(`unknown task: ${taskId}`);
   await hubProgress(
     root, taskId, checkpoint, String(body.status ?? ''),
-    body.note === undefined ? undefined : String(body.note),
+    body.note === undefined ? undefined : String(body.note), revalidate, project,
   );
+  return { ok: true };
+}
+
+async function taskReceipt(
+  root: string,
+  project: string,
+  body: Record<string, unknown>,
+  principal: Principal,
+  revalidate?: TaskRevalidate,
+  revalidateReconciler?: TaskRevalidate,
+): Promise<{ ok: true }> {
+  const receipt = {
+    actor: principal.subject,
+    plan_digest: String(body.plan_digest ?? ''),
+    epoch: Number(body.epoch),
+    sequence: Number(body.sequence),
+    artifact_digest: String(body.artifact_digest ?? ''),
+    counters: body.counters,
+    external_ids: body.external_ids,
+    evidence_hashes: body.evidence_hashes,
+    ...(body.state === undefined ? {} : { state: body.state }),
+    ...(body.blocker_kind === undefined ? {} : { blocker_kind: body.blocker_kind }),
+    ...(body.unblock_condition === undefined ? {} : { unblock_condition: String(body.unblock_condition) }),
+  } as TaskReceipt;
+  await recordTaskReceipt(root, String(body.task ?? ''), receipt, {
+    project, trustedReconciler: principal.kind === 'human', revalidate, revalidateReconciler,
+  });
   return { ok: true };
 }
 
@@ -67,8 +84,14 @@ export async function handleTaskAction(
   project: string,
   pathname: string,
   body: Record<string, unknown>,
+  principal: Principal = { kind: 'human', subject: 'legacy', aclEpoch: 0 },
+  revalidate?: TaskRevalidate,
+  revalidateReconciler?: TaskRevalidate,
 ): Promise<unknown | null> {
-  if (pathname === '/api/task-resolve') return taskResolve(root, project, body);
-  if (pathname === '/api/progress') return recordProgress(root, project, body);
+  if (pathname === '/api/task-resolve') return taskResolve(root, project, body, revalidate);
+  if (pathname === '/api/progress') return recordProgress(root, project, body, revalidate);
+  if (pathname === '/api/task-receipt') {
+    return taskReceipt(root, project, body, principal, revalidate, revalidateReconciler);
+  }
   return null;
 }
