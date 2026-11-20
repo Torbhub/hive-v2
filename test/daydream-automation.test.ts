@@ -106,6 +106,7 @@ async function status(root: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.spyOn(Date, 'now').mockReturnValue(NOW);
   reservationMutation.afterWrite = undefined;
   vi.stubEnv('HIVE_DAYDREAM_AUTOMATION', '1');
   vi.stubEnv('HIVE_DAYDREAM', '1');
