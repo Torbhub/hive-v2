@@ -1230,10 +1230,16 @@ describe('POST /api/task-receipt', () => {
       projects: [{ name: 'demo', home, repos: [{ folder: home }] }],
     });
     await appendTaskEvent(receiptRoot, { id: 'demo-1', project: 'demo', event: 'asked', at: new Date().toISOString() });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [
+        { name: 'builder', worktree: home, task: 'demo-1' },
+        { name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' },
+      ],
+    });
     await hubLog(receiptRoot, 'demo-1', 'plan', 'the plan', [{ id: 'a', desc: 'write it', etaMin: 5 }]);
     const { foldTasks, readTaskEvents } = await import('../src/state.js');
     const planned = foldTasks(await readTaskEvents(receiptRoot))[0];
-    const { recordTaskEvidence } = await import('../src/hub.js');
+    const { recordTaskEvidence } = await import('../src/taskgate.js');
     const evidence = await recordTaskEvidence(receiptRoot, 'demo-1', {
       actor: 'agent:builder', plan_digest: planned.plan_digest!, epoch: planned.lease_epoch!, outcome: 'passed',
       artifact: { diff: 'src/a.ts' }, content: { check: 'unit', status: 'passed' },
@@ -1350,7 +1356,7 @@ describe('POST /api/task-receipt', () => {
             ? { project: 'demo', task: 'demo-1', checkpoint: 'a', status: 'ok' }
             : { project: 'demo', task: 'demo-1', action: 'cancel' };
         const response = await send(fixture.receiptBase + pathname, body, fixture.headers);
-        expect(response.status).toBe(401);
+        expect(response.status).toBe(pathname === '/api/task-resolve' ? 404 : 401);
         const { readTaskEvents } = await import('../src/state.js');
         expect(await readTaskEvents(fixture.receiptRoot)).toEqual(fixture.events);
       } finally {
@@ -1359,4 +1365,166 @@ describe('POST /api/task-receipt', () => {
       }
     },
   );
+
+  it('rejects agent owner verdicts without pane input, answered state, or audit', async () => {
+    const fixture = await receiptFixture();
+    try {
+      const batch = await createQuestionBatch(fixture.receiptRoot, { project: 'demo', agent: 'builder' }, {
+        context: 'Choose one option.',
+        questions: [{
+          question: 'Continue?', context: 'Owner review.', priority: 1, recommended: 'c1',
+          choices: [{ label: 'Yes', description: 'Continue.' }, { label: 'No', description: 'Stop.' }],
+        }],
+      });
+      const { readTaskEvents } = await import('../src/state.js');
+      const { readQuestionBatch } = await import('../src/questions.js');
+      const before = await readTaskEvents(fixture.receiptRoot);
+      vi.mocked(typeLine).mockClear();
+      const bodies = [
+        ['/api/plan-answer', { project: 'demo', task: 'demo-1', verdict: 'approve' }],
+        ['/api/task-resolve', { project: 'demo', task: 'demo-1', action: 'cancel' }],
+        ['/api/questions/answer', { id: batch.id, answers: [{ question: 'q1', choice: 'c1' }] }],
+        ['/api/answer', { project: 'demo', agent: 'builder', choice: '1', fingerprint: 'stale' }],
+        ['/api/task-acceptance', {
+          project: 'demo', task: 'demo-1', plan_digest: fixture.task.plan_digest, epoch: 1, acceptance_id: 'extra',
+        }],
+      ] as const;
+      for (const [pathname, body] of bodies) {
+        const response = await send(fixture.receiptBase + pathname, body, fixture.headers);
+        expect(response.status).toBe(404);
+      }
+      expect(await readTaskEvents(fixture.receiptRoot)).toEqual(before);
+      expect((await readQuestionBatch(fixture.receiptRoot, batch.id)).status).toBe('open');
+      expect(vi.mocked(typeLine)).not.toHaveBeenCalled();
+    } finally {
+      fixture.receiptServer.close();
+      fixture.broker.close();
+    }
+  });
+
+  it('allows an authorized human plan answer with the same digest and epoch', async () => {
+    const fixture = await receiptFixture();
+    try {
+      vi.mocked(capturePane).mockResolvedValue('');
+      vi.mocked(paneExists).mockResolvedValue(true);
+      const tmux = await import('../src/tmux.js');
+      vi.spyOn(tmux, 'paneIdentity').mockResolvedValue({ pid: 1, started: 'x' });
+      vi.mocked(typeLine).mockClear().mockResolvedValue(undefined);
+      const { authHeaders } = await import('./security-fixture.js');
+      const response = await send(fixture.receiptBase + '/api/plan-answer', {
+        project: 'demo', task: 'demo-1', verdict: 'approve',
+      }, authHeaders());
+      expect(response.status).toBe(200);
+      const { readTaskEvents, readDecisions } = await import('../src/state.js');
+      const task = foldTasks(await readTaskEvents(fixture.receiptRoot))[0];
+      expect(task).toMatchObject({
+        state: 'answered', plan_approved: true, plan_digest: fixture.task.plan_digest,
+        lease_epoch: fixture.task.lease_epoch,
+      });
+      expect((await readDecisions(fixture.receiptRoot))[0].summary).toBe('approved the plan');
+    } finally {
+      fixture.receiptServer.close();
+      fixture.broker.close();
+    }
+  });
+
+  it('keeps public evidence untrusted and binds outcome actors to the authenticated principal', async () => {
+    const fixture = await receiptFixture();
+    try {
+      await appendTaskEvent(fixture.receiptRoot, {
+        id: 'demo-1', project: 'demo', event: 'answered', at: new Date().toISOString(),
+        plan_digest: fixture.task.plan_digest,
+      });
+      const evidenceResponse = await send(fixture.receiptBase + '/api/task-evidence', {
+        project: 'demo', task: 'demo-1', actor: 'agent:mallory', plan_digest: fixture.task.plan_digest,
+        epoch: fixture.task.lease_epoch, outcome: 'passed', artifact: { diff: 'fake' }, content: { check: 'fake' },
+      }, fixture.headers);
+      expect(evidenceResponse.status).toBe(200);
+      const { readTaskEvents } = await import('../src/state.js');
+      const storedEvidence = (await readTaskEvents(fixture.receiptRoot)).at(-1)?.evidence;
+      expect(storedEvidence).toMatchObject({ actor: 'agent:builder' });
+      expect(storedEvidence?.verification).toBeUndefined();
+      const receiptResponse = await send(fixture.receiptBase + '/api/task-receipt', receiptBody(
+        fixture.task, storedEvidence!,
+      ), fixture.headers);
+      expect(receiptResponse.status).toBe(200);
+      const { evaluateTaskPredicate } = await import('../src/hub.js');
+      await expect(evaluateTaskPredicate(fixture.receiptRoot, 'demo-1', 'task_receipt', {
+        plan_digest: fixture.task.plan_digest!, artifact_digest: storedEvidence!.artifact_digest,
+      })).resolves.toBe(false);
+
+      const { readTeam } = await import('../src/state.js');
+      const home = path.join(fixture.receiptRoot, 'demo');
+      const team = await readTeam(home);
+      await writeJson(hivePath(home, 'team.json'), {
+        agents: team.agents.map((agent) => ({ ...agent, closed_at: new Date().toISOString() })),
+      });
+      const outcomeResponse = await send(fixture.receiptBase + '/api/task-outcome', {
+        project: 'demo', task: 'demo-1', actor: 'agent:mallory', plan_digest: fixture.task.plan_digest,
+        epoch: fixture.task.lease_epoch, outcome: 'failed', reason: 'verification failed',
+      }, fixture.headers);
+      expect(outcomeResponse.status).toBe(200);
+      expect((await readTaskEvents(fixture.receiptRoot)).at(-1)?.outcome).toMatchObject({
+        actor: 'agent:builder', reason: 'verification failed',
+      });
+    } finally {
+      fixture.receiptServer.close();
+      fixture.broker.close();
+    }
+  });
+
+  it('rejects cross-project, oversized, and sensitive evidence without persistence', async () => {
+    const fixture = await receiptFixture();
+    try {
+      const baseBody = {
+        task: 'demo-1', plan_digest: fixture.task.plan_digest, epoch: fixture.task.lease_epoch,
+        outcome: 'passed', artifact: { diff: 'fake' }, content: { check: 'fake' },
+      };
+      const cross = await send(fixture.receiptBase + '/api/task-evidence', {
+        ...baseBody, project: 'other',
+      }, fixture.headers);
+      expect(cross.status).toBe(404);
+      const oversized = await send(fixture.receiptBase + '/api/task-evidence', {
+        ...baseBody, project: 'demo', content: 'x'.repeat(70 * 1024),
+      }, fixture.headers);
+      expect(oversized.status).toBe(413);
+      const sensitive = await send(fixture.receiptBase + '/api/task-evidence', {
+        ...baseBody, project: 'demo', content: 'Error: fake diff\n at secret.js:1:1',
+      }, fixture.headers);
+      expect(sensitive.status).toBe(400);
+      const { readTaskEvents } = await import('../src/state.js');
+      expect(await readTaskEvents(fixture.receiptRoot)).toEqual(fixture.events);
+    } finally {
+      fixture.receiptServer.close();
+      fixture.broker.close();
+    }
+  });
+
+  it('rejects revoked writes and agent human acceptance without mutation', async () => {
+    const fixture = await receiptFixture();
+    try {
+      const credential = fixture.items.find((row) => row.pk === 'AGENT#builder' && row.sk.startsWith('CRED#'))!;
+      const original = fixture.registry.currentAccount.bind(fixture.registry);
+      let agentAuthentications = 0;
+      fixture.registry.currentAccount = async (subject, assertion) => {
+        if (assertion.startsWith('hva1.') && ++agentAuthentications === 2) credential.revokedAt = 1;
+        return original(subject, assertion);
+      };
+      const response = await send(fixture.receiptBase + '/api/task-evidence', {
+        project: 'demo', task: 'demo-1', plan_digest: fixture.task.plan_digest, epoch: fixture.task.lease_epoch,
+        outcome: 'passed', artifact: { diff: 'fake' }, content: { check: 'fake' },
+      }, fixture.headers);
+      expect(response.status).toBe(401);
+      credential.revokedAt = null;
+      const acceptance = await send(fixture.receiptBase + '/api/task-acceptance', {
+        project: 'demo', task: 'demo-1', plan_digest: fixture.task.plan_digest, epoch: 1, acceptance_id: 'extra',
+      }, fixture.headers);
+      expect(acceptance.status).toBe(404);
+      const { readTaskEvents } = await import('../src/state.js');
+      expect(await readTaskEvents(fixture.receiptRoot)).toEqual(fixture.events);
+    } finally {
+      fixture.receiptServer.close();
+      fixture.broker.close();
+    }
+  });
 });

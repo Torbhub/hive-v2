@@ -125,11 +125,11 @@ export function validateRootContract(contract: RootContract): void {
   }
   const ids = new Set<string>();
   for (const acceptance of contract.acceptance) {
-    if (!nonEmpty(acceptance.id) || ids.has(acceptance.id)
-      || !['task_receipt', 'git_diff_scope'].includes(acceptance.predicate_id)
+    if (!nonEmpty(acceptance.id) || ids.has(acceptance.id) || !nonEmpty(acceptance.predicate_id)
       || !positive(acceptance.version) || !acceptance.configuration || Array.isArray(acceptance.configuration)
       || !Array.isArray(acceptance.required_evidence) || acceptance.required_evidence.length === 0
-      || !acceptance.required_evidence.every(nonEmpty)) {
+      || !acceptance.required_evidence.every(nonEmpty)
+      || acceptance.required !== undefined && typeof acceptance.required !== 'boolean') {
       throw new Refusal('the root contract has an invalid acceptance predicate');
     }
     ids.add(acceptance.id);
@@ -138,7 +138,9 @@ export function validateRootContract(contract: RootContract): void {
     || !/^[0-9a-f]{40}$/i.test(contract.provenance.base_revision)
     || !/^[0-9a-f]{40}$/i.test(contract.provenance.artifact_revision)
     || !Array.isArray(contract.write_scope) || !Array.isArray(contract.action_scope)
-    || !contract.write_scope.every(nonEmpty) || !contract.action_scope.every(nonEmpty)) {
+    || !contract.write_scope.every(nonEmpty) || !contract.action_scope.every(nonEmpty)
+    || contract.required_children !== undefined
+      && (!Array.isArray(contract.required_children) || !contract.required_children.every(nonEmpty))) {
     throw new Refusal('the root contract has invalid provenance or scope');
   }
   if (!contract.budget || !(['depth', 'active_children', 'active_project_records', 'attempts'] as const)
@@ -195,6 +197,11 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         if (index < 0) admissions.push(ev.admission);
         else admissions[index] = ev.admission;
       }
+    } else if (ev.event === 'operation' && ev.operation) {
+      (t.operations ??= []).push(ev.operation);
+    } else if (ev.event === 'human_acceptance' && ev.human_acceptance) {
+      const acceptance = ev.human_acceptance;
+      (t.human_acceptance ??= {})[acceptance.acceptance_id] = acceptance;
     } else if (ev.event === 'note') {
       t.last_note = ev.note ?? null;
     } else if (ev.event === 'progress') {
@@ -227,6 +234,10 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
       t.state = ev.event;
       t.resume_state = null;
       t.unblock_condition = null;
+      if (ev.event === 'blocked' && ev.note?.startsWith('blocked:unsupported_predicate')) {
+        t.resume_state = 'reconciling';
+        t.unblock_condition = ev.note;
+      }
       if (ev.event === 'plan') {
         // A fresh plan replaces the old one: checkpoints and their progress reset.
         t.checkpoints = validCheckpoints(ev.checkpoints) ?? [];

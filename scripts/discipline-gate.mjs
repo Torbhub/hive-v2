@@ -13,7 +13,9 @@ import ts from 'typescript';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINE = 'scripts/discipline-baseline.json';
 const FILES = ['web/App.tsx', 'src/hub.ts', 'src/ui/HubApp.tsx', 'src/cli.ts', 'web/server.ts'];
-const TASK_APPEND_MODULES = new Set(['src/hub.ts', 'src/state.ts', 'src/taskgate.ts', 'src/admission.ts']);
+const TASK_APPEND_MODULES = new Set([
+  'src/hub.ts', 'src/state.ts', 'src/taskgate.ts', 'src/admission.ts', 'src/evidence.ts', 'src/questions.ts',
+]);
 const TEAM_WRITE_MODULES = new Set(['src/state.ts', 'src/admission.ts']);
 
 const usage = 'usage: node scripts/discipline-gate.mjs [--check|--update|--check-task-appends <root>|--check-enforcement <root>]';
@@ -115,9 +117,13 @@ function sourceWorkerErrors(sourceFile, name) {
   const writeAliases = new Set(['writeJson']);
   const bannedAdmissionImport = (specifier) => /(?:^|\/)(?:spawn|watch|kill|branches)\.js$/.test(specifier)
     || /(?:^|\/)web\//.test(specifier);
+  const bannedEvidenceImport = (specifier) => name === 'src/gate.ts' && /(?:^|\/)evidence\.js$/.test(specifier)
+    || ['src/gate.ts', 'src/evidence.ts'].includes(name)
+      && (/(?:^|\/)(?:web|ui)\//.test(specifier) || ['react', 'ink'].includes(specifier));
   const visit = (node) => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       if (name === 'src/admission.ts' && bannedAdmissionImport(node.moduleSpecifier.text)) errors.add(name);
+      if (bannedEvidenceImport(node.moduleSpecifier.text)) errors.add(name);
       if (node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
         for (const element of node.importClause.namedBindings.elements) {
           if ((element.propertyName?.text ?? element.name.text) === 'writeJson') writeAliases.add(element.name.text);
@@ -132,8 +138,10 @@ function sourceWorkerErrors(sourceFile, name) {
       }
     }
     if (ts.isCallExpression(node)) {
-      if (ts.isImportKeyword(node.expression) && name === 'src/admission.ts'
-        && ts.isStringLiteral(node.arguments[0]) && bannedAdmissionImport(node.arguments[0].text)) errors.add(name);
+      if (ts.isImportKeyword(node.expression) && ts.isStringLiteral(node.arguments[0])) {
+        if (name === 'src/admission.ts' && bannedAdmissionImport(node.arguments[0].text)) errors.add(name);
+        if (bannedEvidenceImport(node.arguments[0].text)) errors.add(name);
+      }
       const expression = node.expression;
       const writeCall = ts.isIdentifier(expression) && writeAliases.has(expression.text)
         || ts.isPropertyAccessExpression(expression) && /^(?:writeJson|writeFile|writeFileSync)$/.test(expression.name.text)

@@ -503,11 +503,51 @@ describe('done gate', () => {
     await writeJson(hivePath(home, 'team.json'), {
       agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
     });
+    const { execFileSync } = await import('node:child_process');
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: home, encoding: 'utf8' }).trim();
+    git('init', '-b', 'main');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'Test');
+    await fs.mkdir(path.join(home, 'src'), { recursive: true });
+    await fs.writeFile(path.join(home, 'src', 'a.ts'), 'base\n');
+    git('add', 'src/a.ts');
+    git('commit', '-m', 'feat: base');
+    const base = git('rev-parse', 'HEAD');
+    await fs.writeFile(path.join(home, 'src', 'a.ts'), 'artifact\n');
+    git('commit', '-am', 'feat: artifact');
+    const artifact = git('rev-parse', 'HEAD');
     const id = await hubTask(root, 'demo', 'build it');
-    await hubLog(root, id, 'plan', 'the plan', CPS);
+    const contract: import('../src/types.js').RootContract = {
+      schema_version: 1, objective: 'Build it.', consumer: 'demo-orchestrator', deliverable: 'a diff', kind: 'build',
+      acceptance: [{ id: 'diff', predicate_id: 'git_diff_scope', version: 1, configuration: {}, required_evidence: ['diff'] }],
+      provenance: { repository: home, base_revision: base, artifact_revision: artifact },
+      write_scope: ['src'], action_scope: [],
+      budget: { depth: 1, active_children: 2, active_project_records: 2, attempts: 2 },
+      delegation: { output_claims: ['a diff'], adapters: ['tmux'] },
+    };
+    await hubLog(root, id, 'plan', 'the plan', CPS, undefined, contract);
     vi.mocked(capturePane).mockImplementation(async () => IDLE);
     await planAnswer(root, 'demo', id, 'approve');
+    const { admitTmux } = await import('../src/admission.js');
+    const { contractDigest } = await import('../src/state.js');
+    await admitTmux(root, home, id, 'builder', {
+      parent_id: id, plan_digest: contractDigest(contract), output_claim: 'a diff', acceptance_ids: ['diff'],
+      provenance: contract.provenance, write_scope: ['src'], adapter: 'tmux',
+    });
     return { root, id };
+  }
+
+  async function completeDone(root: string, id: string) {
+    const task = (await listTasks(root)).find((candidate) => candidate.id === id)!;
+    const admission = task.admissions![0];
+    const { transitionTmuxAdmission } = await import('../src/admission.js');
+    await transitionTmuxAdmission(root, admission.provenance.repository, id, 'builder', admission.lease_id, 'released');
+    const { evaluateTaskPredicate } = await import('../src/hub.js');
+    await expect(evaluateTaskPredicate(root, id, 'git_diff_scope', {
+      lease_id: admission.lease_id, base_revision: admission.provenance.base_revision,
+      artifact_revision: admission.provenance.artifact_revision,
+    })).resolves.toBe(true);
+    await hubLog(root, id, 'done');
   }
 
   it('done is rejected without an approved plan', async () => {
@@ -524,7 +564,7 @@ describe('done gate', () => {
     await hubProgress(root, id, 'c2', 'started');
     await expect(hubLog(root, id, 'done')).rejects.toThrow(/c2 has no terminal progress/);
     await hubProgress(root, id, 'c2', 'ok');
-    await hubLog(root, id, 'done');
+    await completeDone(root, id);
     expect((await listTasks(root)).find((t) => t.id === id)?.state).toBe('done');
   });
 
@@ -533,7 +573,7 @@ describe('done gate', () => {
     await hubProgress(root, id, 'c1', 'ok');
     await expect(hubProgress(root, id, 'c2', 'skip')).rejects.toThrow(/needs a note/);
     await hubProgress(root, id, 'c2', 'skip', 'not needed on this repo');
-    await hubLog(root, id, 'done');
+    await completeDone(root, id);
     expect((await listTasks(root)).find((t) => t.id === id)?.state).toBe('done');
   });
 
@@ -543,7 +583,7 @@ describe('done gate', () => {
     await hubProgress(root, id, 'c2', 'fail', 'flaky fixture');
     await expect(hubLog(root, id, 'done')).rejects.toThrow(/c2 failed and the owner has not accepted it/);
     await hubAccept(root, id, 'c2');
-    await hubLog(root, id, 'done');
+    await completeDone(root, id);
     expect((await listTasks(root)).find((t) => t.id === id)?.state).toBe('done');
   });
 
@@ -555,7 +595,7 @@ describe('done gate', () => {
     await hubProgress(root, id, 'c2', 'fail', 'failed again');
     await expect(hubLog(root, id, 'done')).rejects.toThrow(/has not accepted/);
     await hubAccept(root, id, 'c2');
-    await hubLog(root, id, 'done');
+    await completeDone(root, id);
   });
 
   it('progress and accept validate the task, the checkpoint, and the status', async () => {
@@ -1158,7 +1198,7 @@ describe('task receipts', () => {
     const id = await hubTask(root, 'demo', 'build it');
     await hubLog(root, id, 'plan', 'the plan', CPS);
     const task = (await listTasks(root)).find((candidate) => candidate.id === id)!;
-    const { recordTaskEvidence } = await import('../src/hub.js');
+    const { recordTaskEvidence } = await import('../src/taskgate.js');
     const evidence = await recordTaskEvidence(root, id, {
       actor: 'agent:builder', plan_digest: task.plan_digest!, epoch: task.lease_epoch!, outcome,
       artifact: { diff: 'src/a.ts' }, content: { check: 'unit', status: outcome },
@@ -1185,7 +1225,7 @@ describe('task receipts', () => {
     };
   }
 
-  it('passes only the current reconciling candidate with server-hashed evidence', async () => {
+  it('tracks the latest reconciling candidate without trusting inline evidence', async () => {
     const { root, id, task, evidence } = await receiptSetup();
     const { evaluateTaskPredicate, recordTaskReceipt, TASK_PREDICATES } = await import('../src/hub.js');
     const { readTaskEvents } = await import('../src/state.js');
@@ -1197,7 +1237,7 @@ describe('task receipts', () => {
       evidence: { content: { check: 'unit', status: 'passed' }, evidence_hash: evidence.evidence_hash },
     });
     await expect(evaluateTaskPredicate(root, id, 'task_receipt', config(task as never, evidence) as never))
-      .resolves.toBe(true);
+      .resolves.toBe(false);
     const events = await readTaskEvents(root);
     const tampered = events.map((event) => event.event === 'evidence'
       ? { ...event, evidence: { ...event.evidence!, content: { check: 'unit', status: 'failed' } } }
@@ -1210,13 +1250,13 @@ describe('task receipts', () => {
     await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 2, state: 'running' }) as never);
     await expect(passes()).resolves.toBe(false);
     await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 3, state: 'reconciling' }) as never);
-    await expect(passes()).resolves.toBe(true);
+    await expect(passes()).resolves.toBe(false);
     await recordTaskReceipt(root, id, receipt(task as never, evidence, {
       sequence: 4, state: 'blocked', blocker_kind: 'evidence', unblock_condition: 'fresh evidence',
     }) as never);
     await expect(passes()).resolves.toBe(false);
     await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 5, state: 'reconciling' }) as never);
-    await expect(passes()).resolves.toBe(true);
+    await expect(passes()).resolves.toBe(false);
     await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 6, state: 'failed' }) as never);
     await expect(passes()).resolves.toBe(false);
   });
@@ -1303,7 +1343,8 @@ describe('task receipts', () => {
 
   it('uses fresh identical evidence after an identical rebrief and replan', async () => {
     const { root, id, task, evidence } = await receiptSetup();
-    const { evaluateTaskPredicate, recordTaskEvidence, recordTaskReceipt } = await import('../src/hub.js');
+    const { evaluateTaskPredicate, recordTaskReceipt } = await import('../src/hub.js');
+    const { recordTaskEvidence } = await import('../src/taskgate.js');
     const { handleTaskAction } = await import('../web/taskactions.js');
     await handleTaskAction(root, 'demo', '/api/task-resolve', { task: id, action: 'rebrief', note: 'same brief' });
     await hubLog(root, id, 'plan', 'the plan', CPS);
@@ -1315,7 +1356,7 @@ describe('task receipts', () => {
     expect(fresh.evidence_hash).toBe(evidence.evidence_hash);
     await recordTaskReceipt(root, id, receipt(current as never, fresh) as never);
     await expect(evaluateTaskPredicate(root, id, 'task_receipt', config(current as never, fresh) as never))
-      .resolves.toBe(true);
+      .resolves.toBe(false);
   });
 
   it('uses blocker kind for resume state and keeps unblock text informational', async () => {

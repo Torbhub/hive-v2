@@ -40,4 +40,18 @@ describe('journey registry coherence', () => {
     expect(INVARIANTS.find((invariant) => invariant.id === 'owned-lock-release')?.evidence)
       .toBe('test/state.test.ts::withTeamLock');
   });
+
+  it('links evidence outcomes and push operations to real adapter tests', () => {
+    expect(JOURNEYS.find((journey) => journey.id === 'EVIDENCE_DONE')).toMatchObject({
+      status: 'USED', tracer: 'test/evidence.test.ts',
+    });
+    expect(INVARIANTS.find((invariant) => invariant.id === 'registered-evidence-done')?.evidence)
+      .toBe('test/evidence.test.ts::evidence outcomes');
+    expect(INVARIANTS.find((invariant) => invariant.id === 'terminal-outcome-guards')?.evidence)
+      .toBe('test/evidence.test.ts::evidence outcomes');
+    expect(JOURNEYS.find((journey) => journey.id === 'GATE_VERIFY_PUSH')?.criteria)
+      .toContain('push-operation-binding');
+    expect(INVARIANTS.find((invariant) => invariant.id === 'push-operation-binding')?.evidence)
+      .toBe('test/push-consumption.test.ts::contract-bound push operations');
+  });
 });

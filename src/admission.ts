@@ -317,6 +317,26 @@ export async function assertAdmissionCurrentLocked(
   return currentGrant(task, await readTeam(home), agent, leaseId, allowClosed);
 }
 
+export async function assertAdmissionEvidenceLocked(
+  root: string, home: string, taskId: string, agent: string, leaseId: string,
+): Promise<Grant> {
+  const task = storedTask(foldTasks(await readTaskEvents(root)), taskId);
+  await assertRegisteredHome(root, home, task);
+  const admission = task.admissions?.find((candidate) => candidate.agent === agent && candidate.lease_id === leaseId);
+  const entry = (await readTeam(home)).agents.find((candidate) => candidate.name === agent && candidate.lease_id === leaseId);
+  if (!admission || !entry || entry.task !== task.id
+    || admission.plan_digest !== task.plan_digest || admission.root_lease_epoch !== task.lease_epoch
+    || entry.plan_digest !== admission.plan_digest || entry.root_lease_epoch !== admission.root_lease_epoch
+    || entry.lease_epoch !== admission.lease_epoch) {
+    throw new Refusal(`${agent} does not hold the current evidence digest, epoch, and lease`);
+  }
+  const active = activeAdmission(admission) && !entry.lease_revoked && !entry.closed_at;
+  const cleanRelease = admission.status === 'released' && !admission.launch_error
+    && entry.admission_status === 'released' && !entry.launch_error && entry.closed_at;
+  if (!active && !cleanRelease) throw new Refusal(`${agent} lease is not active or cleanly released`);
+  return { task, admission, entry };
+}
+
 export async function withTmuxGrant<T>(
   root: string, home: string, taskId: string, agent: string, leaseId: string,
   fn: (grant: Grant) => Promise<T>, options: { allowClosed?: boolean } = {},
@@ -400,7 +420,7 @@ export async function transitionTmuxAdmissionLocked(
     ...admission, status, lease_revoked: true,
     ...(detail === undefined ? {} : { launch_error: detail }),
   };
-  await appendAdmission(root, finished);
+  if (status !== 'released') await appendAdmission(root, finished);
   const team = await readTeam(home);
   await writeJson(hivePath(home, 'team.json'), {
     agents: team.agents.map((entry) => entry.lease_id === admission.lease_id ? {
@@ -408,6 +428,12 @@ export async function transitionTmuxAdmissionLocked(
       closed_at: new Date().toISOString(), launch_error: detail,
     } : entry),
   });
+  if (status === 'released') {
+    const worktree = team.agents.find((entry) => entry.lease_id === admission.lease_id)?.worktree || home;
+    const teamState = await fs.readFile(hivePath(worktree, 'team.json'), 'utf8').catch(() => null);
+    finished.team_state_hash = teamState === null ? undefined : valueDigest(teamState);
+    await appendAdmission(root, finished);
+  }
 }
 
 export async function transitionTmuxAdmission(
@@ -439,17 +465,23 @@ export async function recordTmuxLaunchOutcome(
   await transitionTmuxAdmission(root, home, taskId, agent, leaseId, 'launch_failed', detail);
 }
 
-export async function recordTmuxExternalOperation(
+export async function recordTmuxExternalOperationLocked(
   root: string, home: string, taskId: string, agent: string, leaseId: string, operationId: string,
 ): Promise<void> {
   if (!operationId) throw new Refusal('an external operation ID is required');
+  const { admission, entry } = await assertAdmissionCurrentLocked(root, home, taskId, agent, leaseId);
+  await appendAdmission(root, { ...admission, external_operation_id: operationId });
+  const team = await readTeam(home);
+  await writeJson(hivePath(home, 'team.json'), {
+    agents: team.agents.map((candidate) => candidate.lease_id === leaseId
+      ? { ...entry, external_operation_id: operationId } : candidate),
+  });
+}
+
+export async function recordTmuxExternalOperation(
+  root: string, home: string, taskId: string, agent: string, leaseId: string, operationId: string,
+): Promise<void> {
   await withHubLock(root, async () => withTeamLock(home, async () => {
-    const { admission, entry } = await assertAdmissionCurrentLocked(root, home, taskId, agent, leaseId);
-    await appendAdmission(root, { ...admission, external_operation_id: operationId });
-    const team = await readTeam(home);
-    await writeJson(hivePath(home, 'team.json'), {
-      agents: team.agents.map((candidate) => candidate.lease_id === leaseId
-        ? { ...entry, external_operation_id: operationId } : candidate),
-    });
+    await recordTmuxExternalOperationLocked(root, home, taskId, agent, leaseId, operationId);
   }));
 }

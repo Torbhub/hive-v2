@@ -1,5 +1,5 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -81,6 +81,10 @@ function environment(root: string, home: string): NodeJS.ProcessEnv {
     HIVE_AGENT_REF: `builder@${home}`,
     HIVE_ASSERTION_KEYS_JSON: JSON.stringify(ASSERTION_KEYS),
   };
+}
+
+function contractEnvironment(root: string, home: string): NodeJS.ProcessEnv {
+  return { ...environment(root, home), HIVE_COLLABORATION_ENABLED: '0' };
 }
 
 describe('authenticated push consumption', () => {
@@ -333,5 +337,385 @@ describe('authenticated push consumption', () => {
     const { root, commit } = await setup();
     await expect(approved(root, commit, 'agent:builder', 'agent-grant'))
       .rejects.toThrow(/human approver/);
+  });
+});
+
+async function bindContract(root: string, home: string, commit: string) {
+  const { contractDigest, valueDigest } = await import('../src/state.js');
+  const base = git(home, 'rev-parse', 'HEAD^');
+  const contract = {
+    schema_version: 1, objective: 'Publish the bounded change.', consumer: 'demo-orchestrator',
+    deliverable: 'the reviewed commit', kind: 'build',
+    acceptance: [{
+      id: 'receipt', predicate_id: 'task_receipt', version: 1, configuration: {}, required_evidence: ['receipt'],
+    }],
+    provenance: { repository: home, base_revision: base, artifact_revision: commit },
+    write_scope: ['a.txt', 'b.txt'], action_scope: ['push'],
+    budget: { depth: 1, active_children: 2, active_project_records: 2, attempts: 2 },
+    delegation: { output_claims: ['the reviewed commit'], adapters: ['tmux'] },
+  } satisfies import('../src/types.js').RootContract;
+  const planDigest = contractDigest(contract);
+  const at = new Date().toISOString();
+  await appendTaskEvent(root, {
+    id: 'demo-1', project: 'demo', event: 'plan', at,
+    checkpoints: [{ id: 'publish', desc: 'push the reviewed commit', etaMin: 1 }],
+    contract, plan_digest: planDigest,
+  });
+  await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'answered', at, plan_digest: planDigest });
+  const admission: import('../src/types.js').TmuxAdmission = {
+    task: 'demo-1', project: 'demo', agent: 'builder', parent_id: 'demo-1', plan_digest: planDigest,
+    root_lease_epoch: 1, lease_id: 'lease-push-1', lease_epoch: 1, lease_revoked: false,
+    output_claim: 'the reviewed commit', acceptance_ids: ['receipt'], provenance: { ...contract.provenance },
+    provenance_digest: valueDigest(contract.provenance), write_scope: ['a.txt', 'b.txt'], adapter: 'tmux',
+    lineage_id: 'builder', attempts_used: 1, status: 'running',
+  };
+  await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'admission', at, admission });
+  await writeJson(hivePath(home, 'team.json'), {
+    agents: [{
+      name: 'builder', worktree: home, task: 'demo-1', parent_id: 'demo-1', plan_digest: planDigest,
+      root_lease_epoch: 1, lease_id: admission.lease_id, lease_epoch: 1, lease_revoked: false,
+      output_claim: admission.output_claim, acceptance_ids: ['receipt'], provenance: { ...contract.provenance },
+      provenance_digest: admission.provenance_digest, write_scope: ['a.txt', 'b.txt'], adapter: 'tmux',
+      lineage_id: 'builder', attempts_used: 1, admission_status: 'running',
+    }],
+  });
+  return { contract, planDigest, admission };
+}
+
+function operationApproval(batch: QuestionBatch, root: string) {
+  const grant = batch.answers![0].decision!.grant!;
+  return {
+    root, project: 'demo', batch: batch.id, question: 'q1',
+    operationId: grant.operationId!, idempotencyKey: grant.idempotencyKey!,
+  };
+}
+
+function runCli(home: string, root: string, batch: QuestionBatch, commit: string, operation = true) {
+  const repository = path.resolve(new URL('..', import.meta.url).pathname);
+  const grant = batch.answers![0].decision!.grant!;
+  const args = [
+    path.join(repository, 'src', 'cli.ts'), 'push', 'origin', commit, 'feat/t16',
+    '--approval', `${batch.id}/q1`,
+    ...(operation ? ['--operation', grant.operationId!, '--idempotency-key', grant.idempotencyKey!] : []),
+  ];
+  return spawnSync(path.join(repository, 'node_modules', '.bin', 'tsx'), args, {
+    cwd: home, encoding: 'utf8', env: { ...process.env, ...contractEnvironment(root, home) },
+  });
+}
+
+async function countPushes(remote: string): Promise<number> {
+  const content = await readFile(path.join(remote, 'push-count'), 'utf8').catch(() => '');
+  return content.split('\n').filter(Boolean).length;
+}
+
+describe('contract-bound push operations', () => {
+  it('binds plan, scope, budget, lease, repository, and operation identity', async () => {
+    const { root, home, commit, registry } = await setup();
+    const { planDigest } = await bindContract(root, home, commit);
+    const batch = await approved(root, commit);
+    expect(batch.answers![0].decision?.grant).toMatchObject({
+      planDigest, actionScope: ['push'], leaseId: 'lease-push-1', leaseEpoch: 1, rootLeaseEpoch: 1,
+      repositoryFingerprint: batch.questions[0].decision!.facts.repositoryFingerprint,
+      commit, branch: 'feat/t16', operationId: expect.any(String), idempotencyKey: expect.any(String),
+      scopeHash: expect.stringMatching(/^[0-9a-f]{64}$/), budgetVersion: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    const { consumePushOperation } = await import('../src/questions.js');
+    const consumed = await consumePushOperation(
+      root, operationApproval(batch, root), 'origin', commit, 'feat/t16', home,
+      Date.now(), environment(root, home), registry,
+    );
+    expect(consumed).toMatchObject({ status: 'pending', operation: { status: 'pending' } });
+  });
+
+  it('pushes through the real CLI once and reconciles the same operation', async () => {
+    const { root, remote, home, commit } = await setup();
+    await bindContract(root, home, commit);
+    await writeFile(path.join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nprintf "push\\n" >> "$GIT_DIR/push-count"\n');
+    await chmod(path.join(remote, 'hooks', 'pre-receive'), 0o755);
+    const batch = await approved(root, commit);
+    const first = runCli(home, root, batch, commit);
+    expect({ status: first.status, stderr: first.stderr }).toEqual({ status: 0, stderr: '' });
+    expect(git(remote, 'rev-parse', 'refs/heads/feat/t16')).toBe(commit);
+    expect(await countPushes(remote)).toBe(1);
+
+    const second = runCli(home, root, batch, commit);
+    expect({ status: second.status, stderr: second.stderr }).toEqual({ status: 0, stderr: '' });
+    expect(await countPushes(remote)).toBe(1);
+    const stored = await readQuestionBatch(root, batch.id);
+    expect(stored.answers![0].decision?.grant).toMatchObject({ operationStatus: 'succeeded' });
+    expect(stored.answers![0].decision?.grant?.operationResult).toEqual({ remote_tip: commit });
+    const { foldTasks, readTaskEvents } = await import('../src/state.js');
+    expect(foldTasks(await readTaskEvents(root))[0].operations?.at(-1)).toMatchObject({
+      operation_id: stored.answers![0].decision!.grant!.operationId, status: 'succeeded',
+    });
+
+    const { pushByHash } = await import('../src/gate.js');
+    await expect(pushByHash('origin', commit, 'feat/t16', home, {
+      ...operationApproval(batch, root), operationId: 'changed-operation',
+    }, contractEnvironment(root, home))).rejects.toThrow(/operation|identity/);
+    expect(await countPushes(remote)).toBe(1);
+  });
+
+  it('rejects a changed binding and a stale team grant without a write', async () => {
+    for (const binding of ['scopeHash', 'leaseEpoch', 'team'] as const) {
+      const { root, home, commit } = await setup();
+      await bindContract(root, home, commit);
+      const batch = await approved(root, commit);
+      const grant = batch.answers![0].decision!.grant!;
+      if (binding === 'scopeHash') grant.scopeHash = '0'.repeat(64);
+      else if (binding === 'leaseEpoch') grant.leaseEpoch = 2;
+      else {
+        const { readTeam } = await import('../src/state.js');
+        const team = await readTeam(home);
+        team.agents[0].lease_epoch = 2;
+        await writeJson(hivePath(home, 'team.json'), team);
+      }
+      await writeJson(path.join(root, '.hive-hub', 'questions', 'closed', `${batch.id}.json`), batch);
+      const { pushByHash } = await import('../src/gate.js');
+      await expect(pushByHash(
+        'origin', commit, 'feat/t16', home, operationApproval(batch, root), contractEnvironment(root, home),
+      )).rejects.toThrow(/binding|scope|lease/);
+      expect(git(home, 'ls-remote', '--heads', 'origin', 'feat/t16')).toBe('');
+    }
+  });
+
+  it('never blind-retries an ambiguous operation', async () => {
+    const { root, remote, home, commit } = await setup();
+    await bindContract(root, home, commit);
+    await writeFile(path.join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nprintf "push\\n" >> "$GIT_DIR/push-count"\n');
+    await chmod(path.join(remote, 'hooks', 'pre-receive'), 0o755);
+    const batch = await approved(root, commit);
+    const grant = batch.answers![0].decision!.grant!;
+    grant.consumedAt = new Date().toISOString();
+    grant.operationStatus = 'ambiguous';
+    await writeJson(path.join(root, '.hive-hub', 'questions', 'closed', `${batch.id}.json`), batch);
+    const { pushByHash } = await import('../src/gate.js');
+    await expect(pushByHash(
+      'origin', commit, 'feat/t16', home, operationApproval(batch, root), contractEnvironment(root, home),
+    )).rejects.toThrow(/ambiguous|reconcile/);
+    expect(await countPushes(remote)).toBe(0);
+    expect(git(home, 'ls-remote', '--heads', 'origin', 'feat/t16')).toBe('');
+  });
+
+  it('gives non-push authority no executor through the real CLI', async () => {
+    const { root, home, commit } = await setup();
+    await bindContract(root, home, commit);
+    const batch = await createQuestionBatch(root, { project: 'demo', agent: `builder@${home}` }, {
+      context: 'Create a pull request.',
+      questions: [{
+        priority: 1,
+        decision: { action: 'pr', branch: 'feat/t16', commit, destination: 'origin/main', reason: 'Reviewed.' },
+      }],
+    });
+    const answered = await answerQuestionBatch(root, batch.id, [{ question: 'q1', choice: 'c2' }], {
+      task: 'demo-1', consumerGrantId: 'agent-grant', consumerAclEpoch: 1,
+      approverSubject: 'user:alice', approverGrantId: 'human-grant', approverAclEpoch: 2,
+    });
+    expect(answered.answers![0].decision?.grant?.executionAuthority).toBe('none');
+    const result = runCli(home, root, answered, commit, false);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/push execution authority|push approval/);
+    expect(git(home, 'ls-remote', '--heads', 'origin', 'feat/t16')).toBe('');
+  });
+
+  it.each(['failed', 'unknown', 'cancelled'] as const)('rejects grant issuance and first dispatch after %s', async (state) => {
+    const { root, home, commit } = await setup();
+    await bindContract(root, home, commit);
+    const batch = await approved(root, commit);
+    await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: state, at: new Date().toISOString() } as never);
+    const result = runCli(home, root, batch, commit);
+    expect(result.status).not.toBe(0);
+    expect(git(home, 'ls-remote', '--heads', 'origin', 'feat/t16')).toBe('');
+    await expect(approved(root, commit)).rejects.toThrow(/closed|terminal|cancelled|failed|unknown/);
+  });
+
+  it('reconciles a consumed operation after closure without another push', async () => {
+    const { root, remote, home, commit } = await setup();
+    await bindContract(root, home, commit);
+    await writeFile(path.join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nprintf "push\\n" >> "$GIT_DIR/push-count"\n');
+    await chmod(path.join(remote, 'hooks', 'pre-receive'), 0o755);
+    const batch = await approved(root, commit);
+    expect(runCli(home, root, batch, commit).status).toBe(0);
+    expect(await countPushes(remote)).toBe(1);
+    await appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'cancelled', at: new Date().toISOString() });
+    expect(runCli(home, root, batch, commit).status).toBe(0);
+    expect(await countPushes(remote)).toBe(1);
+  });
+
+  it('reconciles a pending crash through the operation registry without a second receive', async () => {
+    const { root, remote, home, commit } = await setup();
+    await bindContract(root, home, commit);
+    await writeFile(path.join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nprintf "push\\n" >> "$GIT_DIR/push-count"\n');
+    await chmod(path.join(remote, 'hooks', 'pre-receive'), 0o755);
+    const batch = await approved(root, commit);
+    const grant = batch.answers![0].decision!.grant!;
+    grant.consumedAt = new Date().toISOString();
+    grant.operationStatus = 'pending';
+    await writeJson(path.join(root, '.hive-hub', 'questions', 'closed', `${batch.id}.json`), batch);
+    git(home, 'push', 'origin', `${commit}:refs/heads/feat/t16`);
+    expect(await countPushes(remote)).toBe(1);
+    const { OPERATION_REGISTRY } = await import('../src/evidence.js');
+    await expect(OPERATION_REGISTRY.push.dispatch(
+      'origin', commit, 'feat/t16', home, operationApproval(batch, root), contractEnvironment(root, home),
+    )).resolves.toBeUndefined();
+    expect(await countPushes(remote)).toBe(1);
+    expect((await readQuestionBatch(root, batch.id)).answers![0].decision?.grant?.operationStatus).toBe('succeeded');
+  });
+
+  it('keeps a missing remote tip ambiguous and rejects a changed recorded result', async () => {
+    const { root, home, commit } = await setup();
+    await bindContract(root, home, commit);
+    const batch = await approved(root, commit);
+    const grant = batch.answers![0].decision!.grant!;
+    grant.consumedAt = new Date().toISOString();
+    grant.operationStatus = 'pending';
+    await writeJson(path.join(root, '.hive-hub', 'questions', 'closed', `${batch.id}.json`), batch);
+    const { OPERATION_REGISTRY } = await import('../src/evidence.js');
+    await expect(OPERATION_REGISTRY.push.dispatch(
+      'origin', commit, 'feat/t16', home, operationApproval(batch, root), contractEnvironment(root, home),
+    )).rejects.toThrow(/ambiguous/);
+    expect((await readQuestionBatch(root, batch.id)).answers![0].decision?.grant?.operationStatus).toBe('ambiguous');
+    grant.operationStatus = 'succeeded';
+    grant.operationResult = { remote_tip: '0'.repeat(40) };
+    await writeJson(path.join(root, '.hive-hub', 'questions', 'closed', `${batch.id}.json`), batch);
+    await expect(OPERATION_REGISTRY.push.dispatch(
+      'origin', commit, 'feat/t16', home, operationApproval(batch, root), contractEnvironment(root, home),
+    )).rejects.toThrow(/tip|result|operation/);
+  });
+
+  it('keeps pre-push cancellation ambiguous and rechecks authority immediately before push', async () => {
+    for (const blocker of ['cancel'] as const) {
+      const { root, remote, home, commit } = await setup();
+      await bindContract(root, home, commit);
+      await writeFile(path.join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nprintf "push\\n" >> "$GIT_DIR/push-count"\n');
+      await chmod(path.join(remote, 'hooks', 'pre-receive'), 0o755);
+      const batch = await approved(root, commit);
+      const tmux = await import('../src/tmux.js');
+      const original = tmux.run;
+      vi.spyOn(tmux, 'run').mockImplementation(async (command: string, args: string[], cwd?: string) => {
+        if (command === 'git' && args[0] === 'push') {
+          const { hubResolve } = await import('../src/hub.js');
+          await hubResolve(root, 'demo', 'demo-1', 'cancel', 'cancel before push');
+        }
+        return original(command, args, cwd);
+      });
+      const { OPERATION_REGISTRY } = await import('../src/evidence.js');
+      await expect(OPERATION_REGISTRY.push.dispatch(
+        'origin', commit, 'feat/t16', home, operationApproval(batch, root), contractEnvironment(root, home),
+      )).rejects.toThrow(/ambiguous|external|disabled|paused/);
+      expect(await countPushes(remote)).toBe(0);
+      const { foldTasks, readTaskEvents } = await import('../src/state.js');
+      expect(foldTasks(await readTaskEvents(root))[0].state).not.toBe('cancelled');
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('leaves a queued batch and audit unchanged when execution revalidation fails', async () => {
+    const { root, home, commit } = await setup();
+    await bindContract(root, home, commit);
+    const batch = await createQuestionBatch(root, { project: 'demo', agent: `builder@${home}` }, {
+      context: 'Publish the reviewed change.',
+      questions: [{
+        priority: 1,
+        decision: { action: 'push', branch: 'feat/t16', commit, reason: 'Reviewed.' },
+      }],
+    });
+    await expect(answerQuestionBatch(root, batch.id, [{ question: 'q1', choice: 'c2' }], {
+      task: 'demo-1', consumerGrantId: 'agent-grant', consumerAclEpoch: 1,
+      approverSubject: 'user:alice', approverGrantId: 'human-grant', approverAclEpoch: 2,
+    }, async () => { throw new Error('execute grant revoked'); })).rejects.toThrow(/revoked/);
+    expect((await readQuestionBatch(root, batch.id)).status).toBe('open');
+    expect((await readQuestionBatch(root, batch.id)).answers).toBeUndefined();
+    await expect(readFile(path.join(root, '.hive-hub', 'decisions.jsonl'), 'utf8').catch(() => '')).resolves.toBe('');
+  });
+
+  it('rejects project-execution-disabled consumption without a write', async () => {
+    const { root, home, commit, registry } = await setup();
+    await bindContract(root, home, commit);
+    const batch = await approved(root, commit);
+    const { disableExecution } = await import('../src/rollout.js');
+    await disableExecution(root, 'demo');
+    const { consumePushOperation } = await import('../src/questions.js');
+    await expect(consumePushOperation(
+      root, operationApproval(batch, root), 'origin', commit, 'feat/t16', home,
+      Date.now(), environment(root, home), registry,
+    )).rejects.toThrow(/paused|disabled/);
+    expect(git(home, 'ls-remote', '--heads', 'origin', 'feat/t16')).toBe('');
+  });
+
+  it('leaves batch and audit unchanged when the approver grant is revoked during authorized close', async () => {
+    const { root, home, commit, registry } = await setup();
+    await bindContract(root, home, commit);
+    const batch = await createQuestionBatch(root, { project: 'demo', agent: `builder@${home}` }, {
+      context: 'Publish the reviewed change.',
+      questions: [{
+        priority: 1,
+        decision: { action: 'push', branch: 'feat/t16', commit, reason: 'Reviewed.' },
+      }],
+    });
+    const grant = registry.items.find((row) => row.sk === 'PRINCIPAL#user:alice')!;
+    const original = registry.currentAccount.bind(registry);
+    let authentications = 0;
+    registry.currentAccount = async (subject, assertion) => {
+      if (subject === 'user:alice' && !assertion.startsWith('hva1.') && ++authentications === 2) grant.revokedAt = 1;
+      return original(subject, assertion);
+    };
+    const { createServer } = await import('../web/server.js');
+    const server = createServer(root, registry);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { authHeaders } = await import('./security-fixture.js');
+      const response = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/questions/answer`, {
+        method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ id: batch.id, answers: [{ question: 'q1', choice: 'c2' }] }),
+      });
+      expect(response.status).toBe(404);
+      expect((await readQuestionBatch(root, batch.id)).status).toBe('open');
+      expect((await readQuestionBatch(root, batch.id)).answers).toBeUndefined();
+      await expect(readFile(path.join(root, '.hive-hub', 'decisions.jsonl'), 'utf8').catch(() => '')).resolves.toBe('');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not expose operation completion to public consumers', async () => {
+    const { root, home, commit, registry } = await setup();
+    await bindContract(root, home, commit);
+    const batch = await approved(root, commit);
+    const questions = await import('../src/questions.js');
+    const consumed = await questions.consumePushOperation(
+      root, operationApproval(batch, root), 'origin', commit, 'feat/t16', home,
+      Date.now(), environment(root, home), registry,
+    );
+    expect('consumePushOperationExecutor' in questions).toBe(false);
+    expect((consumed as { complete?: unknown }).complete).toBeUndefined();
+    expect((await readQuestionBatch(root, batch.id)).answers![0].decision?.grant?.operationStatus).toBe('pending');
+  });
+
+  it('keeps rebrief fenced at the push boundary without resetting plan or lease', async () => {
+    const { root, remote, home, commit } = await setup();
+    const { planDigest } = await bindContract(root, home, commit);
+    await writeFile(path.join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nprintf "push\\n" >> "$GIT_DIR/push-count"\n');
+    await chmod(path.join(remote, 'hooks', 'pre-receive'), 0o755);
+    const batch = await approved(root, commit);
+    const tmux = await import('../src/tmux.js');
+    const original = tmux.run;
+    vi.spyOn(tmux, 'run').mockImplementation(async (command: string, args: string[], cwd?: string) => {
+      if (command === 'git' && args[0] === 'push') {
+        const { hubResolve } = await import('../src/hub.js');
+        await hubResolve(root, 'demo', 'demo-1', 'rebrief', 'changed scope');
+      }
+      return original(command, args, cwd);
+    });
+    const { OPERATION_REGISTRY } = await import('../src/evidence.js');
+    await expect(OPERATION_REGISTRY.push.dispatch(
+      'origin', commit, 'feat/t16', home, operationApproval(batch, root), contractEnvironment(root, home),
+    )).rejects.toThrow(/ambiguous|external/);
+    expect(await countPushes(remote)).toBe(0);
+    const { foldTasks, readTaskEvents } = await import('../src/state.js');
+    const task = foldTasks(await readTaskEvents(root))[0];
+    expect(task).toMatchObject({ plan_digest: planDigest, lease_epoch: 1 });
+    expect(task.state).not.toBe('asked');
+    expect((await readQuestionBatch(root, batch.id)).answers![0].decision?.grant?.operationStatus).not.toBe('succeeded');
   });
 });

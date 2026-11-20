@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { run } from './tmux.js';
-import { consumePushApproval } from './questions.js';
+import { consumePushApproval, executePushOperation, type PushReference } from './questions.js';
 
 const STEP_NAME_RE = /^(?!.*\.\.)[A-Za-z0-9_.-]+$/;
 const HEADER_RE = /^# hive-gate steps: ([,A-Za-z0-9_.-]+) head=([0-9a-f]{40}|none) dirty=([01])$/;
@@ -272,7 +272,7 @@ export async function pushByHash(
   sha: string,
   branch: string,
   cwd: string,
-  approval: { root: string; project: string; batch: string; question: string },
+  approval: PushReference & { root: string },
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   if (remote.startsWith('-')) throw new Error(`a remote may not start with '-': ${remote}`);
@@ -284,6 +284,10 @@ export async function pushByHash(
   if (remoteTip.code === 0) {
     const anc = await run('git', ['merge-base', '--is-ancestor', remoteTip.stdout.trim(), sha], cwd);
     if (anc.code !== 0) throw new Error(`${remote}/${branch} is not an ancestor of ${sha}; a push would not be fast-forward`);
+  }
+  if (approval.operationId || approval.idempotencyKey) {
+    await executePushOperation(remote, sha, branch, cwd, approval, env);
+    return;
   }
   const pushUrl = await consumePushApproval(approval.root, approval, remote, sha, branch, cwd, Date.now(), env);
   const pushed = await run('git', ['push', '--', pushUrl, `${sha}:refs/heads/${branch}`], cwd);

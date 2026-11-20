@@ -11,6 +11,7 @@ const REVISION = /^[0-9a-f]{40}$/i;
 const PROTECTED_EXACT = new Set([
   '.hive/team.json', 'scripts/discipline-gate.mjs',
   'src/admission.ts', 'src/scope.ts', 'src/state.ts', 'src/types.ts', 'src/taskgate.ts',
+  'src/evidence.ts', 'src/questions.ts', 'src/gate.ts', 'src/push-cli.ts',
   'src/spawn.ts', 'src/watch.ts', 'src/kill.ts', 'src/launch.ts', 'src/compact.ts',
   'src/cleanup.ts', 'src/daydream-automation.ts', 'web/actions.ts', 'web/taskactions.ts',
 ]);
@@ -316,6 +317,11 @@ export async function gitDiffScope(input: GitDiffScopeInput) {
       ...parseUntracked(untracked.stdout), ...parseUntracked(ignored.stdout),
     ];
   }
+  // The evaluator holds this lock while it reads the repository.
+  changes = changes.flatMap((change) => {
+    const paths = change.paths.filter((claim) => !claim.startsWith('.hive/team.json.lock/'));
+    return paths.length ? [{ ...change, paths }] : [];
+  });
   const rawPaths = [...new Set(changes.flatMap((change) => change.paths))];
   const paths = (await normalizeScope(repository, rawPaths)).sort();
   const outOfScope = new Set<string>();

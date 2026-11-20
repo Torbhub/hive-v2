@@ -37,7 +37,7 @@ vi.mock('../src/admission.js', async (importOriginal) => {
 import { gitDiffScope, normalizeScope, scopesOverlap, taskScope } from '../src/scope.js';
 import { admitTmux, completeTmuxLaunch } from '../src/admission.js';
 import { respawnAgent, spawnAgent, wakeAgent } from '../src/spawn.js';
-import { evaluateTaskPredicate, hubAdd, hubInit, hubResolve, hubTask, recordTaskReceipt } from '../src/hub.js';
+import { evaluateTaskPredicate, hubAdd, hubInit, hubResolve, hubTask, recordTaskEvidence, recordTaskReceipt } from '../src/hub.js';
 import { appendTaskEvent, contractDigest, hivePath, hubPath, manifestRead, readTaskEvents, readTeam, valueDigest, writeJson } from '../src/state.js';
 import { approveContract, taskContract } from './task-contract.js';
 import { killWindow, newWindow, paneIs, run } from '../src/tmux.js';
@@ -412,7 +412,7 @@ describe('normalized repository scope', () => {
 });
 
 describe('spawn runtime evidence', () => {
-  it.each(['git', 'jj'] as const)('passes a clean real %s spawn and an authenticated receipt', async (kind) => {
+  it.each(['git', 'jj'] as const)('passes a clean real %s spawn and stores an unverified authenticated receipt', async (kind) => {
     const { repository, base, id, entry } = await realSpawn(kind);
     expect(entry.runtime_files).toBeDefined();
     const evaluation = await evaluateScope(repository, id, entry.lease_id!, base, base).catch((error: unknown) => error);
@@ -422,14 +422,18 @@ describe('spawn runtime evidence', () => {
     expect(evidence.content).toMatchObject({ out_of_scope: [] });
     expect(passed).toBe(true);
     expect(evidence.actor).toBe('agent:builder');
+    const receiptEvidence = await recordTaskEvidence(repository, id, {
+      actor: 'agent:builder', plan_digest: evidence.plan_digest, epoch: evidence.epoch, lease_id: entry.lease_id,
+      outcome: 'passed', artifact: { check: 'spawn' }, content: { status: 'passed' },
+    });
     await recordTaskReceipt(repository, id, {
       actor: 'agent:builder', plan_digest: evidence.plan_digest, epoch: evidence.epoch, sequence: 1,
-      lease_id: entry.lease_id, artifact_digest: evidence.artifact_digest,
-      counters: {}, external_ids: {}, evidence_hashes: [evidence.evidence_hash], state: 'reconciling',
+      lease_id: entry.lease_id, artifact_digest: receiptEvidence.artifact_digest,
+      counters: {}, external_ids: {}, evidence_hashes: [receiptEvidence.evidence_hash], state: 'reconciling',
     });
     await expect(evaluateTaskPredicate(repository, id, 'task_receipt', {
-      plan_digest: evidence.plan_digest, artifact_digest: evidence.artifact_digest, lease_id: entry.lease_id,
-    })).resolves.toBe(true);
+      plan_digest: evidence.plan_digest, artifact_digest: receiptEvidence.artifact_digest, lease_id: entry.lease_id,
+    })).resolves.toBe(false);
   }, 20_000);
 
   it('releases the lease when a role changes after a clean spawn', async () => {

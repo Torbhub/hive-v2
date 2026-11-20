@@ -254,7 +254,13 @@ async function postResponse(context: RequestContext, principal: Principal): Prom
   }
   const revalidate = async () => {
     const current = await context.authenticate();
-    await authorizeAction(current, context.registry, action, scope);
+    const currentGrant = await authorizeAction(current, context.registry, action, scope);
+    if (executionApproval) {
+      const currentAuthorization = await approvalAuthorization(context, current, body, scope, currentGrant);
+      for (const key of ['task', 'consumerGrantId', 'consumerAclEpoch', 'approverSubject', 'approverGrantId', 'approverAclEpoch'] as const) {
+        if (currentAuthorization[key] !== authorization?.[key]) throw new AuthorizationError('not found');
+      }
+    }
   };
   const revalidateReconciler = async () => {
     const current = await context.authenticate();

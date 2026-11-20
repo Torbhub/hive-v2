@@ -1,7 +1,9 @@
-import { Refusal, hubLog, hubProgress, hubResolve, recordTaskReceipt } from '../src/hub.js';
+import {
+  Refusal, hubLog, hubProgress, hubResolve, recordHumanAcceptance, recordTaskEvidence, recordTaskOutcome, recordTaskReceipt,
+} from '../src/hub.js';
 import type { TaskRevalidate } from '../src/taskgate.js';
 import type { Principal } from '../src/security.js';
-import type { Checkpoint, RootContract, TaskReceipt } from '../src/types.js';
+import type { Checkpoint, RootContract, TaskEvidenceOutcome, TaskOutcome, TaskReceipt } from '../src/types.js';
 
 // Same cap as a task brief.
 const RESOLVE_NOTE_CAP = 4000;
@@ -94,6 +96,42 @@ async function taskReceipt(
   return { ok: true };
 }
 
+function outcomeBinding(body: Record<string, unknown>, principal: Principal) {
+  return {
+    actor: principal.subject,
+    plan_digest: String(body.plan_digest ?? ''),
+    epoch: Number(body.epoch),
+    ...(body.lease_id === undefined ? {} : { lease_id: String(body.lease_id) }),
+  };
+}
+
+async function taskEvidence(root: string, project: string, body: Record<string, unknown>, principal: Principal, revalidate?: TaskRevalidate) {
+  const evidence = await recordTaskEvidence(root, String(body.task ?? ''), {
+    ...outcomeBinding(body, principal), outcome: String(body.outcome ?? '') as TaskEvidenceOutcome,
+    artifact: body.artifact, content: body.content,
+  }, { project, revalidate });
+  return { ok: true, evidence };
+}
+
+async function taskOutcome(root: string, project: string, body: Record<string, unknown>, principal: Principal, revalidate?: TaskRevalidate) {
+  const outcome = await recordTaskOutcome(root, String(body.task ?? ''), String(body.outcome ?? '') as TaskOutcome, {
+    ...outcomeBinding(body, principal),
+    ...(body.covering_record === undefined ? {} : { covering_record: String(body.covering_record) }),
+    ...(body.replacement_id === undefined ? {} : { replacement_id: String(body.replacement_id) }),
+    ...(body.reason === undefined ? {} : { reason: String(body.reason) }),
+    ...(body.acceptance_inapplicable === undefined ? {} : { acceptance_inapplicable: body.acceptance_inapplicable === true }),
+  }, { project, revalidate });
+  return { ok: true, outcome };
+}
+
+async function taskAcceptance(root: string, project: string, body: Record<string, unknown>, principal: Principal, revalidate?: TaskRevalidate) {
+  if (principal.kind !== 'human') throw new Refusal('human acceptance needs a human actor');
+  await recordHumanAcceptance(root, String(body.task ?? ''), {
+    ...outcomeBinding(body, principal), acceptance_id: String(body.acceptance_id ?? ''),
+  }, { project, revalidate });
+  return { ok: true };
+}
+
 // null means the path is not a task action and the caller keeps dispatching.
 export async function handleTaskAction(
   root: string,
@@ -110,5 +148,8 @@ export async function handleTaskAction(
   if (pathname === '/api/task-receipt') {
     return taskReceipt(root, project, body, principal, revalidate, revalidateReconciler);
   }
+  if (pathname === '/api/task-evidence') return taskEvidence(root, project, body, principal, revalidate);
+  if (pathname === '/api/task-outcome') return taskOutcome(root, project, body, principal, revalidate);
+  if (pathname === '/api/task-acceptance') return taskAcceptance(root, project, body, principal, revalidate);
   return null;
 }

@@ -90,6 +90,12 @@ export const INVARIANTS: Invariant[] = [
     evidence: 'test/hub.test.ts::done gate' },
   { id: 'progress-never-changes-state', desc: 'progress events never rewrite the headline task state',
     evidence: 'test/tasks.test.ts::progress folding' },
+  { id: 'registered-evidence-done', desc: 'done needs current registered evidence, successful operations, children, and no writers',
+    evidence: 'test/evidence.test.ts::evidence outcomes' },
+  { id: 'terminal-outcome-guards', desc: 'terminal outcomes name their cover or replacement and never hide live operations',
+    evidence: 'test/evidence.test.ts::evidence outcomes' },
+  { id: 'push-operation-binding', desc: 'push grants bind the current contract and lease, and one operation pushes at most once',
+    evidence: 'test/push-consumption.test.ts::contract-bound push operations' },
 ];
 
 export const JOURNEYS: Journey[] = [
@@ -111,9 +117,12 @@ export const JOURNEYS: Journey[] = [
   { id: 'PROGRESS_TRAIL', desc: 'checkpoints report progress and done needs every one terminal',
     status: USED, tracer: 'test/tasks.test.ts',
     criteria: ['done-needs-all-checkpoints', 'fail-needs-owner-accept', 'progress-never-changes-state'] },
+  { id: 'EVIDENCE_DONE', desc: 'registered evidence and reconciled dependencies govern every terminal outcome',
+    status: USED, tracer: 'test/evidence.test.ts',
+    criteria: ['registered-evidence-done', 'terminal-outcome-guards'] },
   { id: 'GATE_VERIFY_PUSH', desc: 'the gate runs the steps, gate-verify vouches the commit, push goes by hash',
     status: USED, tracer: 'test/gate.test.ts',
-    criteria: ['gate-never-vacuous-green'] },
+    criteria: ['gate-never-vacuous-green', 'push-operation-binding'] },
   { id: 'CLEANUP_TRASH', desc: 'cleanup trashes what hive created and touches nothing else',
     status: USED, tracer: 'test/cleanup.test.ts',
     criteria: ['cleanup-trash-never-delete'] },

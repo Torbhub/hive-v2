@@ -233,10 +233,10 @@ async function main(): Promise<void> {
       throw new UsageError(`unknown gate-verify subcommand: ${sub}`);
     }
     case 'push': {
-      const { flags: f, pos } = parseFlags(args.slice(1), ['approval']);
+      const { flags: f, pos } = parseFlags(args.slice(1), ['approval', 'operation', 'idempotency-key']);
       const [remote, sha, branch] = pos;
       if (!remote || !sha || !branch) throw new UsageError('usage: hive push <remote> <sha> <branch> --approval <batch>/<question>');
-      await runPushCommand(remote, sha, branch, str(f.approval), process.cwd(), process.env);
+      await runPushCommand(remote, sha, branch, str(f.approval), process.cwd(), process.env, str(f.operation), str(f['idempotency-key']));
       return;
     }
     case 'land': {

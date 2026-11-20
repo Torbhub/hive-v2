@@ -418,7 +418,7 @@ describe('worker evidence and cancellation', () => {
     });
     await expect(evaluateTaskPredicate(root, 'demo-1', 'task_receipt', {
       plan_digest: first.plan_digest, artifact_digest: firstEvidence.artifact_digest, lease_id: first.lease_id,
-    })).resolves.toBe(true);
+    })).resolves.toBe(false);
 
     const second = await admit(root, home, contract, 'builder', { retry_of: 'builder' });
     await expect(recordTaskEvidence(root, 'demo-1', {
@@ -485,7 +485,7 @@ describe('worker evidence and cancellation', () => {
     })).resolves.toBe(false);
     await expect(evaluateTaskPredicate(root, 'demo-1', 'task_receipt', {
       plan_digest: admission.plan_digest, artifact_digest: evidence.artifact_digest, lease_id: admission.lease_id,
-    })).resolves.toBe(true);
+    })).resolves.toBe(false);
     await transitionTmuxAdmission(root, home, 'demo-1', agent, admission.lease_id, status);
     await expect(recordTaskEvidence(root, 'demo-1', {
       actor: agent, plan_digest: admission.plan_digest, epoch: task.lease_epoch!,
@@ -527,7 +527,7 @@ describe('worker evidence and cancellation', () => {
     });
     await expect(evaluateTaskPredicate(root, 'demo-1', 'task_receipt', {
       plan_digest: admission.plan_digest, artifact_digest: evidence.artifact_digest, lease_id: admission.lease_id,
-    })).resolves.toBe(true);
+    })).resolves.toBe(false);
   });
 
   it('keeps the lease-less fallback for a genuinely unadmitted legacy actor', async () => {
@@ -545,6 +545,6 @@ describe('worker evidence and cancellation', () => {
     });
     await expect(evaluateTaskPredicate(root, 'demo-1', 'task_receipt', {
       plan_digest: task.plan_digest!, artifact_digest: evidence.artifact_digest,
-    })).resolves.toBe(true);
+    })).resolves.toBe(false);
   });
 });
