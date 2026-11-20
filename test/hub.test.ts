@@ -540,6 +540,7 @@ describe('done gate', () => {
   async function completeDone(root: string, id: string) {
     const task = (await listTasks(root)).find((candidate) => candidate.id === id)!;
     const admission = task.admissions![0];
+    if (admission.provenance.kind === 'research') throw new Error('code fixture required');
     const { transitionTmuxAdmission } = await import('../src/admission.js');
     await transitionTmuxAdmission(root, admission.provenance.repository, id, 'builder', admission.lease_id, 'released');
     const { evaluateTaskPredicate } = await import('../src/hub.js');
@@ -1270,11 +1271,13 @@ describe('task receipts', () => {
     await expect(passes()).resolves.toBe(false);
     await recordTaskReceipt(root, id, receipt(task as never, evidence, {
       sequence: 4, state: 'blocked', blocker_kind: 'evidence', unblock_condition: 'fresh evidence',
+      resume_condition: { type: 'predicate', acceptance_id: 'missing' },
     }) as never);
     await expect(passes()).resolves.toBe(false);
-    await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 5, state: 'reconciling' }) as never);
-    await expect(passes()).resolves.toBe(false);
-    await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 6, state: 'failed' }) as never);
+    await expect(recordTaskReceipt(root, id, receipt(task as never, evidence, {
+      sequence: 5, state: 'reconciling',
+    }) as never)).rejects.toThrow(/resume condition/);
+    await recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence: 5, state: 'failed' }) as never);
     await expect(passes()).resolves.toBe(false);
   });
 
@@ -1338,7 +1341,7 @@ describe('task receipts', () => {
       const claimed = createHash('sha256').update(JSON.stringify(before[kind === 'asked' ? 0 : before.length - 1])).digest('hex');
       await expect(recordTaskReceipt(root, id, receipt(task as never, evidence, {
         sequence: kind === 'receipt' ? 2 : 1, evidence_hashes: [claimed],
-      }) as never)).rejects.toThrow(/evidence/);
+      }) as never)).rejects.toThrow(/evidence|blocker/);
       expect(await readTaskEvents(root)).toEqual(before);
     },
   );
@@ -1376,23 +1379,24 @@ describe('task receipts', () => {
       .resolves.toBe(false);
   });
 
-  it('uses blocker kind for resume state and keeps unblock text informational', async () => {
+  it('requires a current registered condition instead of informational unblock text', async () => {
     const { root, id, task, evidence } = await receiptSetup();
     const { recordTaskReceipt } = await import('../src/hub.js');
     const record = (sequence: number, state: string, extra: Record<string, unknown> = {}) =>
       recordTaskReceipt(root, id, receipt(task as never, evidence, { sequence, state, ...extra }) as never);
     await record(1, 'running');
-    await record(2, 'blocked', { blocker_kind: 'execution', unblock_condition: 'build passes' });
-    expect((await listTasks(root))[0]).toMatchObject({ state: 'blocked', resume_state: 'running' });
-    await record(3, 'running');
-    await record(4, 'reconciling');
-    await record(5, 'blocked', { blocker_kind: 'child', unblock_condition: 'child done' });
-    expect((await listTasks(root))[0]).toMatchObject({ state: 'blocked', resume_state: 'reconciling' });
-    await record(6, 'reconciling');
-    await record(7, 'blocked', { blocker_kind: 'evidence', unblock_condition: 'evidence passes' });
-    expect((await listTasks(root))[0]).toMatchObject({ state: 'blocked', resume_state: 'reconciling' });
-    await record(8, 'reconciling');
-    expect((await listTasks(root))[0]).toMatchObject({ state: 'reconciling', resume_state: null });
+    await expect(record(2, 'blocked', { blocker_kind: 'execution', unblock_condition: 'build passes' }))
+      .rejects.toThrow(/registered resume condition/);
+    await record(2, 'blocked', {
+      blocker_kind: 'execution', unblock_condition: 'build passes',
+      resume_condition: { type: 'predicate', acceptance_id: 'missing' },
+    });
+    expect((await listTasks(root))[0]).toMatchObject({
+      state: 'blocked', resume_state: 'running',
+      resume_condition: { type: 'predicate', acceptance_id: 'missing' },
+    });
+    await expect(record(3, 'running')).rejects.toThrow(/resume condition/);
+    expect((await listTasks(root))[0].state).toBe('blocked');
   });
 
   it.each(['blocked', 'failed'] as const)('allows an authorized reconciler to record %s after revocation', async (state) => {
@@ -1402,6 +1406,7 @@ describe('task receipts', () => {
     await hubLog(root, id, 'cancelled', 'owner revoked the lease');
     await recordTaskReceipt(root, id, receipt(task as never, evidence, {
       sequence: 2, state, actor: 'user:alice', blocker_kind: 'execution', unblock_condition: 'retry later',
+      resume_condition: { type: 'predicate', acceptance_id: 'missing' },
     }) as never, { trustedReconciler: true, revalidateReconciler: async () => {} });
     expect((await listTasks(root))[0]).toMatchObject({ state, lease_revoked: true });
   });
@@ -1417,6 +1422,7 @@ describe('task receipts', () => {
     await hubLog(root, id, 'cancelled', 'owner revoked the lease');
     await recordTaskReceipt(root, id, receipt(task as never, evidence, {
       sequence: 2, state: 'blocked', actor: 'user:alice', blocker_kind: 'execution', unblock_condition: 'retry later',
+      resume_condition: { type: 'predicate', acceptance_id: 'missing' },
     }) as never, { trustedReconciler: true, revalidateReconciler: async () => {} });
     const before = await readTaskEvents(root);
     const current = (await listTasks(root))[0];

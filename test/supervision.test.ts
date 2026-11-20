@@ -114,21 +114,21 @@ function acceptance(overrides: Partial<TaskAcceptance> = {}): TaskAcceptance {
   };
 }
 
-function contract(items: TaskAcceptance[]): RootContract {
+function contract(items: TaskAcceptance[], wallSeconds?: number): RootContract {
   return {
     schema_version: 1, objective: 'Verify the external artifact.', consumer: 'demo-orchestrator',
     deliverable: 'a verified check', kind: 'build', acceptance: items,
     provenance: { repository: 'octo/hive', base_revision: '0'.repeat(40), artifact_revision: SHA },
     write_scope: ['src'], action_scope: [],
-    budget: { depth: 2, active_children: 4, active_project_records: 8, attempts: 3 },
+    budget: { depth: 2, active_children: 4, active_project_records: 8, attempts: 3, wall_seconds: wallSeconds },
     delegation: { output_claims: ['a verified check'], adapters: ['tmux', 'native'] },
   };
 }
 
-async function fixture(items = [acceptance()], approved = true) {
+async function fixture(items = [acceptance()], approved = true, wallSeconds?: number) {
   const root = await mkdtemp(path.join(tmpdir(), 'hive-supervision-'));
   const home = path.join(root, 'demo');
-  const rootContract = contract(items);
+  const rootContract = contract(items, wallSeconds);
   const planDigest = contractDigest(rootContract);
   await writeProjects(root, { projects: [{ name: 'demo', home, repos: [] }] });
   await writeJson(path.join(home, '.hive', 'team.json'), { agents: [] });
@@ -170,6 +170,7 @@ async function recordFlow(root: string, fixture: string, label: string): Promise
     journey: 'GITHUB_CHECK_SUPERVISION', fixture, label, head: process.env.GITHUB_SHA ?? 'local-hook',
     state: current.state, operations: current.operations?.map((operation) => ({
       id: operation.operation_id, status: operation.status, owner: operation.owner,
+      closeOutcome: operation.close_outcome, replacementId: operation.replacement_id,
       externalId: operation.external_run_id, watcherId: operation.watcher_id,
     })),
   };
@@ -286,7 +287,7 @@ describe('github check supervision', () => {
     await recordFlow(current.root, 'cancel', 'proved');
   });
 
-  it('accepts only remote ownership-transfer proof and never treats it as cancellation', async () => {
+  it('closes on remote ownership-transfer proof and fences later success and duplicate receipts', async () => {
     const github = await githubServer();
     const current = await fixture();
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
@@ -300,11 +301,45 @@ describe('github check supervision', () => {
     await OPERATION_REGISTRY.github_check.transfer(current.root, 'demo-1', operation.operation_id, {
       ...options, newOwner: 'new-owner',
     });
-    expect((await task(current.root)).state).toBe('blocked_external');
-    expect((await task(current.root)).operations!.at(-1)).toMatchObject({ owner: 'new-owner', status: 'blocked_external' });
-    expect(await events(current.root, 'cancelled')).toHaveLength(0);
+    expect((await task(current.root)).state).toBe('cancelled');
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({
+      owner: 'new-owner', status: 'failed', detail: 'ownership_transferred',
+    });
+    expect(await events(current.root, 'cancelled')).toHaveLength(1);
+    expect(await events(current.root, 'operation')).toHaveLength(4);
+    Object.assign(github.runs[0], { status: 'completed', conclusion: 'success' });
+    await OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', operation.operation_id, options);
+    expect((await supervisionPass(current.root, options)).watchers).toEqual([]);
+    expect((await task(current.root)).state).toBe('cancelled');
+    expect(await events(current.root, 'receipt')).toHaveLength(0);
     expect(await events(current.root, 'operation')).toHaveLength(4);
     await recordFlow(current.root, 'transfer', 'ownership-proved');
+  });
+
+  it('closes a transferred supersession with its replacement linkage', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
+    const operation = (await task(current.root)).operations![0];
+    await appendTaskEvent(current.root, { id: 'demo-2', project: 'demo', event: 'asked', at: AT });
+    const { recordTaskOutcome } = await import('../src/hub.js');
+    await recordTaskOutcome(current.root, 'demo-1', 'superseded', {
+      actor: 'legacy', plan_digest: current.planDigest, epoch: 1, replacement_id: 'demo-2',
+    });
+    expect((await task(current.root)).state).toBe('closing_external');
+    github.runs[0].app.slug = 'new-owner';
+    await OPERATION_REGISTRY.github_check.transfer(current.root, 'demo-1', operation.operation_id, {
+      ...options, newOwner: 'new-owner',
+    });
+    const closed = await task(current.root);
+    expect(closed.state).toBe('superseded');
+    expect(closed.lease_revoked).toBe(true);
+    expect((await events(current.root, 'superseded'))[0].outcome).toMatchObject({ replacement_id: 'demo-2' });
+    expect(closed.operations!.at(-1)).toMatchObject({
+      status: 'failed', detail: 'ownership_transferred', replacement_id: 'demo-2',
+    });
+    await recordFlow(current.root, 'transfer-superseded', 'ownership-proved');
   });
 
   it('records adapter and binding failures as evidence, never as a pass', async () => {
@@ -501,6 +536,56 @@ describe('github check supervision', () => {
     await OPERATION_REGISTRY.github_check.cancel(stale.root, 'demo-1', staleOperation.operation_id, options);
     expect(github.requests.length).toBe(calls);
     expect(await readTaskEvents(stale.root)).toEqual(staleEvents);
+  });
+
+  it('continues healthy dispatch after another task expires', async () => {
+    const github = await githubServer();
+    const current = await fixture([acceptance()], true, 60);
+    const healthy = contract([acceptance()], 3600);
+    const healthyDigest = contractDigest(healthy);
+    await appendTaskEvent(current.root, { id: 'demo-2', project: 'demo', event: 'asked', at: AT, lease_epoch: 1 });
+    await appendTaskEvent(current.root, {
+      id: 'demo-2', project: 'demo', event: 'plan', at: AT, contract: healthy, plan_digest: healthyDigest,
+      checkpoints: [{ id: 'work', desc: 'verify', etaMin: 5 }],
+    });
+    await appendTaskEvent(current.root, { id: 'demo-2', project: 'demo', event: 'answered', at: AT, plan_digest: healthyDigest });
+    await appendTaskEvent(current.root, {
+      id: 'demo-2', project: 'demo', event: 'progress', at: AT, checkpoint: 'work', status: 'ok',
+    });
+    const expired = Date.parse(AT) + 61_000;
+    await supervisionPass(current.root, { baseUrl: github.baseUrl, allowLoopback: true }, expired);
+    expect(github.calls.posts).toBe(1);
+    expect((await task(current.root)).state).toBe('blocked:budget_exhausted');
+    const healthyTask = foldTasks(await readTaskEvents(current.root)).find((candidate) => candidate.id === 'demo-2')!;
+    expect(healthyTask.operations![0].status).toBe('blocked_external');
+  });
+
+  it('fences direct success after root expiry without blocking valid closure', async () => {
+    const github = await githubServer();
+    const current = await fixture([acceptance()], true, 60);
+    const options = { baseUrl: github.baseUrl, allowLoopback: true, now: Date.parse(AT) };
+    await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
+    const operation = (await task(current.root)).operations![0];
+    Object.assign(github.runs[0], { status: 'completed', conclusion: 'success' });
+    const expired = Date.parse(AT) + 61_000;
+    await supervisionPass(current.root, options, expired);
+    const before = await readTaskEvents(current.root);
+    await OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', operation.operation_id, { ...options, now: expired });
+    expect(await readTaskEvents(current.root)).toEqual(before);
+    expect((await task(current.root)).state).toBe('blocked:budget_exhausted');
+    expect((await task(current.root)).operations!.at(-1)!.status).toBe('blocked_external');
+    expect((await events(current.root, 'evidence')).filter((event) => event.evidence?.outcome === 'passed')).toHaveLength(0);
+    expect(await events(current.root, 'receipt')).toHaveLength(0);
+
+    const closeGithub = await githubServer();
+    const closeOptions = { baseUrl: closeGithub.baseUrl, allowLoopback: true, now: Date.parse(AT) };
+    const closing = await fixture([acceptance()], true, 60);
+    await OPERATION_REGISTRY.github_check.dispatch(closing.root, 'demo-1', config(await task(closing.root)), closeOptions);
+    const closingOperation = (await task(closing.root)).operations![0];
+    await OPERATION_REGISTRY.github_check.cancel(closing.root, 'demo-1', closingOperation.operation_id, closeOptions);
+    Object.assign(closeGithub.runs[0], { status: 'completed', conclusion: 'cancelled' });
+    await supervisionPass(closing.root, closeOptions, expired);
+    expect((await task(closing.root)).state).toBe('cancelled');
   });
 
   it('keeps closing state through missing runs and retries a failed close without duplicate PATCH', async () => {

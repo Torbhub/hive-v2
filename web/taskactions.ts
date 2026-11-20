@@ -89,6 +89,9 @@ async function taskReceipt(
     ...(body.state === undefined ? {} : { state: body.state }),
     ...(body.blocker_kind === undefined ? {} : { blocker_kind: body.blocker_kind }),
     ...(body.unblock_condition === undefined ? {} : { unblock_condition: String(body.unblock_condition) }),
+    ...(body.resume_condition === undefined ? {} : { resume_condition: body.resume_condition }),
+    ...(body.output_claim === undefined ? {} : { output_claim: String(body.output_claim) }),
+    ...(body.artifact_path === undefined ? {} : { artifact_path: String(body.artifact_path) }),
   } as TaskReceipt;
   await recordTaskReceipt(root, String(body.task ?? ''), receipt, {
     project, trustedReconciler: principal.kind === 'human', revalidate, revalidateReconciler,

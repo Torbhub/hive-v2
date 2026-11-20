@@ -3,7 +3,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { captureDeathBundle, wireLogMtime } from './death-bundle.js';
 import { maybeCompact } from './compact.js';
-import { answerDialog, buildStatus, continueProject, readDialogFor, Refusal, wake } from './hub.js';
+import { answerDialog, buildStatus, continueProject, readDialogFor, reconcileBlockedTasks, Refusal, wake } from './hub.js';
 import { DEFAULT_MODEL, typeLine, wakeAgent } from './spawn.js';
 import { classify, isNativeQuestion, lines } from './screen.js';
 import { appendDecision, compareAndSwapTeamEntry, foldTasks, hasLiveSendingClaim, hivePath, hubPath, readPendingPane, readProjects, readTaskEvents, readTeam, valueDigest, writeJson, writePendingPane } from './state.js';
@@ -657,16 +657,18 @@ export async function watchCycle(
   deaths: Set<string> = new Set(),
   wakes: WakeState = new Map(),
   stills: Stillness = new Map(),
-  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache, marks = inFlightMarks, nativeQuestions = nativeQuestionMarks, daydreamAutomation, github }: {
+  { wedgeStillMs = WEDGE_STILL_MS, verdicts = approveCache, marks = inFlightMarks, nativeQuestions = nativeQuestionMarks, daydreamAutomation, github, now }: {
     wedgeStillMs?: number;
     verdicts?: Map<string, true>;
     marks?: Set<string>;
     nativeQuestions?: Map<string, string>;
     daydreamAutomation?: DaydreamAutomationOptions;
     github?: GitHubOptions;
+    now?: number;
   } = {},
 ): Promise<void> {
-  await supervisionPass(root, github);
+  await reconcileBlockedTasks(root);
+  await supervisionPass(root, github, now);
   const pf = await readProjects(root);
   const status = await buildStatus(root);
   for (const p of pf.projects) {

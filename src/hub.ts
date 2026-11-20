@@ -25,7 +25,7 @@ import { assertExecutionAllowed } from './rollout.js';
 
 export { Refusal } from './state.js';
 export {
-  evaluateTaskPredicate, hubAccept, hubLog, hubProgress, hubResolve, ledgerCommand,
+  evaluateTaskPredicate, hubAccept, hubLog, hubProgress, hubResolve, ledgerCommand, reconcileBlockedTasks,
   recordHumanAcceptance, recordTaskEvidence, recordTaskOutcome, recordTaskReceipt, TASK_PREDICATES,
 } from './taskgate.js';
 

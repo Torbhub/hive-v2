@@ -111,6 +111,9 @@ export type TaskEvidence = {
   evidence_hash: string;
   verification?: TaskEvidenceVerification;
 };
+export type TaskResumeCondition =
+  | { type: 'predicate'; acceptance_id: string }
+  | { type: 'child'; child_id: string };
 export type TaskReceipt = {
   actor: string;
   plan_digest: string;
@@ -123,8 +126,10 @@ export type TaskReceipt = {
   evidence_hashes: string[];
   state?: TaskReceiptState;
   blocker_kind?: TaskBlockerKind;
-  // Informational only until a registered condition evaluator exists.
   unblock_condition?: string;
+  resume_condition?: TaskResumeCondition;
+  output_claim?: string;
+  artifact_path?: string;
 };
 export type TaskOperationResult = { remote_tip: string; reconciled?: boolean };
 export type TaskOperation = {
@@ -175,10 +180,26 @@ export type TaskHumanAcceptance = {
   at: string;
 };
 
+export type TaskResearchSource = {
+  id: string;
+  path: string;
+  sha256: string;
+  observed_at: string;
+};
 export type TaskProvenance = {
+  kind?: 'code';
   repository: string;
   base_revision: string;
   artifact_revision: string;
+  source_range?: never;
+  evidence_window?: never;
+} | {
+  kind: 'research';
+  repository?: never;
+  base_revision?: never;
+  artifact_revision?: never;
+  source_range: { start: string; end: string; sources: TaskResearchSource[] };
+  evidence_window: { starts_at: string; ends_at: string };
 };
 export type TaskAcceptance = {
   id: string;
@@ -198,7 +219,7 @@ export type RootContract = {
   provenance: TaskProvenance;
   write_scope: string[];
   action_scope: string[];
-  budget: { depth: number; active_children: number; active_project_records: number; attempts: number };
+  budget: { depth: number; active_children: number; active_project_records: number; attempts: number; wall_seconds?: number };
   delegation: { output_claims: string[]; adapters: ('tmux' | 'native')[] };
   required_children?: string[];
   preflight_snapshot?: string;
@@ -219,6 +240,7 @@ export type TmuxAdmission = {
   acceptance_ids: string[];
   provenance: TaskProvenance;
   provenance_digest: string;
+  repository_root?: string;
   write_scope: string[];
   adapter: 'tmux' | 'native';
   parent_lease_id?: string;
@@ -261,6 +283,9 @@ export type HubTask = {
   last_receipt?: TaskReceipt | null;
   resume_state?: TaskResumeState | null;
   unblock_condition?: string | null;
+  resume_condition?: TaskResumeCondition | null;
+  admitted_at?: string | null;
+  expires_at?: string | null;
   contract?: RootContract | null;
   admissions?: TmuxAdmission[];
   operations?: TaskOperation[];

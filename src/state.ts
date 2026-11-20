@@ -134,9 +134,24 @@ export function validateRootContract(contract: RootContract): void {
     }
     ids.add(acceptance.id);
   }
-  if (!contract.provenance || !nonEmpty(contract.provenance.repository)
-    || !/^[0-9a-f]{40}$/i.test(contract.provenance.base_revision)
-    || !/^[0-9a-f]{40}$/i.test(contract.provenance.artifact_revision)
+  const provenance = contract.provenance;
+  const sources = provenance?.kind === 'research' ? provenance.source_range.sources : [];
+  const validResearch = provenance?.kind === 'research' && contract.kind === 'research'
+    && nonEmpty(provenance.source_range.start) && nonEmpty(provenance.source_range.end)
+    && Array.isArray(sources) && sources.length > 0
+    && sources.every((source) => nonEmpty(source.id) && nonEmpty(source.path)
+      && /^[0-9a-f]{64}$/.test(source.sha256) && Number.isFinite(Date.parse(source.observed_at)))
+    && new Set(sources.map((source) => source.id)).size === sources.length
+    && sources[0].id === provenance.source_range.start
+    && sources.at(-1)!.id === provenance.source_range.end
+    && Number.isFinite(Date.parse(provenance.evidence_window?.starts_at ?? ''))
+    && Number.isFinite(Date.parse(provenance.evidence_window?.ends_at ?? ''))
+    && Date.parse(provenance.evidence_window.starts_at) < Date.parse(provenance.evidence_window.ends_at);
+  const validCode = provenance && (provenance.kind === undefined || provenance.kind === 'code')
+    && nonEmpty(provenance.repository)
+    && /^[0-9a-f]{40}$/i.test(provenance.base_revision)
+    && /^[0-9a-f]{40}$/i.test(provenance.artifact_revision);
+  if (!provenance || !validResearch && !validCode
     || !Array.isArray(contract.write_scope) || !Array.isArray(contract.action_scope)
     || !contract.write_scope.every(nonEmpty) || !contract.action_scope.every(nonEmpty)
     || contract.required_children !== undefined
@@ -145,6 +160,7 @@ export function validateRootContract(contract: RootContract): void {
   }
   if (!contract.budget || !(['depth', 'active_children', 'active_project_records', 'attempts'] as const)
     .every((key) => positive(contract.budget[key]))
+    || contract.budget.wall_seconds !== undefined && !positive(contract.budget.wall_seconds)
     || !contract.delegation || !Array.isArray(contract.delegation.output_claims)
     || !contract.delegation.output_claims.every(nonEmpty) || contract.delegation.output_claims.length === 0
     || !Array.isArray(contract.delegation.adapters) || contract.delegation.adapters.length === 0) {
@@ -166,6 +182,20 @@ export function taskEvidenceDigests(artifact: unknown, content: unknown): {
     artifact_digest: createHash('sha256').update(canonicalJson(artifact)).digest('hex'),
     evidence_hash: createHash('sha256').update(canonicalJson({ artifact, content })).digest('hex'),
   };
+}
+
+function wallDeadline(contract: RootContract | null | undefined, admittedAt: string | null | undefined): string | null {
+  if (!contract?.budget.wall_seconds || !admittedAt) return null;
+  return new Date(Date.parse(admittedAt) + contract.budget.wall_seconds * 1000).toISOString();
+}
+
+export function taskBudgetExpired(task: HubTask, now = Date.now()): boolean {
+  return task.state === 'blocked:budget_exhausted'
+    || task.expires_at !== undefined && task.expires_at !== null && Date.parse(task.expires_at) <= now;
+}
+
+export function assertTaskBudgetCurrent(task: HubTask, now = Date.now()): void {
+  if (taskBudgetExpired(task, now)) throw new Refusal(`${task.id} is blocked:budget_exhausted`);
 }
 
 export function foldTasks(events: TaskEvent[]): HubTask[] {
@@ -204,6 +234,7 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         t.state = ev.operation.detail === 'deadline_exceeded' ? 'blocked_external:deadline_exceeded' : ev.operation.status;
         t.resume_state = 'reconciling';
         t.unblock_condition = ev.operation.resume_condition ?? null;
+        t.resume_condition = null;
         t.last_note = ev.operation.detail ?? null;
       }
     } else if (ev.event === 'human_acceptance' && ev.human_acceptance) {
@@ -231,9 +262,11 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
       if (receipt.state === 'blocked') {
         t.resume_state = receipt.blocker_kind === 'execution' ? 'running' : 'reconciling';
         t.unblock_condition = receipt.unblock_condition ?? null;
+        t.resume_condition = receipt.resume_condition ?? null;
       } else if (receipt.state) {
         t.resume_state = null;
         t.unblock_condition = null;
+        t.resume_condition = null;
       }
       if (ev.note) t.last_note = ev.note;
     } else {
@@ -241,6 +274,11 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
       t.state = ev.event;
       t.resume_state = null;
       t.unblock_condition = null;
+      t.resume_condition = null;
+      if (ev.event === 'blocked' && ev.note === 'blocked:budget_exhausted') {
+        t.state = 'blocked:budget_exhausted';
+        t.lease_revoked = true;
+      }
       if (ev.event === 'blocked' && ev.note?.startsWith('blocked:unsupported_predicate')) {
         t.resume_state = 'reconciling';
         t.unblock_condition = ev.note;
@@ -251,12 +289,14 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         t.plan_digest = ev.plan_digest ?? (t.checkpoints.length ? planDigest(t.checkpoints, ev.note) : null);
         t.contract = ev.contract ?? null;
         t.lease_epoch ??= 1;
+        if (prev === 'blocked:budget_exhausted') t.lease_revoked = false;
         t.progress = {};
         t.checkpoint_accepts = {};
         t.plan_approved = false;
         t.receipt_actor = null;
         t.last_receipt_sequence = 0;
         t.last_receipt = null;
+        t.expires_at = wallDeadline(t.contract, t.admitted_at);
       }
       if (ev.event === 'asked') {
         // A rebrief is an asked event on an existing task: the old plan, its
@@ -276,12 +316,18 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         t.receipt_actor = null;
         t.last_receipt_sequence = 0;
         t.last_receipt = null;
+        t.admitted_at = null;
+        t.expires_at = null;
       }
-      if (ev.event === 'cancelled') {
+      if (ev.event === 'cancelled' || ev.event === 'superseded') {
         t.lease_epoch = (t.lease_epoch ?? 1) + 1;
         t.lease_revoked = true;
       }
-      if (ev.event === 'answered' && prev === 'plan') t.plan_approved = true;
+      if (ev.event === 'answered' && prev === 'plan') {
+        t.plan_approved = true;
+        t.admitted_at ??= ev.at;
+        t.expires_at = wallDeadline(t.contract, t.admitted_at);
+      }
       if (ev.event === 'decided') t.decisions.push({ at: ev.at, reason: ev.note ?? '' });
       if (ev.note) t.last_note = ev.note;
     }
@@ -290,6 +336,28 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
   for (const t of out) t.needs_owner = NEEDS_OWNER_STATES.has(t.state);
   out.sort((a, b) => a.asked.localeCompare(b.asked));
   return out;
+}
+
+function outcomeDetails(events: TaskEvent[], task: HubTask): TaskEvent['outcome'] {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.id === task.id && event.event === task.state && event.outcome) return event.outcome;
+  }
+  return undefined;
+}
+
+export function childReconciled(events: TaskEvent[], id: string, project: string, seen = new Set<string>()): boolean {
+  if (seen.has(id)) return false;
+  seen.add(id);
+  const tasks = foldTasks(events);
+  const task = tasks.find((candidate) => candidate.id === id && candidate.project === project);
+  if (!task) return false;
+  if (['done', 'already_fixed', 'no_op'].includes(task.state)) return true;
+  if (task.state !== 'duplicate') return false;
+  const covering = outcomeDetails(events, task)?.covering_record;
+  if (!covering) return false;
+  return tasks.some((candidate) => candidate.id === covering && candidate.project === project)
+    ? childReconciled(events, covering, project, seen) : false;
 }
 
 // null means the checkpoint list fails the contract: at least one checkpoint,

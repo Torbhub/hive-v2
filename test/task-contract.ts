@@ -26,6 +26,7 @@ export function taskContract(home: string, writeScope: string[], outputClaim: st
 }
 
 export async function approveContract(root: string, id: string, contract: RootContract): Promise<void> {
+  if (contract.provenance.kind === 'research') throw new Error('this fixture needs code provenance');
   const home = contract.provenance.repository;
   const team = await readTeam(home);
   if (!team.agents.some((agent) => agent.orchestrator)) {
