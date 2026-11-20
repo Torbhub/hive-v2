@@ -173,9 +173,9 @@ describe('verifyCommits', () => {
 });
 
 describe('pushByHash', () => {
-  it('registers no executor for non-push authority', async () => {
+  it('registers only the real operation adapters', async () => {
     const { OPERATION_REGISTRY } = await import('../src/evidence.js');
-    expect(Object.keys(OPERATION_REGISTRY)).toEqual(['push']);
+    expect(Object.keys(OPERATION_REGISTRY)).toEqual(['push', 'github_check']);
   });
 
   it('refuses a remote that looks like a flag before consuming approval', async () => {

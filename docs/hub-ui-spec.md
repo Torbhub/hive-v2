@@ -784,3 +784,19 @@ Review accepts only `project`, `branch`, and `findingIds`. Rejoin accepts only `
 
 The CLI and server share one native client factory. It reads `HIVE_KIMI_SERVER_TOKEN` and optional `HIVE_KIMI_SERVER_ORIGIN` only when a mutation needs a native client. Native history refresh and delivery stay inside the locked core operations. The routes use the existing JSON body limits, browser-header checks, execution-pause checks, `no-store` responses, and generic error mapping.
 
+
+## 20. Work tree (web UI only)
+
+The main screen shows **Work tree** between **Decisions** and the project cards when the view has at least one tree node. The tree comes from stored `HubTask`, `TeamEntry`, and `NativeBranchRecord` records. Opening or viewing it sends only the normal `GET /api/view`. It does not refresh native history, sweep questions, call GitHub, read tmux, migrate state, or send a mutation POST.
+
+The response field is `{nodes, truncated}`. It contains at most 500 nodes. **bounded view** appears when records were capped or hidden. Every node has a stable ID, an optional parent ID, project and task scope, kind, record ID, adapter, state, activity, terminal and done flags, Done guards, plan digest and epoch, relative write scope, lineage and attempts, blocker, external ID, evidence outcome, and bounded details. The DTO never contains a worktree path, native workspace or history, credentials, grants, snapshots, or raw run data. The server authorizes every node against its stored project and task. Unauthorized nodes and their external IDs are omitted. A visible node whose parent is hidden becomes a root.
+
+Each row shows its record ID, kind, adapter, and state. `blocked_external` and `closing_external` show ` · active`. They are nonterminal. `blocked_external:deadline_exceeded` shows ` · quarantined`. It has no watcher and cannot pass. `already_fixed`, `duplicate`, and `no_op` show ` · evidence: {evidenceOutcome}`. `failed`, `superseded`, and `unknown` show ` · not done`. Only the exact `done` state is done.
+
+The tree uses `role="tree"` and `role="treeitem"`. The selected row has `aria-selected="true"`. Every descendant stays visible. Up and Down move selection and focus. Home and End move to the first and last visible row. Enter and Space select. Focusing a row selects it. The detail panel is a polite live region. Its two-column desktop layout becomes one column on narrow screens. Long IDs and blockers wrap.
+
+The detail panel shows task, external ID when present, plan digest, lineage, attempts, scope, and record details. A task blocker appears under **Done blockers**. Unresolved required children, writers, and descendants use the generic text `required work is unresolved`. Hidden records never supply blocker IDs or details. An unsupported required acceptance says `Required acceptance {id} is unsupported.` An unsupported extra acceptance says `Extra acceptance {id} needs a human. Required registered passes still apply.` Human acceptance never substitutes for a required registered pass.
+
+An active task has a **Done** button. It is disabled without current registered evidence, terminal checkpoints, successful external operations, reconciled required children, or released writers and descendants. A terminal task has no Done button. An enabled click POSTs the displayed project, task, plan digest, and epoch to `/api/task-outcome`. The server repeats every guard. Failure appears only in the detail panel of its originating node. Selecting another node hides the error there and preserves it on the originating node. Viewing and keyboard navigation never click Done.
+
+Declared in-scope push behavior is unchanged and opens no question card. An undeclared mutation opens one root scope-delta card. The work tree adds no child question cards and no replacement approval path.

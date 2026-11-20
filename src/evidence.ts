@@ -4,6 +4,10 @@ import { pushByHash } from './gate.js';
 import { createNativeBranchClient } from './native-client.js';
 import { gitDiffScope } from './scope.js';
 import {
+  cancelGithubCheck, dispatchGithubCheck, evaluateGithubCheck, reconcileGithubCheck, transferGithubCheck,
+  type GitHubCheckConfig,
+} from './supervision.js';
+import {
   appendTaskEvent, contractDigest, foldTasks, readProjects, readTaskEvents, Refusal, taskEvidenceDigests,
   validateRootContract, valueDigest, withHubLock, withTeamLock,
 } from './state.js';
@@ -27,7 +31,7 @@ export type NativeResultPredicateConfig = {
   artifact_digest?: string;
   branch_id?: string;
 };
-export type TaskPredicateConfig = TaskReceiptPredicateConfig | GitDiffScopePredicateConfig | NativeResultPredicateConfig;
+export type TaskPredicateConfig = TaskReceiptPredicateConfig | GitDiffScopePredicateConfig | NativeResultPredicateConfig | GitHubCheckConfig;
 
 export function canonicalActor(actor: string): string {
   return actor.startsWith('agent:') ? actor.slice('agent:'.length) : actor;
@@ -273,10 +277,21 @@ export const PREDICATE_REGISTRY = {
     version: 1,
     evaluate: evaluateNativeResultLocked,
   },
+  github_check: {
+    version: 1,
+    evaluate: evaluateGithubCheck,
+  },
 };
 
 export const OPERATION_REGISTRY = {
   push: { version: 1, dispatch: pushByHash },
+  github_check: {
+    version: 1,
+    dispatch: dispatchGithubCheck,
+    reconcile: reconcileGithubCheck,
+    cancel: cancelGithubCheck,
+    transfer: transferGithubCheck,
+  },
 };
 
 export async function evaluateTaskPredicate(
@@ -332,7 +347,7 @@ export async function evaluateAcceptanceLocked(root: string, task: HubTask, nati
         base_revision: task.contract.provenance.base_revision,
         artifact_revision: task.contract.provenance.artifact_revision,
       });
-    } else if (acceptance.predicate_id === 'native_result') {
+    } else if (acceptance.predicate_id === 'native_result' || acceptance.predicate_id === 'github_check') {
       Object.assign(config, { plan_digest: task.plan_digest, acceptance_id: acceptance.id });
     }
     let passed = false;

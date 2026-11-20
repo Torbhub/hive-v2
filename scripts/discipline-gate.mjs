@@ -15,6 +15,7 @@ const BASELINE = 'scripts/discipline-baseline.json';
 const FILES = ['web/App.tsx', 'src/hub.ts', 'src/ui/HubApp.tsx', 'src/cli.ts', 'web/server.ts'];
 const TASK_APPEND_MODULES = new Set([
   'src/hub.ts', 'src/state.ts', 'src/taskgate.ts', 'src/admission.ts', 'src/evidence.ts', 'src/questions.ts',
+  'src/supervision.ts',
 ]);
 const TEAM_WRITE_MODULES = new Set(['src/state.ts', 'src/admission.ts']);
 
@@ -120,9 +121,14 @@ function sourceWorkerErrors(sourceFile, name) {
   const bannedEvidenceImport = (specifier) => name === 'src/gate.ts' && /(?:^|\/)evidence\.js$/.test(specifier)
     || ['src/gate.ts', 'src/evidence.ts'].includes(name)
       && (/(?:^|\/)(?:web|ui)\//.test(specifier) || ['react', 'ink'].includes(specifier));
+  const bannedSliceSixImport = (specifier) => name === 'src/supervision.ts'
+      && (/(?:^|\/)(?:watch|hub)(?:\.js)?$/.test(specifier) || /(?:^|\/)web\//.test(specifier))
+    || ['web/App.tsx', 'web/WorkTree.tsx'].includes(name)
+      && /(?:^|\/)src\/(?:state|hub|supervision|admission|branches)(?:\.js)?$/.test(specifier);
   const bannedNativeImport = (specifier) => name === 'src/branches.ts'
       && /(?:^|\/)(?:evidence|taskgate|hub|native-client|kimi-server)\.js$/.test(specifier)
-    || name === 'src/evidence.ts' && /(?:^|\/)kimi-server\.js$/.test(specifier);
+    || name === 'src/evidence.ts' && /(?:^|\/)kimi-server\.js$/.test(specifier)
+    || bannedSliceSixImport(specifier);
   const visit = (node) => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       if (name === 'src/admission.ts' && bannedAdmissionImport(node.moduleSpecifier.text)) errors.add(name);
