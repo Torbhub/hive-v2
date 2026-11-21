@@ -17,6 +17,7 @@ vi.mock('../src/hub.js', () => ({
     kind: 'numbered', text: 'dialog text', options: [], cursor: null, esc: true,
     fingerprint: 'fp', project: 'demo', session: 'demo-orchestrator', pane: '%1',
   })),
+  redactDialog: <T>(dialog: T): T => dialog,
 }));
 
 vi.mock('../src/state.js', async (importOriginal) => {
@@ -76,7 +77,7 @@ describe('buildView', () => {
     expect(view.tasks[0].needs_owner).toBe(true);
     // orchestrator question → "demo", agent question → "demo/fixer"
     expect(Object.keys(view.dialogs).sort()).toEqual(['demo', 'demo/fixer']);
-    expect(view.dialogs.demo.pane).toBe('%1');
+    expect(view.dialogs.demo).toHaveProperty('pane', '%1');
     expect(view.questions).toEqual([]);
     expect(view.updatedAt).toBeGreaterThan(0);
     expect(view.error).toBe('');

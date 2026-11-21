@@ -536,6 +536,32 @@ export type DaydreamAutomationProjectStatus = {
   daily: { project: DaydreamAutomationUsage; agents: Record<string, DaydreamAutomationUsage> };
 };
 
+export type PendingWorkerLaunch = {
+  at: string;
+  agent: string;
+  pane: string;
+  pane_pid: number;
+  pane_started: string;
+  worktree: string;
+  task?: string;
+  lease_id?: string;
+  launch_claim_path: string;
+  launch_claim_digest: string;
+  dialog: string;
+  fingerprint: string;
+  jj_workspace?: string;
+  resume_token?: string;
+  resume_pid?: number;
+  resume_started?: string;
+  answer_choice?: string;
+  answer_option?: string;
+  approved?: boolean;
+  dialog_delivered?: boolean;
+  pickup_started?: boolean;
+  pickup_typed?: boolean;
+  claim_completed?: boolean;
+};
+
 export type TeamEntry = {
   name: string;
   orchestrator?: boolean;
@@ -588,6 +614,7 @@ export type TeamEntry = {
   launch_claim_digest?: string;
   launch_claim_in_worktree?: boolean;
   launch_claim_completed?: boolean;
+  launch_pending?: PendingWorkerLaunch;
   external_operation_id?: string;
   launch_error?: string;
 };

@@ -51,7 +51,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   };
 });
 
-import { hubLog, hubTask, startProject, wake } from '../src/hub.js';
+import { hubLog, hubTask, redactDialog, startProject, wake } from '../src/hub.js';
 import { interruptAgent } from '../src/interrupt.js';
 import { killAgent } from '../src/kill.js';
 import { createQuestionBatch } from '../src/questions.js';
@@ -64,6 +64,7 @@ import { authHeaders, configureSecurity } from './security-fixture.js';
 import { taskContract } from './task-contract.js';
 import { snapshotNativeMessages } from '../src/native-history.js';
 import { buildNeeds } from '../src/ui/look.js';
+import { lines, parseDialog } from '../src/screen.js';
 
 let server: Server;
 let base: string;
@@ -129,6 +130,52 @@ describe('GET /api/view', () => {
     expect(task.needs_owner).toBe(true);
     expect(view.updatedAt).toBeGreaterThan(0);
     expect(view.error).toBe('');
+  });
+
+  it('redacts live dialog text and option details without changing its usable fingerprint', async () => {
+    const home = path.join(root, 'demo');
+    const secret = 'live-dialog-secret';
+    const dialog = COMMAND_DIALOG
+      .replace('   $ echo hive-calibration', `   $ echo hive-calibration\n   api_key=${secret}`);
+    const capture = vi.mocked(capturePane).getMockImplementation()!;
+    const exists = vi.mocked(paneExists).getMockImplementation()!;
+    const is = vi.mocked(paneIs).getMockImplementation()!;
+    const literal = vi.mocked(sendLiteral).getMockImplementation()!;
+    let answered = false;
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', pane: '%9', pane_pid: 1, pane_started: 'x', worktree: home }],
+    });
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(paneIs).mockResolvedValue(true);
+    vi.mocked(capturePane).mockImplementation(async () => answered ? '' : dialog);
+    vi.mocked(sendLiteral).mockImplementation(async () => { answered = true; });
+    try {
+      const response = await fetch(`${base}/api/view`);
+      const raw = await response.text();
+      expect(raw).not.toContain(secret);
+      const view = JSON.parse(raw);
+      const live = view.dialogs['demo/builder'];
+      expect(live.text).toContain('api_key=[redacted]');
+      expect(live.options[1].detail).toBe('');
+      const synthetic = redactDialog({
+        kind: 'menu', text: 'menu', cursor: 1, esc: true, fingerprint: 'fp',
+        project: 'demo', session: 'builder', pane: '%9',
+        options: [{ n: 1, label: 'Trust', detail: `token=${secret}`, offered: true, saves_rule: false }],
+      });
+      expect(synthetic.options[0].detail).toContain('token=[redacted]');
+      expect(live.fingerprint).toBe(parseDialog(lines(dialog)).fingerprint);
+      const answer = await post('/api/answer', {
+        project: 'demo', agent: 'builder', choice: '1', fingerprint: live.fingerprint,
+      });
+      expect(answer.status).toBe(200);
+      expect(await answer.json()).toMatchObject({ ok: true, dialog_gone: true });
+    } finally {
+      await writeJson(hivePath(home, 'team.json'), { agents: [] });
+      vi.mocked(capturePane).mockImplementation(capture);
+      vi.mocked(paneExists).mockImplementation(exists);
+      vi.mocked(paneIs).mockImplementation(is);
+      vi.mocked(sendLiteral).mockImplementation(literal);
+    }
   });
 });
 
@@ -588,6 +635,7 @@ describe('POST settings with a current dialog', () => {
     });
     let answered = false;
     vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(paneIs).mockResolvedValue(true);
     vi.mocked(capturePane).mockImplementation(async () => answered ? '' : COMMAND_DIALOG);
     vi.mocked(sendLiteral).mockClear().mockImplementation(async () => { answered = true; });
     vi.mocked(sleep).mockResolvedValue(undefined);
@@ -599,7 +647,7 @@ describe('POST settings with a current dialog', () => {
 
       expect(r.status).toBe(200);
       expect(await r.json()).toEqual(expected);
-      expect(sendLiteral).toHaveBeenCalledWith('%1', '1');
+      expect(sendLiteral).toHaveBeenCalledWith('%1', '1', { pid: 1, started: 'x' });
       expect((await readProjects(root)).projects[0]).toMatchObject(change);
       if ('mode' in change) expect(vi.mocked(run).mock.calls.filter((c) => c[0] === 'kimi')).toEqual([]);
     } finally {
@@ -608,6 +656,7 @@ describe('POST settings with a current dialog', () => {
         projects: [{ name: 'demo', home, repos: [{ folder: home }] }],
       });
       vi.mocked(paneExists).mockRestore();
+      vi.mocked(paneIs).mockRestore();
       vi.mocked(capturePane).mockRestore();
       vi.mocked(sendLiteral).mockRestore();
       vi.mocked(sleep).mockRestore();

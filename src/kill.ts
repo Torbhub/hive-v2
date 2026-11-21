@@ -4,6 +4,7 @@ import {
 } from './state.js';
 import type { TeamEntry } from './types.js';
 import { revokeTmuxAdmission } from './admission.js';
+import { releasePendingLaunchClaim } from './project.js';
 
 export function recordedIdentity(entry: TeamEntry): PaneIdentity {
   if (!entry.pane || !entry.pane_pid || !entry.pane_started) {
@@ -83,6 +84,7 @@ export async function killEntry(root: string, home: string, entry: TeamEntry): P
     await stampEntry(root, home, stamped, undefined);
     throw error;
   }
+  await releasePendingLaunchClaim(root, stamped);
   return dropEntry(home, stamped);
 }
 
@@ -136,6 +138,7 @@ async function killCascade(root: string, project: string): Promise<{ target: str
   try {
     for (const entry of targets) {
       await killPane(entry);
+      await releasePendingLaunchClaim(root, entry);
       if (await dropEntry(home, entry)) done.push(entry);
     }
   } catch (e) {

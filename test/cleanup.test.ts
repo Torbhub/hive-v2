@@ -21,6 +21,8 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 });
 
 import { cleanupProject } from '../src/cleanup.js';
+import { killAgent } from '../src/kill.js';
+import { removeProject } from '../src/project.js';
 import { hivePath, manifestAdd, readTeam, writeJson, hubPath } from '../src/state.js';
 import { killWindow, run } from '../src/tmux.js';
 
@@ -186,5 +188,24 @@ describe('cleanupProject tmux records', () => {
     const team = await readTeam(home);
     expect(team.agents[0].closed_at).toBeUndefined();
     expect(team.agents[1].closed_at).toBeUndefined();
+  });
+
+  it('releases a pending claim during cleanup so close and project deletion can finish', async () => {
+    const { root, home } = await setupTmux();
+    const claim = '.hive-hub/launches/proj:pending.json';
+    await writeJson(hubPath(root, 'launches', 'proj:pending.json'), { project: 'proj' });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{
+        name: 'builder', pane: '%1', pane_pid: 11, pane_started: 'a', worktree: home,
+        launch_pending: {
+          at: new Date().toISOString(), agent: 'builder', pane: '%1', pane_pid: 11, pane_started: 'a',
+          worktree: home, launch_claim_path: claim, launch_claim_digest: 'digest', dialog: 'dialog', fingerprint: 'fp',
+        },
+      }],
+    });
+    await cleanupProject(root, 'proj');
+    expect(await fs.stat(path.join(root, claim)).catch(() => null)).toBeNull();
+    await killAgent(root, 'proj', 'builder');
+    await expect(removeProject(root, 'proj')).resolves.toEqual({ ok: true, name: 'proj' });
   });
 });

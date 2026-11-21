@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { killWindow, paneExists, paneIs, processStartTime, run, type PaneIdentity } from './tmux.js';
 import { compareAndSwapTeamEntry, hivePath, manifestRead, manifestWrite, readProjects, readTeam, type ManifestRecord } from './state.js';
 import { revokeTmuxAdmission } from './admission.js';
+import { releasePendingLaunchClaim } from './project.js';
 import type { TeamEntry } from './types.js';
 
 export type CleanupAction = { record: ManifestRecord; action: string; acted: boolean };
@@ -66,6 +67,7 @@ export async function cleanupProject(
           }
           throw e;
         }
+        for (const entry of stamped) await releasePendingLaunchClaim(root, entry);
       }
       continue;
     }

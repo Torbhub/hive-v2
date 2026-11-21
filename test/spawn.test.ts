@@ -56,19 +56,33 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     sendLiteral: vi.fn(async () => {}),
     sendEnter: vi.fn(async () => {}),
     sendArrow: vi.fn(async () => {}),
+    sendEscape: vi.fn(async () => {}),
     killWindow: vi.fn(async () => {}),
     sleep: vi.fn((ms: number) => vi.advanceTimersByTimeAsync(ms)),
   };
+});
+
+vi.mock('../src/admission.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/admission.js')>();
+  return { ...orig, completeTmuxLaunch: vi.fn(orig.completeTmuxLaunch) };
+});
+
+vi.mock('../src/state.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/state.js')>();
+  return { ...orig, compareAndSwapTeamEntry: vi.fn(orig.compareAndSwapTeamEntry) };
 });
 
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
 
 import { closeAgent, effectiveOrchestratorMode, findLatestSession, launchCommand, respawnAgent, spawnAgent, waitIdle, wakeAgent } from '../src/spawn.js';
-import { hubAdd, hubInit, hubResolve, hubTask, setProjectApprovals, setProjectMode, startProject } from '../src/hub.js';
+import { answerDialog, hubAdd, hubInit, hubResolve, hubTask, readDialogFor, redactDialog, setProjectApprovals, setProjectMode, startProject } from '../src/hub.js';
 import { removeProject } from '../src/project.js';
-import { appendTaskEvent, hivePath, manifestRead, readDecisions, readProjects, readTeam, writeJson, writeProjects } from '../src/state.js';
-import { capturePane, killWindow, newWindow, paneIdentity, paneIs, run, sendArrow, sendEnter, sendLiteral } from '../src/tmux.js';
+import { killAgent } from '../src/kill.js';
+import { completeTmuxLaunch } from '../src/admission.js';
+import { appendTaskEvent, compareAndSwapTeamEntry, hivePath, manifestRead, readDecisions, readProjects, readTeam, valueDigest, writeJson, writeProjects } from '../src/state.js';
+import { capturePane, killWindow, newWindow, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep } from '../src/tmux.js';
+import { watchCycle } from '../src/watch.js';
 import { approveContract, taskContract } from './task-contract.js';
 
 function spawn(root: string, opts: Parameters<typeof spawnAgent>[2]): Promise<string> {
@@ -974,15 +988,40 @@ describe('tasked relaunch cleanup', () => {
     vi.mocked(paneIs).mockResolvedValueOnce(false);
   }
 
-  it.each(['respawn', 'wake'])('kills the new pane after %s registration when idle fails', async (kind) => {
+  it.each(['respawn', 'wake'])('preserves a dialog after %s registration and resumes the same replacement', async (kind) => {
     const { root, home } = await launchedWorker();
-    vi.mocked(capturePane).mockImplementationOnce(async () => PERMISSION);
+    const original = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
     if (kind === 'wake') await allowWake(home);
     const operation = kind === 'respawn' ? respawnAgent(root, 'demo', 'worker1') : wakeAgent(root, 'demo', 'worker1');
-    await expect(operation).rejects.toThrow(/dialog/);
+    await expect(operation).resolves.toBe('%9');
+    const replacement = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+    expect(replacement).toMatchObject({ attempts_used: 2, lease_revoked: false });
+    expect(replacement.lease_id).not.toBe(original.lease_id);
+    expect(replacement.launch_pending).toMatchObject({ pane: '%9', lease_id: replacement.lease_id });
+    expect(replacement.worktree).toBe(original.worktree);
+    expect(replacement.launch_pending?.worktree).toBe(original.worktree);
+    const approval = redactDialog((await readDialogFor(root, 'demo', 'worker1'))!).fingerprint;
+    let answered = false;
+    vi.mocked(capturePane).mockImplementation(async () => answered ? IDLE : PERMISSION);
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      if (text === '1') answered = true;
+    });
+    await answerDialog(root, 'demo', 'worker1', '1', approval);
+    const resumed = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+    expect(resumed).toMatchObject({ attempts_used: 2, lease_id: replacement.lease_id });
+    expect(resumed.launch_pending).toBeUndefined();
+  });
+
+  it.each(['respawn', 'wake'])('kills the new pane and revokes the replacement after %s startup timeout', async (kind) => {
+    const { root, home } = await launchedWorker();
+    vi.mocked(capturePane).mockImplementation(async () => 'starting');
+    if (kind === 'wake') await allowWake(home);
+    const operation = kind === 'respawn' ? respawnAgent(root, 'demo', 'worker1') : wakeAgent(root, 'demo', 'worker1');
+    await expect(operation).rejects.toThrow(/never went idle/);
     expect(killWindow).toHaveBeenCalledWith('%9', { pid: 4242, started: 'later' });
     expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')).toMatchObject({
-      lease_revoked: true, admission_status: 'launch_failed', closed_at: expect.any(String),
+      attempts_used: 2, lease_revoked: true, admission_status: 'launch_failed', closed_at: expect.any(String),
     });
   });
 
@@ -1087,7 +1126,7 @@ describe('trust dialog at spawn', () => {
     let calls = 0;
     const typed = vi.mocked(sendLiteral).mock.calls.length;
     const kills = vi.mocked(killWindow).mock.calls.length;
-    vi.mocked(capturePane).mockImplementation(async () => (++calls === 1 ? PERMISSION : IDLE));
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
     try {
       await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
       expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(0);
@@ -1114,18 +1153,32 @@ describe('trust dialog at spawn', () => {
     }
   }, 20_000);
 
-  it('surfaces an undeclared dialog on managed auto relaunch without typing or killing the new pane', async () => {
-    const { root } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+  it('resumes an undeclared dialog on managed auto relaunch with the same replacement', async () => {
+    const { root, home } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
     await setProjectMode(root, 'demo', 'auto');
-    let calls = 0;
     const typed = vi.mocked(sendLiteral).mock.calls.length;
     const kills = vi.mocked(killWindow).mock.calls.length;
-    vi.mocked(capturePane).mockImplementation(async () => (++calls === 1 ? PERMISSION : IDLE));
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
     try {
       await expect(respawnAgent(root, 'demo', 'builder')).resolves.toBe('%9');
       expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(0);
       expect(vi.mocked(killWindow).mock.calls.slice(kills).filter((call) => call[0] === '%9')).toHaveLength(0);
+      const replacement = (await readTeam(home)).agents.find((agent) => agent.name === 'builder')!;
+      expect(replacement.launch_pending?.pane).toBe('%9');
+      expect(replacement.launch_pending?.lease_id).toBe(replacement.lease_id);
+      expect(replacement.worktree).toBe(home);
+      expect(replacement.launch_pending?.worktree).toBe(home);
+      const approval = redactDialog((await readDialogFor(root, 'demo', 'builder'))!).fingerprint;
+      let answered = false;
+      vi.mocked(capturePane).mockImplementation(async () => answered ? IDLE : PERMISSION);
+      vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+        if (text === '1') answered = true;
+      });
+      await answerDialog(root, 'demo', 'builder', '1', approval);
+      expect(vi.mocked(sendLiteral).mock.calls.slice(typed).filter((call) => call[1].startsWith('You are builder'))).toHaveLength(1);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'builder')?.launch_pending).toBeUndefined();
     } finally {
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
     }
   }, 20_000);
@@ -1177,14 +1230,815 @@ describe('trust dialog at spawn', () => {
     }
   }, 20_000);
 
-  it('any other dialog still throws outside auto mode', async () => {
-    const { root } = await setup({ name: 'builder' });
+  it('preserves a dialog launch with bounded evidence, its workspace, lease, and claim', async () => {
+    const { root, home } = await setup({ name: 'builder' });
     await setProjectMode(root, 'demo', 'ask');
+    const id = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, id);
+    const worktree = hivePath(home, 'lanes', 'worker1');
+    const secret = 'launch-recovery-secret';
+    const dialog = PERMISSION.replace(
+      '   ↑/↓ select',
+      `   api_key=${secret}\n   ${'x'.repeat(5000)}\n   ↑/↓ select`,
+    );
     const typed = vi.mocked(sendLiteral).mock.calls.length;
-    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+    const kills = vi.mocked(killWindow).mock.calls.length;
+    const runs = vi.mocked(run).mock.calls.length;
+    vi.mocked(capturePane).mockImplementation(async () => dialog);
     try {
-      await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow(/answer it in the pane, then respawn/);
+      await expect(spawn(root, { agent: 'worker1', task: id })).resolves.toBe('%9');
       expect(vi.mocked(sendLiteral).mock.calls.slice(typed)).toHaveLength(0);
+      expect(vi.mocked(killWindow).mock.calls.slice(kills)).toHaveLength(0);
+      const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(worker).toMatchObject({
+        pane: '%9', worktree, lease_revoked: false, admission_status: 'admitted', attempts_used: 1,
+      });
+      expect(worker.launch_pending).toMatchObject({
+        agent: 'worker1', pane: '%9', pane_pid: 4242, pane_started: 'later',
+        lease_id: worker.lease_id, launch_claim_path: worker.launch_claim_path,
+      });
+      expect(worker.launch_pending!.dialog).toContain('api_key=[redacted]');
+      expect(worker.launch_pending!.dialog).not.toContain(secret);
+      expect(worker.launch_pending!.dialog.length).toBeLessThanOrEqual(4000);
+      const external = redactDialog((await readDialogFor(root, 'demo', 'worker1'))!);
+      expect(external.text).toContain('api_key=[redacted]');
+      expect(external.text).not.toContain(secret);
+      expect(worker.launch_pending!.fingerprint).toMatch(/^[0-9a-f]{40}$/);
+      expect(await fs.stat(worktree)).toBeTruthy();
+      expect(await fs.stat(path.join(root, worker.launch_claim_path!))).toBeTruthy();
+      expect(vi.mocked(run).mock.calls.slice(runs).some((call) => call[0] === 'jj' && call[1].includes('forget'))).toBe(false);
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  async function pendingLaunch() {
+    const { root, home } = await setup({ name: 'builder' });
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    const id = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, id);
+    try {
+      vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+      await spawn(root, { agent: 'worker1', task: id });
+      const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      const approval = redactDialog((await readDialogFor(root, 'demo', 'worker1'))!).fingerprint;
+      return { root, home, id, worker, approval };
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }
+
+  async function pendingPlainLaunch() {
+    const { root, home } = await setup({ name: 'builder' });
+    try {
+      vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+      await spawn(root, { agent: 'worker1' });
+      const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      const approval = redactDialog((await readDialogFor(root, 'demo', 'worker1'))!).fingerprint;
+      return { root, home, worker, approval };
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }
+
+  it('resumes the same pane and lease after a structured answer without another attempt', async () => {
+    const { root, home, id, worker, approval } = await pendingLaunch();
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    try {
+      await expect(spawn(root, { agent: 'worker1', task: id })).rejects.toThrow(/already has an agent/);
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.attempts_used).toBe(1);
+
+      let reads = 0;
+      vi.mocked(capturePane).mockImplementation(async () => ++reads <= 2 ? PERMISSION : IDLE);
+      const typed = vi.mocked(sendLiteral).mock.calls.length;
+      await answerDialog(root, 'demo', 'worker1', '1', approval);
+      const sent = vi.mocked(sendLiteral).mock.calls.slice(typed);
+      expect(sent[0]).toEqual(['%9', '1', { pid: 4242, started: 'later' }]);
+      expect(sent.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(1);
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+
+      const resumed = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(resumed).toMatchObject({
+        pane: '%9', lease_id: worker.lease_id, attempts_used: 1,
+        lease_revoked: false, admission_status: 'admitted',
+      });
+      expect(resumed.launch_pending).toBeUndefined();
+      await expect(fs.stat(path.join(root, worker.launch_claim_path!))).rejects.toThrow();
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('registers non-task pending claim metadata when no prior claim exists', async () => {
+    const { root, home, worker, approval } = await pendingPlainLaunch();
+    expect(worker).toMatchObject({
+      launch_claim_path: worker.launch_pending!.launch_claim_path,
+      launch_claim_digest: worker.launch_pending!.launch_claim_digest,
+      launch_claim_in_worktree: false,
+      launch_claim_completed: false,
+    });
+    let answered = false;
+    vi.mocked(capturePane).mockImplementation(async () => answered ? IDLE : PERMISSION);
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      if (text === '1') answered = true;
+    });
+    try {
+      await answerDialog(root, 'demo', 'worker1', '1', approval);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+    } finally {
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('replaces older non-task top-level claim metadata with the pending replacement claim', async () => {
+    const { root, home, worker } = await pendingPlainLaunch();
+    const olderClaim = '.hive-hub/launches/demo:older.json';
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: (await readTeam(home)).agents.map((agent) => agent.name === 'worker1'
+        ? { ...agent, launch_claim_path: olderClaim, launch_claim_digest: 'older-digest' } : agent),
+    });
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+    await respawnAgent(root, 'demo', 'worker1');
+    const replacement = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+    expect(replacement.launch_pending).toBeDefined();
+    expect(replacement.launch_claim_path).toBe(replacement.launch_pending!.launch_claim_path);
+    expect(replacement.launch_claim_digest).toBe(replacement.launch_pending!.launch_claim_digest);
+    expect(replacement.launch_claim_path).not.toBe(olderClaim);
+    expect(replacement.launch_claim_path).not.toBe(worker.launch_claim_path);
+    const approval = redactDialog((await readDialogFor(root, 'demo', 'worker1'))!).fingerprint;
+    let answered = false;
+    vi.mocked(capturePane).mockImplementation(async () => answered ? IDLE : PERMISSION);
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      if (text === '1') answered = true;
+    });
+    try {
+      await answerDialog(root, 'demo', 'worker1', '1', approval);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+    } finally {
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('resumes only the selected worker@path when duplicate names have pending launches', async () => {
+    const { root, home, worker } = await pendingPlainLaunch();
+    const otherWorktree = path.join(home, 'other');
+    await fs.mkdir(otherWorktree, { recursive: true });
+    const otherClaim = '.hive-hub/launches/demo:other.json';
+    await writeJson(path.join(root, otherClaim), { project: 'demo' });
+    const other = {
+      ...worker,
+      pane: '%8', pane_pid: 4343, pane_started: 'other', worktree: otherWorktree,
+      launch_claim_path: otherClaim, launch_claim_digest: 'other-digest',
+      launch_pending: {
+        ...worker.launch_pending!, pane: '%8', pane_pid: 4343, pane_started: 'other',
+        worktree: otherWorktree, launch_claim_path: otherClaim, launch_claim_digest: 'other-digest',
+      },
+    };
+    await writeJson(hivePath(home, 'team.json'), { agents: [worker, other] });
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+    const ref = `worker1@${otherWorktree}`;
+    const approval = redactDialog((await readDialogFor(root, 'demo', ref))!).fingerprint;
+    let answered = false;
+    vi.mocked(capturePane).mockImplementation(async () => answered ? IDLE : PERMISSION);
+    vi.mocked(sendLiteral).mockClear();
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      if (text === '1') answered = true;
+    });
+    try {
+      await answerDialog(root, 'demo', ref, '1', approval);
+      const agents = (await readTeam(home)).agents;
+      expect(agents.find((agent) => agent.pane === '%8')?.launch_pending).toBeUndefined();
+      expect(agents.find((agent) => agent.pane === '%9')?.launch_pending).toBeDefined();
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[0] === '%8' && call[1].startsWith('You are worker1')))
+        .toHaveLength(1);
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[0] === '%9' && call[1].startsWith('You are worker1')))
+        .toHaveLength(0);
+      expect(await fs.stat(path.join(root, otherClaim)).catch(() => null)).toBeNull();
+      expect(await fs.stat(path.join(root, worker.launch_claim_path!))).toBeTruthy();
+    } finally {
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('resumes after a crash immediately after the final dialog key without a second pickup', async () => {
+    const { root, home, approval } = await pendingPlainLaunch();
+    let answered = false;
+    vi.mocked(capturePane).mockImplementation(async () => answered ? IDLE : PERMISSION);
+    vi.mocked(sendLiteral).mockClear();
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      if (text === '1') answered = true;
+    });
+    const sleepImplementation = vi.mocked(sleep).getMockImplementation()!;
+    vi.mocked(sleep).mockRejectedValueOnce(new Error('crash after delivery'));
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval)).rejects.toThrow('crash after delivery');
+      const delivered = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(delivered.launch_pending?.dialog_delivered).toBe(true);
+      expect(delivered.launch_pending?.pickup_typed).toBeUndefined();
+      vi.mocked(sleep).mockImplementation(sleepImplementation);
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+      await answerDialog(root, 'demo', 'worker1', '1', approval);
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(1);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+    } finally {
+      vi.mocked(sleep).mockImplementation(sleepImplementation);
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('refuses a stale pane identity and retains the pending evidence and claim', async () => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    vi.mocked(paneIs).mockResolvedValue(false);
+    let reads = 0;
+    vi.mocked(capturePane).mockImplementation(async () => ++reads <= 2 ? PERMISSION : IDLE);
+    vi.mocked(sendLiteral).mockClear();
+    vi.mocked(sendArrow).mockClear();
+    vi.mocked(sendEnter).mockClear();
+    vi.mocked(sendEscape).mockClear();
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval))
+        .rejects.toThrow(/identity|changed|no longer/);
+      expect(vi.mocked(sendLiteral)).not.toHaveBeenCalled();
+      expect(vi.mocked(sendArrow)).not.toHaveBeenCalled();
+      expect(vi.mocked(sendEnter)).not.toHaveBeenCalled();
+      expect(vi.mocked(sendEscape)).not.toHaveBeenCalled();
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+      const pending = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(pending.launch_pending).toEqual(worker.launch_pending);
+      expect(await fs.stat(path.join(root, worker.launch_claim_path!))).toBeTruthy();
+    } finally {
+      vi.mocked(paneIs).mockResolvedValue(true);
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('refuses a substituted pending dialog without sending keys', async () => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: (await readTeam(home)).agents.map((agent) => agent.name === 'worker1'
+        ? { ...agent, launch_pending: { ...agent.launch_pending!, fingerprint: 'replacement' } } : agent),
+    });
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+    vi.mocked(sendLiteral).mockClear();
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval))
+        .rejects.toThrow(/dialog|pending/);
+      expect(vi.mocked(sendLiteral)).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('records an answer before keys and refuses a conflicting answer without input', async () => {
+    const { root, home, approval } = await pendingLaunch();
+    const changed = PERMISSION.replace('Run this command?', 'Run this changed command?');
+    let reads = 0;
+    vi.mocked(capturePane).mockImplementation(async () => ++reads === 1 ? PERMISSION : changed);
+    vi.mocked(sendLiteral).mockClear();
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval)).rejects.toThrow(/changed/);
+      const recorded = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!.launch_pending!;
+      expect(recorded).toMatchObject({ answer_choice: '1', answer_option: 'Approve once', approved: true });
+      expect(recorded.pickup_typed).toBeUndefined();
+      expect(recorded.dialog_delivered).toBeUndefined();
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval)).rejects.toThrow(/delivery/);
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(0);
+      vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+      await expect(answerDialog(root, 'demo', 'worker1', '3', approval)).rejects.toThrow(/different recorded answer/);
+      expect(vi.mocked(sendLiteral)).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it.each(['3', 'esc'])('denial %s revokes and cleans the pending launch without a pickup', async (choice) => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    let reads = 0;
+    vi.mocked(capturePane).mockImplementation(async () => ++reads <= 2 ? PERMISSION : IDLE);
+    vi.mocked(sendLiteral).mockClear();
+    vi.mocked(sendEscape).mockClear();
+    const worktree = worker.worktree!;
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', choice, approval))
+        .resolves.toMatchObject({ dialog_gone: true });
+      const identity = { pid: 4242, started: 'later' };
+      if (choice === 'esc') expect(vi.mocked(sendEscape)).toHaveBeenCalledWith('%9', identity);
+      else expect(vi.mocked(sendLiteral)).toHaveBeenCalledWith('%9', '3', identity);
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(0);
+      expect(vi.mocked(killWindow)).toHaveBeenCalledWith('%9', identity);
+      const denied = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(denied).toMatchObject({ admission_status: 'launch_failed', lease_revoked: true, closed_at: expect.any(String) });
+      expect(denied.launch_error).toMatch(/denied/);
+      expect(denied.launch_pending!.dialog).toContain('Run this command?');
+      expect(await fs.stat(worktree).catch(() => null)).toBeNull();
+      expect(await fs.stat(path.join(root, worker.launch_claim_path!)).catch(() => null)).toBeNull();
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('passes the recorded identity to every menu key before resuming', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const id = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, id);
+    const worktree = path.join(home, 'lane');
+    await fs.mkdir(worktree, { recursive: true });
+    const menu = trustAt(worktree, true);
+    vi.mocked(capturePane).mockImplementation(async () => menu);
+    await spawn(root, { agent: 'worker1', task: id, worktree: 'lane' });
+    const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+    const approval = redactDialog((await readDialogFor(root, 'demo', 'worker1'))!).fingerprint;
+    let answered = false;
+    vi.mocked(capturePane).mockImplementation(async () => answered ? IDLE : menu);
+    vi.mocked(sendEnter).mockImplementation(async () => { answered = true; });
+    vi.mocked(sendArrow).mockClear();
+    vi.mocked(sendEnter).mockClear();
+    try {
+      await answerDialog(root, 'demo', 'worker1', '2', approval);
+      const identity = { pid: 4242, started: 'later' };
+      expect(vi.mocked(sendArrow)).toHaveBeenCalledWith('%9', 'Down', identity);
+      expect(vi.mocked(sendEnter)).toHaveBeenCalledWith('%9', identity);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+    } finally {
+      vi.mocked(sendEnter).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('resumes through the real watch auto-approval path without reacquiring its grant', async () => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    await setProjectMode(root, 'demo', 'auto');
+    vi.mocked(sendLiteral).mockClear();
+    let answered = false;
+    vi.mocked(capturePane).mockImplementation(async () => answered ? IDLE : PERMISSION);
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      if (text === '1') answered = true;
+    });
+    try {
+      await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts: new Map(), marks: new Set() });
+      const resumed = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(resumed).toMatchObject({ lease_id: worker.lease_id, attempts_used: 1 });
+      expect(resumed.launch_pending).toBeUndefined();
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(1);
+    } finally {
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('close releases the preserved claim so project delete can finish', async () => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    await closeAgent(root, 'demo', 'worker1');
+    await closeAgent(root, 'demo', 'builder');
+    await closeAgent(root, 'demo', 'demo-orchestrator');
+    expect(vi.mocked(killWindow)).toHaveBeenCalledWith('%9', { pid: 4242, started: 'later' });
+    expect(await fs.stat(path.join(root, worker.launch_claim_path!)).catch(() => null)).toBeNull();
+    await expect(removeProject(root, 'demo')).resolves.toEqual({ ok: true, name: 'demo' });
+  }, 20_000);
+
+  it('pending respawn releases the old claim and clears pending identity', async () => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    await respawnAgent(root, 'demo', 'worker1');
+    const replacement = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+    expect(replacement).toMatchObject({ attempts_used: 2 });
+    expect(replacement.launch_pending).toBeUndefined();
+    expect(replacement.lease_id).not.toBe(worker.lease_id);
+    expect(await fs.stat(path.join(root, worker.launch_claim_path!)).catch(() => null)).toBeNull();
+  }, 20_000);
+
+  it.each(['pickup', 'finish'])('%s failure revokes and cleans the launch with dialog evidence', async (stage) => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    let reads = 0;
+    vi.mocked(capturePane).mockImplementation(async () => ++reads <= 2 ? PERMISSION : IDLE);
+    if (stage === 'pickup') {
+      vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+        if (text.startsWith('You are worker1')) throw new Error('pickup failed');
+      });
+    } else {
+      vi.mocked(completeTmuxLaunch).mockRejectedValueOnce(new Error('finish failed'));
+    }
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval))
+        .rejects.toThrow(`${stage} failed`);
+      const failed = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(failed).toMatchObject({ admission_status: 'launch_failed', lease_revoked: true, closed_at: expect.any(String) });
+      expect(failed.launch_error).toContain(`${stage} failed`);
+      expect(failed.launch_error).toContain('Run this command?');
+      expect(vi.mocked(killWindow)).toHaveBeenCalledWith('%9', { pid: 4242, started: 'later' });
+      expect(await fs.stat(worker.worktree!).catch(() => null)).toBeNull();
+      expect(await fs.stat(path.join(root, worker.launch_claim_path!)).catch(() => null)).toBeNull();
+    } finally {
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('resumes after a session-record failure without another dialog or pickup', async () => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    vi.mocked(sendLiteral).mockClear();
+    const sessionHome = mkdtempSync(path.join(tmpdir(), 'hive-pending-session-'));
+    const defaultHome = os.homedir();
+    vi.mocked(os.homedir).mockReturnValue(sessionHome);
+    const state = path.join(sessionHome, '.kimi-code', 'sessions', 'wd_test', 'session_worker', 'state.json');
+    await fs.mkdir(path.dirname(state), { recursive: true });
+    await fs.writeFile(state, JSON.stringify({ cwd: worker.worktree, updatedAt: 1, lastPrompt: 'You are worker1 of project demo.' }));
+    const compare = vi.mocked(compareAndSwapTeamEntry).getMockImplementation()!;
+    let failed = false;
+    vi.mocked(compareAndSwapTeamEntry).mockImplementation(async (home, expected, update) => {
+      if (!failed && update && update.session_id === 'session_worker') {
+        failed = true;
+        throw new Error('session failed');
+      }
+      return compare(home, expected, update);
+    });
+    let reads = 0;
+    vi.mocked(capturePane).mockImplementation(async () => ++reads <= 2 ? PERMISSION : IDLE);
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval))
+        .rejects.toThrow('session failed');
+      const pending = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(pending.launch_pending?.pickup_typed).toBe(true);
+      expect(pending.launch_pending?.resume_token).toBeUndefined();
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+      await answerDialog(root, 'demo', 'worker1', '1', approval);
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(1);
+      const resumed = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(resumed.session_id).toBe('session_worker');
+      expect(resumed.launch_pending).toBeUndefined();
+    } finally {
+      vi.mocked(compareAndSwapTeamEntry).mockImplementation(compare);
+      vi.mocked(os.homedir).mockReturnValue(defaultHome);
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('resumes a final-clear failure after finish without another dialog or pickup', async () => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    vi.mocked(completeTmuxLaunch).mockClear();
+    vi.mocked(sendLiteral).mockClear();
+    const compare = vi.mocked(compareAndSwapTeamEntry).getMockImplementation()!;
+    let failed = false;
+    vi.mocked(compareAndSwapTeamEntry).mockImplementation(async (home, expected, update) => {
+      if (!failed && update && 'launch_pending' in update && update.launch_pending === undefined
+        && expected.launch_pending?.claim_completed) {
+        failed = true;
+        throw new Error('clear failed');
+      }
+      return compare(home, expected, update);
+    });
+    let reads = 0;
+    vi.mocked(capturePane).mockImplementation(async () => ++reads <= 2 ? PERMISSION : IDLE);
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval))
+        .rejects.toThrow('clear failed');
+      const pending = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(pending.launch_pending).toMatchObject({ pickup_typed: true, claim_completed: true });
+      expect(pending.launch_pending?.resume_token).toBeUndefined();
+      expect(pending.lease_revoked).toBe(false);
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+      await answerDialog(root, 'demo', 'worker1', '1', approval);
+      expect(vi.mocked(completeTmuxLaunch)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(1);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+    } finally {
+      vi.mocked(compareAndSwapTeamEntry).mockImplementation(compare);
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('claims resume atomically before the first pickup so concurrent answers cannot inject twice', async () => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    const screens = [PERMISSION, PERMISSION, IDLE, IDLE, IDLE, IDLE, IDLE, PERMISSION, IDLE];
+    vi.mocked(capturePane).mockImplementation(async () => screens.shift() ?? IDLE);
+    let pickups = 0;
+    let entered!: () => void;
+    let release!: () => void;
+    const enteredPickup = new Promise<void>((resolve) => { entered = resolve; });
+    const releasePickup = new Promise<void>((resolve) => { release = resolve; });
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      if (!text.startsWith('You are worker1')) return;
+      pickups += 1;
+      if (pickups === 1) {
+        entered();
+        await releasePickup;
+      }
+    });
+    const first = answerDialog(root, 'demo', 'worker1', '1', approval);
+    try {
+      await enteredPickup;
+      const claimed = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(claimed.launch_pending?.resume_token).toEqual(expect.any(String));
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval))
+        .rejects.toThrow(/resuming|changed/);
+      release();
+      await first;
+      expect(pickups).toBe(1);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+    } finally {
+      release();
+      await first.catch(() => {});
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('releases a non-idle resume for a same-answer retry without duplicate pickup', async () => {
+    const { root, home, approval } = await pendingLaunch();
+    const screens = [PERMISSION, PERMISSION];
+    let retry = false;
+    vi.mocked(capturePane).mockImplementation(async () => retry ? IDLE : screens.shift() ?? 'starting');
+    vi.mocked(sendLiteral).mockClear();
+    vi.mocked(killWindow).mockClear();
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval)).rejects.toThrow(/not idle/);
+      const pending = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(pending.launch_pending?.resume_token).toBeUndefined();
+      expect(pending.launch_pending?.pickup_typed).toBeUndefined();
+      expect(vi.mocked(killWindow)).not.toHaveBeenCalled();
+      retry = true;
+      await answerDialog(root, 'demo', 'worker1', '1', approval);
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(1);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('rejects an approval replayed after the lease changes', async () => {
+    const { root, home, worker, approval } = await pendingLaunch();
+    expect(approval).not.toBe(worker.launch_pending!.fingerprint);
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: (await readTeam(home)).agents.map((agent) => agent.name === 'worker1'
+        ? { ...agent, lease_id: 'replacement-lease', launch_pending: { ...agent.launch_pending!, lease_id: 'replacement-lease' } }
+        : agent),
+    });
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+    vi.mocked(sendLiteral).mockClear();
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval)).rejects.toThrow(/changed|approval|pending/);
+      expect(vi.mocked(sendLiteral)).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('stops before Enter when the menu changes after selection', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const id = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, id);
+    const worktree = path.join(home, 'lane');
+    await fs.mkdir(worktree, { recursive: true });
+    const menu = trustAt(worktree, true);
+    let screen = menu;
+    vi.mocked(capturePane).mockImplementation(async () => screen);
+    await spawn(root, { agent: 'worker1', task: id, worktree: 'lane' });
+    const approval = redactDialog((await readDialogFor(root, 'demo', 'worker1'))!).fingerprint;
+    vi.mocked(sendArrow).mockImplementation(async () => { screen = menu.replace('Trust this folder?', 'Trust this folder NOW?'); });
+    vi.mocked(sendEnter).mockClear();
+    vi.mocked(sendLiteral).mockClear();
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '2', approval)).rejects.toThrow(/changed/);
+      expect(vi.mocked(sendEnter)).not.toHaveBeenCalled();
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(0);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeDefined();
+    } finally {
+      vi.mocked(sendArrow).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('refuses a stale ordinary worker before sending any key', async () => {
+    const { root, home } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+    const dialog = (await readDialogFor(root, 'demo', 'builder'))!;
+    expect(redactDialog(dialog).fingerprint).toBe(dialog.fingerprint);
+    vi.mocked(paneIs).mockResolvedValue(false);
+    vi.mocked(sendLiteral).mockClear();
+    try {
+      await expect(answerDialog(root, 'demo', 'builder', '1', dialog.fingerprint)).rejects.toThrow(/identity|no longer/);
+      expect(vi.mocked(sendLiteral)).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(paneIs).mockResolvedValue(true);
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+    expect(home).toBeTruthy();
+  }, 20_000);
+
+  async function orphanedLaunch(stage: 'wait' | 'session', pickupTyped: boolean) {
+    const pending = await pendingLaunch();
+    await writeJson(hivePath(pending.home, 'team.json'), {
+      agents: (await readTeam(pending.home)).agents.map((agent) => agent.name === 'worker1'
+        ? {
+          ...agent,
+          launch_pending: {
+            ...agent.launch_pending!, resume_token: 'orphaned-owner', resume_pid: process.pid,
+            resume_started: 'dead-owner', pickup_started: stage !== 'wait', pickup_typed: pickupTyped,
+            answer_choice: '1', answer_option: 'Approve once', approved: true, dialog_delivered: true,
+          },
+        }
+        : agent),
+    });
+    vi.mocked(sendLiteral).mockClear();
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    return pending;
+  }
+
+  it('reclaims an orphaned token before pickup', async () => {
+    const { root, home, approval } = await orphanedLaunch('wait', false);
+    await answerDialog(root, 'demo', 'worker1', '1', approval);
+    expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(1);
+    expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+  }, 20_000);
+
+  it('reclaims an orphaned token after pickup without repeating it', async () => {
+    const { root, home, approval } = await orphanedLaunch('session', true);
+    await answerDialog(root, 'demo', 'worker1', '1', approval);
+    expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(0);
+    expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+  }, 20_000);
+
+  it('reconciles a token left behind when releaseResume itself fails', async () => {
+    const { root, home, approval } = await pendingLaunch();
+    vi.mocked(completeTmuxLaunch).mockClear();
+    vi.mocked(sendLiteral).mockClear();
+    const compare = vi.mocked(compareAndSwapTeamEntry).getMockImplementation()!;
+    let clearFailed = false;
+    let releaseFailed = false;
+    vi.mocked(compareAndSwapTeamEntry).mockImplementation(async (home, expected, update) => {
+      if (!clearFailed && update && 'launch_pending' in update && update.launch_pending === undefined
+        && expected.launch_pending?.claim_completed) {
+        clearFailed = true;
+        throw new Error('clear failed');
+      }
+      if (!releaseFailed && update && expected.launch_pending?.resume_token && update.launch_pending?.resume_token === undefined) {
+        releaseFailed = true;
+        throw new Error('release failed');
+      }
+      return compare(home, expected, update);
+    });
+    let reads = 0;
+    vi.mocked(capturePane).mockImplementation(async () => ++reads <= 2 ? PERMISSION : IDLE);
+    try {
+      await expect(answerDialog(root, 'demo', 'worker1', '1', approval)).rejects.toThrow('release failed');
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending?.resume_token)
+        .toEqual(expect.any(String));
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+      await answerDialog(root, 'demo', 'worker1', '1', approval);
+      expect(vi.mocked(completeTmuxLaunch)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(sendLiteral).mock.calls.filter((call) => call[1].startsWith('You are worker1'))).toHaveLength(1);
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+    } finally {
+      vi.mocked(compareAndSwapTeamEntry).mockImplementation(compare);
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('reports rollback failure with the original error primary when the replacement is missing', async () => {
+    const { root, home } = await pendingPlainLaunch();
+    vi.mocked(newWindow).mockImplementationOnce(async () => {
+      await writeJson(hivePath(home, 'team.json'), { agents: [] });
+      throw new Error('replacement missing');
+    });
+    const error = await respawnAgent(root, 'demo', 'worker1').catch((cause: unknown) => cause as AggregateError) as AggregateError;
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error.message).toBe('replacement missing');
+    expect(error.errors[0].message).toBe('replacement missing');
+    expect(error.errors[1].message).toMatch(/rollback/);
+  }, 20_000);
+
+  it('reports rollback failure with the original error primary when rollback CAS fails', async () => {
+    const { root, home } = await pendingPlainLaunch();
+    const compare = vi.mocked(compareAndSwapTeamEntry).getMockImplementation()!;
+    let failed = false;
+    vi.mocked(compareAndSwapTeamEntry).mockImplementation(async (home, expected, update) => {
+      if (!failed && update && update.launch_error?.includes('replacement CAS failed')) {
+        failed = true;
+        return undefined;
+      }
+      return compare(home, expected, update);
+    });
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      if (text.startsWith('You are worker1')) throw new Error('replacement CAS failed');
+    });
+    try {
+      const error = await respawnAgent(root, 'demo', 'worker1').catch((cause: unknown) => cause as AggregateError) as AggregateError;
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(error.message).toBe('replacement CAS failed');
+      expect(error.errors[0].message).toBe('replacement CAS failed');
+      expect(error.errors[1].message).toMatch(/rollback CAS failed/);
+      expect(vi.mocked(killWindow)).toHaveBeenCalledWith('%9', { pid: 4242, started: 'later' });
+      expect(home).toBeTruthy();
+    } finally {
+      vi.mocked(compareAndSwapTeamEntry).mockImplementation(compare);
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('leaves a terminal record when a non-task pending replacement fails after old-state release', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+    await spawn(root, { agent: 'worker1' });
+    const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+    vi.mocked(newWindow).mockRejectedValueOnce(new Error('replacement failed'));
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    await expect(respawnAgent(root, 'demo', 'worker1')).rejects.toThrow('replacement failed');
+    const failed = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+    expect(failed.closed_at).toEqual(expect.any(String));
+    expect(failed.launch_error).toContain('replacement failed');
+    expect(await fs.stat(path.join(root, worker.launch_claim_path!)).catch(() => null)).toBeNull();
+  }, 20_000);
+
+  it('records launch_failed when non-task replacement input fails after registration', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+    await spawn(root, { agent: 'worker1' });
+    const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      if (text.startsWith('You are worker1')) throw new Error('replacement input failed');
+    });
+    try {
+      await expect(respawnAgent(root, 'demo', 'worker1')).rejects.toThrow('replacement input failed');
+      const failed = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(failed).toMatchObject({ pane: '%9', admission_status: 'launch_failed' });
+      expect(failed.launch_error).toContain('replacement input failed');
+      expect(failed.closed_at).toEqual(expect.any(String));
+      expect(vi.mocked(killWindow)).toHaveBeenCalledWith('%9', { pid: 4242, started: 'later' });
+      expect(await fs.stat(path.join(root, worker.launch_claim_path!)).catch(() => null)).toBeNull();
+    } finally {
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('cascade releases pending claims before project deletion', async () => {
+    const { root, home, worker } = await pendingLaunch();
+    await closeAgent(root, 'demo', 'builder');
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: (await readTeam(home)).agents.map((agent) => agent.name === 'worker1'
+        ? { ...agent, parent: 'demo-orchestrator' } : agent),
+    });
+    await killAgent(root, 'demo');
+    expect(await fs.stat(path.join(root, worker.launch_claim_path!)).catch(() => null)).toBeNull();
+    await expect(removeProject(root, 'demo')).resolves.toEqual({ ok: true, name: 'demo' });
+  }, 20_000);
+
+  it('uses raw dialog text for a declared SHA push and exact secret-bearing command digest', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const secret = 'sk-rawcommandsecret';
+    const command = `git push origin ${'a'.repeat(40)}:refs/heads/${secret}`;
+    const output = 'Return the named artifact and its verification evidence to the orchestrator.';
+    const contract = { ...taskContract(home, [], output), action_scope: [`command:${valueDigest(command)}`] };
+    const id = await hubTask(root, 'demo', 'do it');
+    await approveContract(root, id, contract);
+    const dialog = PERMISSION.replace('   $ echo hive-calibration', `   $ ${command}`);
+    vi.mocked(capturePane).mockImplementation(async () => dialog);
+    await spawn(root, { agent: 'worker1', task: id });
+    const raw = (await readDialogFor(root, 'demo', 'worker1'))!;
+    expect(raw.text).toContain(command);
+    expect(redactDialog(raw).text).not.toContain(secret);
+    await setProjectMode(root, 'demo', 'auto');
+    let answered = false;
+    vi.mocked(capturePane).mockImplementation(async () => answered ? IDLE : dialog);
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      if (text === '1') answered = true;
+    });
+    try {
+      await watchCycle(root, {}, new Set(), new Map(), new Map(), { verdicts: new Map(), marks: new Set() });
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.launch_pending).toBeUndefined();
+    } finally {
+      vi.mocked(sendLiteral).mockImplementation(async () => {});
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('still kills the pane, forgets the workspace, and deletes the claim on timeout', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    const id = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, id);
+    const worktree = hivePath(home, 'lanes', 'worker1');
+    const kills = vi.mocked(killWindow).mock.calls.length;
+    vi.mocked(capturePane).mockImplementation(async () => 'starting');
+    try {
+      await expect(spawn(root, { agent: 'worker1', task: id })).rejects.toThrow(/never went idle/);
+      const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
+      expect(worker).toMatchObject({ admission_status: 'launch_failed', lease_revoked: true });
+      expect(worker.launch_pending).toBeUndefined();
+      expect(vi.mocked(killWindow).mock.calls.slice(kills)).toContainEqual(['%9', { pid: 4242, started: 'later' }]);
+      expect(await fs.stat(worktree).catch(() => null)).toBeNull();
+      expect(await fs.stat(path.join(root, worker.launch_claim_path!)).catch(() => null)).toBeNull();
+      expect(vi.mocked(run).mock.calls.some((call) => call[0] === 'jj' && call[1].includes('forget'))).toBe(true);
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
     }

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { captureDeathBundle, wireLogMtime } from './death-bundle.js';
 import { maybeCompact } from './compact.js';
-import { answerDialog, buildStatus, continueProject, readDialogFor, reconcileBlockedTasks, Refusal, wake } from './hub.js';
+import { answerDialog, buildStatus, continueProject, dialogApprovalFingerprint, readDialogFor, reconcileBlockedTasks, Refusal, wake } from './hub.js';
 import { DEFAULT_MODEL, typeLine, wakeAgent } from './spawn.js';
 import { classify, isNativeQuestion, lines } from './screen.js';
 import { appendDecision, compareAndSwapTeamEntry, foldTasks, hasLiveSendingClaim, hivePath, hubPath, readPendingPane, readProjects, readTaskEvents, readTeam, valueDigest, writeJson, writePendingPane } from './state.js';
@@ -197,7 +197,7 @@ async function cancelNativeDialog(
   root: string, project: string, agentRef: string | undefined,
   dialog: NonNullable<Awaited<ReturnType<typeof readDialogFor>>>,
 ): Promise<void> {
-  const answer = await answerDialog(root, project, agentRef, 'esc', dialog.fingerprint);
+  const answer = await answerDialog(root, project, agentRef, 'esc', dialogApprovalFingerprint(dialog));
   if (!answer.dialog_gone) throw new Refusal('native mutation dialog did not close; no operation ran');
 }
 
@@ -220,7 +220,7 @@ async function dispatchDeclaredPush(
   await OPERATION_REGISTRY.push.dispatch('origin', declared.commit, declared.branch, cwd, declared.reference, env);
   await appendDecision(root, {
     project, by: 'watch', task: entry?.task,
-    summary: `dispatched declared push ${declared.commit} to origin/${declared.branch} without native approval`,
+    summary: redactSecrets(`dispatched declared push ${declared.commit} to origin/${declared.branch} without native approval`),
   });
   return true;
 }
@@ -324,8 +324,12 @@ async function maybeAutoApprove(
     ? dialog.options.find((option) => option.offered && !option.saves_rule && /^(Approve|Allow)\b/i.test(option.label))
     : dialog.options.find((option) => option.n === 1);
   if (!opt || !opt.offered || opt.saves_rule) return;
-  const answered = await withResolvedTaskBoundPane(root, project, agentRef,
-    () => answerDialog(root, project, agentRef, String(opt.n), dialog.fingerprint));
+  const { entry } = await watchAgent(root, project, agentRef);
+  const approval = dialogApprovalFingerprint(dialog);
+  const answered = entry?.launch_pending
+    ? await answerDialog(root, project, agentRef, String(opt.n), approval)
+    : await withResolvedTaskBoundPane(root, project, agentRef,
+      () => answerDialog(root, project, agentRef, String(opt.n), approval));
   if (answered === undefined) return;
   await appendDecision(root, {
     project, by: 'watch', summary: `auto-approved "${opt.label}" for: $ ${redactSecrets(command)}`,
