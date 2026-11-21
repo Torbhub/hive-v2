@@ -27,6 +27,7 @@ assert INPUTS['scenario']['options'] == ['preflight', 'count', 'matrix', 'count-
 assert INPUTS['recovery_run_id']['type'] == 'string'
 assert INPUTS['recovery_run_id']['required'] is False
 assert WORKFLOW_CONFIG['jobs']['preflight']['if'] == "inputs.scenario != 'count-recovery'"
+assert WORKFLOW_CONFIG['jobs']['preflight']['environment'] == 't01-smoke'
 RECOVERY_JOB = WORKFLOW_CONFIG['jobs']['count-recovery']
 assert RECOVERY_JOB['if'] == "inputs.scenario == 'count-recovery'"
 assert RECOVERY_JOB['environment'] == 't01-smoke'
