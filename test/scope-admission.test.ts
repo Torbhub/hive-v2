@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 process.env.KIMI_CODE_HOME = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 import { admitTmux } from '../src/admission.js';
-import { normalizeScope, scopesOverlap } from '../src/scope.js';
+import { normalizeScope, protectedClaim, scopesOverlap } from '../src/scope.js';
 import { contractDigest, hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';
 import { newWindow } from '../src/tmux.js';
 import { admitted, artifact, brief, evaluateScope, gitRepo, IDLE, setup, spawn, writeTask } from './scope-fixture.js';
@@ -120,6 +120,15 @@ describe('spawnAgent --task', () => {
 });
 
 describe('normalized repository scope', () => {
+  it.each([
+    'scripts/discipline-comments.mjs',
+    'scripts/discipline-python-comments.py',
+    'scripts/discipline-baseline.json',
+  ])('protects the comment gate file %s from task-scoped admission', (file) => {
+    expect(protectedClaim(file)).toBe(true);
+    expect(protectedClaim(`generated/${path.basename(file)}`)).toBe(false);
+  });
+
   it('uses repository-relative prefixes', async () => {
     const { repository } = await gitRepo();
     await expect(normalizeScope(repository, ['./src/a', 'src'])).resolves.toEqual(['src', 'src/a']);

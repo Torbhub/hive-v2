@@ -1,14 +1,9 @@
 #!/usr/bin/env node
-// discipline-gate.mjs — line-count ratchet for the god files (hive has no
-// linter; growth is how these files got here). Any count above the checked-in
-// baseline fails the gate. --update moves the baseline DOWN only. A missing
-// baseline, a missing entry, or a missing file fails loud — a silent skip is
-// a false green.
-// Modes: --check (default) | --update (ratchet down) | --check-task-appends <root>.
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { commentInventory } from './discipline-comments.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINE = 'scripts/discipline-baseline.json';
@@ -19,15 +14,18 @@ const TASK_APPEND_MODULES = new Set([
 ]);
 const TEAM_WRITE_MODULES = new Set(['src/state.ts', 'src/admission.ts']);
 
-const usage = 'usage: node scripts/discipline-gate.mjs [--check|--update|--check-task-appends <root>|--check-enforcement <root>]';
+const usage = 'usage: node scripts/discipline-gate.mjs [--check|--update|--check-task-appends <root>|--check-enforcement <root>|--inventory-comments [root]]';
 const appendMode = process.argv[2] === '--check-task-appends';
 const enforcementMode = process.argv[2] === '--check-enforcement';
-if (((appendMode || enforcementMode) && process.argv.length !== 4) || (!appendMode && !enforcementMode && process.argv.length > 3)) {
+const inventoryMode = process.argv[2] === '--inventory-comments';
+const scopedMode = appendMode || enforcementMode;
+if ((scopedMode && process.argv.length !== 4) || (inventoryMode && process.argv.length > 4)
+  || (!scopedMode && !inventoryMode && process.argv.length > 3)) {
   console.error(usage);
   process.exit(2);
 }
 const mode = process.argv[2] ?? '--check';
-if (!appendMode && !enforcementMode && !['--check', '--update'].includes(mode)) {
+if (!scopedMode && !inventoryMode && !['--check', '--update'].includes(mode)) {
   console.error(usage);
   process.exit(2);
 }
@@ -36,6 +34,16 @@ const fail = (msg) => {
   console.error(msg);
   process.exit(1);
 };
+
+if (inventoryMode) {
+  const root = process.argv[3] ?? ROOT;
+  try {
+    console.log(JSON.stringify(commentInventory(root), null, 2));
+  } catch (error) {
+    fail(`FAIL: comment inventory: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  process.exit(0);
+}
 
 function sourceAppendErrors(sourceFile) {
   const errors = new Set();
@@ -72,7 +80,6 @@ function sourceAppendErrors(sourceFile) {
         errors.add(sourceFile.fileName);
       }
     }
-    // Re-export aliases have no local import graph here, so fail closed.
     if (ts.isExportDeclaration(node) && node.exportClause && ts.isNamedExports(node.exportClause)
       && node.exportClause.elements.some((element) =>
         (element.propertyName?.text ?? element.name.text) === 'appendTaskEvent')) {
@@ -206,55 +213,120 @@ if (enforcementMode) {
   process.exit(0);
 }
 
-const counts = {};
+const dictionary = () => Object.create(null);
+const regularFile = (file) => {
+  try {
+    return lstatSync(file).isFile();
+  } catch {
+    return false;
+  }
+};
+const counts = dictionary();
 for (const f of FILES) {
   const p = join(ROOT, f);
-  if (!existsSync(p)) fail(`FAIL: tracked file missing on disk: ${f}`);
-  // newline count, matching wc -l so the seeded baseline stays honest
+  if (!regularFile(p)) fail(`FAIL: tracked file missing or not a regular file: ${f}`);
   counts[f] = readFileSync(p, 'utf8').split('\n').length - 1;
 }
 
 const baselinePath = join(ROOT, BASELINE);
+const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const validPath = (value) => value.length > 0 && !value.startsWith('/') && !value.split('/').includes('..');
+
+function readBaseline(allowMissing) {
+  if (!existsSync(baselinePath)) {
+    if (allowMissing) return { files: dictionary(), comments: dictionary(), seedComments: true };
+    fail(`FAIL: ${BASELINE} missing — generate it with: node scripts/discipline-gate.mjs --update`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(baselinePath, 'utf8'));
+  } catch {
+    fail(`FAIL: ${BASELINE} malformed JSON`);
+  }
+  if (!record(parsed) || parsed.version !== 1 || !record(parsed.files)
+    || (parsed.comments !== undefined && !record(parsed.comments))) {
+    fail(`FAIL: ${BASELINE} malformed structure`);
+  }
+  for (const [file, count] of Object.entries(parsed.files)) {
+    if (!validPath(file) || !Number.isInteger(count) || count < 0) fail(`FAIL: ${BASELINE} malformed line count: ${file}`);
+  }
+  for (const [file, count] of Object.entries(parsed.comments ?? {})) {
+    if (!validPath(file) || !Number.isInteger(count) || count <= 0) fail(`FAIL: ${BASELINE} malformed comment count: ${file}`);
+  }
+  return {
+    files: Object.assign(dictionary(), parsed.files),
+    comments: Object.assign(dictionary(), parsed.comments ?? {}),
+    seedComments: parsed.comments === undefined,
+  };
+}
+
+let inventory;
+try {
+  inventory = commentInventory(ROOT);
+} catch (error) {
+  fail(`FAIL: comment inventory: ${error instanceof Error ? error.message : String(error)}`);
+}
+const currentComments = dictionary();
+for (const [file, lines] of Object.entries(inventory)) currentComments[file] = lines.length;
+const baseline = readBaseline(mode === '--update');
 
 if (mode === '--update') {
-  const old = existsSync(baselinePath) ? JSON.parse(readFileSync(baselinePath, 'utf8')).files ?? {} : {};
-  const next = {};
+  const next = dictionary();
   for (const f of FILES) {
-    if (old[f] !== undefined && counts[f] > old[f]) {
-      next[f] = old[f];
-      console.error(`WARNING: ${f} is ${counts[f]} lines, over baseline ${old[f]} — REFUSED to ratchet up; the gate still fails until the file shrinks`);
+    if (Object.hasOwn(baseline.files, f) && counts[f] > baseline.files[f]) {
+      next[f] = baseline.files[f];
+      console.error(`WARNING: ${f} is ${counts[f]} lines, over baseline ${baseline.files[f]} — REFUSED to ratchet up; the gate still fails until the file shrinks`);
     } else {
       next[f] = counts[f];
     }
   }
-  writeFileSync(baselinePath, `${JSON.stringify({ version: 1, files: next }, null, 2)}\n`);
-  console.log(`baseline written: ${BASELINE} (${FILES.length} files)`);
+  const nextComments = dictionary();
+  for (const [file, count] of Object.entries(currentComments)) {
+    const hasPrevious = Object.hasOwn(baseline.comments, file);
+    const previous = hasPrevious ? baseline.comments[file] : undefined;
+    if (!baseline.seedComments && !hasPrevious) {
+      console.error(`WARNING: REFUSED to add new comment baseline: ${file}`);
+    } else if (!baseline.seedComments && count > previous) {
+      nextComments[file] = previous;
+      console.error(`WARNING: REFUSED to ratchet comments up: ${file} (${previous} -> ${count})`);
+    } else {
+      nextComments[file] = count;
+    }
+  }
+  writeFileSync(baselinePath, `${JSON.stringify({ version: 1, files: next, comments: nextComments }, null, 2)}\n`);
+  console.log(`baseline written: ${BASELINE} (${FILES.length} line counts, ${Object.keys(nextComments).length} comment counts)`);
   process.exit(0);
 }
 
-if (!existsSync(baselinePath)) {
-  fail(`FAIL: ${BASELINE} missing — generate it with: node scripts/discipline-gate.mjs --update`);
-}
-const base = JSON.parse(readFileSync(baselinePath, 'utf8')).files;
-if (!base) fail(`FAIL: ${BASELINE} missing files — regenerate with: node scripts/discipline-gate.mjs --update`);
-const absent = FILES.filter((f) => base[f] === undefined);
+const absent = FILES.filter((f) => !Object.hasOwn(baseline.files, f));
 if (absent.length) {
   fail(`FAIL: baseline missing entries: ${absent.join(', ')} — regenerate with: node scripts/discipline-gate.mjs --update`);
 }
-
-const over = FILES.filter((f) => counts[f] > base[f]);
-const down = FILES.filter((f) => counts[f] < base[f]);
+const over = FILES.filter((f) => counts[f] > baseline.files[f]);
+const down = FILES.filter((f) => counts[f] < baseline.files[f]);
 for (const f of FILES) {
-  const marker = counts[f] > base[f] ? 'OVER' : counts[f] < base[f] ? 'down' : 'ok';
-  console.log(`  ${f.padEnd(24)} baseline=${String(base[f]).padEnd(5)} current=${String(counts[f]).padEnd(5)} ${marker}`);
+  const marker = counts[f] > baseline.files[f] ? 'OVER' : counts[f] < baseline.files[f] ? 'down' : 'ok';
+  console.log(`  ${f.padEnd(24)} baseline=${String(baseline.files[f]).padEnd(5)} current=${String(counts[f]).padEnd(5)} ${marker}`);
 }
+if (over.length) fail(`FAIL: ${over.length} file(s) over baseline — shrink them; the baseline ratchets down only`);
+if (down.length) console.log(`note: ${down.length} file(s) below baseline — ratchet down with: node scripts/discipline-gate.mjs --update`);
 
-if (over.length) {
-  fail(`FAIL: ${over.length} file(s) over baseline — shrink them; the baseline ratchets down only`);
+const stale = Object.keys(baseline.comments).filter((file) => !regularFile(join(ROOT, file))).sort();
+if (stale.length) fail(`FAIL: stale baseline entries: ${stale.join(', ')}`);
+const added = Object.keys(currentComments).filter((file) => !Object.hasOwn(baseline.comments, file)).sort();
+const increased = Object.keys(currentComments).filter((file) => Object.hasOwn(baseline.comments, file)
+  && currentComments[file] > baseline.comments[file]).sort();
+if (added.length) console.error(`FAIL: new files with comments: ${added.join(', ')}`);
+if (increased.length) console.error(`FAIL: increased comment counts: ${increased.join(', ')}`);
+for (const file of [...added, ...increased].sort()) {
+  for (const line of inventory[file]) console.error(`comment ${file}:${line}`);
 }
-if (down.length) {
-  console.log(`note: ${down.length} file(s) below baseline — ratchet down with: node scripts/discipline-gate.mjs --update`);
+if (added.length || increased.length) fail('FAIL: comment baseline ratchets down only');
+const commentsDown = Object.keys(baseline.comments).filter((file) => Object.hasOwn(currentComments, file)
+  && currentComments[file] < baseline.comments[file]);
+if (commentsDown.length) {
+  console.log(`note: ${commentsDown.length} file(s) below comment baseline — ratchet down with: node scripts/discipline-gate.mjs --update`);
 }
 const workerErrors = workerEnforcementErrors(ROOT);
 if (workerErrors.length) fail(`FAIL: worker enforcement dependency or team write ban: ${workerErrors.join(', ')}`);
-console.log('discipline gate: OK (no file above baseline, worker writes and dependencies sanctioned)');
+console.log(`discipline gate: OK (${Object.keys(currentComments).length} files with comments, no ratchet increases)`);

@@ -10,6 +10,10 @@ You build what the orchestrator briefs you to build.
 - Commit early and often, conventional style, small commits.
 - Run the checks yourself before you hand work back (build, test, lint —
   whatever the repo has). The gate is not a substitute for your own run.
+- Write no comments in any repository. This rule is additive to target-repo
+  instructions. Use the target repo's ADR convention for durable decisions and
+  escalate conflicts to the orchestrator. Migrate semantic directives into
+  executable configuration or checks.
 - Report to the orchestrator: what you did, what you did not do, what to
   watch. Verdict first.
 - Keep your handoff current: the START HERE block of `.hive/handoffs/<you>.md`

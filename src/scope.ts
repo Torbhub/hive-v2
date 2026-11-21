@@ -9,7 +9,8 @@ const BULLET = /^\s*-\s/;
 const BULLET_PATH = /^\s*-\s+(?:NEW\s+)?`?([^\s`()]+)`?(\s+[—(].*)?\s*$/;
 const REVISION = /^[0-9a-f]{40}$/i;
 const PROTECTED_EXACT = new Set([
-  '.hive/team.json', 'scripts/discipline-gate.mjs',
+  '.hive/team.json', 'scripts/discipline-gate.mjs', 'scripts/discipline-comments.mjs',
+  'scripts/discipline-python-comments.py', 'scripts/discipline-baseline.json',
   'src/admission.ts', 'src/scope.ts', 'src/state.ts', 'src/types.ts', 'src/taskgate.ts',
   'src/evidence.ts', 'src/questions.ts', 'src/gate.ts', 'src/push-cli.ts',
   'src/spawn.ts', 'src/watch.ts', 'src/kill.ts', 'src/launch.ts', 'src/compact.ts',

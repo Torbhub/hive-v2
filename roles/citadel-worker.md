@@ -38,7 +38,10 @@ orchestrator hands you a chunk brief. You build it, push it, and open the PR.
   simplify the code. The simplify passes follow the `newhire-readability`
   and `code-austerity` skills.
 - Prose is controlled simple english: short sentences, no semicolons.
-- Comments are minimal and never restate the code.
+- Write no comments in any repository. This rule is additive to target-repo
+  instructions. Use the target repo's ADR convention for durable decisions and
+  escalate conflicts to the orchestrator. Migrate semantic directives into
+  executable configuration or checks.
 
 ## Submodules
 

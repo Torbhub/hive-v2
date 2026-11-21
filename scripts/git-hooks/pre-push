@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-# pre-push gate (hive-v2) — tracked in the repo at scripts/git-hooks/pre-push.
-# scripts/install-git-hooks.sh copies it into .git/hooks. Edit the tracked
-# copy, not the installed one.
-#
-# jj git push fires NO git hooks — jj users: `jj push` (wired by
-# scripts/install-git-hooks.sh via scripts/jj-push-gate.sh), never bare
-# `jj git push`. Bypass: PRESUBMIT=off (loud warning; declare it in your
-# lane pulse) or `git push --no-verify`.
+: 'hive-v2 tracked hook: scripts/git-hooks/pre-push'
 case "${PRESUBMIT:-on}" in
   off|0)
     echo "!! WARNING: PRESUBMIT=${PRESUBMIT} — pushing WITHOUT the full gate. !!" >&2
@@ -16,7 +9,6 @@ case "${PRESUBMIT:-on}" in
 esac
 set -euo pipefail
 
-# A jj workspace has no .git — resolve the root through jj first, git second.
 if root="$(jj root 2>/dev/null)"; then
   cd "$root"
   list_scripts() { jj file list 'glob:**/*.sh'; }
