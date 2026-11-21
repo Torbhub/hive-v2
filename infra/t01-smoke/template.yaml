@@ -240,6 +240,19 @@ Resources:
           #!/bin/bash
           set -euo pipefail
           umask 077
+          report_bootstrap_failure() {
+            local status=$? category=failure
+            trap - ERR
+            case "$status" in 124|137) category=timeout ;; esac
+            if ! grep -q '"check":"complete"' /var/lib/t01/evidence/preflight.jsonl 2>/dev/null; then
+              printf 'T01_EVIDENCE {"check":"bootstrap_error","status":"failed","category":"%s:instance-bootstrap","origin":"instance-bootstrap:%s"}\n' "$category" "$status" > /dev/console
+              printf 'T01_EVIDENCE {"check":"provisioning","status":"failed"}\n' > /dev/console
+              printf 'T01_EVIDENCE {"check":"complete","status":"failed"}\n' > /dev/console
+            fi
+            exit "$status"
+          }
+          trap report_bootstrap_failure ERR
+          PROVISION_TIMEOUT_SECONDS="$(( ${LifetimeMinutes} * 60 - 60 ))"
           shutdown -h +${LifetimeMinutes}
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
             --max-redirs 0 --connect-timeout 10 --max-time 60 \
@@ -265,7 +278,7 @@ Resources:
           export LIFETIME_MINUTES='${LifetimeMinutes}' RUN_ID='${RunId}'
           export RUNTIME_SCRIPT_URL='${RuntimeScriptUrl}'
           export RUNTIME_SCRIPT_SHA256='${RuntimeScriptSha256}'
-          /opt/t01-provision.sh
+          timeout --signal=TERM --kill-after=5s "$PROVISION_TIMEOUT_SECONDS" /opt/t01-provision.sh
       Tags:
         - Key: Name
           Value: hive-v2-t01-smoke
