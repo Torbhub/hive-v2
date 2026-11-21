@@ -41,6 +41,7 @@ for f in .github/workflows/*.yml .github/workflows/*.yaml; do
 done
 
 export PYTHONDONTWRITEBYTECODE=1
+python3 test/deploy_workflow_checks.py
 npm test
 npm run build
 node scripts/discipline-gate.mjs
