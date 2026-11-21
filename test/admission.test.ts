@@ -409,6 +409,44 @@ describe('tmux replacement lineage', () => {
     const fourth = await admit(root, home, increased, 'attempt-4', { retry_of: 'attempt-3' });
     expect(fourth).toMatchObject({ attempts_used: 4, lease_epoch: 1, retry_of: 'attempt-3' });
   });
+
+  it('refuses historical lease replay and counts attempts across the whole lineage', async () => {
+    const fixture = await setup({
+      budget: { depth: 1, active_children: 4, active_project_records: 4, attempts: 4 },
+    });
+    await seedTask(fixture.root, fixture.contract);
+    await admit(fixture.root, fixture.home, fixture.contract, 'attempt-a');
+    await outcome(fixture.root, fixture.home, 'attempt-a', 'retry on b');
+    const second = await admit(fixture.root, fixture.home, fixture.contract, 'attempt-b', { retry_of: 'attempt-a' });
+    await outcome(fixture.root, fixture.home, 'attempt-b', 'retry on c');
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(admit(fixture.root, fixture.home, fixture.contract, 'attempt-replay', { retry_of: 'attempt-a' }))
+        .rejects.toThrow(/latest|replacement|stale/);
+    }
+    await appendTaskEvent(fixture.root, {
+      id: 'demo-1', project: 'demo', event: 'admission', at: new Date().toISOString(),
+      admission: {
+        ...second, agent: 'attempt-low', lease_id: 'historical-low-lease', attempts_used: 1,
+        status: 'failed', lease_revoked: true,
+      },
+    });
+    const third = await admit(fixture.root, fixture.home, fixture.contract, 'attempt-c', { retry_of: 'attempt-low' });
+    expect(third).toMatchObject({ attempts_used: 3, lineage_id: 'attempt-a' });
+    await outcome(fixture.root, fixture.home, 'attempt-c', 'fence before deltas');
+
+    const secondPlan = { ...fixture.contract, action_scope: ['command:second'] };
+    await withHubLock(fixture.root, () => applyRootDeltaLocked(
+      fixture.root, fixture.home, 'demo-1', secondPlan, contractDigest(fixture.contract), 1,
+    ));
+    const thirdPlan = { ...fixture.contract, action_scope: ['command:third'] };
+    await withHubLock(fixture.root, () => applyRootDeltaLocked(
+      fixture.root, fixture.home, 'demo-1', thirdPlan, contractDigest(secondPlan), 2,
+    ));
+    await expect(admit(fixture.root, fixture.home, thirdPlan, 'attempt-d', { retry_of: 'attempt-c' }))
+      .rejects.toThrow(/epoch|replacement|stale/);
+    const task = foldTasks(await readTaskEvents(fixture.root)).find((candidate) => candidate.id === 'demo-1')!;
+    expect(task.admissions?.at(-1)).toMatchObject({ lease_id: third.lease_id, attempts_used: 3 });
+  });
 });
 
 describe('worker evidence and cancellation', () => {
@@ -635,6 +673,55 @@ describe('native admission leases', () => {
   });
 });
 
+describe('root delta replacement budgets', () => {
+  it('refuses to shrink depth below active native replacement usage', async () => {
+    const fixture = await setup({
+      budget: { depth: 2, active_children: 4, active_project_records: 4, attempts: 3 },
+      delegation: { output_claims: [OUTPUT, 'Review the bounded change.'], adapters: ['tmux', 'native'] },
+    });
+    await seedTask(fixture.root, fixture.contract);
+    const parent = await admit(fixture.root, fixture.home, fixture.contract, 'builder');
+    await admitNative(fixture.root, fixture.home, 'demo-1', 'native-branch', request(fixture.home, fixture.contract, {
+      output_claim: 'Review the bounded change.', write_scope: [], adapter: 'native',
+      parent_lease_id: parent.lease_id, budget: { depth: 2, attempts: 3 },
+    }));
+    const nextContract = { ...fixture.contract, budget: { ...fixture.contract.budget, depth: 1 } };
+    await expect(withHubLock(fixture.root, () => applyRootDeltaLocked(
+      fixture.root, fixture.home, 'demo-1', nextContract, contractDigest(fixture.contract), 1,
+    ))).rejects.toThrow(/depth/);
+    const task = foldTasks(await readTaskEvents(fixture.root)).find((candidate) => candidate.id === 'demo-1')!;
+    expect(task.plan_digest).toBe(contractDigest(fixture.contract));
+    expect(task.admissions?.filter(active => !active.lease_revoked)).toHaveLength(2);
+  });
+
+  it('refuses to shrink depth or slots below legacy team usage', async () => {
+    const cases = [
+      { name: 'children', legacyTask: 'demo-1', legacyDepth: 1, changes: { active_children: 1 }, error: /active children/ },
+      { name: 'project', legacyTask: 'demo-2', legacyDepth: 1, changes: { active_project_records: 1 }, error: /active project/ },
+      { name: 'depth', legacyTask: 'demo-1', legacyDepth: 2, changes: { depth: 1 }, error: /depth/ },
+    ] as const;
+    for (const testCase of cases) {
+      const fixture = await setup({
+        budget: { depth: 2, active_children: 2, active_project_records: 2, attempts: 3 },
+      });
+      await seedTask(fixture.root, fixture.contract);
+      await admit(fixture.root, fixture.home, fixture.contract, 'builder');
+      const team = await readTeam(fixture.home);
+      await writeJson(hivePath(fixture.home, 'team.json'), {
+        agents: [...team.agents, {
+          name: `legacy-${testCase.name}`, task: testCase.legacyTask, write_scope: [], depth: testCase.legacyDepth,
+        }],
+      });
+      const nextContract = { ...fixture.contract, budget: { ...fixture.contract.budget, ...testCase.changes } };
+      await expect(withHubLock(fixture.root, () => applyRootDeltaLocked(
+        fixture.root, fixture.home, 'demo-1', nextContract, contractDigest(fixture.contract), 1,
+      ))).rejects.toThrow(testCase.error);
+      const task = foldTasks(await readTaskEvents(fixture.root)).find((candidate) => candidate.id === 'demo-1')!;
+      expect(task.plan_digest).toBe(contractDigest(fixture.contract));
+    }
+  });
+});
+
 describe('research provenance and root wall budgets', () => {
   it('admits research with source and evidence ranges and no Git revisions', async () => {
     const digest = 'a'.repeat(64);
@@ -671,7 +758,151 @@ describe('research provenance and root wall budgets', () => {
     expect(admitted.provenance.artifact_revision).toBeUndefined();
   });
 
-  it('expires writers once and extends only by root delta without resetting attempts', async () => {
+  it('admits one authorized replacement during an attempts-only delta recovery window', async () => {
+    const fixture = await setup({
+      budget: { depth: 1, active_children: 4, active_project_records: 4, attempts: 1, wall_seconds: 60 },
+    });
+    await seedTask(fixture.root, fixture.contract);
+    await admit(fixture.root, fixture.home, fixture.contract, 'builder');
+    const before = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    const originalExpiresAt = Date.parse(before.expires_at!);
+    const recoveryExpiresAt = originalExpiresAt + 60_000;
+    const approvedAt = originalExpiresAt + 1_000;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(approvedAt);
+      await reconcileTaskBudgets(fixture.root, approvedAt);
+      const nextContract = { ...fixture.contract, budget: { ...fixture.contract.budget, attempts: 2 } };
+      await withHubLock(fixture.root, () => applyRootDeltaLocked(
+        fixture.root, fixture.home, 'demo-1', nextContract, contractDigest(fixture.contract), 1,
+      ));
+      const recovered = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+      expect(recovered.admitted_at).toBe(before.admitted_at);
+      expect(Date.parse(recovered.expires_at!)).toBe(recoveryExpiresAt);
+      expect(recovered.contract!.budget).toEqual(nextContract.budget);
+
+      await reconcileTaskBudgets(fixture.root, approvedAt);
+      const replacement = await admit(fixture.root, fixture.home, nextContract, 'builder', { retry_of: 'builder' });
+      expect(replacement).toMatchObject({ attempts_used: 2, root_lease_epoch: 2, plan_digest: contractDigest(nextContract) });
+      await reconcileTaskBudgets(fixture.root, approvedAt + 1);
+      const admitted = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+      expect(admitted.state).not.toBe('blocked:budget_exhausted');
+      expect(admitted.admissions?.filter((admission) => !admission.lease_revoked)).toHaveLength(1);
+      expect(admitted.admissions?.find((admission) => admission.lease_id === replacement.lease_id))
+        .toMatchObject({ attempts_used: 2, lease_revoked: false });
+
+      await expect(admit(fixture.root, fixture.home, nextContract, 'builder', { retry_of: 'builder' }))
+        .rejects.toThrow(/blocked:budget_exhausted/);
+      await reconcileTaskBudgets(fixture.root, recoveryExpiresAt);
+      const expired = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+      expect(expired.state).toBe('blocked:budget_exhausted');
+      expect(expired.admissions?.some((admission) => admission.attempts_used > 2)).toBe(false);
+      await expect(admit(fixture.root, fixture.home, nextContract, 'builder', { retry_of: 'builder' }))
+        .rejects.toThrow(/budget|grant/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('allows only the first question-approved recovery without reconciliation', async () => {
+    const fixture = await setup({
+      budget: { depth: 1, active_children: 4, active_project_records: 4, attempts: 1, wall_seconds: 60 },
+    });
+    await seedTask(fixture.root, fixture.contract);
+    await admit(fixture.root, fixture.home, fixture.contract, 'builder');
+    const before = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    const originalExpiresAt = Date.parse(before.expires_at!);
+    const firstRecoveryExpiresAt = originalExpiresAt + 60_000;
+    const { answerQuestionBatch, cancelQuestionBatch, createRootDeltaQuestion } = await import('../src/questions.js');
+    const approveDelta = async (contract: RootContract) => {
+      const batch = await createRootDeltaQuestion(fixture.root, 'demo-1', contract, 'Authorize recovery.');
+      await answerQuestionBatch(fixture.root, batch.id, [{ question: 'q1', choice: 'c2' }]);
+    };
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(originalExpiresAt + 1_000);
+      const unanswered = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+      expect(unanswered.state).toBe('answered');
+      const wallOnly = { ...fixture.contract, budget: { ...fixture.contract.budget, wall_seconds: 120 } };
+      const wallBatch = await createRootDeltaQuestion(fixture.root, 'demo-1', wallOnly, 'Deny wall recovery.');
+      await expect(answerQuestionBatch(fixture.root, wallBatch.id, [{ question: 'q1', choice: 'c2' }]))
+        .rejects.toThrow(/attempt|expired|recovery/);
+      await cancelQuestionBatch(fixture.root, wallBatch.id);
+
+      const secondContract = { ...fixture.contract, budget: { ...fixture.contract.budget, attempts: 2 } };
+      await approveDelta(secondContract);
+      const recovered = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+      expect(Date.parse(recovered.expires_at!)).toBe(firstRecoveryExpiresAt);
+      const replacement = await admit(fixture.root, fixture.home, secondContract, 'builder', { retry_of: 'builder' });
+      expect(replacement.attempts_used).toBe(2);
+
+      vi.setSystemTime(originalExpiresAt + 2_000);
+      const thirdContract = { ...secondContract, budget: { ...secondContract.budget, attempts: 3 } };
+      await approveDelta(thirdContract);
+      const repeated = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+      expect(Date.parse(repeated.expires_at!)).toBe(firstRecoveryExpiresAt);
+
+      vi.setSystemTime(firstRecoveryExpiresAt + 1_000);
+      const fourthContract = { ...thirdContract, budget: { ...thirdContract.budget, attempts: 4 } };
+      const expiredBatch = await createRootDeltaQuestion(fixture.root, 'demo-1', fourthContract, 'Deny repeated recovery.');
+      await expect(answerQuestionBatch(fixture.root, expiredBatch.id, [{ question: 'q1', choice: 'c2' }]))
+        .rejects.toThrow(/attempt|expired|recovery/);
+      const expired = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+      expect(expired).toMatchObject({ plan_digest: contractDigest(thirdContract), expires_at: repeated.expires_at });
+      await expect(admit(fixture.root, fixture.home, thirdContract, 'builder', { retry_of: 'builder' }))
+        .rejects.toThrow(/budget|grant/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps expired tasks closed without a current matching attempts delta', async () => {
+    const fixture = await setup({
+      budget: { depth: 1, active_children: 4, active_project_records: 4, attempts: 1, wall_seconds: 60 },
+    });
+    await seedTask(fixture.root, fixture.contract);
+    await admit(fixture.root, fixture.home, fixture.contract, 'builder');
+    const before = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    const expired = Date.parse(before.expires_at!) + 1;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(expired);
+      await reconcileTaskBudgets(fixture.root, expired);
+      const increased = { ...fixture.contract, budget: { ...fixture.contract.budget, attempts: 2 } };
+      await expect(withHubLock(fixture.root, () => applyRootDeltaLocked(
+        fixture.root, fixture.home, 'demo-1', increased, 'f'.repeat(64), 1,
+      ))).rejects.toThrow(/stale/);
+      await expect(withHubLock(fixture.root, () => applyRootDeltaLocked(
+        fixture.root, fixture.home, 'demo-1', increased, contractDigest(fixture.contract), 2,
+      ))).rejects.toThrow(/stale/);
+      await expect(admit(fixture.root, fixture.home, fixture.contract, 'builder', { retry_of: 'builder' }))
+        .rejects.toThrow(/budget|grant/);
+
+      const nonAttempt = { ...fixture.contract, write_scope: ['src', 'docs'] };
+      await expect(withHubLock(fixture.root, () => applyRootDeltaLocked(
+        fixture.root, fixture.home, 'demo-1', nonAttempt, contractDigest(fixture.contract), 1,
+      ))).rejects.toThrow(/attempt|expired|budget/);
+      const unchanged = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+      expect(unchanged).toMatchObject({ plan_digest: contractDigest(fixture.contract), expires_at: before.expires_at });
+
+      await withHubLock(fixture.root, () => applyRootDeltaLocked(
+        fixture.root, fixture.home, 'demo-1', increased, contractDigest(fixture.contract), 1,
+      ));
+      await expect(admit(fixture.root, fixture.home, increased, 'builder', {
+        retry_of: 'builder', plan_digest: contractDigest(nonAttempt),
+      })).rejects.toThrow(/digest|grant/);
+      const wrongPreviousDigest = {
+        ...await withRetryIdentity(fixture.root, request(fixture.home, increased, { retry_of: 'builder' })),
+        retry_plan_digest: contractDigest(increased),
+      };
+      await expect(admitTmux(fixture.root, fixture.home, 'demo-1', 'builder', wrongPreviousDigest))
+        .rejects.toThrow(/replacement|digest|grant/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('expires writers once and denies wall-only deltas after expiry', async () => {
     const fixture = await setup({
       budget: { depth: 1, active_children: 4, active_project_records: 4, attempts: 3, wall_seconds: 60 },
     });
@@ -705,15 +936,31 @@ describe('research provenance and root wall budgets', () => {
       ...fixture.contract,
       budget: { ...fixture.contract.budget, wall_seconds: 120 },
     };
+    await expect(withHubLock(fixture.root, () => applyRootDeltaLocked(
+      fixture.root, fixture.home, 'demo-1', nextContract, contractDigest(fixture.contract), 1,
+    ))).rejects.toThrow(/attempt|expired|budget/);
+    const unchanged = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    expect(unchanged).toMatchObject({
+      state: 'blocked:budget_exhausted', plan_digest: contractDigest(fixture.contract), expires_at: before.expires_at,
+    });
+  });
+
+  it('changes wall deadlines on nonexpired tasks without resetting attempts', async () => {
+    const fixture = await setup({
+      budget: { depth: 1, active_children: 4, active_project_records: 4, attempts: 3, wall_seconds: 60 },
+    });
+    await seedTask(fixture.root, fixture.contract);
+    const first = await admit(fixture.root, fixture.home, fixture.contract, 'builder');
+    const before = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    const nextContract = { ...fixture.contract, budget: { ...fixture.contract.budget, wall_seconds: 120 } };
     await withHubLock(fixture.root, () => applyRootDeltaLocked(
       fixture.root, fixture.home, 'demo-1', nextContract, contractDigest(fixture.contract), 1,
     ));
-    const replacement = await admit(fixture.root, fixture.home, nextContract, 'builder-replacement', {
-      retry_of: 'builder',
-    });
-    expect(replacement.attempts_used).toBe(2);
     const extended = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
+    expect(extended.admitted_at).toBe(before.admitted_at);
     expect(Date.parse(extended.expires_at!)).toBe(Date.parse(before.admitted_at!) + 120_000);
-    expect(extended.state).not.toBe('blocked:budget_exhausted');
+    expect(extended.admissions?.find((admission) => !admission.lease_revoked)).toMatchObject({
+      root_lease_epoch: 2, attempts_used: first.attempts_used,
+    });
   });
 });

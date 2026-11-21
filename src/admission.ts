@@ -3,8 +3,9 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { normalizeScope, pathsWithinScope, protectedClaim, repositoryIdentity, scopesOverlap, taskScope } from './scope.js';
 import {
-  appendTaskEvent, assertTaskBudgetCurrent, canonicalJson, contractDigest, foldTasks, hivePath, hubPath, readProjects,
-  readTaskEvents, readTeam, Refusal, taskBudgetExpired, validateRootContract, valueDigest, withHubLock, withTeamLock, writeJson,
+  appendTaskEvent, assertTaskBudgetCurrent, canonicalJson, contractDigest, foldTasks, hasAttemptRecovery, hivePath, hubPath,
+  readProjects, readTaskEvents, readTeam, Refusal, taskBudgetExpired, validateRootContract, valueDigest, withHubLock, withTeamLock,
+  writeJson,
 } from './state.js';
 import { CLOSED_STATES } from './types.js';
 import type { HubTask, RootContract, TaskProvenance, TeamEntry, TmuxAdmission } from './types.js';
@@ -42,15 +43,15 @@ function positiveInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
 }
 
-function storedTask(tasks: HubTask[], id: string, now = Date.now(), allowBudgetExhausted = false): HubTask {
+function storedTask(tasks: HubTask[], id: string, now = Date.now(), forRootDelta = false): HubTask {
   const task = tasks.find((candidate) => candidate.id === id);
   if (!task) throw new Refusal(`unknown task: ${id}`);
   if (!task.plan_approved) throw new Refusal(`${id} has no approved plan; the owner approves the plan before workers spawn`);
-  const budgetDelta = allowBudgetExhausted && task.state === 'blocked:budget_exhausted';
+  const budgetDelta = forRootDelta && task.state === 'blocked:budget_exhausted';
   if (!task.contract || task.lease_revoked && !budgetDelta || !task.plan_digest || !task.lease_epoch) {
     throw new Refusal(`${id} has no current root contract grant`);
   }
-  if (!budgetDelta) assertTaskBudgetCurrent(task, now);
+  if (!forRootDelta) assertTaskBudgetCurrent(task, now);
   validateRootContract(task.contract);
   if (contractDigest(task.contract) !== task.plan_digest) throw new Refusal(`${id} root contract digest does not match`);
   return task;
@@ -119,12 +120,17 @@ async function normalizedAllocation(home: string, contract: RootContract, reques
 function previousAdmission(task: HubTask, request: TmuxAdmissionRequest): TmuxAdmission | undefined {
   if (!request.retry_of) return undefined;
   const previous = task.admissions?.find((admission) => admission.lease_id === request.retry_lease_id);
+  const latest = task.admissions?.filter((admission) => admission.lineage_id === previous?.lineage_id).at(-1);
+  const currentPlan = previous?.plan_digest === task.plan_digest && previous?.root_lease_epoch === task.lease_epoch;
+  const precedingPlan = previous?.plan_digest !== task.plan_digest
+    && previous?.root_lease_epoch === (task.lease_epoch ?? 0) - 1;
   if (!request.retry_lease_id || !request.retry_plan_digest || !request.lineage_id || !previous
     || previous.agent !== request.retry_of || previous.task !== task.id || previous.project !== task.project
     || previous.parent_id !== request.parent_id || previous.plan_digest !== request.retry_plan_digest
-    || previous.lineage_id !== request.lineage_id
+    || previous.lineage_id !== request.lineage_id || latest?.lease_id !== previous.lease_id
+    || !currentPlan && !precedingPlan
     || previous.provenance_digest !== valueDigest(request.provenance)) {
-    throw new Refusal('replacement identity, plan, lineage, or provenance does not match the previous lease');
+    throw new Refusal('replacement must use the latest lineage lease in the current or preceding plan epoch');
   }
   return previous;
 }
@@ -290,7 +296,11 @@ async function admitLocked(
   await checkCollisions(root, home, tasks, agent, request, writeScope);
   checkDuplicate(tasks, task, request, valueDigest(request.provenance));
   await checkBudgets(root, home, tasks, task, request);
-  const attemptsUsed = (previous?.attempts_used ?? 0) + 1;
+  const attemptsUsed = previous
+    ? Math.max(...(task.admissions ?? [])
+      .filter((admission) => admission.lineage_id === previous.lineage_id)
+      .map((admission) => admission.attempts_used)) + 1
+    : 1;
   const attemptCap = Math.min(request.budget?.attempts ?? task.contract!.budget.attempts, task.contract!.budget.attempts);
   if (attemptsUsed > attemptCap) {
     if (previous) await transitionTmuxAdmissionLocked(root, home, previous, 'blocked:budget_exhausted');
@@ -558,6 +568,30 @@ export async function reconcileTaskBudgets(root: string, now = Date.now()): Prom
   }
 }
 
+async function assertRootDeltaBudgets(
+  home: string, tasks: HubTask[], task: HubTask, nextContract: RootContract,
+): Promise<void> {
+  const admissions = allAdmissions(tasks);
+  const represented = new Set(admissions.map(({ admission }) => admission.lease_id));
+  const active = admissions.filter(({ admission }) => activeAdmission(admission));
+  const legacy = (await readTeam(home)).agents.filter((entry) => entry.task && !entry.orchestrator && !entry.closed_at
+    && (!entry.lease_id || !represented.has(entry.lease_id)));
+  const children = active.filter(({ task: owner }) => owner.id === task.id);
+  const legacyChildren = legacy.filter((entry) => entry.task === task.id);
+  if (children.some(({ admission }) => (admission.depth ?? 1) > nextContract.budget.depth)
+    || legacyChildren.some((entry) => (entry.depth ?? 1) > nextContract.budget.depth)) {
+    throw new Refusal('root delta depth is below active replacement usage');
+  }
+  if (children.length + legacyChildren.length > nextContract.budget.active_children) {
+    throw new Refusal('root delta active children budget is below active usage');
+  }
+  const projectRecords = active.filter(({ task: owner }) => owner.project === task.project).length
+    + legacy.filter((entry) => entry.task?.startsWith(`${task.project}-`)).length;
+  if (projectRecords > nextContract.budget.active_project_records) {
+    throw new Refusal('root delta active project records budget is below active usage');
+  }
+}
+
 export async function applyRootDeltaLocked(
   root: string, home: string, taskId: string, nextContract: RootContract, basePlanDigest: string, baseEpoch: number,
 ): Promise<void> {
@@ -565,11 +599,18 @@ export async function applyRootDeltaLocked(
   const nextDigest = contractDigest(nextContract);
   if (nextDigest === basePlanDigest) throw new Refusal('a root delta must change the contract digest');
   await withTeamLock(home, async () => {
-    const tasks = foldTasks(await readTaskEvents(root));
-    const task = storedTask(tasks, taskId, Date.now(), true);
+    const events = await readTaskEvents(root);
+    const tasks = foldTasks(events);
+    const now = Date.now();
+    const task = storedTask(tasks, taskId, now, true);
     if (task.plan_digest !== basePlanDigest || task.lease_epoch !== baseEpoch || !task.contract) {
       throw new Refusal('root delta is stale; review the current contract again');
     }
+    const attemptIncrease = nextContract.budget.attempts > task.contract.budget.attempts;
+    if (taskBudgetExpired(task, now) && (!attemptIncrease || hasAttemptRecovery(events, taskId))) {
+      throw new Refusal('expired task recovery requires the first increased attempt budget');
+    }
+    await assertRootDeltaBudgets(home, tasks, task, nextContract);
     const active = (task.admissions ?? []).filter(activeAdmission);
     const otherProjectRecords = allAdmissions(tasks).filter(({ task: owner, admission }) =>
       owner.id !== task.id && owner.project === task.project && activeAdmission(admission)).length;
