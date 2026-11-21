@@ -77,7 +77,7 @@ export const INVARIANTS: Invariant[] = [
   { id: 'current-grant-before-launch', desc: 'registration and typing need the current digest, epoch, and lease',
     evidence: 'test/spawn.test.ts::spawn gate' },
   { id: 'scope-diff-fences-lease', desc: 'an out-of-scope Git change revokes the writer lease and fails',
-    evidence: 'test/scope.test.ts::git_diff_scope' },
+    evidence: 'test/scope-diff.test.ts::git_diff_scope' },
   { id: 'locked-team-mutations', desc: 'kill and maintenance writes compare the full record before mutation',
     evidence: 'test/kill.test.ts::killAgent one agent' },
   { id: 'wake-current-lease', desc: 'a dead tasked worker re-wakes only through its current lease',

@@ -30,7 +30,7 @@ describe('journey registry coherence', () => {
     expect(INVARIANTS.find((invariant) => invariant.id === 'attempt-lineage-budget')?.evidence)
       .toBe('test/admission.test.ts::tmux replacement lineage');
     expect(INVARIANTS.find((invariant) => invariant.id === 'scope-diff-fences-lease')?.evidence)
-      .toBe('test/scope.test.ts::git_diff_scope');
+      .toBe('test/scope-diff.test.ts::git_diff_scope');
     expect(JOURNEYS.find((journey) => journey.id === 'WATCHDOG_REWAKE')?.criteria)
       .toContain('wake-current-lease');
     expect(INVARIANTS.find((invariant) => invariant.id === 'public-contract-intake')?.evidence)
