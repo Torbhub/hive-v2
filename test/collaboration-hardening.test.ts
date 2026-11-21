@@ -140,6 +140,40 @@ describe('stored-target authorization', () => {
     expect((await fetch(`${base}/api/log?project=demo&agent=builder`, { headers: agentHeaders() })).status).not.toBe(404);
   });
 
+  it('reauthorizes older log pages instead of letting a cursor bypass the ACL', async () => {
+    const { home, base, items } = await fixture();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', task: 'demo-1', session_id: 'session_paged' }],
+    });
+    const sessionHome = await fs.mkdtemp(path.join(tmpdir(), 'hive-log-home-'));
+    const wireDir = path.join(sessionHome, '.kimi-code', 'sessions', 'wd_test', 'session_paged', 'agents', 'main');
+    await fs.mkdir(wireDir, { recursive: true });
+    const lines = Array.from({ length: 101 }, (_, i) => JSON.stringify({
+      type: 'context.append_loop_event', time: i,
+      event: { type: 'content.part', part: { type: 'text', text: `line-${i}` } },
+    }));
+    await fs.writeFile(path.join(wireDir, 'wire.jsonl'), `${lines.join('\n')}\n`);
+    removeAgentProjectGrant(items, taskGrant());
+    const previousHome = process.env.HOME;
+    process.env.HOME = sessionHome;
+    try {
+      const latestResponse = await fetch(`${base}/api/log?project=demo&agent=builder`, { headers: agentHeaders() });
+      expect(latestResponse.status).toBe(200);
+      const latest = await latestResponse.json();
+      expect(latest.hasOlder).toBe(true);
+
+      removeAgentProjectGrant(items);
+      const older = await fetch(
+        `${base}/api/log?project=demo&agent=builder&before=${encodeURIComponent(latest.olderCursor)}`,
+        { headers: agentHeaders() },
+      );
+      expect(older.status).toBe(404);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
   it('redacts agent credentials and source-truncated fragments from authorized log responses', async () => {
     const { root, home, base, items } = await fixture();
     items.find((row) => row.pk === 'SUBJECT#user:alice')!.expiresAt = 0;

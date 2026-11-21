@@ -174,7 +174,9 @@ async function logResponse(context: RequestContext, principal: Principal): Promi
   if (principal.kind === 'agent' && target.name !== principal.agentId) throw new AuthorizationError('not found');
   const scope = { project, task: target.task };
   await authorize(principal, context.registry, 'read', scope);
-  const log = await readAgentLog(context.root, project, target.name);
+  const log = await readAgentLog(
+    context.root, project, target.name, undefined, context.url.searchParams.get('before') ?? undefined,
+  );
   const current = await context.authenticate();
   await authorize(current, context.registry, 'read', scope);
   sendJson(context.res, 200, log);
@@ -316,6 +318,7 @@ async function legacyRouteRequest(context: RequestContext): Promise<void> {
     const log = await readAgentLog(
       context.root, context.url.searchParams.get('project') ?? '',
       context.url.searchParams.get('agent') ?? undefined,
+      undefined, context.url.searchParams.get('before') ?? undefined,
     );
     sendJson(res, 200, log);
     return;
