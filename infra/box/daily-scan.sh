@@ -21,6 +21,13 @@ post() {
     -d "$2"
 }
 
+closed_task_state() {
+  case "$1" in
+    done|cancelled|failed|already_fixed|duplicate|no_op|unknown|superseded) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 nudge_running() {
   local id=$1 resp code body
   resp=$(post /api/message "$(jq -n --arg project "$PROJECT" \
@@ -64,7 +71,7 @@ if [ -n "$file" ]; then
   id=$(basename "$file" .md)
   state=$(curl -fsS "$API/api/view" -H "x-hive-auth: $HIVE_WEB_SECRET" \
     | jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .state')
-  if [ "$state" = done ] || [ "$state" = cancelled ]; then
+  if closed_task_state "$state"; then
     echo "kept: $MARKER already posted and closed ($id)"
     exit 0
   fi
