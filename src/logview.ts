@@ -1,24 +1,33 @@
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { findSessionDir, readTailBytes } from './death-bundle.js';
+import { findSessionDir } from './death-bundle.js';
 import { checkName } from './names.js';
 import { readProjects, readTeam, Refusal } from './state.js';
 import type { TeamEntry } from './types.js';
 
 export type LogEntryKind = 'think' | 'text' | 'tool' | 'prompt';
 
-export type LogEntry = { at: string; kind: LogEntryKind; text: string };
+export type LogEntry = { id: string; at: string; kind: LogEntryKind; text: string };
+export type ParsedLogEntry = Omit<LogEntry, 'id'>;
 
 export type AgentLog = {
   agent: string;
   session_id: string;
+  fileGeneration: string | null;
+  hasOlder: boolean;
+  olderCursor: string | null;
   agents: { agentId: string; entries: LogEntry[] }[];
 };
 
-const TAIL_BYTES = 256 * 1024;
+const LOG_CHUNK_BYTES = 256 * 1024;
+const MAX_RECORD_BYTES = 256 * 1024;
+const CURSOR_ANCHOR_BYTES = 128;
 const MAX_ENTRIES = 100;
 const TEXT_CAP = 500;
+const CURSOR_KEY = randomBytes(32);
 
 // Wire logs can hold secrets the agent saw mid-turn. These go out over the
 // wire to any browser that reaches the hub, so the common key shapes die here.
@@ -58,7 +67,7 @@ function at(ms: unknown): string {
 
 // One wire.jsonl line → one entry, or null for anything that is not part of
 // the thinking view (steps, usage, results) or does not parse.
-export function parseWireLine(line: string): LogEntry | null {
+export function parseWireLine(line: string): ParsedLogEntry | null {
   let rec: Record<string, unknown>;
   try {
     rec = JSON.parse(line) as Record<string, unknown>;
@@ -104,14 +113,174 @@ export function parseWireLine(line: string): LogEntry | null {
   return null;
 }
 
-export function parseWireText(raw: string): LogEntry[] {
-  const out: LogEntry[] = [];
+export function parseWireText(raw: string): ParsedLogEntry[] {
+  const out: ParsedLogEntry[] = [];
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     const entry = parseWireLine(line);
     if (entry) out.push(entry);
   }
   return out;
+}
+
+type LogCursor = {
+  session: string;
+  dev: string;
+  ino: string;
+  offset: number;
+  anchor: string;
+  anchorBytes: number;
+};
+
+type PositionedEntry = {
+  entry: ParsedLogEntry;
+  offset: number;
+  anchor: string;
+  anchorBytes: number;
+};
+
+type LogPage = { entries: LogEntry[]; fileGeneration: string | null; hasOlder: boolean; olderCursor: string | null };
+
+function invalidCursor(): never {
+  throw new Refusal('log cursor is stale or invalid');
+}
+
+function lineAnchor(line: Buffer): { anchor: string; anchorBytes: number } {
+  const prefix = line.subarray(0, CURSOR_ANCHOR_BYTES);
+  return { anchor: createHash('sha256').update(prefix).digest('hex'), anchorBytes: prefix.length };
+}
+
+function decodeCursor(raw: string, session: string): LogCursor {
+  try {
+    if (raw.length > 2048) throw new Error();
+    const [encoded, supplied, extra] = raw.split('.');
+    if (!encoded || !supplied || extra !== undefined || !/^[\w-]+$/.test(encoded) || !/^[\w-]+$/.test(supplied)) {
+      throw new Error();
+    }
+    const expected = createHmac('sha256', CURSOR_KEY).update(encoded).digest();
+    const signature = Buffer.from(supplied, 'base64url');
+    if (signature.length !== expected.length || !timingSafeEqual(signature, expected)) throw new Error();
+    const value = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as Record<string, unknown>;
+    if (value.v !== 1 || value.session !== session || typeof value.dev !== 'string' || !/^\d+$/.test(value.dev)
+      || typeof value.ino !== 'string' || !/^\d+$/.test(value.ino)
+      || typeof value.offset !== 'number' || !Number.isSafeInteger(value.offset) || value.offset <= 0
+      || typeof value.anchor !== 'string' || !/^[0-9a-f]{64}$/.test(value.anchor)
+      || typeof value.anchorBytes !== 'number' || !Number.isSafeInteger(value.anchorBytes)
+      || value.anchorBytes <= 0 || value.anchorBytes > CURSOR_ANCHOR_BYTES) {
+      throw new Error();
+    }
+    return {
+      session, dev: value.dev, ino: value.ino, offset: value.offset,
+      anchor: value.anchor, anchorBytes: value.anchorBytes,
+    };
+  } catch {
+    return invalidCursor();
+  }
+}
+
+function encodeCursor(session: string, stat: { dev: number; ino: number }, entry: PositionedEntry): string {
+  const encoded = Buffer.from(JSON.stringify({
+    v: 1, session, dev: String(stat.dev), ino: String(stat.ino), offset: entry.offset,
+    anchor: entry.anchor, anchorBytes: entry.anchorBytes,
+  })).toString('base64url');
+  return `${encoded}.${createHmac('sha256', CURSOR_KEY).update(encoded).digest('base64url')}`;
+}
+
+async function readExact(handle: FileHandle, length: number, position: number): Promise<Buffer> {
+  const buffer = Buffer.alloc(length);
+  let read = 0;
+  while (read < length) {
+    const result = await handle.read(buffer, read, length - read, position + read);
+    if (result.bytesRead === 0) throw new Refusal('wire log changed while it was read');
+    read += result.bytesRead;
+  }
+  return buffer;
+}
+
+async function validateCursor(handle: FileHandle, stat: { dev: number; ino: number; size: number },
+  cursor: LogCursor): Promise<void> {
+  if (String(stat.dev) !== cursor.dev || String(stat.ino) !== cursor.ino
+    || cursor.offset >= stat.size || cursor.offset + cursor.anchorBytes > stat.size) {
+    invalidCursor();
+  }
+  try {
+    const prefix = await readExact(handle, cursor.anchorBytes, cursor.offset);
+    if (createHash('sha256').update(prefix).digest('hex') !== cursor.anchor) invalidCursor();
+  } catch {
+    invalidCursor();
+  }
+}
+
+async function readLogPage(handle: FileHandle, session: string, before?: string): Promise<LogPage> {
+  const cursor = before === undefined ? undefined : decodeCursor(before, session);
+  const stat = await handle.stat();
+  if (!stat.isFile()) {
+    if (cursor) invalidCursor();
+    return { entries: [], fileGeneration: null, hasOlder: false, olderCursor: null };
+  }
+  if (cursor) await validateCursor(handle, stat, cursor);
+  const fileGeneration = createHash('sha256').update(`${stat.dev}:${stat.ino}`).digest('hex').slice(0, 16);
+
+  const found: PositionedEntry[] = [];
+  let carry = Buffer.alloc(0);
+  let insideOverLimitRecord = false;
+  let end = cursor?.offset ?? stat.size;
+  while (end > 0 && found.length <= MAX_ENTRIES) {
+    const start = Math.max(0, end - LOG_CHUNK_BYTES);
+    const chunk = await readExact(handle, end - start, start);
+    const block = Buffer.concat([chunk, carry]);
+    const lines: { line: Buffer; offset: number }[] = [];
+    let lineStart = 0;
+    for (let i = 0; i < block.length; i++) {
+      if (block[i] !== 10) continue;
+      lines.push({ line: block.subarray(lineStart, i), offset: start + lineStart });
+      lineStart = i + 1;
+    }
+    if (lineStart < block.length) lines.push({ line: block.subarray(lineStart), offset: start + lineStart });
+
+    const lastNewline = block.lastIndexOf(10);
+    const trailingFragment = insideOverLimitRecord && lastNewline < block.length - 1 ? lines.length - 1 : -1;
+    for (let i = lines.length - 1; i >= (start === 0 ? 0 : 1); i--) {
+      if (i === trailingFragment) continue;
+      const { line, offset } = lines[i];
+      if (line.length === 0 || line.length > MAX_RECORD_BYTES) continue;
+      const entry = parseWireLine(line.toString('utf8'));
+      if (!entry) continue;
+      found.push({ entry, offset, ...lineAnchor(line) });
+      if (found.length > MAX_ENTRIES) break;
+    }
+
+    if (insideOverLimitRecord && lastNewline === -1) {
+      carry = Buffer.alloc(0);
+      if (start !== 0) {
+        end = start;
+        continue;
+      }
+    }
+    insideOverLimitRecord = false;
+    const firstNewline = block.indexOf(10);
+    const firstLineLength = firstNewline === -1 ? block.length : firstNewline;
+    if (start === 0) {
+      carry = Buffer.alloc(0);
+    } else if (firstLineLength > MAX_RECORD_BYTES) {
+      carry = Buffer.alloc(0);
+      insideOverLimitRecord = true;
+    } else {
+      carry = block.subarray(0, firstNewline === -1 ? block.length : firstNewline + 1);
+    }
+    end = start;
+  }
+
+  const hasOlder = found.length > MAX_ENTRIES;
+  const selected = found.slice(0, MAX_ENTRIES).reverse();
+  const entries = selected.map(({ entry, offset }) => ({ ...entry, id: `${fileGeneration}:${offset}` }));
+  const oldest = selected[0];
+  return {
+    entries,
+    fileGeneration,
+    hasOlder,
+    olderCursor: hasOlder && oldest ? encodeCursor(session, stat, oldest) : null,
+  };
 }
 
 // Name validation failures are operator input problems, not infrastructure:
@@ -164,6 +333,7 @@ export async function readAgentLog(
   project: string,
   agentRef?: string,
   home: string = os.homedir(),
+  before?: string,
 ): Promise<AgentLog> {
   const { entry, name } = await resolveEntry(root, project, agentRef);
   if (!entry.session_id) throw new Refusal(`${name} has no recorded session yet`);
@@ -177,13 +347,23 @@ export async function readAgentLog(
     throw new Refusal(`${name}'s session ${entry.session_id} has no wire log under ~/.kimi-code/sessions`);
   }
   const file = path.join(sessionDir, 'agents', 'main', 'wire.jsonl');
-  const st = await fs.stat(file).catch(() => null);
-  const entries = st?.isFile()
-    ? parseWireText(await readTailBytes(file, TAIL_BYTES)).slice(-MAX_ENTRIES)
-    : [];
+  const handle = await fs.open(file, 'r').catch(() => null);
+  let page: LogPage = { entries: [], fileGeneration: null, hasOlder: false, olderCursor: null };
+  if (handle) {
+    try {
+      page = await readLogPage(handle, entry.session_id, before);
+    } finally {
+      await handle.close();
+    }
+  } else if (before !== undefined) {
+    invalidCursor();
+  }
   return {
     agent: name,
     session_id: entry.session_id,
-    agents: entries.length > 0 ? [{ agentId: 'main', entries }] : [],
+    fileGeneration: page.fileGeneration,
+    hasOlder: page.hasOlder,
+    olderCursor: page.olderCursor,
+    agents: page.entries.length > 0 ? [{ agentId: 'main', entries: page.entries }] : [],
   };
 }

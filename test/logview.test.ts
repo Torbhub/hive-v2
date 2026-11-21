@@ -297,6 +297,105 @@ describe('readAgentLog', () => {
     expect(entries[99].text).toBe('line-120');
   });
 
+  it('pages backward through more than 100 entries without gaps or duplicate ids', async () => {
+    const lines = Array.from({ length: 250 }, (_, i) => textLine(`line-${String(i + 1).padStart(3, '0')}`));
+    const { root, home } = await setup([ORCH], { main: lines });
+
+    const latest = await readAgentLog(root, 'demo', undefined, home);
+    const middle = await readAgentLog(root, 'demo', undefined, home, latest.olderCursor!);
+    const oldest = await readAgentLog(root, 'demo', undefined, home, middle.olderCursor!);
+
+    expect(latest.agents[0].entries).toHaveLength(100);
+    expect(middle.agents[0].entries).toHaveLength(100);
+    expect(oldest.agents[0].entries).toHaveLength(50);
+    expect(latest.hasOlder).toBe(true);
+    expect(middle.hasOlder).toBe(true);
+    expect(oldest.hasOlder).toBe(false);
+    expect(oldest.olderCursor).toBeNull();
+    expect(latest.olderCursor).not.toContain('wire.jsonl');
+    expect(latest.olderCursor).not.toContain('/');
+
+    const entries = [...oldest.agents[0].entries, ...middle.agents[0].entries, ...latest.agents[0].entries];
+    expect(entries.map((entry) => entry.text)).toEqual(lines.map((_, i) => `line-${String(i + 1).padStart(3, '0')}`));
+    expect(new Set(entries.map((entry) => entry.at)).size).toBe(1);
+    expect(new Set(entries.map((entry) => entry.id)).size).toBe(250);
+  });
+
+  it('keeps complete entries across chunk, UTF-8, and torn JSON boundaries', async () => {
+    const lines = Array.from({ length: 105 }, (_, i) => textLine(
+      `line-${String(i + 1).padStart(3, '0')}-😀-${'x'.repeat(3000)}`,
+    ));
+    lines.splice(50, 0, '{"torn json"');
+    lines.push('{"type":"context.append_loop_event"');
+    const { root, home } = await setup([ORCH], { main: lines });
+
+    const latest = await readAgentLog(root, 'demo', undefined, home);
+    const older = await readAgentLog(root, 'demo', undefined, home, latest.olderCursor!);
+
+    expect(latest.agents[0].entries.map((entry) => entry.text.slice(0, 8))).toEqual(
+      Array.from({ length: 100 }, (_, i) => `line-${String(i + 6).padStart(3, '0')}`),
+    );
+    expect(older.agents[0].entries.map((entry) => entry.text.slice(0, 8))).toEqual([
+      'line-001', 'line-002', 'line-003', 'line-004', 'line-005',
+    ]);
+    expect(latest.agents[0].entries.every((entry) => entry.text.includes('😀'))).toBe(true);
+    expect(latest.agents[0].entries.every((entry) => entry.text.length === 501)).toBe(true);
+  });
+
+  it('skips a newline-less JSON record that spans many read chunks', async () => {
+    const oversized = textLine('x'.repeat(3 * 256 * 1024));
+    const { root, home } = await setup([ORCH], { main: [textLine('before'), oversized, textLine('after')] });
+
+    const log = await readAgentLog(root, 'demo', undefined, home);
+
+    expect(log.agents[0].entries.map((entry) => entry.text)).toEqual(['before', 'after']);
+    expect(log.hasOlder).toBe(false);
+    expect(log.olderCursor).toBeNull();
+  });
+
+  it('never emits a valid JSON prefix with over-limit trailing whitespace', async () => {
+    const oversized = `${textLine('fragment-must-not-appear')}${' '.repeat(3 * 256 * 1024)}`;
+    const { root, home } = await setup([ORCH], { main: [textLine('before'), oversized, textLine('after')] });
+
+    const log = await readAgentLog(root, 'demo', undefined, home);
+
+    expect(log.agents[0].entries.map((entry) => entry.text)).toEqual(['before', 'after']);
+    expect(JSON.stringify(log)).not.toContain('fragment-must-not-appear');
+  });
+
+  it('refuses a cursor substituted across sessions', async () => {
+    const team = [ORCH, { name: 'fixer', session_id: 'session_other', worktree: '/wt/a' }];
+    const lines = Array.from({ length: 101 }, (_, i) => textLine(`line-${i}`));
+    const { root, home } = await setup(team, { main: lines });
+    const otherDir = path.join(
+      home, '.kimi-code', 'sessions', 'wd_demo_000000000000', 'session_other', 'agents', 'main',
+    );
+    await fs.mkdir(otherDir, { recursive: true });
+    await fs.writeFile(path.join(otherDir, 'wire.jsonl'), `${textLine('other session')}\n`);
+    const latest = await readAgentLog(root, 'demo', undefined, home);
+
+    await expect(readAgentLog(root, 'demo', 'fixer', home, latest.olderCursor!)).rejects.toThrow(/stale or invalid/);
+  });
+
+  it('refuses cursors after a same-size anchor rewrite and renamed file replacement', async () => {
+    const lines = Array.from({ length: 101 }, (_, i) => textLine(`original-${i}`));
+    const { root, home } = await setup([ORCH], { main: lines });
+    const file = path.join(
+      home, '.kimi-code', 'sessions', 'wd_demo_000000000000', 'session_abc', 'agents', 'main', 'wire.jsonl',
+    );
+    const latest = await readAgentLog(root, 'demo', undefined, home);
+
+    const rewritten = Array.from({ length: 101 }, (_, i) => textLine(`modified-${i}`));
+    expect(Buffer.byteLength(rewritten.join('\n'))).toBe(Buffer.byteLength(lines.join('\n')));
+    await fs.writeFile(file, `${rewritten.join('\n')}\n`);
+    await expect(readAgentLog(root, 'demo', undefined, home, latest.olderCursor!)).rejects.toThrow(/stale or invalid/);
+
+    const replacement = `${file}.replacement`;
+    await fs.writeFile(replacement, `${lines.join('\n')}\n`);
+    await fs.rename(replacement, file);
+    await expect(readAgentLog(root, 'demo', undefined, home, latest.olderCursor!)).rejects.toThrow(/stale or invalid/);
+  });
+
   it('a stale session id is a Refusal, not a 500', async () => {
     const { root, home } = await setup([{ ...ORCH, session_id: 'session_gone' }], {});
     const err = await readAgentLog(root, 'demo', undefined, home).then(
