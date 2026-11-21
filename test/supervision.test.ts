@@ -18,6 +18,7 @@ import type {
 const SHA = 'a'.repeat(40);
 const ARTIFACT = 'b'.repeat(64);
 const AT = '2026-11-20T12:00:00.000Z';
+const DEADLINE = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 const servers = new Set<Server>();
 
 afterEach(async () => {
@@ -139,7 +140,7 @@ function acceptance(overrides: Partial<TaskAcceptance> = {}): TaskAcceptance {
     version: 1,
     configuration: {
       repository: 'octo/hive', sha: SHA, external_id: 'deliverable-check', artifact_digest: ARTIFACT,
-      owner: 'hive-checks', deadline: '2026-11-21T12:00:00.000Z',
+      owner: 'hive-checks', deadline: DEADLINE,
     },
     required_evidence: ['github-check'],
     ...overrides,
