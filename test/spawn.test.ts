@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+process.env.KIMI_CODE_HOME = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+
 const IDLE = readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'idle-empty-prompt.txt'),
   'utf8',
@@ -72,15 +74,20 @@ vi.mock('../src/state.js', async (importOriginal) => {
   return { ...orig, compareAndSwapTeamEntry: vi.fn(orig.compareAndSwapTeamEntry) };
 });
 
+vi.mock('../src/project.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/project.js')>();
+  return { ...orig, withLaunchClaim: vi.fn(orig.withLaunchClaim) };
+});
+
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
 
-import { closeAgent, effectiveOrchestratorMode, findLatestSession, launchCommand, respawnAgent, spawnAgent, waitIdle, wakeAgent } from '../src/spawn.js';
-import { answerDialog, hubAdd, hubInit, hubResolve, hubTask, readDialogFor, redactDialog, setProjectApprovals, setProjectMode, startProject } from '../src/hub.js';
-import { removeProject } from '../src/project.js';
+import { closeAgent, effectiveOrchestratorMode, findLatestSession, launchCommand, packageRoot, respawnAgent, spawnAgent, waitIdle, wakeAgent } from '../src/spawn.js';
+import { answerDialog, hubAdd, hubInit, hubResolve, hubTask, readDialogFor, redactDialog, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
+import { removeProject, withLaunchClaim } from '../src/project.js';
 import { killAgent } from '../src/kill.js';
 import { completeTmuxLaunch } from '../src/admission.js';
-import { appendTaskEvent, compareAndSwapTeamEntry, hivePath, manifestRead, readDecisions, readProjects, readTeam, valueDigest, writeJson, writeProjects } from '../src/state.js';
+import { appendTaskEvent, compareAndSwapTeamEntry, hivePath, hubPath, manifestRead, readDecisions, readProjects, readTaskEvents, readTeam, valueDigest, withHubLock, writeJson, writeProjects } from '../src/state.js';
 import { capturePane, killWindow, newWindow, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep } from '../src/tmux.js';
 import { watchCycle } from '../src/watch.js';
 import { approveContract, taskContract } from './task-contract.js';
@@ -99,7 +106,7 @@ async function setup(teamEntry: Record<string, unknown>) {
   await fs.mkdir(home, { recursive: true });
   await hubInit(root);
   await hubAdd(root, 'demo', home);
-  const entry = { ...teamEntry };
+  const entry = { model: 'kimi-code/k3.1-pro-highspeed', ...teamEntry };
   if (!entry.orchestrator) {
     entry.handoff = entry.handoff === true || entry.handoff === undefined
       ? hivePath(home, 'handoffs', `${String(entry.name)}.md`)
@@ -164,10 +171,41 @@ describe('respawnAgent', () => {
 
   it('relaunches on the model recorded in team.json', async () => {
     const { root } = await setup({
-      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', worktree: '', model: 'kimi-k2',
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', worktree: '', model: 'kimi-code/k3.1-pro',
     });
     await respawnAgent(root, 'demo', 'builder');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toContain("-m 'kimi-k2'");
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toContain("-m 'kimi-code/k3.1-pro'");
+  }, 20_000);
+
+  it('migrates a legacy missing model only on an explicit respawn request', async () => {
+    const { root, home } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', worktree: '', model: undefined,
+    });
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow(/missing.*model.*--model/);
+    await respawnAgent(root, 'demo', 'builder', { model: 'kimi-code/k3.1-pro-highspeed' });
+    expect((await readTeam(home)).agents[0].model).toBe('kimi-code/k3.1-pro-highspeed');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toContain("-m 'kimi-code/k3.1-pro-highspeed'");
+  }, 20_000);
+
+  it('refuses a model option when team.json already records a model', async () => {
+    const { root } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', worktree: '', model: 'kimi-code/k3.1-pro-highspeed',
+    });
+    await expect(respawnAgent(root, 'demo', 'builder', { model: 'kimi-code/k3.1-pro' }))
+      .rejects.toThrow(/model.*only.*missing/);
+  });
+
+  it('rejects an unconfigured recorded model before killing the live pane', async () => {
+    const { root } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', worktree: '', model: 'kimi-k2',
+    });
+    const kills = vi.mocked(killWindow).mock.calls.length;
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    await expect(respawnAgent(root, 'demo', 'builder')).rejects.toThrow(
+      'model "kimi-k2" is not configured. Expected configured default "kimi-code/k3.1-pro-highspeed"',
+    );
+    expect(vi.mocked(killWindow).mock.calls).toHaveLength(kills);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
   }, 20_000);
 
   it('rejects a bad recorded model before killing the live pane', async () => {
@@ -201,6 +239,31 @@ describe('spawnAgent', () => {
     const runs = vi.mocked(run).mock.calls.length;
     await expect(spawn(root, { agent: 'builder2', model: 'bad model' })).rejects.toThrow(/model alias/);
     expect(vi.mocked(run).mock.calls).toHaveLength(runs);
+  }, 20_000);
+
+  it('keeps orchestrator workers on the central K3.1 Pro default', async () => {
+    const { root } = await setup({ name: 'builder' });
+    const role = await fs.readFile(path.join(packageRoot(), 'roles', 'orchestrator.md'), 'utf8');
+    expect(role).toContain('Omit `--model`');
+    expect(role).not.toContain('--model kimi-k2');
+    await spawn(root, { agent: 'builder2' });
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toContain("-m 'kimi-code/k3.1-pro-highspeed'");
+  }, 20_000);
+
+  it('rejects an unconfigured tasked model before attempts, leases, workspaces, or panes', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const task = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, task);
+    const runs = vi.mocked(run).mock.calls.length;
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    await expect(spawn(root, { agent: 'worker1', task, model: 'kimi-k2' })).rejects.toThrow(
+      'model "kimi-k2" is not configured. Expected configured default "kimi-code/k3.1-pro-highspeed"',
+    );
+    expect(vi.mocked(run).mock.calls).toHaveLength(runs);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+    expect((await readTeam(home)).agents.some((agent) => agent.name === 'worker1')).toBe(false);
+    expect((await readTaskEvents(root)).some((event) => event.event === 'admission')).toBe(false);
+    expect(existsSync(hivePath(home, 'lanes', 'worker1'))).toBe(false);
   }, 20_000);
 
   it('places a default jj lane under .hive/lanes instead of the repo root', async () => {
@@ -513,12 +576,21 @@ describe('wakeAgent', () => {
     expect(pane).toBe('%9');
     expect(newWindow).toHaveBeenCalledWith(
       'demo:builder', home,
-      `HIVE_AGENT=builder HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_b -m 'kimi-code/k3.1-pro'`,
+      `HIVE_AGENT=builder HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_b -m 'kimi-code/k3.1-pro-highspeed'`,
     );
     const team = await readTeam(home);
-    expect(team.agents[0]).toMatchObject({ pane: '%9', session_id: 'session_b', model: 'kimi-code/k3.1-pro' });
+    expect(team.agents[0]).toMatchObject({ pane: '%9', session_id: 'session_b', model: 'kimi-code/k3.1-pro-highspeed' });
     expect(team.agents[0].closed_at).toBeUndefined();
   }, 20_000);
+
+  it('refuses to wake a legacy entry with no recorded model', async () => {
+    const { root } = await setup({
+      name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b', model: undefined,
+    });
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/missing.*model.*--model/);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+  });
 
   it('shell-quotes a hub root containing spaces and a quote', async () => {
     const root = path.join(mkdtempSync(path.join(tmpdir(), 'hive-spawn-')), "root with ' quote");
@@ -530,7 +602,7 @@ describe('wakeAgent', () => {
     await fs.mkdir(path.dirname(handoff), { recursive: true });
     await fs.writeFile(handoff, '# worker handoff\n\n## START HERE\n### Assignment\nComplete the bounded test assignment in the requested files.\n\n### Deliverable\nReturn the named artifact and verification evidence to the orchestrator.\n');
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b', handoff }],
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b', handoff, model: 'kimi-code/k3.1-pro-highspeed' }],
     });
     vi.mocked(paneIs).mockResolvedValueOnce(false);
     await wakeAgent(root, 'demo', 'builder');
@@ -578,7 +650,7 @@ describe('worker contract edge cases', () => {
     const handoff = path.join(root, 'custom-handoff.md');
     await fs.writeFile(handoff, '# builder\n\n## START HERE\nWait for a message.\n\nProgress: keep this note.\n\n## Memory\n\n- keep this lesson\n');
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b', worktree: '', handoff }],
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b', worktree: '', handoff, model: 'kimi-code/k3.1-pro-highspeed' }],
     });
     await respawnAgent(root, 'demo', 'builder', contract);
     const text = await fs.readFile(handoff, 'utf8');
@@ -675,9 +747,9 @@ describe('Hive agent question policy', () => {
   }, 20_000);
 
   it('resumes the bound profile without incompatible agent-file flags', () => {
-    const fresh = launchCommand(undefined, 'ask', 'kimi-code/k3.1-pro', '/tmp/hive agent.md');
+    const fresh = launchCommand(undefined, 'ask', 'kimi-code/k3.1-pro-highspeed', '/tmp/hive agent.md');
     expect(fresh).toContain("--agent-file '/tmp/hive agent.md'");
-    const resumed = launchCommand('session_abc', 'ask', 'kimi-code/k3.1-pro', '/tmp/hive agent.md');
+    const resumed = launchCommand('session_abc', 'ask', 'kimi-code/k3.1-pro-highspeed', '/tmp/hive agent.md');
     expect(resumed).not.toContain('--agent-file');
     expect(launchCommand(undefined, 'ask')).not.toContain('--agent-file');
   });
@@ -685,13 +757,13 @@ describe('Hive agent question policy', () => {
 
 describe('launchCommand', () => {
   it('builds the teamkimi run line per mode, resume included, K3.1 Pro by default', () => {
-    expect(launchCommand(undefined, 'ask')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'");
-    expect(launchCommand(undefined, 'yolo')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -y -m 'kimi-code/k3.1-pro'");
-    expect(launchCommand(undefined, 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro'");
-    expect(launchCommand(undefined, 'supervised-auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --auto -m 'kimi-code/k3.1-pro'");
-    expect(launchCommand('session_abc', 'ask')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro'");
-    expect(launchCommand('session_abc', 'yolo')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -y -m 'kimi-code/k3.1-pro'");
-    expect(launchCommand('session_abc', 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro'");
+    expect(launchCommand(undefined, 'ask')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro-highspeed'");
+    expect(launchCommand(undefined, 'yolo')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -y -m 'kimi-code/k3.1-pro-highspeed'");
+    expect(launchCommand(undefined, 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro-highspeed'");
+    expect(launchCommand(undefined, 'supervised-auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --auto -m 'kimi-code/k3.1-pro-highspeed'");
+    expect(launchCommand('session_abc', 'ask')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro-highspeed'");
+    expect(launchCommand('session_abc', 'yolo')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -y -m 'kimi-code/k3.1-pro-highspeed'");
+    expect(launchCommand('session_abc', 'auto')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro-highspeed'");
   });
 
   it('a per-agent model overrides the default, combined with session and mode', () => {
@@ -741,7 +813,7 @@ describe('orchestrator respawn mode', () => {
     await setProjectMode(root, 'demo', 'ask');
     await setProjectApprovals(root, 'demo', 'manual');
     await respawnAgent(root, 'demo', 'demo-orchestrator');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --agent-file '${root}/demo/.hive/team/demo-orchestrator/agent.md' -m 'kimi-code/k3.1-pro'`);
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --agent-file '${root}/demo/.hive/team/demo-orchestrator/agent.md' -m 'kimi-code/k3.1-pro-highspeed'`);
   }, 20_000);
 
   it('leaves a yolo orchestrator on -y', async () => {
@@ -761,7 +833,7 @@ describe('orchestrator respawn mode', () => {
     await setProjectMode(root, 'demo', 'ask');
     await setProjectApprovals(root, 'demo', 'smart');
     await respawnAgent(root, 'demo', 'builder');
-    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=builder HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --agent-file '${root}/demo/.hive/team/builder/agent.md' -m 'kimi-code/k3.1-pro'`);
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2]).toBe(`HIVE_AGENT=builder HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --agent-file '${root}/demo/.hive/team/builder/agent.md' -m 'kimi-code/k3.1-pro-highspeed'`);
   }, 20_000);
 
   it('relaunches a plain agent without -y in auto mode and clears its migration fence', async () => {
@@ -777,6 +849,80 @@ describe('orchestrator respawn mode', () => {
     expect((await readTeam(home)).agents[0]).toMatchObject({ launch_mode: 'auto', launch_scoped_auto: true });
     expect((await readTeam(home)).agents[0].migration_state).toBeUndefined();
     expect((await readTeam(home)).agents[0].watch_authority_revoked_at).toBeUndefined();
+  }, 20_000);
+
+  it('migrates an orchestrator with a legacy missing model on explicit respawn', async () => {
+    const { root, home } = await setup({
+      name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 111, pane_started: 'earlier', model: undefined,
+    });
+    await respawnAgent(root, 'demo', 'demo-orchestrator', { model: 'kimi-code/k3.1-pro-highspeed' });
+    expect((await readTeam(home)).agents[0].model).toBe('kimi-code/k3.1-pro-highspeed');
+  }, 20_000);
+
+  it('refuses to wake an orchestrator with a legacy missing model', async () => {
+    const { root } = await setup({
+      name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', model: undefined,
+    });
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    await expect(wake(root, 'demo')).rejects.toThrow(/missing.*model.*--model/);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+  });
+
+  it('stamps the resolved model on a fresh orchestrator', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    await writeJson(hivePath(home, 'team.json'), { agents: [] });
+    const task = await hubTask(root, 'demo', 'start the orchestrator');
+    await startProject(root, 'demo', task);
+    expect((await readTeam(home)).agents[0]).toMatchObject({
+      name: 'demo-orchestrator', orchestrator: true, model: 'kimi-code/k3.1-pro-highspeed',
+    });
+  }, 20_000);
+
+  it('rejects an unsafe orchestrator model before claims or agent files', async () => {
+    const { root, home } = await setup({
+      name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 111, pane_started: 'earlier', model: 'bad model',
+    });
+    const task = await hubTask(root, 'demo', 'start the orchestrator');
+    const originalTeam = await fs.readFile(hivePath(home, 'team.json'), 'utf8');
+    const claims = vi.mocked(withLaunchClaim).mock.calls.length;
+    const windows = vi.mocked(newWindow).mock.calls.length;
+    await expect(startProject(root, 'demo', task)).rejects.toThrow(/model alias/);
+    expect(vi.mocked(withLaunchClaim).mock.calls).toHaveLength(claims);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+    expect(await fs.readFile(hivePath(home, 'team.json'), 'utf8')).toBe(originalTeam);
+    expect(existsSync(hivePath(home, 'team', 'demo-orchestrator'))).toBe(false);
+    expect(await fs.readdir(hubPath(root, 'launches')).catch(() => [])).toEqual([]);
+  });
+
+  it('releases the hub lock when the locked TeamKimi status recheck times out', async () => {
+    const { root } = await setup({
+      name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 111, pane_started: 'earlier',
+    });
+    const task = await hubTask(root, 'demo', 'start the orchestrator');
+    let statusCalls = 0;
+    let markLockedStatus!: () => void;
+    const lockedStatus = new Promise<void>((resolve) => { markLockedStatus = resolve; });
+    vi.mocked(run).mockImplementation(async (command, _args, _cwd, _env, timeoutMs) => {
+      if (command !== 'teamkimi') return { code: 0, stdout: '', stderr: '' };
+      statusCalls++;
+      if (statusCalls === 2) {
+        expect(timeoutMs).toBe(10_000);
+        markLockedStatus();
+        return new Promise((resolve) => {
+          setTimeout(() => resolve({ code: 1, stdout: '', stderr: 'timed out' }), timeoutMs);
+        });
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    try {
+      const starting = startProject(root, 'demo', task);
+      await lockedStatus;
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(starting).rejects.toThrow(/proxy is down.*10s.*teamkimi server/);
+      await expect(withHubLock(root, async () => 'acquired')).resolves.toBe('acquired');
+    } finally {
+      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
+    }
   }, 20_000);
 });
 

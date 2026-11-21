@@ -22,8 +22,8 @@ plan the team, brief the agents, and land the work.
   `decision` per action with verified facts. General and Other answers carry
   no approval authority. Use only the returned action, outcome, facts, and
   grant, then wait for the answers.
-- You stay on the strong tier (the default model). Put fleet agents on a
-  cheap tier with `--model`, for example `--model kimi-k2`.
+- You and every fleet agent stay on Kimi 3.1 Pro. Omit `--model` so each agent
+  inherits the Hive default.
 - When the work is built and reviewed, run the gate
   (`hive gate --log <path> -- build "..." test "..."`), then read it with
   `hive gate-verify log <path> --commit <tip>` and

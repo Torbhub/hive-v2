@@ -1,0 +1,9 @@
+default_model = "kimi-code/k3.1-pro-highspeed"
+
+[models."kimi-code/k3.1-pro-highspeed"]
+provider = "managed:kimi-code"
+model = "k3.1-pro-highspeed"
+
+[models."kimi-code/k3.1-pro"]
+provider = "managed:kimi-code"
+model = "k3.1-pro"

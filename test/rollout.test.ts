@@ -10,6 +10,7 @@ import { disableExecution } from '../src/rollout.js';
 const tmux = await import('../src/tmux.js');
 const { launchWindow, respawnAgent, spawnAgent } = await import('../src/spawn.js');
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+process.env.KIMI_CODE_HOME = path.join(repository, 'test', 'fixtures');
 
 afterEach(() => {
   vi.useRealTimers();
@@ -35,6 +36,16 @@ function cli(root: string, args: string[]) {
 }
 
 describe('project execution rollout control', () => {
+  it('refuses a respawn model change when team.json records a model', async () => {
+    const { root, home } = await projectRoot();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', model: 'kimi-code/k3.1-pro-highspeed' }],
+    });
+    const result = cli(root, ['spawn', 'respawn', 'demo', '--agent', 'builder', '--model', 'kimi-code/k3.1-pro']);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/model.*only.*missing/);
+  });
+
   it('turns execution off once, reports status, and offers no on command', async () => {
     const { root } = await projectRoot();
     const first = cli(root, ['hub', 'execution', 'demo', 'off']);
@@ -112,7 +123,7 @@ describe('project execution rollout control', () => {
     await fs.mkdir(path.dirname(handoff), { recursive: true });
     await fs.writeFile(handoff, '# builder\n\n## START HERE\n### Assignment\nComplete the bounded rollout assignment.\n\n### Deliverable\nReturn the bounded rollout evidence.\n');
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'builder', pane: '%1', pane_pid: 1, pane_started: 'now', worktree: home, handoff }],
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 1, pane_started: 'now', worktree: home, handoff, model: 'kimi-code/k3.1-pro-highspeed' }],
     });
     await disableExecution(root, 'demo');
     process.env.HIVE_COLLABORATION_ENABLED = '1';
@@ -173,7 +184,7 @@ describe('project execution rollout control', () => {
     await fs.mkdir(path.dirname(handoff), { recursive: true });
     await fs.writeFile(handoff, '# builder\n\n## START HERE\n### Assignment\nComplete the bounded rollout assignment.\n\n### Deliverable\nReturn the bounded rollout evidence.\n');
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'builder', pane: '%1', pane_pid: 1, pane_started: 'now', worktree: home, handoff }],
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 1, pane_started: 'now', worktree: home, handoff, model: 'kimi-code/k3.1-pro-highspeed' }],
     });
     process.env.HIVE_COLLABORATION_ENABLED = '1';
     vi.spyOn(tmux, 'run').mockImplementation(async (command) => {
@@ -222,7 +233,7 @@ describe('project execution rollout control', () => {
     await fs.mkdir(path.dirname(handoff), { recursive: true });
     await fs.writeFile(handoff, '# builder\n\n## START HERE\n### Assignment\nComplete the bounded rollout assignment.\n\n### Deliverable\nReturn the bounded rollout evidence.\n');
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'builder', pane: '%1', pane_pid: 1, pane_started: 'now', worktree: home, handoff }],
+      agents: [{ name: 'builder', pane: '%1', pane_pid: 1, pane_started: 'now', worktree: home, handoff, model: 'kimi-code/k3.1-pro-highspeed' }],
     });
     process.env.HIVE_COLLABORATION_ENABLED = '1';
     vi.useFakeTimers();

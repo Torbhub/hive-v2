@@ -4,10 +4,10 @@ import { capturePane, paneExists, paneIdentity, paneIs } from './tmux.js';
 import { lines, parseDialog } from './screen.js';
 import {
   clearPendingPane, compareAndSwapTeamEntry, hasLiveSendingClaim, hivePath, hubPath, insertTeamEntry, manifestAdd,
-  readPendingPane, readTeam, Refusal, withHubLock, writePendingPane, type PendingPane, type ProjectsFile,
+  readPendingPane, readProjects, readTeam, Refusal, withHubLock, writePendingPane, type PendingPane, type ProjectsFile,
 } from './state.js';
 import {
-  assertEntryAlive, effectiveOrchestratorMode, ensureAgentFiles, findLatestSession,
+  assertEntryAlive, checkModel, DEFAULT_MODEL, effectiveOrchestratorMode, ensureAgentFiles, findLatestSession,
   launchWindow, orchestratorName, pickupLine, preflight, typeLine, waitIdle,
 } from './spawn.js';
 import { withLaunchClaim, withProjectLock } from './project.js';
@@ -20,9 +20,22 @@ type ProjectEntry = ProjectsFile['projects'][number];
 type LaunchKind = 'wake' | 'start';
 
 export function pendingMigrationRequired(pending: PendingPane, orchestrator?: TeamEntry): boolean {
-  return pending.launch_scoped_auto === undefined || pending.launch_mode === undefined
+  return pending.model === undefined || (orchestrator !== undefined && orchestrator.model === undefined)
+    || (orchestrator !== undefined && pending.model !== orchestrator.model)
+    || pending.launch_scoped_auto === undefined || pending.launch_mode === undefined
     || pending.migration_state !== undefined || pending.watch_authority_revoked_at !== undefined
     || orchestrator?.migration_state !== undefined || orchestrator?.watch_authority_revoked_at !== undefined;
+}
+
+function orchestratorModel(project: string, kind: LaunchKind, old?: TeamEntry): string {
+  if (!old) {
+    if (kind === 'wake') throw new Refusal(`${project}'s orchestrator is not in team.json; start it instead of waking`);
+    return DEFAULT_MODEL;
+  }
+  if (old.model === undefined) {
+    throw new Refusal(`${old.name} is missing its recorded model. Use hive spawn respawn ${project} --agent ${old.name} --model ${DEFAULT_MODEL}`);
+  }
+  return old.model;
 }
 
 async function recordOrchestrator(home: string, entry: Parameters<typeof insertTeamEntry>[1]): Promise<void> {
@@ -52,16 +65,8 @@ async function launchOrchestrator(
   task?: string,
 ): Promise<string> {
   await assertExecutionAllowed(root, project);
-  return withLaunchClaim(root, project, (p) => launchRegisteredOrchestrator(root, p, kind, task));
-}
-
-async function launchRegisteredOrchestrator(
-  root: string,
-  p: ProjectEntry,
-  kind: LaunchKind,
-  task?: string,
-): Promise<string> {
-  const project = p.name;
+  const projectEntry = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
+  if (!projectEntry) throw new Refusal(`unknown project: ${project}`);
   if (kind === 'start') {
     if (!task || !new RegExp(`^${project}-\\d+$`).test(task)) {
       throw new Refusal(`a task id is ${project}-<n>: ${task}`);
@@ -69,18 +74,36 @@ async function launchRegisteredOrchestrator(
     const taskFile = await fs.stat(hubPath(root, 'tasks', `${task}.md`)).catch(() => null);
     if (!taskFile?.isFile()) throw new Refusal(`no task file for ${task}`);
   }
+  const pending = await readPendingPane(root, project);
+  const old = (await readTeam(projectEntry.home)).agents.find((entry) => entry.orchestrator);
+  const model = pending ? undefined : orchestratorModel(project, kind, old);
+  if (model !== undefined) {
+    checkModel(model);
+    await preflight(model);
+  }
+  return withLaunchClaim(root, project, (p) => launchRegisteredOrchestrator(root, p, kind, task, model));
+}
+
+async function launchRegisteredOrchestrator(
+  root: string,
+  p: ProjectEntry,
+  kind: LaunchKind,
+  task: string | undefined,
+  expectedModel: string | undefined,
+): Promise<string> {
+  const project = p.name;
   // Claim-then-launch under the hub lock: a second start for the same project
   // must see the pending record, never race past the check.
   const launched = await withHubLock(root, async () => {
     if (await settlePendingPane(root, project)) return 'continue' as const;
-    await preflight();
-
     const team = await readTeam(p.home);
     const old = team.agents.find((a) => a.orchestrator);
-    // The watch's death path wakes from a stale snapshot; re-read under the lock.
-    if (kind === 'wake' && !old) {
-      throw new Refusal(`${project}'s orchestrator is not in team.json; start it instead of waking`);
+    const model = orchestratorModel(project, kind, old);
+    if (expectedModel !== undefined && model !== expectedModel) {
+      throw new Refusal(`${project}'s recorded model changed before launch`);
     }
+    checkModel(model);
+    await preflight(model);
     if (kind === 'wake' && old?.closed_at) {
       throw new Refusal(`${project}'s orchestrator was closed on purpose at ${old.closed_at}; not waking it`);
     }
@@ -101,7 +124,7 @@ async function launchRegisteredOrchestrator(
       if (block) await applyMemoryBlock(hivePath(cwd, 'handoffs', `${name}.md`), block);
     }
     const mode = effectiveOrchestratorMode(p.mode ?? 'ask', p.approvals);
-    const { pane, identity } = await launchWindow(root, project, name, cwd, sessionId, mode, old?.model);
+    const { pane, identity } = await launchWindow(root, project, name, cwd, sessionId, mode, model);
     await manifestAdd(p.home, {
       kind: 'tmux', at: new Date().toISOString(), pane, window: `${project}:${name}`,
       pane_pid: identity.pid, pane_started: identity.started,
@@ -111,16 +134,16 @@ async function launchRegisteredOrchestrator(
     const pending = {
       pane, pane_pid: identity.pid, pane_started: identity.started,
       kind, at: new Date().toISOString(), typed: false, sending: true, claim_token: randomUUID(), task, line,
-      launch_mode: mode, launch_scoped_auto: mode === 'auto',
+      model, launch_mode: mode, launch_scoped_auto: mode === 'auto',
     };
     await writePendingPane(root, project, pending);
-    return { pane, identity, pending, sessionId, name, cwd, old };
+    return { pane, identity, pending, sessionId, name, cwd, old, model };
   });
   if (launched === 'continue') {
     // A live, young pending pane is a start still in flight; finish it instead of refusing.
     return continueProject(root, project);
   }
-  const { pane, identity, pending, sessionId, name, cwd, old } = launched;
+  const { pane, identity, pending, sessionId, name, cwd, old, model } = launched;
   const line = pending.line ?? '';
 
   try {
@@ -141,7 +164,7 @@ async function launchRegisteredOrchestrator(
       await recordOrchestrator(p.home, {
         name, orchestrator: true, pane, pane_pid: identity.pid, pane_started: identity.started,
         worktree: cwd, handoff: hivePath(cwd, 'handoffs', `${name}.md`), closed_at: undefined, wedged_at: undefined,
-        launch_mode: current.launch_mode, launch_scoped_auto: current.launch_scoped_auto,
+        model, launch_mode: current.launch_mode, launch_scoped_auto: current.launch_scoped_auto,
         migration_state: undefined, watch_authority_revoked_at: undefined,
       });
       await writePendingPane(root, project, { ...current, typed: true, sending: false });
@@ -216,7 +239,7 @@ async function continueRegisteredProject(root: string, p: ProjectEntry): Promise
         pane: pending.pane, pane_pid: id.pid, pane_started: id.started,
         worktree: p.home, handoff: hivePath(p.home, 'handoffs', `${orchestratorName(project)}.md`),
         closed_at: undefined, wedged_at: undefined,
-        launch_mode: current.launch_mode, launch_scoped_auto: current.launch_scoped_auto,
+        model: current.model!, launch_mode: current.launch_mode, launch_scoped_auto: current.launch_scoped_auto,
         migration_state: undefined, watch_authority_revoked_at: undefined,
       });
       await writePendingPane(root, project, { ...current, typed: true, sending: false });
