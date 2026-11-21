@@ -1193,7 +1193,8 @@ describe('native root contract deltas', () => {
     expect(await readNativeBranch(fixture.selector, oldBranch.id)).toEqual(oldBranch);
 
     await expect(evaluateTaskPredicate(fixture.root, 'demo-1', 'native_result', {
-      lease_id: oldBranch.leaseId, plan_digest: changed.plan_digest!, artifact_digest: oldBranch.result!.digest,
+      acceptance_id: 'native', lease_id: oldBranch.leaseId,
+      plan_digest: changed.plan_digest!, artifact_digest: oldBranch.result!.digest,
     }, 1, fixture.native)).resolves.toBe(false);
     await expect(rejoinNativeBranch(fixture.selector, oldBranch.id, {
       principal: fixture.principal, registry: fixture.registry, reviewDigest: oldBranch.review!.digest,
@@ -1211,7 +1212,8 @@ describe('native root contract deltas', () => {
     );
     const current = foldTasks(await readTaskEvents(fixture.root)).find((task) => task.id === 'demo-1')!;
     await expect(evaluateTaskPredicate(fixture.root, 'demo-1', 'native_result', {
-      lease_id: recreated.leaseId, plan_digest: current.plan_digest!, artifact_digest: recorded.result!.digest,
+      acceptance_id: 'native', lease_id: recreated.leaseId,
+      plan_digest: current.plan_digest!, artifact_digest: recorded.result!.digest,
     }, 1, fixture.native)).resolves.toBe(true);
     await transitionTmuxAdmission(fixture.root, fixture.home, 'demo-1', recreated.id, recreated.leaseId!, 'released');
     await transitionTmuxAdmission(fixture.root, fixture.home, 'demo-1', 'builder', parentReplacement.lease_id, 'released');

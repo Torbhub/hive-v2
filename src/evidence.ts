@@ -8,17 +8,23 @@ import { pushByHash } from './gate.js';
 import { createNativeBranchClient } from './native-client.js';
 import { gitDiffScope, normalizeScope, pathsWithinScope, repositoryIdentity } from './scope.js';
 import {
-  cancelGithubCheck, dispatchGithubCheck, evaluateGithubCheck, reconcileGithubCheck, transferGithubCheck,
-  type GitHubCheckConfig,
+  cancelGithubCheck, dispatchGithubCheck, evaluateGithubCheck, githubAcceptanceProvenance, reconcileGithubCheck,
+  transferGithubCheck, type GitHubCheckConfig,
 } from './supervision.js';
 import {
-  appendTaskEvent, contractDigest, foldTasks, readProjects, readTaskEvents, Refusal, taskEvidenceDigests,
+  acceptanceFor, acceptanceReceipt, allowsLeaseLessFallback, canonicalActor, evidenceAcceptanceBound,
+  registeredEvidenceBinding,
+} from './acceptance.js';
+import {
+  appendTaskEvent, contractDigest, foldTasks, readProjects, readTaskEvents, readTeam, Refusal, taskEvidenceDigests,
   validateRootContract, valueDigest, withHubLock, withTeamLock,
 } from './state.js';
 import type {
-  HubTask, NativeBranchClient, TaskEvent, TaskEvidence, TaskEvidenceVerification, TaskReceipt, TaskResearchSource, TeamEntry,
-  TmuxAdmission,
+  HubTask, NativeBranchClient, TaskAcceptance, TaskEvent, TaskEvidence, TaskEvidenceVerification, TaskReceipt,
+  TaskResearchSource, TeamEntry, TmuxAdmission,
 } from './types.js';
+
+export { allowsLeaseLessFallback, canonicalActor } from './acceptance.js';
 
 export type TaskReceiptPredicateConfig = {
   plan_digest: string;
@@ -33,6 +39,7 @@ export type GitDiffScopePredicateConfig = {
   lease_id: string;
   base_revision: string;
   artifact_revision: string;
+  acceptance_id?: string;
 };
 export type NativeResultPredicateConfig = {
   acceptance_id?: string;
@@ -43,23 +50,13 @@ export type NativeResultPredicateConfig = {
 };
 export type TaskPredicateConfig = TaskReceiptPredicateConfig | GitDiffScopePredicateConfig | NativeResultPredicateConfig | GitHubCheckConfig;
 
-export function canonicalActor(actor: string): string {
-  return actor.startsWith('agent:') ? actor.slice('agent:'.length) : actor;
-}
-
-export function allowsLeaseLessFallback(task: HubTask, actor: string): boolean {
-  const canonical = canonicalActor(actor);
-  if ((task.admissions ?? []).some((admission) => admission.agent === canonical)) return false;
-  if (actor.startsWith('agent:')) return !task.contract;
-  if (!task.contract) return true;
-  return ['legacy', 'orchestrator', `${task.project}-orchestrator`].includes(canonical)
-    || canonical.startsWith('user:');
-}
-
-function latestEvidence(events: TaskEvent[], id: string, hash: string, after?: string | number): TaskEvidence | undefined {
+function latestEvidence(
+  events: TaskEvent[], id: string, hash: string, after?: string | number, task?: HubTask, acceptance?: TaskAcceptance,
+): TaskEvidence | undefined {
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index];
     if (event.id === id && event.event === 'evidence' && event.evidence?.evidence_hash === hash
+      && (!task || !acceptance || evidenceAcceptanceBound(task, acceptance, event.evidence))
       && (after === undefined || typeof after === 'number' && index > after || typeof after === 'string' && event.at > after)) {
       return event.evidence;
     }
@@ -70,11 +67,12 @@ function latestEvidence(events: TaskEvent[], id: string, hash: string, after?: s
 export function matchingEvidence(
   events: TaskEvent[], id: string, receipt: TaskReceipt, task: HubTask, recovery: boolean, requireVerification = false,
   after?: string | number, adapterId: TaskEvidenceVerification['adapter_id'] | 'any' = 'task_receipt',
+  acceptance?: TaskAcceptance,
 ): TaskEvidence[] | null {
   if (receipt.evidence_hashes.length === 0) return null;
   const matches: TaskEvidence[] = [];
   for (const hash of receipt.evidence_hashes) {
-    const evidence = latestEvidence(events, id, hash, after);
+    const evidence = latestEvidence(events, id, hash, after, task, acceptance);
     if (!evidence || evidence.artifact_digest !== receipt.artifact_digest
       || evidence.lease_id !== receipt.lease_id) return null;
     const serverArtifact = evidence.verification?.adapter_id === 'task_receipt'
@@ -103,31 +101,43 @@ export function matchingEvidence(
   return matches;
 }
 
-function currentReceiptLease(task: HubTask, receipt: TaskReceipt, config: TaskReceiptPredicateConfig): boolean {
+function receiptAcceptance(task: HubTask, config: TaskReceiptPredicateConfig): TaskAcceptance | undefined {
+  const matches = (task.contract?.acceptance ?? []).filter((acceptance) => acceptance.predicate_id === 'task_receipt'
+    && acceptance.version === 1 && (!config.acceptance_id || acceptance.id === config.acceptance_id)
+    && acceptance.configuration.artifact_digest === config.artifact_digest
+    && (config.output_claim === undefined || acceptance.configuration.output_claim === config.output_claim)
+    && (config.artifact_path === undefined || acceptance.configuration.artifact_path === config.artifact_path));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function currentReceiptLease(
+  task: HubTask, receipt: TaskReceipt, config: TaskReceiptPredicateConfig, acceptance?: TaskAcceptance,
+): boolean {
   if (!receipt.lease_id) return !config.lease_id && allowsLeaseLessFallback(task, receipt.actor);
   return config.lease_id === receipt.lease_id && (task.admissions ?? []).some((admission) =>
-    admission.lease_id === receipt.lease_id && (!admission.lease_revoked
-      && (admission.status === 'admitted' || admission.status === 'running')
+    admission.lease_id === receipt.lease_id && (!acceptance || admission.acceptance_ids.includes(acceptance.id))
+    && (!admission.lease_revoked && (admission.status === 'admitted' || admission.status === 'running')
       || admission.status === 'released' && !admission.launch_error));
 }
 
 export const TASK_PREDICATES = {
   task_receipt(events: TaskEvent[], id: string, config: TaskReceiptPredicateConfig): boolean {
     const task = foldTasks(events).find((candidate) => candidate.id === id);
-    const receipt = task?.last_receipt;
-    const reconciling = task?.state === 'reconciling'
-      || task?.state === 'blocked' && task.resume_state === 'reconciling';
-    if (!task || task.lease_revoked || !reconciling || receipt?.state !== 'reconciling'
+    if (!task) return false;
+    const acceptance = task.contract ? receiptAcceptance(task, config) : undefined;
+    if (task.contract && !acceptance) return false;
+    const receipt = acceptance ? acceptanceReceipt(events, task, acceptance, config.lease_id) : task.last_receipt;
+    const reconciling = task.state === 'reconciling' || task.state === 'blocked' && task.resume_state === 'reconciling';
+    if (task.lease_revoked || !reconciling || receipt?.state !== 'reconciling'
       || receipt.plan_digest !== config.plan_digest || receipt.plan_digest !== task.plan_digest
       || receipt.epoch !== task.lease_epoch || receipt.actor !== task.receipt_actor
-      || receipt.artifact_digest !== config.artifact_digest || !currentReceiptLease(task, receipt, config)) {
-      return false;
-    }
+      || receipt.artifact_digest !== config.artifact_digest) return false;
     if (task.contract && contractDigest(task.contract) !== task.plan_digest) return false;
-    const verified = matchingEvidence(events, id, receipt, task, false, true);
+    if (!currentReceiptLease(task, receipt, config, acceptance)) return false;
+    const verified = matchingEvidence(events, id, receipt, task, false, true, undefined, 'task_receipt', acceptance);
     if (!verified?.every((evidence) => evidence.verification?.adapter_id === 'task_receipt'
       && evidence.verification.evidence_type === evidence.verification.adapter_id)) return false;
-    return (config.evidence_hashes ?? []).every((hash) => receipt.evidence_hashes.includes(hash));
+    return (config.evidence_hashes ?? []).every((hash) => verified.some((evidence) => evidence.evidence_hash === hash));
   },
 };
 
@@ -226,10 +236,7 @@ async function evaluateTaskReceiptLocked(
     || receipt.output_claim !== config.output_claim || !receipt.artifact_path
     || valueDigest(admissionProvenance(task, receipt)) !== valueDigest(task.contract.provenance)
     || !currentReceiptLease(task, receipt, config)) return false;
-  const acceptance = task.contract.acceptance.find((candidate) => candidate.predicate_id === 'task_receipt'
-    && candidate.version === 1 && candidate.configuration.output_claim === config.output_claim
-    && candidate.configuration.artifact_path === config.artifact_path
-    && candidate.configuration.artifact_digest === config.artifact_digest);
+  const acceptance = receiptAcceptance(task, config);
   const admission = task.admissions?.find((candidate) => candidate.lease_id === receipt.lease_id
     && candidate.output_claim === config.output_claim && candidate.plan_digest === task.plan_digest
     && candidate.root_lease_epoch === task.lease_epoch && acceptance
@@ -250,8 +257,9 @@ async function evaluateTaskReceiptLocked(
     if (!file || file.path !== configuredPath || !pathsWithinScope([file.path], admission.write_scope)) return false;
     const contentDigest = createHash('sha256').update(file.bytes).digest('hex');
     if (contentDigest !== receipt.artifact_digest) return false;
-    if (!resume && receipt.actor === 'adapter:task_receipt') {
-      return TASK_PREDICATES.task_receipt(await readTaskEvents(root), id, config);
+    if (!resume && receipt.actor === 'adapter:task_receipt'
+      && TASK_PREDICATES.task_receipt(await readTaskEvents(root), id, config)) {
+      return true;
     }
     const artifact = { output_claim: config.output_claim, path: file.path, content_digest: contentDigest };
     const content = {
@@ -266,7 +274,7 @@ async function evaluateTaskReceiptLocked(
       artifact_digest: contentDigest, evidence_hash: evidenceHash,
       verification: {
         adapter_id: 'task_receipt', evidence_type: 'task_receipt',
-        provenance_digest: valueDigest(admission.provenance),
+        provenance_digest: valueDigest(admission.provenance), acceptance_id: acceptance.id,
       },
     };
     await appendTaskEvent(root, {
@@ -295,11 +303,14 @@ async function evaluateGitDiffScopeLocked(root: string, id: string, config: GitD
   const task = foldTasks(await readTaskEvents(root)).find((candidate) => candidate.id === id);
   if (!task) throw new Refusal(`unknown task: ${id}`);
   const admission = task.admissions?.find((candidate) => candidate.lease_id === config.lease_id);
-  if (!admission || !task.contract?.acceptance.some((acceptance) => acceptance.predicate_id === 'git_diff_scope'
-    && admission.acceptance_ids.includes(acceptance.id))) {
+  const allocated = task.contract?.acceptance.filter((acceptance) => acceptance.predicate_id === 'git_diff_scope'
+    && admission?.acceptance_ids.includes(acceptance.id)
+    && (!config.acceptance_id || acceptance.id === config.acceptance_id)) ?? [];
+  const acceptance = allocated.length === 1 ? allocated[0] : undefined;
+  if (!admission || !acceptance) {
     throw new Refusal(`${id} has no registered git_diff_scope allocation for this lease`);
   }
-  if (admission.plan_digest !== task.plan_digest || admission.root_lease_epoch !== task.lease_epoch
+  if (!task.contract || admission.plan_digest !== task.plan_digest || admission.root_lease_epoch !== task.lease_epoch
     || contractDigest(task.contract) !== task.plan_digest) {
     throw new Refusal('git_diff_scope plan digest or epoch is stale');
   }
@@ -344,7 +355,7 @@ async function evaluateGitDiffScopeLocked(root: string, id: string, config: GitD
         artifact: result.changes, content: result, ...digests,
         verification: {
           adapter_id: 'git_diff_scope', evidence_type: 'git_diff_scope',
-          provenance_digest: valueDigest(admission.provenance),
+          provenance_digest: valueDigest(admission.provenance), acceptance_id: acceptance.id,
         },
       },
     });
@@ -361,6 +372,9 @@ async function evaluateNativeAdmissionLocked(
 ): Promise<boolean> {
   const project = (await readProjects(root)).projects.find((candidate) => candidate.name === task.project);
   if (!project) return false;
+  const acceptance = acceptanceFor(task, 'native_result', config.acceptance_id);
+  if (!acceptance || !admission.acceptance_ids.includes(acceptance.id)) return false;
+  const acceptanceId = acceptance.id;
   return withTeamLock(project.home, async () => {
     const scope = { root, project: task.project };
     const matches = config.branch_id
@@ -390,14 +404,15 @@ async function evaluateNativeAdmissionLocked(
     const content = { resultDigest: digest, childSnapshot: branch.childSnapshot };
     const evidenceHash = taskEvidenceDigests(artifact, content).evidence_hash;
     const events = await readTaskEvents(root);
-    const existing = latestEvidence(events, task.id, evidenceHash);
+    const existing = latestEvidence(events, task.id, evidenceHash, undefined, task, acceptance);
     if (existing) {
       return existing.outcome === 'passed' && existing.artifact_digest === digest
         && existing.lease_id === admission.lease_id && existing.plan_digest === admission.plan_digest
         && existing.epoch === admission.root_lease_epoch
         && existing.verification?.adapter_id === 'native_result'
         && existing.verification.evidence_type === 'native_result'
-        && existing.verification.provenance_digest === valueDigest(admission.provenance);
+        && existing.verification.provenance_digest === valueDigest(admission.provenance)
+        && evidenceAcceptanceBound(task, acceptance, existing);
     }
     await appendTaskEvent(root, {
       id: task.id, project: task.project, event: 'evidence', at: new Date().toISOString(),
@@ -407,7 +422,7 @@ async function evaluateNativeAdmissionLocked(
         artifact_digest: digest, evidence_hash: evidenceHash,
         verification: {
           adapter_id: 'native_result', evidence_type: 'native_result',
-          provenance_digest: valueDigest(admission.provenance),
+          provenance_digest: valueDigest(admission.provenance), acceptance_id: acceptanceId,
         },
       },
     });
@@ -422,21 +437,25 @@ async function evaluateNativeResultLocked(
   if (!task?.contract || contractDigest(task.contract) !== task.plan_digest || config.plan_digest !== task.plan_digest) {
     return false;
   }
-  const acceptance = config.acceptance_id
-    ? task.contract.acceptance.find((candidate) => candidate.id === config.acceptance_id)
-    : undefined;
-  if (config.acceptance_id && acceptance?.predicate_id !== 'native_result') return false;
+  const allocated = config.lease_id && !config.acceptance_id
+    ? task.contract.acceptance.filter((candidate) => candidate.predicate_id === 'native_result'
+      && (task.admissions ?? []).some((admission) => admission.adapter === 'native'
+        && admission.lease_id === config.lease_id && admission.plan_digest === task.plan_digest
+        && admission.root_lease_epoch === task.lease_epoch && admission.acceptance_ids.includes(candidate.id)))
+    : [];
+  const acceptance = config.acceptance_id ? acceptanceFor(task, 'native_result', config.acceptance_id)
+    : config.lease_id ? allocated.length === 1 ? allocated[0] : undefined
+      : acceptanceFor(task, 'native_result');
+  if (!acceptance || acceptance.version !== 1) return false;
+  const boundConfig = { ...config, acceptance_id: acceptance.id };
   const admissions = (task.admissions ?? []).filter((admission) => admission.adapter === 'native'
     && admission.plan_digest === task.plan_digest && admission.root_lease_epoch === task.lease_epoch
     && (!config.lease_id || admission.lease_id === config.lease_id)
-    && (config.acceptance_id
-      ? admission.acceptance_ids.includes(config.acceptance_id)
-      : task.contract!.acceptance.some((candidate) => candidate.predicate_id === 'native_result'
-        && admission.acceptance_ids.includes(candidate.id))));
+    && admission.acceptance_ids.includes(acceptance.id));
   if (admissions.length === 0) return false;
   const client = native ?? createNativeBranchClient();
   for (const admission of admissions) {
-    if (await evaluateNativeAdmissionLocked(root, task, admission, config, client)) return true;
+    if (await evaluateNativeAdmissionLocked(root, task, admission, boundConfig, client)) return true;
   }
   return false;
 }
@@ -508,6 +527,7 @@ export async function evaluateRegisteredAcceptanceLocked(
       lease_id: (config as GitDiffScopePredicateConfig).lease_id ?? admission?.lease_id,
       base_revision: task.contract.provenance.base_revision,
       artifact_revision: task.contract.provenance.artifact_revision,
+      acceptance_id: acceptance.id,
     });
   } else if (acceptance.predicate_id === 'native_result' || acceptance.predicate_id === 'github_check') {
     Object.assign(config, { plan_digest: task.plan_digest, acceptance_id: acceptance.id });
@@ -525,10 +545,17 @@ export async function evaluateRegisteredAcceptanceLocked(
   const requiredHashes = acceptance.required_evidence.filter((item) => /^[0-9a-f]{64}$/.test(item));
   if (passed && requiredHashes.length) {
     const events = await readTaskEvents(root);
-    passed = requiredHashes.every((hash) => events.some((event) => event.id === task.id
+    const currentTask = foldTasks(events).find((candidate) => candidate.id === task.id) ?? task;
+    const project = (await readProjects(root)).projects.find((candidate) => candidate.name === currentTask.project);
+    const entries = project ? (await readTeam(project.home)).agents : [];
+    const provenance = acceptance.predicate_id === 'github_check'
+      ? githubAcceptanceProvenance(currentTask, acceptance) : undefined;
+    const receipt = acceptance.predicate_id === 'task_receipt'
+      ? acceptanceReceipt(events, currentTask, acceptance, (config as TaskReceiptPredicateConfig).lease_id) : undefined;
+    passed = requiredHashes.every((hash) => events.some((event) => event.id === currentTask.id
       && event.event === 'evidence' && event.evidence?.evidence_hash === hash
-      && event.evidence.outcome === 'passed' && event.evidence.plan_digest === task.plan_digest
-      && event.evidence.epoch === task.lease_epoch));
+      && event.evidence.outcome === 'passed'
+      && registeredEvidenceBinding(currentTask, acceptance, event.evidence, entries, provenance, receipt)));
   }
   return passed;
 }

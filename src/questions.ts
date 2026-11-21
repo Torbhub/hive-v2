@@ -841,8 +841,8 @@ export const OPEN_BATCH_TTL_MS = 7 * 24 * 60 * 60_000;
 export const CLOSED_BATCH_CAP = 200;
 export const VIEW_BATCH_CAP = 50;
 
-// Lazy expiry and retention, driven by the hub view: an open batch older
-// than the wait limit is abandoned, so it cancels with an audit note.
+// Watch maintenance expires an open batch older than the wait limit and
+// records an audit note.
 // Closed history is capped so the archive never grows without bound.
 export async function sweepQuestionBatches(root: string, now = Date.now()): Promise<void> {
   // Nothing on disk means nothing to expire or prune, and no writes at all.

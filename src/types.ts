@@ -98,6 +98,16 @@ export type TaskEvidenceVerification = {
   adapter_id: 'task_receipt' | 'git_diff_scope' | 'native_result' | 'github_check';
   evidence_type: 'task_receipt' | 'git_diff_scope' | 'native_result' | 'github_check';
   provenance_digest: string;
+  acceptance_id?: string;
+};
+export type AcceptanceEvidenceRow = {
+  acceptanceId: string;
+  predicateId: string;
+  required: boolean;
+  result: 'PASS' | 'FAIL' | 'PENDING' | 'NOT_RUN';
+  artifactDigest: string;
+  target: string;
+  blocker?: string;
 };
 export type TaskEvidence = {
   actor: string;
@@ -407,6 +417,10 @@ export type WorkTreeNode = {
   blocker?: string;
   externalId?: string;
   evidenceOutcome?: string;
+  registeredPass: boolean;
+  evidenceIncomplete: boolean;
+  acceptance: AcceptanceEvidenceRow[];
+  acceptanceTruncated: boolean;
   details: { label: string; value: string }[];
 };
 export type WorkTree = { nodes: WorkTreeNode[]; truncated: boolean };

@@ -1,7 +1,7 @@
 import type { Decision, HubProject, HubTask, HubView, NativeBranchRecord, QuestionBatch, TaskEvent, TeamEntry } from './types.js';
 import { buildStatus, listTasks, readDialogFor, redactDialog } from './hub.js';
 import { listNativeBranches } from './branches.js';
-import { VIEW_BATCH_CAP, listOpenQuestionBatches, sweepQuestionBatches } from './questions.js';
+import { VIEW_BATCH_CAP, listOpenQuestionBatches } from './questions.js';
 import { readDecisions, readTaskEvents, readTeam } from './state.js';
 import { buildWorkTree } from './supervision.js';
 
@@ -42,7 +42,6 @@ export async function buildView(root: string): Promise<HubView> {
   let questionsTotal = 0;
   let error = '';
   try {
-    await withTimeout(sweepQuestionBatches(root), READ_TIMEOUT_MS, 'questions-sweep');
     openBatches = await withTimeout(listOpenQuestionBatches(root), READ_TIMEOUT_MS, 'questions');
     questionsTotal = openBatches.length;
     questions = openBatches.slice(0, VIEW_BATCH_CAP);

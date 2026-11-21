@@ -504,7 +504,8 @@ function treeNode(overrides: Record<string, unknown>): Record<string, unknown> {
     id: 'task:demo:demo-1', parentId: null, project: 'demo', task: 'demo-1', kind: 'task', recordId: 'demo-1',
     adapter: 'root', state: 'running', active: true, terminal: false, done: false, doneEnabled: false,
     doneBlockers: ['github has no passing registered evidence'], planDigest: 'c'.repeat(64), epoch: 1,
-    scope: ['src'], details: [], ...overrides,
+    registeredPass: false, evidenceIncomplete: true, acceptanceTruncated: false,
+    scope: ['src'], details: [], acceptance: [], ...overrides,
   };
 }
 
