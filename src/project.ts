@@ -6,7 +6,7 @@ import {
   hubPath, readPendingPane, readProjects, readTeam, Refusal, valueDigest, withHubLock, writeJson, writeProjects, type ProjectsFile,
 } from './state.js';
 import { APPROVALS_MODES, PROJECT_MODES } from './types.js';
-import type { Approvals, ProjectMode } from './types.js';
+import type { Approvals, ProjectMode, TeamEntry } from './types.js';
 import { run } from './tmux.js';
 
 type AddOptions = { mode?: string; approvals?: string; source?: string; legacy?: boolean };
@@ -269,6 +269,7 @@ export async function withLaunchClaim<T>(
   root: string,
   name: string,
   fn: (project: ProjectEntry, claim: string, digest: string) => Promise<T>,
+  options: { preserveClaim?: (result: T) => boolean } = {},
 ): Promise<T> {
   const file = hubPath(root, 'launches', `${name}:${randomUUID()}.json`);
   let digest = '';
@@ -277,11 +278,29 @@ export async function withLaunchClaim<T>(
     digest = valueDigest(await fs.readFile(file, 'utf8'));
     return registered;
   });
+  let preserve = false;
   try {
-    return await fn(project, path.relative(root, file).split(path.sep).join('/'), digest);
+    const result = await fn(project, path.relative(root, file).split(path.sep).join('/'), digest);
+    preserve = options.preserveClaim?.(result) ?? false;
+    return result;
   } finally {
-    await fs.rm(file, { force: true });
+    if (!preserve) await fs.rm(file, { force: true });
   }
+}
+
+function pendingClaimFile(base: string, claim: string): string {
+  const file = path.resolve(base, claim);
+  if (path.dirname(file) !== hubPath(base, 'launches')) throw new Refusal('pending launch claim is outside its launch directory');
+  return file;
+}
+
+export async function releasePendingLaunchClaim(root: string, entry: TeamEntry): Promise<void> {
+  const pending = entry.launch_pending;
+  if (!pending) return;
+  const original = pendingClaimFile(root, pending.launch_claim_path);
+  const worker = pendingClaimFile(pending.worktree, pending.launch_claim_path);
+  await fs.rm(original, { force: true });
+  if (worker !== original) await fs.rm(worker, { force: true });
 }
 
 export async function removeProject(root: string, name: string): Promise<{ ok: true; name: string }> {

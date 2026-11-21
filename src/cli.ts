@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import {
   answerDialog, buildStatus, continueProject, hubAdd, hubInit, hubTask, ledgerCommand,
-  listTasks, planAnswer, readDialogFor, startProject, wake,
+  listTasks, planAnswer, readDialogFor, redactDialog, startProject, wake,
 } from './hub.js';
 import { closeAgent, respawnAgent, spawnAgent } from './spawn.js';
 import { parseSteps, runGate, verifyCommits, verifyLog } from './gate.js';
@@ -125,7 +125,7 @@ async function hubCommand(args: string[]): Promise<void> {
       if (!project) throw new UsageError('usage: hive hub dialog <project> [agent]');
       const dialog = await readDialogFor(root, validName('project', project), agent && validAgentRef(agent));
       if (!dialog) process.exit(3);
-      console.log(JSON.stringify(dialog, null, 2));
+      console.log(JSON.stringify(redactDialog(dialog), null, 2));
       return;
     }
     case 'answer': {

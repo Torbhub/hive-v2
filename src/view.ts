@@ -1,5 +1,5 @@
 import type { Decision, HubProject, HubTask, HubView, NativeBranchRecord, QuestionBatch, TaskEvent, TeamEntry } from './types.js';
-import { buildStatus, listTasks, readDialogFor } from './hub.js';
+import { buildStatus, listTasks, readDialogFor, redactDialog } from './hub.js';
 import { listNativeBranches } from './branches.js';
 import { VIEW_BATCH_CAP, listOpenQuestionBatches, sweepQuestionBatches } from './questions.js';
 import { readDecisions, readTaskEvents, readTeam } from './state.js';
@@ -96,13 +96,13 @@ async function readDialogs(root: string, projects: HubProject[]): Promise<HubVie
   for (const p of projects) {
     if (p.orchestrator.question || p.orchestrator.starting?.question) {
       jobs.push(readDialogFor(root, p.name).then((d) => {
-        if (d) dialogs[p.name] = d;
+        if (d) dialogs[p.name] = redactDialog(d);
       }).catch(() => {}));
     }
     for (const a of p.agents) {
       if (a.question && a.ref) {
         jobs.push(readDialogFor(root, p.name, a.ref).then((d) => {
-          if (d) dialogs[`${p.name}/${a.ref}`] = d;
+          if (d) dialogs[`${p.name}/${a.ref}`] = redactDialog(d);
         }).catch(() => {}));
       }
     }

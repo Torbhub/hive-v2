@@ -84,7 +84,7 @@ import { typeLine, wakeAgent } from '../src/spawn.js';
 import { captureDeathBundle, wireLogMtime } from '../src/death-bundle.js';
 import { maybeCompact } from '../src/compact.js';
 import { capturePane, killWindow, paneExists, paneIs, run, sendEscape, sleep, tmux } from '../src/tmux.js';
-import { withTimeout } from '../src/view.js';
+import { buildView, withTimeout } from '../src/view.js';
 import { appendDecision, appendTaskEvent, contractDigest, foldTasks, hubPath, readDecisions, readPendingPane, readTaskEvents, readTeam, upsertTeamEntry, valueDigest, writeJson, writePendingPane, hivePath } from '../src/state.js';
 import { answerQuestionBatch, createQuestionBatch, listOpenQuestionBatches, readQuestionBatch } from '../src/questions.js';
 import { loadProcessedKeys, recordProcessedKey } from '../src/watch-persist.js';
@@ -222,7 +222,7 @@ function jj(cwd: string, ...args: string[]): string {
   return execFileSync('jj', args, { cwd, encoding: 'utf8' }).trim();
 }
 
-async function declaredPushProject() {
+async function declaredPushProject(branch = 'feat/watch') {
   const root = tmp();
   const remote = path.join(root, 'remote.git');
   const home = path.join(root, 'push-home');
@@ -236,7 +236,7 @@ async function declaredPushProject() {
   const base = git(home, 'rev-parse', 'HEAD');
   git(home, 'remote', 'add', 'origin', remote);
   git(home, 'update-ref', 'refs/remotes/origin/main', base);
-  git(home, 'checkout', '-b', 'feat/watch');
+  git(home, 'checkout', '-b', branch);
   await fs.writeFile(path.join(home, 'a.txt'), 'change\n');
   git(home, 'add', 'a.txt');
   git(home, 'commit', '-m', 'feat: declared watch push');
@@ -268,11 +268,11 @@ async function declaredPushProject() {
     context: 'Publish the reviewed change.',
     questions: [{
       priority: 1,
-      decision: { action: 'push', branch: 'feat/watch', commit, reason: 'Reviewed.' },
+      decision: { action: 'push', branch, commit, reason: 'Reviewed.' },
     }],
   });
   await answerQuestionBatch(root, batch.id, [{ question: 'q1', choice: 'c2' }]);
-  return { root, remote, home, commit, batch, admission };
+  return { root, remote, home, commit, batch, admission, branch };
 }
 
 describe('watchCycle watchdog', () => {
@@ -1170,6 +1170,30 @@ describe('watchCycle auto-approver', () => {
     expect(stored.answers![0].decision?.grant).toMatchObject({ operationStatus: 'succeeded' });
     expect(foldTasks(await readTaskEvents(root))[0].operations?.at(-1)).toMatchObject({ status: 'succeeded' });
     expect(await listOpenQuestionBatches(root)).toEqual([]);
+  });
+
+  it('redacts a secret branch from decisions while dispatching its exact declaration', async () => {
+    const actual = await vi.importActual<typeof import('../src/tmux.js')>('../src/tmux.js');
+    vi.mocked(run).mockImplementation(actual.run);
+    const branch = 'sk-secretbranch';
+    const { root, remote, home, commit } = await declaredPushProject(branch);
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '' },
+      projects: [{
+        name: 'demo', home, repos: [], open_tasks: 1,
+        orchestrator: { state: 'running', question: false },
+        agents: [{ name: 'builder', state: 'running', question: true, ref: `builder@${home}` }],
+      }],
+    } as never);
+    vi.mocked(readDialogFor).mockResolvedValue(dialogWith(
+      `Run this command?\n  $ git push origin ${commit}:refs/heads/${branch}`,
+    ) as never);
+
+    await cycle(root, freshApprover());
+
+    expect(git(remote, 'rev-parse', `refs/heads/${branch}`)).toBe(commit);
+    expect(JSON.stringify(await readDecisions(root))).not.toContain(branch);
+    expect(JSON.stringify((await buildView(root)).decisions)).not.toContain(branch);
   });
 
   it('auto leaves folder trust and unrelated startup dialogs for the launch path and owner', async () => {

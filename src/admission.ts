@@ -467,12 +467,18 @@ export async function completeTmuxLaunch(
     const original = path.resolve(root, claim);
     const worker = path.resolve(worktree, claim);
     const originalContent = await fs.readFile(original, 'utf8').catch(() => null);
+    const workerContent = worker === original ? originalContent : await fs.readFile(worker, 'utf8').catch(() => null);
+    if (admission.launch_claim_completed) {
+      if (originalContent !== null || workerContent !== null) {
+        throw new Refusal(`${agent} completed launch claim reappeared`);
+      }
+      return;
+    }
     if (!admission.launch_claim_digest || originalContent === null
       || valueDigest(originalContent) !== admission.launch_claim_digest) {
       throw new Refusal(`${agent} launch claim changed or disappeared before completion`);
     }
     if (worker !== original) {
-      const workerContent = await fs.readFile(worker, 'utf8').catch(() => null);
       if (admission.launch_claim_in_worktree) {
         if (workerContent === null || valueDigest(workerContent) !== admission.launch_claim_digest) {
           throw new Refusal(`${agent} worktree launch claim changed or disappeared before completion`);

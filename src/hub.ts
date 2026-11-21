@@ -7,6 +7,7 @@ import { APPROVALS_MODES, CLOSED_STATES, PROJECT_MODES } from './types.js';
 import type { Approvals, ProjectMode } from './types.js';
 import {
   capturePane, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep,
+  type PaneIdentity,
 } from './tmux.js';
 import { lines, parseDialog, scrapeContext } from './screen.js';
 import {
@@ -17,7 +18,8 @@ import {
 import { addProject } from './project.js';
 import { listOpenQuestionBatches } from './questions.js';
 import type { QuestionBatch } from './types.js';
-import { orchestratorName, typeLine } from './spawn.js';
+import { orchestratorName, pendingApprovalFingerprint, pendingWorkerAnswerTarget, assertPendingWorkerResumeAvailable, markPendingWorkerAnswerDelivered, recordPendingWorkerAnswer, resumePendingWorkerLaunch, typeLine } from './spawn.js';
+import { assertTmuxGrant } from './admission.js';
 import { redactSecrets } from './logview.js';
 import { planVerdict, type TaskRevalidate } from './taskgate.js';
 import { taskScope } from './scope.js';
@@ -47,41 +49,26 @@ export async function hubAdd(
   return addProject(root, name, folder, { legacy: true, source });
 }
 
-export async function setProjectMode(root: string, project: string, mode: string): Promise<ProjectMode> {
-  if (!(PROJECT_MODES as readonly string[]).includes(mode)) {
-    throw new Refusal(`a mode is ask|yolo|auto: ${mode}`);
+async function setProjectOption(root: string, project: string, field: 'mode' | 'approvals', value: string): Promise<ProjectMode | Approvals> {
+  const allowed = field === 'mode' ? PROJECT_MODES : APPROVALS_MODES;
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new Refusal(field === 'mode' ? `a mode is ask|yolo|auto: ${value}` : `approvals is manual|safe|smart: ${value}`);
   }
   return withHubLock(root, async () => {
     const pf = await readProjects(root);
-    const current = pf.projects.find((candidate) => candidate.name === project);
-    if (!current) throw new Refusal(`unknown project: ${project}`);
+    if (!pf.projects.some((candidate) => candidate.name === project)) throw new Refusal(`unknown project: ${project}`);
     await writeProjects(root, {
       ...pf,
       projects: pf.projects.map((candidate) => candidate.name === project
-        ? { ...candidate, mode: mode as ProjectMode }
+        ? { ...candidate, [field]: value }
         : candidate),
     });
-    return mode as ProjectMode;
+    return value as ProjectMode | Approvals;
   });
 }
 
-export async function setProjectApprovals(root: string, project: string, approvals: string): Promise<Approvals> {
-  if (!(APPROVALS_MODES as readonly string[]).includes(approvals)) {
-    throw new Refusal(`approvals is manual|safe|smart: ${approvals}`);
-  }
-  return withHubLock(root, async () => {
-    const pf = await readProjects(root);
-    const current = pf.projects.find((candidate) => candidate.name === project);
-    if (!current) throw new Refusal(`unknown project: ${project}`);
-    await writeProjects(root, {
-      ...pf,
-      projects: pf.projects.map((candidate) => candidate.name === project
-        ? { ...candidate, approvals: approvals as Approvals }
-        : candidate),
-    });
-    return approvals as Approvals;
-  });
-}
+export function setProjectMode(root: string, project: string, mode: string): Promise<ProjectMode> { return setProjectOption(root, project, 'mode', mode) as Promise<ProjectMode>; }
+export function setProjectApprovals(root: string, project: string, approvals: string): Promise<Approvals> { return setProjectOption(root, project, 'approvals', approvals) as Promise<Approvals>; }
 
 export async function hubTask(root: string, project: string, text: string): Promise<string> {
   const pf = await readProjects(root);
@@ -273,11 +260,35 @@ export async function buildStatus(root: string, batches?: QuestionBatch[]): Prom
   };
 }
 
+export type DialogRead = HubDialog & {
+  project: string;
+  session: string;
+  pane: string;
+  _target_identity?: PaneIdentity;
+  _approval_fingerprint?: string;
+};
+
+export function dialogApprovalFingerprint(dialog: DialogRead): string {
+  return dialog._approval_fingerprint ?? dialog.fingerprint;
+}
+
+export function redactDialog(dialog: DialogRead): DialogRead {
+  const { _target_identity, _approval_fingerprint, ...raw } = dialog;
+  return {
+    ...raw,
+    fingerprint: dialogApprovalFingerprint(dialog),
+    text: redactSecrets(dialog.text),
+    options: dialog.options.map((option) => ({
+      ...option, label: redactSecrets(option.label), detail: redactSecrets(option.detail),
+    })),
+  };
+}
+
 export async function readDialogFor(
   root: string,
   project: string,
   agentRefArg?: string,
-): Promise<(HubDialog & { project: string; session: string; pane: string }) | null> {
+): Promise<DialogRead | null> {
   const pf = await readProjects(root);
   const p = pf.projects.find((x) => x.name === project);
   if (!p) throw new Refusal(`unknown project: ${project}`);
@@ -300,15 +311,22 @@ export async function readDialogFor(
   } else {
     session = orchestratorName(project);
     const pending = await readPendingPane(root, project);
-    if (pending && await paneExists(pending.pane)) entry = { name: session, pane: pending.pane };
-    else entry = team.agents.find((a) => a.orchestrator);
+    if (pending && await paneExists(pending.pane)) {
+      entry = { name: session, pane: pending.pane, pane_pid: pending.pane_pid, pane_started: pending.pane_started };
+    } else entry = team.agents.find((a) => a.orchestrator);
   }
   if (!entry?.pane || !(await paneExists(entry.pane))) return null;
   const raw = await capturePane(entry.pane);
   if (raw === null) return null;
   const dialog = parseDialog(lines(raw));
   if (dialog.kind === 'none') return null;
-  return { ...dialog, project, session, pane: entry.pane };
+  return {
+    ...dialog, project, session, pane: entry.pane,
+    _target_identity: entry.pane_pid && entry.pane_started
+      ? { pid: entry.pane_pid, started: entry.pane_started }
+      : undefined,
+    _approval_fingerprint: entry.launch_pending ? pendingApprovalFingerprint(entry) : undefined,
+  };
 }
 
 // A menu answer is a walk: from the cursor's option to the chosen one, then Enter.
@@ -331,28 +349,70 @@ export async function answerDialog(
 ): Promise<{ answered: true; session: string; choice: string; option: string; dialog_gone: boolean }> {
   await assertExecutionAllowed(root, project);
   const dialog = await readDialogFor(root, project, agentRefArg);
-  if (!dialog) throw new Refusal('no dialog is on that screen');
-  if (dialog.fingerprint !== seen) {
+  if (!dialog) {
+    const pending = await pendingWorkerAnswerTarget(root, project, agentRefArg, undefined, seen);
+    const recorded = pending?.launch_pending;
+    if (!pending || !recorded?.answer_option || recorded.answer_choice !== choice || recorded.approved === undefined) {
+      throw new Refusal('no dialog is on that screen');
+    }
+    if (!recorded.dialog_delivered) throw new Refusal('the pending answer has no confirmed dialog delivery');
+    await resumePendingWorkerLaunch(root, project, agentRefArg, pending.pane!, {
+      fingerprint: seen, choice, option: recorded.answer_option, approved: recorded.approved,
+    });
+    return {
+      answered: true, session: pending.name, choice, option: recorded.answer_option, dialog_gone: true,
+    };
+  }
+  const pending = await pendingWorkerAnswerTarget(root, project, agentRefArg, dialog.pane, seen);
+  if (pending ? dialog.fingerprint !== pending.launch_pending!.fingerprint : dialog.fingerprint !== seen) {
     throw new Refusal('the dialog changed since it was read; read it again before answering');
+  }
+  if (pending) await assertPendingWorkerResumeAvailable(pending);
+  if (pending?.task && pending.lease_id) {
+    const home = (await readProjects(root)).projects.find((candidate) => candidate.name === project)!.home;
+    await assertTmuxGrant(root, home, pending.task, pending.name, pending.lease_id);
+  }
+  const identity = dialog._target_identity;
+  if (!identity) throw new Refusal(`${dialog.session} has no recorded pane identity`);
+  if (!(await paneIs(dialog.pane, identity))) {
+    throw new Refusal(`${dialog.pane} is no longer the recorded target for ${dialog.session}`);
   }
   await assertExecutionAllowed(root, project);
   let option = 'Esc';
-  if (choice === 'esc') {
-    await sendEscape(dialog.pane);
-  } else {
-    const opt = dialog.options.find((o) => String(o.n) === choice);
+  let opt: HubDialog['options'][number] | undefined;
+  if (choice !== 'esc') {
+    opt = dialog.options.find((candidate) => String(candidate.n) === choice);
     if (!opt) throw new Refusal(`the dialog has no option ${choice}`);
     if (!opt.offered) throw new Refusal(`option ${choice} needs your own text; answer it in the pane`);
     option = opt.label;
-    if (dialog.kind === 'menu') {
-      for (const key of menuKeys(opt.n, dialog.cursor ?? 1)) {
-        if (key === 'Enter') await sendEnter(dialog.pane);
-        else await sendArrow(dialog.pane, key);
-      }
-    } else {
-      await sendLiteral(dialog.pane, choice);
-    }
   }
+  const approved = opt !== undefined && /^(?:Approve|Allow|Trust)\b/i.test(opt.label);
+  const answer = { fingerprint: seen, choice, option, approved };
+  await recordPendingWorkerAnswer(root, project, agentRefArg, dialog.pane, answer);
+  const revalidate = async (): Promise<void> => {
+    const current = await readDialogFor(root, project, agentRefArg);
+    if (!current || current.fingerprint !== dialog.fingerprint
+      || current._target_identity?.pid !== identity.pid || current._target_identity.started !== identity.started) {
+      throw new Refusal('the dialog or its target changed before the next key');
+    }
+    if (!(await paneIs(current.pane, identity))) throw new Refusal(`${current.pane} changed before the next key`);
+    const currentPending = await pendingWorkerAnswerTarget(root, project, agentRefArg, current.pane, seen);
+    if (Boolean(currentPending) !== Boolean(pending)) throw new Refusal('the dialog target changed before the next key');
+  };
+  if (choice === 'esc') {
+    await revalidate();
+    await sendEscape(dialog.pane, identity);
+  } else if (dialog.kind === 'menu') {
+    for (const key of menuKeys(opt!.n, dialog.cursor ?? 1)) {
+      await revalidate();
+      if (key === 'Enter') await sendEnter(dialog.pane, identity);
+      else await sendArrow(dialog.pane, key, identity);
+    }
+  } else {
+    await revalidate();
+    await sendLiteral(dialog.pane, choice, identity);
+  }
+  await markPendingWorkerAnswerDelivered(root, project, agentRefArg, dialog.pane, answer);
   await sleep(2000);
   const after = await readDialogFor(root, project, agentRefArg);
   const firstLine = dialog.text.split('\n').map((l) => l.trim()).find((l) => l && !/^[─╌-]+$/.test(l)) ?? '';
@@ -363,7 +423,13 @@ export async function answerDialog(
   } catch (e) {
     console.error(`hive: the decision was not logged: ${e instanceof Error ? e.message : e}`);
   }
-  return { answered: true, session: dialog.session, choice, option, dialog_gone: after === null };
+  if (pending && (!approved || after === null)) {
+    await resumePendingWorkerLaunch(root, project, agentRefArg, dialog.pane, answer);
+  }
+  return {
+    answered: true, session: dialog.session, choice, option,
+    dialog_gone: pending && !approved ? true : after === null,
+  };
 }
 
 const PLAN_FEEDBACK_CAP = 500;

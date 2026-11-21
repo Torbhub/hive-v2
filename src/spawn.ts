@@ -1,19 +1,20 @@
 import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { writeNoFollow } from './safe-write.js';
 import { fileURLToPath } from 'node:url';
 import {
-  killWindow, newWindow, paneIdentity, paneIs, capturePane,
+  killWindow, newWindow, paneIdentity, paneIs, capturePane, processStartTime,
   sendArrow, sendEnter, sendLiteral, sleep, run, windowName, type PaneIdentity,
 } from './tmux.js';
-import { classify, lines, parseDialog } from './screen.js';
+import { classify, dialogFingerprint, lines, parseDialog } from './screen.js';
 import {
   appendDecision, compareAndSwapTeamEntry, foldTasks, hivePath, hubPath, insertTeamEntry, manifestAdd,
-  readProjects, readTaskEvents, readTeam, clearPendingPane, valueDigest, withTeamLock, type ProjectsFile,
+  readProjects, readTaskEvents, readTeam, clearPendingPane, Refusal, valueDigest, withTeamLock, type ProjectsFile,
 } from './state.js';
 import type { Approvals, ProjectMode, TeamEntry, TmuxAdmission } from './types.js';
-import { withLaunchClaim, withProjectLock } from './project.js';
+import { releasePendingLaunchClaim, withLaunchClaim, withProjectLock } from './project.js';
 import {
   admitTmux, assertTmuxGrant, completeTmuxLaunch, recordTmuxLaunchOutcome, registerTmuxLaunch, withTmuxGrant,
 } from './admission.js';
@@ -22,6 +23,7 @@ import { applyMemoryBlock, memoryBlockFor } from './memory.js';
 import { assertEntryAlive, killEntry, recordedIdentity } from './kill.js';
 import { requireAgentCredential } from './collaboration-credentials.js';
 import { assertExecutionAllowed } from './rollout.js';
+import { redactSecrets } from './logview.js';
 export { assertEntryAlive } from './kill.js';
 
 export function orchestratorName(project: string): string {
@@ -282,7 +284,52 @@ async function captureTeamStateHash(home: string, worktree: string): Promise<str
   });
 }
 
-type LaunchResult = { pane: string; identity: PaneIdentity; home: string; worktree: string; admission?: TmuxAdmission };
+type LaunchLease = Pick<TmuxAdmission, 'task' | 'agent' | 'lease_id'>;
+
+type LaunchResult = {
+  pane: string;
+  identity: PaneIdentity;
+  home: string;
+  worktree: string;
+  admission?: LaunchLease;
+  claimPending?: boolean;
+};
+
+async function registerPendingWorkerLaunch(
+  root: string,
+  project: string,
+  home: string,
+  registered: TeamEntry,
+  worktree: string,
+  launchClaim: string,
+  launchClaimDigest: string,
+  jjWorkspace?: string,
+): Promise<void> {
+  const pane = registered.pane!;
+  const raw = await capturePane(pane);
+  const dialog = raw === null ? null : parseDialog(lines(raw));
+  if (!dialog || dialog.kind === 'none') throw new Error(`${pane} dialog disappeared before it was recorded`);
+  const launch_pending: NonNullable<TeamEntry['launch_pending']> = {
+    at: new Date().toISOString(), agent: registered.name, pane,
+    pane_pid: registered.pane_pid!, pane_started: registered.pane_started!,
+    worktree, task: registered.task, lease_id: registered.lease_id,
+    launch_claim_path: launchClaim, launch_claim_digest: launchClaimDigest,
+    dialog: redactSecrets(dialog.text).slice(0, 4000), fingerprint: dialog.fingerprint,
+    jj_workspace: jjWorkspace,
+  };
+  const pendingRegistration = await withProjectLock(
+    root, project,
+    () => compareAndSwapTeamEntry(home, registered, {
+      launch_pending,
+      worktree,
+      launch_claim_path: launchClaim,
+      launch_claim_digest: launchClaimDigest,
+      launch_claim_in_worktree: registered.launch_claim_in_worktree ?? false,
+      launch_claim_completed: false,
+    }),
+  );
+  if (!pendingRegistration) throw new Error(`${registered.name} changed while its dialog launch was recorded`);
+}
 
 async function finishLaunch(root: string, claim: string, result: LaunchResult): Promise<void> {
   if (!result.admission) {
@@ -478,8 +525,11 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   checkWorkerContract(opts);
   checkModel(opts.model);
   await preflight();
-  const launched = await withLaunchClaim(root, project,
-    (p, launchClaim, launchClaimDigest) => spawnRegisteredAgent(root, p, opts, launchClaim, launchClaimDigest));
+  const launched = await withLaunchClaim(
+    root, project,
+    (p, launchClaim, launchClaimDigest) => spawnRegisteredAgent(root, p, opts, launchClaim, launchClaimDigest),
+    { preserveClaim: (result) => result.claimPending === true },
+  );
   return launched.pane;
 }
 
@@ -594,15 +644,12 @@ async function spawnRegisteredAgent(
     }
 
     const idle = await waitIdleTrust(pane, worktreeExisted ? undefined : { cwd: worktree, identity });
-    if (idle === 'dialog' && p.mode === 'auto') {
-      await finishLaunch(root, launchClaim, { pane, identity, home, worktree, admission });
-      return { pane, identity, home, worktree, admission };
+    if (idle === 'dialog') {
+      if (!registered) throw new Error(`${agent} launch was not registered`);
+      await registerPendingWorkerLaunch(root, project, home, registered, worktree, launchClaim, launchClaimDigest, jjLane?.name);
+      return { pane, identity, home, worktree, admission, claimPending: true };
     }
-    if (idle !== 'idle') {
-      throw new Error(idle === 'dialog'
-        ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
-        : `${pane} never went idle; nothing was typed`);
-    }
+    if (idle !== 'idle') throw new Error(`${pane} never went idle; nothing was typed`);
     if (task && admission) {
       await withTmuxGrant(root, home, task, agent, admission.lease_id, async () => {
         await assertExecutionAllowed(root, project);
@@ -630,6 +677,238 @@ async function spawnRegisteredAgent(
   }
 }
 
+type PendingLaunch = NonNullable<TeamEntry['launch_pending']>;
+type PendingAnswer = { fingerprint: string; choice: string; option: string; approved: boolean };
+
+function assertPendingIdentity(entry: TeamEntry, pending: PendingLaunch): PaneIdentity {
+  const identity = { pid: pending.pane_pid, started: pending.pane_started };
+  if (pending.agent !== entry.name || pending.pane !== entry.pane
+    || entry.pane_pid !== identity.pid || entry.pane_started !== identity.started
+    || entry.worktree !== pending.worktree || entry.task !== pending.task || entry.lease_id !== pending.lease_id
+    || entry.launch_claim_path !== pending.launch_claim_path || entry.launch_claim_digest !== pending.launch_claim_digest
+    || entry.closed_at || entry.lease_revoked || (entry.task && !entry.lease_id)) {
+    throw new Refusal(`${entry.name} pending launch identity changed. Read its current state before answering again`);
+  }
+  return identity;
+}
+
+export function pendingApprovalFingerprint(entry: TeamEntry): string {
+  const pending = entry.launch_pending!;
+  return dialogFingerprint(JSON.stringify([
+    pending.fingerprint, pending.agent, pending.pane, pending.pane_pid, pending.pane_started,
+    pending.worktree, pending.lease_id ?? null, pending.launch_claim_digest,
+  ]));
+}
+
+export async function pendingWorkerAnswerTarget(
+  root: string, project: string, agentRef: string | undefined, pane: string | undefined, fingerprint: string,
+): Promise<TeamEntry | undefined> {
+  if (!agentRef) return undefined;
+  const p = await projectEntry(root, project);
+  const [name, worktree] = agentRef.split('@');
+  const matches = (await readTeam(p.home)).agents.filter(
+    (candidate) => !candidate.orchestrator && candidate.name === name
+      && (worktree === undefined || candidate.worktree === worktree),
+  );
+  const entry = matches.length === 1 ? matches[0] : undefined;
+  const pending = entry?.launch_pending;
+  if (!entry || !pending) return undefined;
+  if (pendingApprovalFingerprint(entry) !== fingerprint || pane !== undefined && entry.pane !== pane) {
+    throw new Refusal(`${name} pending launch approval or pane changed. Read it again before answering`);
+  }
+  assertPendingIdentity(entry, pending);
+  return entry;
+}
+
+async function updatePendingEntry(home: string, entry: TeamEntry, update: Partial<TeamEntry>): Promise<TeamEntry> {
+  const updated = await compareAndSwapTeamEntry(home, entry, update);
+  if (!updated) throw new Refusal(`${entry.name} pending launch changed during recovery`);
+  return updated;
+}
+
+function assertPendingAnswer(pending: PendingLaunch, answer: PendingAnswer): void {
+  if (pending.answer_choice !== undefined
+    && (pending.answer_choice !== answer.choice || pending.answer_option !== answer.option
+      || pending.approved !== answer.approved)) {
+    throw new Refusal(`${pending.agent} pending launch already has a different recorded answer`);
+  }
+}
+
+export async function recordPendingWorkerAnswer(
+  root: string, project: string, agentRef: string | undefined, pane: string, answer: PendingAnswer,
+): Promise<void> {
+  const entry = await pendingWorkerAnswerTarget(root, project, agentRef, pane, answer.fingerprint);
+  if (!entry) return;
+  const pending = entry.launch_pending!;
+  assertPendingAnswer(pending, answer);
+  const home = (await projectEntry(root, project)).home;
+  await updatePendingEntry(home, entry, {
+    launch_pending: {
+      ...pending, answer_choice: answer.choice, answer_option: answer.option, approved: answer.approved,
+    },
+  });
+}
+
+export async function markPendingWorkerAnswerDelivered(
+  root: string, project: string, agentRef: string | undefined, pane: string, answer: PendingAnswer,
+): Promise<void> {
+  const entry = await pendingWorkerAnswerTarget(root, project, agentRef, pane, answer.fingerprint);
+  if (!entry) return;
+  const pending = entry.launch_pending!;
+  assertPendingAnswer(pending, answer);
+  const home = (await projectEntry(root, project)).home;
+  await updatePendingEntry(home, entry, {
+    launch_pending: { ...pending, dialog_delivered: true },
+  });
+}
+
+async function releaseResume(home: string, entry: TeamEntry): Promise<void> {
+  const token = entry.launch_pending!.resume_token;
+  const current = (await readTeam(home)).agents.find(
+    (candidate) => candidate.name === entry.name && candidate.launch_pending?.resume_token === token,
+  );
+  if (!current?.launch_pending) return;
+  await updatePendingEntry(home, current, {
+    launch_pending: {
+      ...current.launch_pending,
+      resume_token: undefined, resume_pid: undefined, resume_started: undefined,
+    },
+  });
+}
+
+async function abortPendingLaunch(root: string, home: string, entry: TeamEntry, error: unknown): Promise<void> {
+  const pending = entry.launch_pending!;
+  const reason = error instanceof Error ? error.message : String(error);
+  const detail = redactSecrets(`${reason}\n${pending.dialog}`).slice(0, 4000);
+  let failed = await updatePendingEntry(home, entry, {
+    closed_at: new Date().toISOString(), launch_error: detail,
+    launch_pending: { ...pending, resume_token: undefined, resume_pid: undefined, resume_started: undefined },
+  });
+  if (failed.task && failed.lease_id) {
+    await recordTmuxLaunchOutcome(root, home, failed.task, failed.name, failed.lease_id, detail);
+    failed = (await readTeam(home)).agents.find((candidate) => candidate.lease_id === failed.lease_id) ?? failed;
+  }
+  let cleanupError: unknown;
+  await killWindow(pending.pane, { pid: pending.pane_pid, started: pending.pane_started })
+    .catch((cause: unknown) => { cleanupError = cause; });
+  await releasePendingLaunchClaim(root, failed);
+  if (pending.jj_workspace) await undoJjWorkspace(home, pending.jj_workspace, pending.worktree);
+  if (cleanupError) {
+    const detail = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+    throw new Error(`pending pane cleanup failed: ${detail}`, { cause: error });
+  }
+}
+
+const resumeOwners = new Set<string>();
+
+async function resumeOwnerLive(pending: PendingLaunch): Promise<boolean> {
+  const token = pending.resume_token!;
+  if (resumeOwners.has(token)) return true;
+  if (pending.resume_pid === process.pid) return false;
+  if (!pending.resume_pid || !pending.resume_started) return false;
+  return await processStartTime(pending.resume_pid) === pending.resume_started;
+}
+
+export async function assertPendingWorkerResumeAvailable(entry: TeamEntry): Promise<void> {
+  const pending = entry.launch_pending;
+  if (pending?.resume_token && await resumeOwnerLive(pending)) {
+    throw new Refusal(`${entry.name} pending launch is already resuming`);
+  }
+}
+
+export async function resumePendingWorkerLaunch(
+  root: string, project: string, agentRef: string | undefined, pane: string, answer: PendingAnswer,
+): Promise<void> {
+  const entry = await pendingWorkerAnswerTarget(root, project, agentRef, pane, answer.fingerprint);
+  if (!entry) return;
+  const agent = entry.name;
+  const pending = entry.launch_pending!;
+  if (!pending.dialog_delivered) throw new Refusal(`${agent} pending answer has no confirmed dialog delivery`);
+  assertPendingAnswer(pending, answer);
+  const home = (await projectEntry(root, project)).home;
+  if (pending.resume_token && await resumeOwnerLive(pending)) {
+    throw new Refusal(`${agent} pending launch is already resuming`);
+  }
+  if (pending.resume_token && pending.pickup_started && !pending.pickup_typed) {
+    await abortPendingLaunch(root, home, entry, new Error(`${agent} resume stopped during pickup`));
+    throw new Refusal(`${agent} resume stopped during pickup and was closed`);
+  }
+  const identity = assertPendingIdentity(entry, pending);
+  const token = randomUUID();
+  let current = await updatePendingEntry(home, entry, {
+    launch_pending: {
+      ...pending, resume_token: token, resume_pid: process.pid,
+      resume_started: (await processStartTime(process.pid)) ?? 'unknown',
+      answer_choice: answer.choice, answer_option: answer.option, approved: answer.approved,
+    },
+  });
+  resumeOwners.add(token);
+  try {
+    if (!answer.approved) {
+      await abortPendingLaunch(root, home, current, new Error(`launch dialog denied with "${answer.option}"`));
+      return;
+    }
+
+    let stage: 'wait' | 'pickup' | 'session' | 'finish' | 'mark' | 'clear' = 'wait';
+    try {
+      if (!current.launch_pending!.pickup_typed) {
+        if (!(await paneIs(pane, identity))) throw new Refusal(`${pane} is no longer the pending launch for ${agent}`);
+        if ((await waitIdle(pane)) !== 'idle') throw new Refusal(`${pane} is not idle after its dialog answer`);
+        stage = 'pickup';
+        current = await updatePendingEntry(home, current, {
+          launch_pending: { ...current.launch_pending!, pickup_started: true },
+        });
+        const typePickup = async (): Promise<void> => {
+          const fresh = (await readTeam(home)).agents.find(
+            (candidate) => candidate.name === agent && candidate.pane === pane,
+          );
+          if (fresh?.launch_pending?.resume_token !== token) {
+            throw new Refusal(`${agent} pending launch changed before its first line was typed`);
+          }
+          await assertExecutionAllowed(root, project);
+          await typeLine(pane, pickupLine(root, project, agent), identity);
+        };
+        if (current.task && current.lease_id) {
+          await withTmuxGrant(root, home, current.task, agent, current.lease_id, typePickup);
+        } else {
+          await withProjectLock(root, project, typePickup);
+        }
+        current = await updatePendingEntry(home, current, {
+          launch_pending: { ...current.launch_pending!, pickup_typed: true },
+        });
+      }
+
+      stage = 'session';
+      const sessionId = await findLatestSession(pending.worktree, agent);
+      if (sessionId && current.session_id !== sessionId) {
+        current = await updatePendingEntry(home, current, { session_id: sessionId });
+      }
+
+      if (!current.launch_pending!.claim_completed) {
+        stage = 'finish';
+        const admission = current.task && current.lease_id
+          ? { task: current.task, agent, lease_id: current.lease_id }
+          : undefined;
+        await finishLaunch(root, pending.launch_claim_path, { pane, identity, home, worktree: pending.worktree, admission });
+        if (!admission) await fs.rm(path.join(root, pending.launch_claim_path), { force: true });
+        stage = 'mark';
+        current = await updatePendingEntry(home, current, {
+          launch_pending: { ...current.launch_pending!, claim_completed: true },
+        });
+      }
+
+      stage = 'clear';
+      current = await updatePendingEntry(home, current, { launch_pending: undefined });
+    } catch (error) {
+      if (stage === 'pickup' || stage === 'finish') await abortPendingLaunch(root, home, current, error);
+      else await releaseResume(home, current);
+      throw error;
+    }
+  } finally {
+    resumeOwners.delete(token);
+  }
+}
+
 export async function closeAgent(root: string, project: string, agent: string): Promise<void> {
   const home = (await projectEntry(root, project)).home;
   const team = await readTeam(home);
@@ -647,8 +926,12 @@ async function relaunchAgent(
   sessionId: string | undefined,
   admission?: TmuxAdmission,
 ): Promise<string> {
-  const launched = await withLaunchClaim(root, p.name, (registered, launchClaim, launchClaimDigest) =>
-    relaunchRegisteredAgent(root, registered, old, sessionId, launchClaim, launchClaimDigest, admission));
+  const launched = await withLaunchClaim(
+    root, p.name,
+    (registered, launchClaim, launchClaimDigest) =>
+      relaunchRegisteredAgent(root, registered, old, sessionId, launchClaim, launchClaimDigest, admission),
+    { preserveClaim: (result) => result.claimPending === true },
+  );
   return launched.pane;
 }
 
@@ -681,9 +964,9 @@ async function relaunchRegisteredAgent(
     });
     const patch = {
       pane, pane_pid: identity.pid, pane_started: identity.started,
-      session_id: sessionId, model: old.model ?? DEFAULT_MODEL, closed_at: undefined, wedged_at: undefined,
+      worktree, session_id: sessionId, model: old.model ?? DEFAULT_MODEL, closed_at: undefined, wedged_at: undefined,
       launch_mode: mode, launch_scoped_auto: mode === 'auto',
-      migration_state: undefined, watch_authority_revoked_at: undefined,
+      migration_state: undefined, watch_authority_revoked_at: undefined, launch_pending: undefined,
       ...evidence, team_state_hash: teamStateHash,
     };
     let registered: TeamEntry | undefined;
@@ -698,15 +981,12 @@ async function relaunchRegisteredAgent(
       });
     }
     const idle = await waitIdleTrust(pane);
-    if (idle === 'dialog' && p.mode === 'auto') {
-      await finishLaunch(root, launchClaim, { pane, identity, home, worktree, admission });
-      return { pane, identity, home, worktree, admission };
+    if (idle === 'dialog') {
+      if (!registered) throw new Error(`${old.name} launch was not registered`);
+      await registerPendingWorkerLaunch(root, p.name, home, registered, worktree, launchClaim, launchClaimDigest);
+      return { pane, identity, home, worktree, admission, claimPending: true };
     }
-    if (idle !== 'idle') {
-      throw new Error(idle === 'dialog'
-        ? `a dialog is on the screen of ${pane}; answer it in the pane, then respawn`
-        : `${pane} never went idle; nothing was typed`);
-    }
+    if (idle !== 'idle') throw new Error(`${pane} never went idle; nothing was typed`);
     if (old.task && admission) {
       await withTmuxGrant(root, home, old.task, old.name, admission.lease_id, async () => {
         await assertExecutionAllowed(root, p.name);
@@ -775,10 +1055,26 @@ export async function respawnAgent(
   if (!stamped) throw new Error(`${agent} was replaced before respawn`);
   try {
     if (old.pane) await killWindow(old.pane, recordedIdentity(old));
-    return await relaunchAgent(root, p, old, undefined, admission);
+    await releasePendingLaunchClaim(root, old);
+    return await relaunchAgent(root, p, { ...old, launch_pending: undefined }, undefined, admission);
   } catch (error) {
     if (old.task && !old.orchestrator) {
       await recordTmuxLaunchOutcome(root, home, old.task, agent, admission!.lease_id, error instanceof Error ? error.message : String(error));
+    } else if (old.launch_pending) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const current = (await readTeam(home)).agents.find((candidate) => candidate.name === agent);
+      if (!current) {
+        throw new AggregateError([error, new Error(`${agent} replacement disappeared during rollback`)], reason);
+      }
+      const pending = current.launch_pending ?? stamped.launch_pending;
+      const detail = redactSecrets(`${reason}${pending ? `\n${pending.dialog}` : ''}`).slice(0, 4000);
+      const failed = await compareAndSwapTeamEntry(home, current, {
+        closed_at: new Date().toISOString(), launch_error: detail, admission_status: 'launch_failed',
+        launch_pending: pending ? {
+          ...pending, resume_token: undefined, resume_pid: undefined, resume_started: undefined,
+        } : undefined,
+      });
+      if (!failed) throw new AggregateError([error, new Error(`${agent} rollback CAS failed`)], reason);
     } else {
       await compareAndSwapTeamEntry(home, stamped, { closed_at: undefined });
     }
@@ -804,7 +1100,8 @@ export async function wakeAgent(root: string, project: string, agent: string): P
   }
   const admission = await admitReplacement(root, p.home, old, true);
   try {
-    return await relaunchAgent(root, p, old, old.session_id, admission);
+    await releasePendingLaunchClaim(root, old);
+    return await relaunchAgent(root, p, { ...old, launch_pending: undefined }, old.session_id, admission);
   } catch (error) {
     if (old.task && !old.orchestrator) {
       await recordTmuxLaunchOutcome(root, p.home, old.task, agent, admission!.lease_id, error instanceof Error ? error.message : String(error));

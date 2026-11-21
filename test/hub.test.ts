@@ -281,7 +281,7 @@ describe('answerDialog on menus', () => {
     expect(r.answered).toBe(true);
     expect(r.option).toBe('Trust this folder');
     expect(vi.mocked(sendArrow).mock.calls).toEqual([]);
-    expect(vi.mocked(sendEnter).mock.calls).toEqual([['%1']]);
+    expect(vi.mocked(sendEnter).mock.calls).toEqual([['%1', { pid: 1, started: 'x' }]]);
   });
 
   it("answering '3' with the cursor on 1 sends Down Down Enter", async () => {
@@ -660,7 +660,7 @@ describe('orchestrator dialog pane resolution', () => {
       }],
     });
     await writePendingPane(root, 'demo', {
-      pane: '%2', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+      pane: '%2', pane_pid: 2, pane_started: 'pending', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
     });
     await setProjectMode(root, 'demo', 'auto');
     vi.mocked(paneExists).mockImplementation(async (pane) => pane === '%2');
@@ -670,7 +670,7 @@ describe('orchestrator dialog pane resolution', () => {
     await handleCurrentOrchestratorDialog(root, 'demo');
 
     expect(sendLiteral).toHaveBeenCalledTimes(1);
-    expect(sendLiteral).toHaveBeenCalledWith('%2', '1');
+    expect(sendLiteral).toHaveBeenCalledWith('%2', '1', { pid: 2, started: 'pending' });
   });
 
   it('a dead pending pane does not hide a live registered orchestrator', async () => {

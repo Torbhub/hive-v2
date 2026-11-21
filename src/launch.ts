@@ -109,7 +109,8 @@ async function launchRegisteredOrchestrator(
     let line = pickupLine(root, project, name);
     if (task) line += ` The task: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`;
     const pending = {
-      pane, kind, at: new Date().toISOString(), typed: false, sending: true, claim_token: randomUUID(), task, line,
+      pane, pane_pid: identity.pid, pane_started: identity.started,
+      kind, at: new Date().toISOString(), typed: false, sending: true, claim_token: randomUUID(), task, line,
       launch_mode: mode, launch_scoped_auto: mode === 'auto',
     };
     await writePendingPane(root, project, pending);
