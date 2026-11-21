@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import type { HubDialog, HubTask, HubView } from '../src/types';
-import { ago, staleTask, taskProgress, type Need } from '../src/ui/look';
+import { ago, contractLines, staleTask, taskProgress, type Need } from '../src/ui/look';
 import { cn } from './lib/utils';
 import { Btn } from './action';
 import { Input } from './components/ui/input';
@@ -184,7 +184,20 @@ export function NeedCard({
         {need.when !== '' && <span className="shrink-0 text-xs text-zinc-500 tabular">{need.when}</span>}
       </div>
       {need.action === 'plan' ? (
-        <PlanDetail detail={need.detail ?? ''} checkpoints={need.checkpoints} />
+        <>
+          <PlanDetail detail={need.detail ?? ''} checkpoints={need.checkpoints} />
+          <section data-root-contract className="mt-2 flex flex-col gap-0.5 font-mono text-xs text-zinc-400">
+            {contractLines(need).map((line, index) => (
+              <div
+                key={index}
+                data-contract-empty={line === 'No root contract is recorded.' ? '' : undefined}
+                className={index === 0 ? 'font-sans font-semibold text-zinc-300' : 'whitespace-pre-wrap break-words'}
+              >
+                {line}
+              </div>
+            ))}
+          </section>
+        </>
       ) : (
         <>
           {need.detail && <div className="mt-1 text-xs text-zinc-500">{need.detail}</div>}

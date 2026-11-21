@@ -21,6 +21,7 @@ vi.mock('../src/hub.js', () => ({
 
 import { HubApp } from '../src/ui/HubApp.js';
 import { buildStatus, listTasks, planAnswer } from '../src/hub.js';
+import { taskContract } from './task-contract.js';
 
 function fakeStreams() {
   const stdout = new PassThrough() as PassThrough & { columns: number; rows: number };
@@ -86,6 +87,52 @@ describe('HubApp plan actions', () => {
     await waitForFrame(frame, 'plan to approve');
     expect(frame()).toContain('a approve plan');
     expect(frame()).toContain('b send back');
+    inst.unmount();
+  });
+
+  it('shows the actual contract and stored digest before the approval controls', async () => {
+    const base = taskContract('/r/demo', ['src'], 'Return the bounded artifact.');
+    const contract: ReturnType<typeof taskContract> = {
+      ...base,
+      provenance: {
+        kind: 'code', repository: '/r/demo', base_revision: '0'.repeat(40), artifact_revision: '1'.repeat(40),
+      },
+      acceptance: [{
+        ...base.acceptance[0],
+        configuration: { scope: { paths: ['src'], review: { required: true, tiers: ['owner', 'peer'] } } },
+      }],
+    };
+    const digest = 'a'.repeat(64);
+    vi.mocked(listTasks).mockResolvedValue([{ ...planTask, contract, plan_digest: digest }]);
+    const { stdout, stdin } = fakeStreams();
+    stdout.columns = 200;
+    const frame = frameReader(stdout);
+    const inst = render(<HubApp root="/r" />, { stdout, stdin, debug: true, patchConsole: false });
+    await waitForFrame(frame, 'Root contract');
+    for (const text of [
+      `Plan digest: ${digest}`, 'Schema: 1', 'Kind: build', 'Objective: Complete the bounded task.',
+      'Consumer: demo-orchestrator', 'Deliverable: Return the bounded artifact.',
+      'Acceptance diff: git_diff_scope v1', 'Required: true', 'Evidence: diff-evidence',
+      'Configuration: {', '      "scope": {', '        "review": {', '          "required": true',
+      'Provenance kind: code', 'Repository: /r/demo',
+      `Base revision: ${'0'.repeat(40)}`, `Artifact revision: ${'1'.repeat(40)}`,
+      'Write scope: src', 'Action scope: (none)',
+      'Budget: depth=1, active_children=8, active_project_records=16, attempts=3',
+      'Delegated output claims: Return the bounded artifact.', 'Delegated adapters: tmux',
+    ]) expect(frame()).toContain(text);
+    expect(frame().indexOf(`Plan digest: ${digest}`)).toBeLessThan(frame().indexOf('a approve plan'));
+    inst.unmount();
+  });
+
+  it('marks a legacy plan with no contract before the approval controls', async () => {
+    vi.mocked(listTasks).mockResolvedValue([{ ...planTask, plan_digest: 'b'.repeat(64) }]);
+    const { stdout, stdin } = fakeStreams();
+    stdout.columns = 200;
+    const frame = frameReader(stdout);
+    const inst = render(<HubApp root="/r" />, { stdout, stdin, debug: true, patchConsole: false });
+    await waitForFrame(frame, 'No root contract is recorded.');
+    expect(frame()).toContain(`Plan digest: ${'b'.repeat(64)}`);
+    expect(frame().indexOf('No root contract is recorded.')).toBeLessThan(frame().indexOf('a approve plan'));
     inst.unmount();
   });
 
