@@ -198,8 +198,29 @@ export function assertTaskBudgetCurrent(task: HubTask, now = Date.now()): void {
   if (taskBudgetExpired(task, now)) throw new Refusal(`${task.id} is blocked:budget_exhausted`);
 }
 
+export function hasAttemptRecovery(events: TaskEvent[], taskId: string): boolean {
+  let contract: RootContract | null | undefined;
+  let previousContract: RootContract | null | undefined;
+  for (const event of events) {
+    if (event.id !== taskId) continue;
+    if (event.event === 'asked') contract = null;
+    if (event.event === 'plan') {
+      previousContract = contract;
+      contract = event.contract ?? null;
+    }
+    if (event.event === 'answered' && event.note === 'root contract delta approved by owner'
+      && previousContract && contract && contract.budget.attempts > previousContract.budget.attempts) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function foldTasks(events: TaskEvent[]): HubTask[] {
   const byId = new Map<string, HubTask & { decisions: { at: string; reason: string }[] }>();
+  const previousContracts = new Map<string, RootContract | null | undefined>();
+  const previousDeadlines = new Map<string, string | null | undefined>();
+  const recoveredTasks = new Set<string>();
   for (const ev of events) {
     const previous = byId.get(ev.id);
     let t = previous;
@@ -285,6 +306,8 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
       }
       if (ev.event === 'plan') {
         // A fresh plan replaces the old one: checkpoints and their progress reset.
+        previousContracts.set(ev.id, t.contract);
+        previousDeadlines.set(ev.id, t.expires_at);
         t.checkpoints = validCheckpoints(ev.checkpoints) ?? [];
         t.plan_digest = ev.plan_digest ?? (t.checkpoints.length ? planDigest(t.checkpoints, ev.note) : null);
         t.contract = ev.contract ?? null;
@@ -324,9 +347,21 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         t.lease_revoked = true;
       }
       if (ev.event === 'answered' && prev === 'plan') {
+        const previousContract = previousContracts.get(ev.id);
+        const previousDeadline = previousDeadlines.get(ev.id);
+        const attemptRecovery = ev.note === 'root contract delta approved by owner' && previousContract
+          && t.contract!.budget.attempts > previousContract.budget.attempts;
         t.plan_approved = true;
         t.admitted_at ??= ev.at;
-        t.expires_at = wallDeadline(t.contract, t.admitted_at);
+        if (attemptRecovery) {
+          const firstRecovery = !recoveredTasks.has(ev.id);
+          recoveredTasks.add(ev.id);
+          t.expires_at = firstRecovery && previousDeadline
+            ? wallDeadline(t.contract, previousDeadline)
+            : previousDeadline ?? wallDeadline(t.contract, t.admitted_at);
+        } else {
+          t.expires_at = wallDeadline(t.contract, t.admitted_at);
+        }
       }
       if (ev.event === 'decided') t.decisions.push({ at: ev.at, reason: ev.note ?? '' });
       if (ev.note) t.last_note = ev.note;
