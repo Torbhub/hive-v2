@@ -10,9 +10,9 @@ name: auto-merge
 #      itself.
 # Tiers:
 #   A. prose — label `auto-merge`, and every changed file is in the
-#      allowlist (docs/, roles/, rules/, skills/, README.md, AGENTS.md).
-#      infra/ and src/ are hard-denied even if the allowlist is ever
-#      widened.
+#      allowlist (docs/, rules/, skills/, README.md, AGENTS.md).
+#      infra/, src/, and roles/ are hard-denied even if the allowlist is
+#      ever widened. Role PRs need manual review and an post-merge main bench.
 #   B. deslop-clean — label `deslop-clean`, applied by the on-box
 #      adversarial reviewer only after a full deslop review comes back
 #      CLEAN (and pulled on SLOPPY). Prose and product code are allowed;
@@ -77,11 +77,11 @@ jobs:
           PROSE_OK=1; PROSE_DENY=0; DESLOP_DENY=0
           while IFS= read -r f; do
             case "$f" in
-              docs/*|roles/*|rules/*|skills/*|README.md|AGENTS.md) ;;
+              docs/*|rules/*|skills/*|README.md|AGENTS.md) ;;
               *) PROSE_OK=0;;
             esac
             case "$f" in
-              infra/*|src/*) PROSE_DENY=1;;
+              infra/*|src/*|roles/*) PROSE_DENY=1;;
             esac
             case "$f" in
               infra/*|.github/*|scripts/*|roles/*|skills/*|rules/*|AGENTS.md) DESLOP_DENY=1;;
@@ -110,7 +110,7 @@ jobs:
             WHY="deploy line not green (fail-closed halt)"
           else
             [ "$HAS_PROSE" = 1 ] && [ "$PROSE_OK" = 0 ] && WHY="outside the prose allowlist"
-            [ "$HAS_PROSE" = 1 ] && [ "$PROSE_DENY" = 1 ] && WHY="touches infra/ or src/ (prose hard deny)"
+            [ "$HAS_PROSE" = 1 ] && [ "$PROSE_DENY" = 1 ] && WHY="touches infra/, src/, or roles/ (prose hard deny; roles need manual post-merge main bench)"
             [ "$HAS_DESLOP" = 1 ] && [ "$DESLOP_DENY" = 1 ] && WHY="touches the control plane: infra/, .github/, scripts/, roles/, skills/, rules/, AGENTS.md (human territory even with deslop-clean)"
           fi
           # A held PR must not keep a previously-enabled auto-merge.

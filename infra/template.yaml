@@ -40,8 +40,16 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              StringLike:
-                token.actions.githubusercontent.com:sub: !Sub '${GithubSubjectPrefix}:*'
+                token.actions.githubusercontent.com:sub: !Sub '${GithubSubjectPrefix}:ref:refs/heads/main'
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GithubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:sub: !Sub '${GithubSubjectPrefix}:environment:t01-smoke'
       Policies:
         - PolicyName: hive-v2-deploy
           PolicyDocument:
@@ -120,6 +128,7 @@ Resources:
                 Action:
                   - iam:CreateRole
                   - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
                   - iam:DeleteRole
                   - iam:PutRolePolicy
                   - iam:DeleteRolePolicy
@@ -173,8 +182,8 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              StringLike:
-                token.actions.githubusercontent.com:sub: !Sub '${GithubSubjectPrefix}:*'
+                token.actions.githubusercontent.com:ref: refs/heads/main
+                token.actions.githubusercontent.com:sub: !Sub '${GithubSubjectPrefix}:environment:role-bench'
       Policies:
         - PolicyName: hive-v2-bench
           PolicyDocument:
@@ -482,7 +491,7 @@ Outputs:
     Description: ARN the GitHub workflow assumes (set as secret HIVE_DEPLOY_ROLE_ARN).
     Value: !GetAtt DeployRole.Arn
   BenchRoleArn:
-    Description: ARN the bench workflow assumes (set as secret HIVE_BENCH_ROLE_ARN).
+    Description: ARN the bench workflow assumes (set as role-bench environment secret HIVE_BENCH_ROLE_ARN).
     Value: !GetAtt BenchRole.Arn
   T01SmokeRoleArn:
     Description: ARN the protected t01-smoke environment assumes (set as secret HIVE_T01_SMOKE_ROLE_ARN).
