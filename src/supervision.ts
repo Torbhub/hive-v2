@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { reconcileTaskBudgets, revokeTaskAdmissionsLocked } from './admission.js';
 import {
   appendTaskEvent, assertTaskBudgetCurrent, contractDigest, doneBlockers, foldTasks, readProjects, readTaskEvents, Refusal,
@@ -198,7 +199,7 @@ async function apiRequest(options: GitHubOptions, pathname: string, init: {
         if (done) break;
         size += value.byteLength;
         if (size > 1024 * 1024) {
-          await reader.cancel();
+          void reader.cancel().catch(() => {});
           throw new Error('GitHub API response exceeds the byte cap');
         }
         chunks.push(value);
@@ -344,107 +345,177 @@ async function finishClose(
   });
 }
 
+function matchingOperation(task: HubTask, expected: TaskOperation): TaskOperation | undefined {
+  const operation = latestOperation(task, expected.operation_id);
+  if (!operation || operation.kind !== 'github_check' || !sameOperation(operation, expected)
+    || !currentOperation(task, operation)) return undefined;
+  return operation;
+}
+
 async function reconcileLocked(
   root: string, id: string, operationId: string, options: GitHubOptions,
-): Promise<void> {
+): Promise<TaskOperation | undefined> {
   const task = await currentTask(root, id);
   const operation = latestOperation(task, operationId);
   if (!operation || operation.kind !== 'github_check' || operation.detail === 'identity_unknown'
-    || CLOSED_STATES.has(task.state) || !currentOperation(task, operation)) return;
+    || CLOSED_STATES.has(task.state) || !currentOperation(task, operation)) return undefined;
   if (expired(operation, options.now)) {
     await appendOperation(root, task, { ...operation, detail: 'deadline_exceeded' });
-    return;
+    return undefined;
   }
-  if (operation.status !== 'closing_external' && taskBudgetExpired(task, options.now)) return;
-  if (operation.status === 'succeeded' && task.state === 'reconciling') return;
-  let run: CheckRun | undefined;
-  try {
-    run = await findRun(operation, options);
-  } catch (error) {
-    await failRun(root, task, operation, undefined, 'adapter-error', error instanceof Error ? error.message : String(error));
-    return;
-  }
-  if (!run) {
-    await failRun(root, task, operation, undefined, 'adapter-error', 'external identity not found');
-    return;
-  }
-  if (!runBound(operation, run)) {
-    await failRun(root, task, operation, run, 'adapter-error', 'external identity binding changed');
-    return;
-  }
-  if (operation.status === 'closing_external') {
-    if (run.status === 'completed' && run.conclusion === 'cancelled') {
-      await finishClose(root, task, operation, run, 'external_cancelled');
-    }
-    return;
-  }
-  if (run.status !== 'completed') {
-    await appendOperation(root, task, { ...operation, status: 'blocked_external', detail: undefined });
-    return;
-  }
-  if (run.conclusion === 'success') {
-    await passRun(root, task, operation, run, options.now);
-    return;
-  }
-  await appendAdapterEvidence(root, task, operation, run, 'failed', `GitHub conclusion: ${run.conclusion ?? 'unknown'}`);
-  await appendOperation(root, task, {
-    ...operation, status: 'failed', detail: `GitHub conclusion: ${run.conclusion ?? 'unknown'}`,
-  });
+  if (operation.status !== 'closing_external' && taskBudgetExpired(task, options.now)) return undefined;
+  if (operation.status === 'succeeded' && task.state === 'reconciling') return undefined;
+  return operation;
 }
 
+const CLAIM_TIMEOUT_MS = 60_000;
+
+type AttemptPhase = NonNullable<TaskOperation['attempt_phase']>;
+
+function clearAttempt(operation: TaskOperation): TaskOperation {
+  return { ...operation, attempt_id: undefined, attempted_at: undefined, attempt_phase: undefined };
+}
+
+function startAttempt(operation: TaskOperation, phase: AttemptPhase): TaskOperation {
+  return { ...operation, attempt_id: randomUUID(), attempted_at: new Date().toISOString(), attempt_phase: phase };
+}
+
+function staleClaim(operation: TaskOperation): boolean {
+  if (!operation.attempt_phase) return false;
+  const claimedAt = Date.parse(operation.attempted_at ?? '');
+  return !Number.isFinite(claimedAt) || Date.now() - claimedAt > CLAIM_TIMEOUT_MS;
+}
+
+type DispatchIntent = { operation: TaskOperation; lookup: boolean; claim: boolean };
+
 export async function dispatchGithubCheck(
-  root: string, id: string, config: GitHubCheckConfig, options: GitHubOptions = {},
+  root: string, id: string, config: GitHubCheckConfig, options: GitHubOptions = {}, recoverPending = false,
 ): Promise<TaskOperation> {
-  return withHubLock(root, async () => {
+  const intent = await withHubLock(root, async (): Promise<DispatchIntent> => {
     const task = await currentTask(root, id);
     const operation = operationFor(task, config);
-    if (!registeredConfig(task, config)) return operation;
+    if (!registeredConfig(task, config)) return { operation, lookup: false, claim: false };
     assertTaskBudgetCurrent(task, options.now);
     if (!validIdentity(config)) {
       const wrongRepository = config.repository !== undefined && config.repository !== task.contract?.provenance.repository;
       const wrongSha = config.sha !== undefined && config.sha !== task.contract?.provenance.artifact_revision;
-      if (wrongRepository || wrongSha) return operation;
+      if (wrongRepository || wrongSha) return { operation, lookup: false, claim: false };
       const unknown = unknownOperation(task, config);
       await appendOperation(root, task, unknown);
-      return unknown;
+      return { operation: unknown, lookup: false, claim: false };
     }
     if (expired(operation, options.now)) {
       const quarantined = { ...operation, detail: 'deadline_exceeded' };
       await appendOperation(root, task, quarantined);
-      return quarantined;
+      return { operation: quarantined, lookup: false, claim: false };
     }
     const existing = latestOperation(task, operation.operation_id);
     if (existing?.detail === 'identity_unknown' || existing?.status === 'succeeded'
-      || existing?.status === 'closing_external' || existing?.detail === 'deadline_exceeded') return existing;
+      || existing?.status === 'closing_external' || existing?.detail === 'deadline_exceeded') {
+      return { operation: existing, lookup: false, claim: false };
+    }
     if (existing && (existing.idempotency_key !== operation.idempotency_key
       || existing.plan_digest !== operation.plan_digest || existing.artifact_digest !== operation.artifact_digest)) {
       const ambiguous = { ...existing, status: 'ambiguous' as const, detail: 'operation identity changed' };
       await appendOperation(root, task, ambiguous);
-      return ambiguous;
+      return { operation: ambiguous, lookup: false, claim: false };
     }
-    let run: CheckRun | undefined;
-    try {
-      run = await findRun(existing ?? operation, options);
-      if (!run) {
-        run = readRun(await apiRequest(options, `repos/${operation.repository}/check-runs`, {
-          method: 'POST',
-          idempotencyKey: operation.idempotency_key,
-          body: {
-            name: checkName(operation.external_id!), head_sha: operation.commit, external_id: operation.external_id,
-            status: 'in_progress',
-          },
-        }));
-      }
-    } catch (error) {
-      await failRun(root, task, existing ?? operation, undefined, 'adapter-error', error instanceof Error ? error.message : String(error));
-      return { ...operation, detail: 'adapter_error' };
+    if (!existing) {
+      const pending = { ...operation, status: 'pending' as const };
+      await appendOperation(root, task, pending);
+      return { operation: pending, lookup: true, claim: true };
     }
-    if (!run) return existing ?? operation;
-    const next = {
-      ...(existing ?? operation), external_run_id: String(run.id),
-      status: 'blocked_external' as const,
-      detail: runBound({ ...(existing ?? operation), external_run_id: String(run.id) }, run) ? undefined : 'external identity binding changed',
+    return {
+      operation: existing, lookup: true,
+      claim: !existing.external_run_id && existing.detail !== 'dispatch_ambiguous'
+        && (existing.status !== 'pending' || recoverPending),
     };
+  });
+  if (!intent.lookup) return intent.operation;
+
+  const claimed = await withHubLock(root, async (): Promise<DispatchIntent> => {
+    const task = await currentTask(root, id);
+    if (!intent.claim) return intent;
+    const current = matchingOperation(task, intent.operation);
+    if (!current) {
+      return {
+        operation: latestOperation(task, intent.operation.operation_id) ?? intent.operation,
+        lookup: false, claim: false,
+      };
+    }
+    if (current.attempt_phase === 'dispatch_post'
+      || current.attempt_phase === 'dispatch_lookup' && !staleClaim(current)) {
+      return { operation: current, lookup: true, claim: false };
+    }
+    const pending = startAttempt({ ...current, status: 'pending' }, 'dispatch_lookup');
+    await appendOperation(root, task, pending);
+    return { operation: pending, lookup: true, claim: true };
+  });
+  if (!claimed.lookup) return claimed.operation;
+
+  let activeOperation = claimed.operation;
+  let run: CheckRun | undefined;
+  try {
+    run = await findRun(activeOperation, options);
+    if (!run && claimed.claim) {
+      const posting = await withHubLock(root, async () => {
+        const task = await currentTask(root, id);
+        const current = matchingOperation(task, activeOperation);
+        if (!current || current.attempt_phase !== 'dispatch_lookup' || current.external_run_id
+          || taskBudgetExpired(task, options.now)) return undefined;
+        const next = { ...current, attempted_at: new Date().toISOString(), attempt_phase: 'dispatch_post' as const };
+        await appendOperation(root, task, next);
+        return next;
+      });
+      if (!posting) return latestOperation(await currentTask(root, id), activeOperation.operation_id) ?? activeOperation;
+      activeOperation = posting;
+      run = readRun(await apiRequest(options, `repos/${activeOperation.repository}/check-runs`, {
+        method: 'POST',
+        idempotencyKey: activeOperation.idempotency_key,
+        body: {
+          name: checkName(activeOperation.external_id!), head_sha: activeOperation.commit,
+          external_id: activeOperation.external_id, status: 'in_progress',
+        },
+      }));
+    }
+  } catch (error) {
+    if (!claimed.claim) return activeOperation;
+    return withHubLock(root, async () => {
+      const task = await currentTask(root, id);
+      const current = matchingOperation(task, activeOperation);
+      if (current && !taskBudgetExpired(task, options.now)) {
+        const unsent = current.attempt_phase === 'dispatch_lookup'
+          || current.attempt_phase === 'dispatch_post' && error instanceof Refusal;
+        const failed = unsent ? clearAttempt(current) : current;
+        await failRun(root, task, failed, undefined, 'adapter-error', error instanceof Error ? error.message : String(error));
+      }
+      return { ...activeOperation, detail: 'adapter_error' };
+    });
+  }
+  if (!run && activeOperation.attempt_phase === 'dispatch_post' && staleClaim(activeOperation)) {
+    return withHubLock(root, async () => {
+      const task = await currentTask(root, id);
+      const current = matchingOperation(task, activeOperation);
+      if (!current) return latestOperation(task, activeOperation.operation_id) ?? activeOperation;
+      if (current.attempt_phase !== 'dispatch_post' || !staleClaim(current)
+        || current.external_run_id || taskBudgetExpired(task, options.now)) return current;
+      const ambiguous = clearAttempt({ ...current, status: 'blocked_external', detail: 'dispatch_ambiguous' });
+      await appendOperation(root, task, ambiguous);
+      return ambiguous;
+    });
+  }
+  if (!run) return activeOperation;
+  return withHubLock(root, async () => {
+    const task = await currentTask(root, id);
+    const current = matchingOperation(task, activeOperation);
+    if (!current) return latestOperation(task, activeOperation.operation_id) ?? activeOperation;
+    if (taskBudgetExpired(task, options.now)) return current;
+    const bound = {
+      ...current, external_run_id: String(run.id),
+      status: 'blocked_external' as const,
+      detail: runBound({ ...current, external_run_id: String(run.id) }, run) ? undefined : 'external identity binding changed',
+    };
+    const next = clearAttempt(bound);
     await appendOperation(root, task, next);
     return next;
   });
@@ -453,56 +524,143 @@ export async function dispatchGithubCheck(
 export async function reconcileGithubCheck(
   root: string, id: string, operationId: string, options: GitHubOptions = {},
 ): Promise<void> {
-  return withHubLock(root, () => reconcileLocked(root, id, operationId, options));
+  const operation = await withHubLock(root, () => reconcileLocked(root, id, operationId, options));
+  if (!operation) return;
+  let run: CheckRun | undefined;
+  let failure: string | undefined;
+  try {
+    run = await findRun(operation, options);
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  }
+  await withHubLock(root, async () => {
+    const task = await currentTask(root, id);
+    const current = matchingOperation(task, operation);
+    if (!current || CLOSED_STATES.has(task.state)) return;
+    if (current.status !== 'closing_external' && taskBudgetExpired(task, options.now)) return;
+    if (current.detail === 'dispatch_ambiguous' && (failure || !run)) return;
+    if (failure) {
+      await failRun(root, task, current, undefined, 'adapter-error', failure);
+      return;
+    }
+    if (!run) {
+      await failRun(root, task, current, undefined, 'adapter-error', 'external identity not found');
+      return;
+    }
+    if (!runBound(current, run)) {
+      await failRun(root, task, current, run, 'adapter-error', 'external identity binding changed');
+      return;
+    }
+    const bound = { ...current, external_run_id: String(run.id) };
+    if (bound.status === 'closing_external') {
+      if (run.status === 'completed' && run.conclusion === 'cancelled') {
+        await finishClose(root, task, bound, run, 'external_cancelled');
+      }
+      return;
+    }
+    if (run.status !== 'completed') {
+      await appendOperation(root, task, { ...bound, status: 'blocked_external', detail: undefined });
+      return;
+    }
+    if (run.conclusion === 'success') {
+      await passRun(root, task, bound, run, options.now);
+      return;
+    }
+    await appendAdapterEvidence(root, task, bound, run, 'failed', `GitHub conclusion: ${run.conclusion ?? 'unknown'}`);
+    await appendOperation(root, task, {
+      ...bound, status: 'failed', detail: `GitHub conclusion: ${run.conclusion ?? 'unknown'}`,
+    });
+  });
 }
 
 export async function cancelGithubCheck(
   root: string, id: string, operationId: string, options: GitHubOptions = {},
 ): Promise<void> {
-  return withHubLock(root, async () => {
+  const operation = await withHubLock(root, async () => {
     const task = await currentTask(root, id);
     const operation = latestOperation(task, operationId);
     if (!operation || operation.kind !== 'github_check' || operation.detail === 'identity_unknown'
-      || CLOSED_STATES.has(task.state) || !currentOperation(task, operation)) return;
+      || CLOSED_STATES.has(task.state) || !currentOperation(task, operation)) return undefined;
     if (expired(operation, options.now)) {
       await appendOperation(root, task, { ...operation, detail: 'deadline_exceeded' });
-      return;
+      return undefined;
     }
-    let run: CheckRun | undefined;
-    try {
-      run = await findRun(operation, options);
-    } catch (error) {
-      await failRun(root, task, operation, undefined, 'adapter-error', error instanceof Error ? error.message : String(error));
-      return;
+    return operation;
+  });
+  if (!operation) return;
+  let run: CheckRun | undefined;
+  let failure: string | undefined;
+  try {
+    run = await findRun(operation, options);
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  }
+  const claim = await withHubLock(root, async () => {
+    const task = await currentTask(root, id);
+    const current = matchingOperation(task, operation);
+    if (!current || CLOSED_STATES.has(task.state)) return undefined;
+    if (failure || !run) {
+      if (current.status !== 'closing_external' && !current.external_run_id) {
+        await appendOperation(root, task, clearAttempt({
+          ...current, status: 'closing_external', cancellation_requested: false,
+        }));
+      } else if (!current.attempt_phase) {
+        await failRun(root, task, current, undefined, 'adapter-error', failure ?? 'external identity not found');
+      }
+      return undefined;
     }
-    if (!run) {
-      await failRun(root, task, operation, undefined, 'adapter-error', 'external identity not found');
-      return;
-    }
-    const closing = { ...operation, status: 'closing_external' as const };
+    const closing = { ...current, status: 'closing_external' as const };
     if (run.status === 'completed' && run.conclusion === 'cancelled') {
-      await appendOperation(root, task, closing);
-      await finishClose(root, task, closing, run, 'external_cancelled');
-      return;
+      const closed = clearAttempt(closing);
+      await appendOperation(root, task, closed);
+      await finishClose(root, task, closed, run, 'external_cancelled');
+      return undefined;
     }
     if (run.status === 'completed') {
-      await appendOperation(root, task, closing);
+      await appendOperation(root, task, clearAttempt(closing));
+      return undefined;
+    }
+    if (current.cancellation_requested || run.cancellation_requested) {
+      await appendOperation(root, task, clearAttempt({ ...closing, cancellation_requested: true }));
+      return undefined;
+    }
+    if ((current.attempt_phase === 'cancellation_patch' || current.attempt_phase === 'cancellation_claim')
+      && !staleClaim(current)) return undefined;
+    const claimed = startAttempt({ ...closing, cancellation_requested: false }, 'cancellation_claim');
+    await appendOperation(root, task, claimed);
+    return { operation: claimed, run };
+  });
+  if (!claim) return;
+  const patch = await withHubLock(root, async () => {
+    const task = await currentTask(root, id);
+    const current = matchingOperation(task, claim.operation);
+    if (!current || CLOSED_STATES.has(task.state)) return undefined;
+    const patching = { ...current, attempted_at: new Date().toISOString(), attempt_phase: 'cancellation_patch' as const };
+    await appendOperation(root, task, patching);
+    return { operation: patching, run: claim.run };
+  });
+  if (!patch) return;
+  let patchError: unknown;
+  try {
+    await apiRequest(options, `repos/${patch.operation.repository}/check-runs/${patch.run.id}`, {
+      method: 'PATCH', body: { status: 'completed', conclusion: 'cancelled' },
+    });
+  } catch (error) {
+    patchError = error;
+  }
+  await withHubLock(root, async () => {
+    const task = await currentTask(root, id);
+    const current = matchingOperation(task, patch.operation);
+    if (!current || CLOSED_STATES.has(task.state)) return;
+    if (patchError) {
+      const failed = {
+        ...clearAttempt(current), cancellation_requested: !(patchError instanceof Refusal),
+      };
+      await failRun(root, task, failed, undefined, 'adapter-error',
+        patchError instanceof Error ? patchError.message : String(patchError));
       return;
     }
-    if (operation.cancellation_requested || run.cancellation_requested) {
-      await appendOperation(root, task, { ...closing, cancellation_requested: true });
-      return;
-    }
-    await appendOperation(root, task, { ...closing, cancellation_requested: false });
-    try {
-      await apiRequest(options, `repos/${operation.repository}/check-runs/${run.id}`, {
-        method: 'PATCH', body: { status: 'completed', conclusion: 'cancelled' },
-      });
-      await appendOperation(root, task, { ...closing, cancellation_requested: true });
-    } catch (error) {
-      await failRun(root, task, { ...closing, cancellation_requested: false }, undefined, 'adapter-error',
-        error instanceof Error ? error.message : String(error));
-    }
+    await appendOperation(root, task, clearAttempt({ ...current, cancellation_requested: true }));
   });
 }
 
@@ -510,22 +668,29 @@ export async function transferGithubCheck(
   root: string, id: string, operationId: string, options: GitHubTransferOptions,
 ): Promise<void> {
   if (!options.newOwner.trim()) throw new Refusal('ownership transfer needs a new owner');
-  return withHubLock(root, async () => {
+  const operation = await withHubLock(root, async () => {
     const task = await currentTask(root, id);
     const operation = latestOperation(task, operationId);
     if (!operation || operation.status !== 'closing_external' || operation.detail === 'identity_unknown'
-      || CLOSED_STATES.has(task.state) || !currentOperation(task, operation)) return;
+      || CLOSED_STATES.has(task.state) || !currentOperation(task, operation)) return undefined;
     if (expired(operation, options.now)) {
       await appendOperation(root, task, { ...operation, detail: 'deadline_exceeded' });
-      return;
+      return undefined;
     }
-    const run = await findRun(operation, options, options.newOwner);
+    return operation;
+  });
+  if (!operation) return;
+  const run = await findRun(operation, options, options.newOwner);
+  await withHubLock(root, async () => {
+    const task = await currentTask(root, id);
+    const current = matchingOperation(task, operation);
+    if (!current || CLOSED_STATES.has(task.state)) return;
     if (!run) {
-      await failRun(root, task, operation, run, 'adapter-error', 'ownership transfer proof does not match');
+      await failRun(root, task, current, run, 'adapter-error', 'ownership transfer proof does not match');
       return;
     }
     await finishClose(root, task, {
-      ...operation, owner: options.newOwner, previous_owner: operation.owner,
+      ...current, owner: options.newOwner, previous_owner: current.owner,
       cancellation_requested: false, detail: undefined,
     }, run, 'ownership_transferred');
   });
@@ -555,7 +720,7 @@ export async function supervisionPass(root: string, options: GitHubOptions = {},
       if (acceptance.predicate_id !== 'github_check' || acceptance.version !== 1) continue;
       const config = { ...acceptance.configuration, acceptance_id: acceptance.id, plan_digest: task.plan_digest } as GitHubCheckConfig;
       const operation = latestOperation(task, operationFor(task, config).operation_id);
-      if (operation?.status !== 'closing_external') await dispatchGithubCheck(root, task.id, config, passOptions);
+      if (operation?.status !== 'closing_external') await dispatchGithubCheck(root, task.id, config, passOptions, true);
     }
   }
   const watchers = new Set<string>();
