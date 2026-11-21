@@ -1,6 +1,9 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+
+process.env.KIMI_CODE_HOME = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 
 const testRun = vi.hoisted(() => ({ actualRun: null as unknown as typeof import('../src/tmux.js').run }));
 vi.mock('../src/tmux.js', async (importOriginal) => {

@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+process.env.KIMI_CODE_HOME = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+
 const IDLE = readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'idle-empty-prompt.txt'),
   'utf8',

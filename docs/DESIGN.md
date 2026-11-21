@@ -225,14 +225,19 @@ hive ui                                  — the hub screen
   maps to no flag for `ask` and managed `auto`, and `-y` only for explicit
   `yolo`, on fresh starts and resumes alike. Derived `ask` plus `safe` or
   `smart` orchestrator launches use supervised `--auto` instead. The model
-  is the house default `kimi-code/k3.1-pro` unless the spawn passed `--model`,
-  and the effective model is stamped into team.json. HIVE_AGENT and HIVE_PROJECT
+  is the house default `kimi-code/k3.1-pro-highspeed` unless the spawn passed
+  `--model`, and the effective model is stamped into team.json. HIVE_AGENT and HIVE_PROJECT
   remain pane and hook metadata. They cannot select MCP identity. An individual
   agent credential selects that identity. The root is shell-quoted.
   `exec` so
-  the pane process IS the CLI (identity check). Pre-flight: `teamkimi status`
-  must succeed, else refuse. Pending orchestrator records carry launch mode and
-  scoped-auto provenance. Missing provenance is a legacy migration state.
+  the pane process IS the CLI (identity check). Pre-flight: Python `tomllib`
+  reads the direct model alias from Kimi's `config.toml`. Its provider and
+  upstream model must match the Hive mapping. `teamkimi status` must respond
+  within 10 seconds. These checks make no provider request and run before admission or
+  launch. A missing recorded model needs explicit respawn with `--model`.
+  A recorded model cannot change during respawn. Pending orchestrator records
+  carry the resolved model, launch mode, and scoped-auto provenance. Missing
+  provenance is a legacy migration state.
   Watch and direct continuation re-read it before typing. The trust menu is
   answered only for the exact canonical path of a lane created by this spawn.
   Existing worktrees and relaunches never auto-trust. Every trust key carries

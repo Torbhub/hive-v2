@@ -477,7 +477,7 @@ describe('watchCycle watchdog', () => {
 
 describe('watchCycle pending launch', () => {
   const pending = {
-    pane: '%1', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString(), typed: false, line: 'pick up the project',
+    pane: '%1', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: 'pick up the project',
   };
 
   function startingProject(name: string, starting: Record<string, unknown> = {}, question = false) {
@@ -485,7 +485,7 @@ describe('watchCycle pending launch', () => {
       name, home: '', repos: [], open_tasks: 0,
       orchestrator: {
         state: 'none', question,
-        starting: { pane: '%1', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: pending.at, typed: false, question: false, ...starting },
+        starting: { pane: '%1', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: pending.at, typed: false, question: false, ...starting },
       },
       agents: [],
     };
@@ -1262,7 +1262,7 @@ describe('watchCycle auto-approver', () => {
     const { root } = await setupProject({ approvals: 'safe' });
     await writePendingPane(root, 'demo', {
       pane: '%2', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false,
-      at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+      model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
     });
     withQuestion();
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ git status') as never);
@@ -1504,8 +1504,8 @@ describe('watchCycle auto-approver', () => {
     }
     expect(kimiCalls()[0][1]).toEqual(['-m', 'cheap-model', '-p', expect.any(String)]);
     expect(kimiCalls().map((call) => call[1][1])).toEqual([
-      'cheap-model', 'kimi-code/k3.1-pro', 'kimi-code/k3.1-pro',
-      'kimi-code/k3.1-pro', 'kimi-code/k3.1-pro', ' process-model ',
+      'cheap-model', 'kimi-code/k3.1-pro-highspeed', 'kimi-code/k3.1-pro-highspeed',
+      'kimi-code/k3.1-pro-highspeed', 'kimi-code/k3.1-pro-highspeed', ' process-model ',
     ]);
   });
 });

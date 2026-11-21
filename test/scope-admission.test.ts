@@ -1,7 +1,10 @@
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+
+process.env.KIMI_CODE_HOME = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 import { admitTmux } from '../src/admission.js';
 import { normalizeScope, scopesOverlap } from '../src/scope.js';
 import { contractDigest, hivePath, manifestRead, readTeam, writeJson } from '../src/state.js';

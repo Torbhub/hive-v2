@@ -656,11 +656,11 @@ describe('orchestrator dialog pane resolution', () => {
     await writeJson(hivePath(home, 'team.json'), {
       agents: [{
         name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'old',
-        launch_mode: 'auto', launch_scoped_auto: true,
+        model: 'kimi-code/k3.1-pro-highspeed', launch_mode: 'auto', launch_scoped_auto: true,
       }],
     });
     await writePendingPane(root, 'demo', {
-      pane: '%2', pane_pid: 2, pane_started: 'pending', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+      pane: '%2', pane_pid: 2, pane_started: 'pending', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
     });
     await setProjectMode(root, 'demo', 'auto');
     vi.mocked(paneExists).mockImplementation(async (pane) => pane === '%2');
@@ -679,7 +679,7 @@ describe('orchestrator dialog pane resolution', () => {
       agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'current' }],
     });
     await writePendingPane(root, 'demo', {
-      pane: '%2', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+      pane: '%2', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
     });
     vi.mocked(paneExists).mockImplementation(async (pane) => pane === '%1');
     vi.mocked(capturePane).mockResolvedValue(DIALOG);
@@ -692,7 +692,7 @@ describe('continue sending claim', () => {
   async function setupPending() {
     const { root } = await setup();
     await writePendingPane(root, 'demo', {
-      pane: '%7', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+      pane: '%7', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
     });
     vi.mocked(capturePane).mockImplementation(async () => IDLE);
     vi.mocked(typeLine).mockClear();
@@ -723,6 +723,18 @@ describe('continue sending claim', () => {
 
     expect(typeLine).not.toHaveBeenCalled();
     expect((await readPendingPane(root, 'demo'))?.typed).not.toBe(true);
+  });
+
+  it('refuses a pending model that differs from the recorded orchestrator model', async () => {
+    const root = await setupPending();
+    const home = path.join(root, 'demo');
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, model: 'kimi-code/k3.1-pro-highspeed' }],
+    });
+    const current = (await readPendingPane(root, 'demo'))!;
+    await writePendingPane(root, 'demo', { ...current, model: 'kimi-code/k3.1-pro' });
+    await expect(continueProject(root, 'demo')).rejects.toThrow(/provenance|migration/);
+    expect(typeLine).not.toHaveBeenCalled();
   });
 
   it('lets only one overlapping continuation reach typeLine', async () => {
@@ -769,7 +781,7 @@ describe('continue sending claim', () => {
     const root = await setupPending();
     const staleAt = new Date(Date.now() - 11 * 60_000).toISOString();
     await writePendingPane(root, 'demo', {
-      pane: '%7', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: staleAt, typed: false, sending: true, line: 'You are demo-orchestrator.',
+      pane: '%7', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: staleAt, typed: false, sending: true, line: 'You are demo-orchestrator.',
     });
 
     await expect(continueProject(root, 'demo')).resolves.toBe('%7');
@@ -937,7 +949,7 @@ describe('wake racing a cascade kill', () => {
     vi.mocked(killWindow).mockClear();
     const { root, home } = await setup();
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc' }],
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', model: 'kimi-code/k3.1-pro-highspeed' }],
     });
     vi.mocked(waitIdle).mockImplementationOnce(async () => {
       await killAgent(root, 'demo');
@@ -955,10 +967,10 @@ describe('wake racing a cascade kill', () => {
     vi.mocked(capturePane).mockImplementation(async () => IDLE);
     const { root, home } = await setup();
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc' }],
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', model: 'kimi-code/k3.1-pro-highspeed' }],
     });
     await writePendingPane(root, 'demo', {
-      pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+      pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
     });
     vi.mocked(waitIdle).mockImplementationOnce(async () => {
       await killAgent(root, 'demo');
@@ -977,7 +989,7 @@ describe('start after a cleanup stamp', () => {
     const { root, home } = await setup();
     await hubTask(root, 'demo', 'do it');
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', closed_at: new Date().toISOString() }],
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', model: 'kimi-code/k3.1-pro-highspeed', closed_at: new Date().toISOString() }],
     });
     const pane = await startProject(root, 'demo', 'demo-1');
     expect(pane).toBe('%9');
@@ -995,7 +1007,7 @@ describe('orchestrator launch registration locking', () => {
     let releasePreflight!: () => void;
     const entered = new Promise<void>((resolve) => { markPreflight = resolve; });
     const release = new Promise<void>((resolve) => { releasePreflight = resolve; });
-    vi.mocked(preflight).mockImplementationOnce(async () => {
+    vi.mocked(preflight).mockImplementationOnce(async () => {}).mockImplementationOnce(async () => {
       markPreflight();
       await release;
     });
@@ -1060,7 +1072,7 @@ describe('wake after a cascade kill', () => {
     const { root, home } = await setup();
     await writeJson(hivePath(home, 'team.json'), {
       agents: [{
-        name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc',
+        name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', model: 'kimi-code/k3.1-pro-highspeed',
         closed_at: new Date().toISOString(),
       }],
     });
@@ -1076,7 +1088,7 @@ describe('wake pending pane', () => {
   it('a stale pending record is cleared and the wake proceeds', async () => {
     const { root } = await setup();
     await writePendingPane(root, 'demo', {
-      pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, at: new Date(Date.now() - 11 * 60_000).toISOString(), line: LINE,
+      pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date(Date.now() - 11 * 60_000).toISOString(), line: LINE,
     });
     await expect(wake(root, 'demo')).rejects.toThrow(/not in team.json/);
     expect(await readPendingPane(root, 'demo')).toBeNull();
@@ -1084,7 +1096,7 @@ describe('wake pending pane', () => {
 
   it('a pending record whose pane died is cleared and the wake proceeds', async () => {
     const { root } = await setup();
-    await writePendingPane(root, 'demo', { pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString(), line: LINE });
+    await writePendingPane(root, 'demo', { pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), line: LINE });
     vi.mocked(paneExists).mockImplementation(async (p) => p !== '%7');
     await expect(wake(root, 'demo')).rejects.toThrow(/not in team.json/);
     expect(await readPendingPane(root, 'demo')).toBeNull();
@@ -1095,9 +1107,9 @@ describe('wake pending pane', () => {
     const { root, home } = await setup();
     await fs.mkdir(hivePath(home), { recursive: true });
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc' }],
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', model: 'kimi-code/k3.1-pro-highspeed' }],
     });
-    await writePendingPane(root, 'demo', { pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString(), line: LINE });
+    await writePendingPane(root, 'demo', { pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), line: LINE });
     vi.mocked(capturePane).mockImplementation(async () => IDLE);
     const pane = await wake(root, 'demo');
     expect(pane).toBe('%7');
@@ -1111,7 +1123,7 @@ describe('orchestrator launch mode', () => {
   async function setupOrchestrator() {
     const { root, home } = await setup();
     await writeJson(hivePath(home, 'team.json'), {
-      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc' }],
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', model: 'kimi-code/k3.1-pro-highspeed' }],
     });
     return { root, home };
   }
@@ -1123,7 +1135,7 @@ describe('orchestrator launch mode', () => {
     const pane = await wake(root, 'demo');
     expect(pane).toBe('%9');
     expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2])
-      .toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro'`);
+      .toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro-highspeed'`);
   });
 
   it('wakes in ask when approvals is manual, so the human answers', async () => {
@@ -1132,7 +1144,7 @@ describe('orchestrator launch mode', () => {
     await setProjectApprovals(root, 'demo', 'manual');
     await wake(root, 'demo');
     expect(vi.mocked(newWindow).mock.calls.at(-1)?.[2])
-      .toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro'`);
+      .toBe(`HIVE_AGENT=demo-orchestrator HIVE_PROJECT=demo HIVE_HUB_ROOT='${root}' KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- --session session_abc -m 'kimi-code/k3.1-pro-highspeed'`);
   });
 });
 

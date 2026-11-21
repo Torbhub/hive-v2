@@ -24,6 +24,7 @@ import { assertEntryAlive, killEntry, recordedIdentity } from './kill.js';
 import { requireAgentCredential } from './collaboration-credentials.js';
 import { assertExecutionAllowed } from './rollout.js';
 import { redactSecrets } from './logview.js';
+import { assertModelConfigured } from './model-config.js';
 export { assertEntryAlive } from './kill.js';
 
 export function orchestratorName(project: string): string {
@@ -40,10 +41,11 @@ export function packageRoot(): string {
   throw new Error('hive: cannot find roles/ above the running module');
 }
 
-export async function preflight(): Promise<void> {
-  const r = await run('teamkimi', ['status']);
+export async function preflight(model: string): Promise<void> {
+  await assertModelConfigured(model, DEFAULT_MODEL);
+  const r = await run('teamkimi', ['status'], undefined, undefined, 10_000);
   if (r.code !== 0) {
-    throw new Error('the teamkimi proxy is down; start it (teamkimi server) — hive spawns nothing without it');
+    throw new Error('model preflight failed: the teamkimi proxy is down or did not respond within 10s. Start it with teamkimi server, then retry. Hive spawns nothing without it');
   }
 }
 
@@ -164,15 +166,15 @@ export function effectiveOrchestratorMode(mode: ProjectMode, approvals?: Approva
 
 // Called before any side effect (worktree add, pane kill): a bad alias is a
 // recoverable config error and must never orphan a worktree or kill a live agent.
-function checkModel(model: string | undefined): void {
+export function checkModel(model: string | undefined): void {
   if (model !== undefined && !MODEL_RE.test(model)) {
     throw new Error(`a model alias is letters, digits, '.', '_', '-', '/', '[', ']': ${model}`);
   }
 }
 
-// Sessions without an explicit model get the house default, not whatever
+// Fresh sessions without an explicit model get the house default, not whatever
 // default_model a drifting config.toml happens to say.
-export const DEFAULT_MODEL = 'kimi-code/k3.1-pro';
+export const DEFAULT_MODEL = 'kimi-code/k3.1-pro-highspeed';
 
 export function launchCommand(
   sessionId: string | undefined,
@@ -418,6 +420,7 @@ async function admissionRequest(
 }
 
 export type WorkerContract = { assignment: string; deliverable: string };
+export type RespawnOptions = Partial<WorkerContract> & { model?: string };
 export type SpawnOptions = {
   agent: string;
   role?: string;
@@ -523,8 +526,9 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   await assertExecutionAllowed(root, project);
   if (!AGENT_NAME_RE.test(opts.agent)) throw new Error(`an agent name is lowercase letters, digits, '-': ${opts.agent}`);
   checkWorkerContract(opts);
-  checkModel(opts.model);
-  await preflight();
+  const model = opts.model ?? DEFAULT_MODEL;
+  checkModel(model);
+  await preflight(model);
   const launched = await withLaunchClaim(
     root, project,
     (p, launchClaim, launchClaimDigest) => spawnRegisteredAgent(root, p, opts, launchClaim, launchClaimDigest),
@@ -964,7 +968,7 @@ async function relaunchRegisteredAgent(
     });
     const patch = {
       pane, pane_pid: identity.pid, pane_started: identity.started,
-      worktree, session_id: sessionId, model: old.model ?? DEFAULT_MODEL, closed_at: undefined, wedged_at: undefined,
+      worktree, session_id: sessionId, model: old.model, closed_at: undefined, wedged_at: undefined,
       launch_mode: mode, launch_scoped_auto: mode === 'auto',
       migration_state: undefined, watch_authority_revoked_at: undefined, launch_pending: undefined,
       ...evidence, team_state_hash: teamStateHash,
@@ -1030,22 +1034,30 @@ async function admitReplacement(
 }
 
 export async function respawnAgent(
-  root: string, project: string, agent: string, options: Partial<WorkerContract> = {},
+  root: string, project: string, agent: string, options: RespawnOptions = {},
 ): Promise<string> {
   await assertExecutionAllowed(root, project);
   const p = await projectEntry(root, project);
   const home = p.home;
   const old = (await readTeam(home)).agents.find((entry) => entry.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
+  if (old.model === undefined && options.model === undefined) {
+    throw new Error(`${agent} is missing its recorded model. Use hive spawn respawn ${project} --agent ${agent} --model ${DEFAULT_MODEL}`);
+  }
+  if (old.model !== undefined && options.model !== undefined) {
+    throw new Error('a respawn model can be set only when the recorded model is missing');
+  }
+  const model = options.model ?? old.model!;
+  const migrated = { ...old, model };
   const repair = !old.orchestrator && (options.assignment !== undefined || options.deliverable !== undefined);
   if (repair) checkWorkerContract(options);
   if (!old.orchestrator && !repair) await requireWorkerContract(old, home);
-  checkModel(old.model);
-  await preflight();
-  if (old.task && !old.orchestrator) await admissionRequest(root, old.task, '', old);
+  checkModel(model);
+  await preflight(model);
+  if (old.task && !old.orchestrator) await admissionRequest(root, old.task, '', migrated);
   if (repair) await writeWorkerContract(old.worktree || home, agent, options, old.handoff);
   await assertExecutionAllowed(root, project);
-  const admission = await admitReplacement(root, home, old);
+  const admission = await admitReplacement(root, home, migrated);
   const reserved = admission
     ? (await readTeam(home)).agents.find((entry) => entry.lease_id === admission.lease_id)
     : old;
@@ -1056,7 +1068,7 @@ export async function respawnAgent(
   try {
     if (old.pane) await killWindow(old.pane, recordedIdentity(old));
     await releasePendingLaunchClaim(root, old);
-    return await relaunchAgent(root, p, { ...old, launch_pending: undefined }, undefined, admission);
+    return await relaunchAgent(root, p, { ...migrated, launch_pending: undefined }, undefined, admission);
   } catch (error) {
     if (old.task && !old.orchestrator) {
       await recordTmuxLaunchOutcome(root, home, old.task, agent, admission!.lease_id, error instanceof Error ? error.message : String(error));
@@ -1091,9 +1103,13 @@ export async function wakeAgent(root: string, project: string, agent: string): P
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
   if (old.closed_at) throw new Error(`${agent} was closed on purpose at ${old.closed_at}; not waking it`);
   if (!old.session_id) throw new Error(`${agent} has no recorded session to resume; respawn it instead`);
+  if (old.model === undefined) {
+    throw new Error(`${agent} is missing its recorded model. Use hive spawn respawn ${project} --agent ${agent} --model ${DEFAULT_MODEL}`);
+  }
   if (!old.orchestrator) await requireWorkerContract(old, p.home);
-  checkModel(old.model);
-  await preflight();
+  const model = old.model;
+  checkModel(model);
+  await preflight(model);
   if (old.task && !old.orchestrator) await admissionRequest(root, old.task, '', old);
   if (old.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
     throw new Error(`${agent} is already running`);
