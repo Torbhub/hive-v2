@@ -61,7 +61,6 @@ fi
 archive="$(mktemp)"
 staging="$(mktemp -d /opt/teamkimi-count-install.XXXXXX)"
 trap 'rm -f "$archive"; rm -rf "$staging"' EXIT
-# gh follows the private codeload redirect without exposing its token.
 runuser -u ubuntu -- gh api "repos/Torbhub/teamkimi/tarball/$TEAMKIMI_COUNT_COMMIT" > "$archive"
 printf '%s  %s\n' "$TEAMKIMI_COUNT_ARCHIVE_SHA256" "$archive" | sha256sum -c --status -
 tar -xzf "$archive" -C "$staging" --strip-components=1

@@ -317,7 +317,6 @@ export async function gitDiffScope(input: GitDiffScopeInput) {
       ...parseUntracked(untracked.stdout), ...parseUntracked(ignored.stdout),
     ];
   }
-  // The evaluator holds this lock while it reads the repository.
   changes = changes.flatMap((change) => {
     const paths = change.paths.filter((claim) => !claim.startsWith('.hive/team.json.lock/'));
     return paths.length ? [{ ...change, paths }] : [];

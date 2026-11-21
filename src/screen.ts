@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { HubDialog, HubDialogOption } from './types.js';
 
-// Dim runs are placeholder text; escapes and nbsp would break the regexes below.
 export function ansiClean(raw: string): string {
   return raw
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
@@ -15,17 +14,13 @@ export function lines(raw: string): string[] {
   return ansiClean(raw).split('\n');
 }
 
-// A horizontal rule: the input box's ╭─╮/╰─╯ rows or a dialog's plain ──── rule.
 const RULE_RE = /^\s*[╭╰]?[─╌]{4,}[╮╯]?\s*$/;
-// Empty prompt row inside the input box: `│ >` and nothing else.
 const EMPTY_PROMPT_RE = /^\s*│\s*>\s*│?\s*$/;
-// Kimi's spinner: a braille glyph, a word, an ellipsis — `⠼ thinking…`, `⠼ Thinking… · Tip: …`.
 const SPINNER_RE = /^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+\S[^…]*…/;
 const CONTEXT_RE = /context:\s*(\d+)%\s*\(([^/\s]+)\s*\/\s*([^)\s]+)\)/;
 const NUMBERED_OPTION_RE = /^\s*(▶)?\s*(\d{1,2})\.\s+(.+?)\s*$/;
 const MENU_CURSOR_RE = /^\s*❯\s+(.+?)\s*$/;
 
-// Phrases a live Kimi dialog shows, calibrated on 2.1.1 captures (test/fixtures/).
 const DIALOG_PHRASES = [
   'Trust this folder',
   'Run this command?',
@@ -40,7 +35,6 @@ const DIALOG_PHRASES = [
   'Enter to confirm',
 ];
 
-// Options that need the owner's own text; a button cannot answer them (spec §4).
 const NOT_OFFERED_RE = /^(Type something\.?|Chat about this)$/i;
 const SAVES_RULE_RE = /always allow|don't ask again|switch to accept edits/i;
 
@@ -74,7 +68,6 @@ export function hasEmptyPrompt(ls: string[]): boolean {
 }
 
 export function hasSpinner(ls: string[]): boolean {
-  // Kimi clears the spinner when it goes idle, so any spinner line on screen is live.
   return ls.some((l) => SPINNER_RE.test(l));
 }
 
@@ -85,7 +78,7 @@ export function classify(ls: string[]): ScreenState {
   if (hasSpinner(ls)) return 'working';
   if (hasEmptyPrompt(ls)) return 'idle';
   return 'unknown';
-}// Dialog text is the block between the last two plain rules; with too few rules, the whole screen (a misread only refuses to type).
+}
 function dialogRegion(ls: string[]): string[] {
   const rules = ruleIndexes(ls);
   if (rules.length >= 2) return ls.slice(rules[rules.length - 2], rules[rules.length - 1] + 1);
@@ -96,9 +89,6 @@ export function dialogFingerprint(text: string): string {
   return createHash('sha1').update(text).digest('hex');
 }
 
-// A menu's option labels sit at the cursor line's label column and each one
-// follows a blank or rule line; the lines under a label are its detail.
-// Calibrated on the 2.1.1 trust menu (test/fixtures/dialog-trust-menu.txt).
 function menuOptions(block: string[], cursorLine: number): { options: HubDialogOption[]; cursor: number } {
   const marker = block[cursorLine].match(/^\s*❯\s+/);
   const labelCol = marker ? marker[0].length : 0;
@@ -107,7 +97,6 @@ function menuOptions(block: string[], cursorLine: number): { options: HubDialogO
   let current: HubDialogOption | null = null;
   for (let i = cursorLine; i < block.length; i++) {
     const l = block[i];
-    // Strip the ❯ marker so the cursor line's label measures at labelCol too.
     const stripped = i === cursorLine ? l.replace(/^(\s*)❯\s+/, '$1') : l;
     const text = stripped.trim();
     if (text === '' || RULE_RE.test(l)) {

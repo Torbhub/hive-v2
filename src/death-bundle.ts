@@ -6,7 +6,6 @@ import { run, tmux, tmuxSocket } from './tmux.js';
 import type { TeamEntry } from './types.js';
 import { lastLine } from './view.js';
 
-// Rebuild stamp left by infra/ deploy on the box; the box is committed state in infra/.
 const HIVE_V2_DIST = '/home/ubuntu/hive-v2/dist/src/cli.js';
 const PROBE_TIMEOUT_MS = 10_000;
 const DEPLOY_WINDOW_MS = 10 * 60_000;
@@ -21,7 +20,6 @@ function cap(text: string, lines = SECTION_LINES): string {
   return all.length <= lines ? all.join('\n') : all.slice(-lines).join('\n');
 }
 
-// Every probe is isolated: a failure is one recorded line, never a lost bundle.
 async function isolated(name: string, fn: () => Promise<string>): Promise<string> {
   try {
     const out = (await fn()).trimEnd();
@@ -76,7 +74,6 @@ async function findWireLog(sessionDir: string): Promise<string> {
   throw new Error(`no wire.jsonl under ${agentsDir}`);
 }
 
-// The wedge judge's liveness signal: when the session last wrote a wire event.
 export async function wireLogMtime(home: string, sessionId: string): Promise<number | null> {
   try {
     return (await fs.stat(await findWireLog(await findSessionDir(home, sessionId)))).mtimeMs;
@@ -88,7 +85,6 @@ export async function wireLogMtime(home: string, sessionId: string): Promise<num
 const ACTIVITY_EVENTS = new Set(['turn.ended', 'agent.turn.ended', 'full_compaction.complete']);
 const WIRE_ACTIVITY_CHUNK_BYTES = 64 * 1024;
 
-// Kimi refreshes its cache after model round-trips, not local state writes.
 export async function wireActivityAt(home: string, sessionId: string): Promise<number | null> {
   try {
     const file = await findWireLog(await findSessionDir(home, sessionId));
@@ -125,7 +121,6 @@ export async function wireActivityAt(home: string, sessionId: string): Promise<n
   }
 }
 
-// Only type and timestamp leave this function; payloads never enter the bundle.
 async function wireTail(home: string, sessionId: string): Promise<string> {
   const file = await findWireLog(await findSessionDir(home, sessionId));
   const events: { type: string; at: string }[] = [];

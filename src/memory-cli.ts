@@ -1,5 +1,3 @@
-// `hive memory` subcommands. Kept out of cli.ts: that file is at its
-// line-count baseline (scripts/discipline-gate.mjs).
 import { listCandidates, memoryEnabled, promoteCandidate, proposeMemory } from './memory.js';
 
 const USAGE = 'usage: hive memory propose <project> <text...> | ls <project> | promote <project> <id>';

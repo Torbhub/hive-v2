@@ -69,7 +69,6 @@ async function readBriefFrame(
       try {
         candidates.push(parseDaydreamBrief(JSON.parse(frame.text), briefBinding(record, phase)));
       } catch {
-        // Verification rejects a turn without exactly one valid standalone brief.
       }
     }
   }

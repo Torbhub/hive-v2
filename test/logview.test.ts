@@ -81,7 +81,6 @@ describe('parseWireLine', () => {
   });
 
   it('redacts a token that straddles the 500-char cap', () => {
-    // Cap-first would keep the token's head; redact-first must not.
     const straddle = `${'x'.repeat(469)} Bearer ${'T'.repeat(100)}`;
     const e = parseWireLine(loopEvent({ type: 'content.part', part: { type: 'think', think: straddle } }));
     expect(e?.text).toContain('Bearer [redacted]');

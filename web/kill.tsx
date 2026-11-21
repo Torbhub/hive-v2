@@ -1,10 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Btn } from './action';
 
-// A cascade kill drops the orchestrator and its children for good, so the
-// first click only arms it (the Rebrief/Back reveal idiom); the second fires.
-// The confirm renders in the same slot, so it stays disabled for a beat —
-// the second hit of a double-click must land on a dead button.
 export function KillControl({
   project, children, onKill,
 }: {

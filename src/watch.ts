@@ -20,8 +20,6 @@ import { redactSecrets } from './logview.js';
 import { pendingMigrationRequired } from './launch.js';
 import { supervisionPass, type GitHubOptions } from './supervision.js';
 
-// Read-only leaders: a chain segment must start with one of these to be
-// auto-approvable. Multi-word leaders match the subcommand, not just `git`.
 const SAFE_LEADERS = [
   'ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'pwd', 'echo', 'wc', 'tsc',
   'git status', 'git log', 'git diff', 'git show', 'git branch',
@@ -31,13 +29,11 @@ const SAFE_LEADERS = [
   'npm run build',
 ];
 
-// Destructive shapes are never auto-approved, by either tier.
 const GIT_PUSH_RE = /git\s+push/;
 const NEVER_RES = [
   /\brm\s/, GIT_PUSH_RE, /git\s+reset/, /\bsudo\b/, /\bdd\s/, /\bmkfs\b/,
   /\bjj\s+push\b/, /\bjj\s+abandon\b/, /jj\s+workspace\s+forget/,
   /chmod\s+-R/, /(?:curl|wget)[^|]*\|\s*(?:ba|z)?sh\b/, />\s*\/(etc|usr|bin|sbin|var|boot|lib)(\/|\s|$)/,
-  // Heavy compute waits for a human: box policy bans local builds and suites.
   /\bnpm\s+ci\b/, /\bnpm\s+(?:i|install)\b/, /\bnpx\s+vitest\b/, /\bnpm\s+test\b/,
   /\bnpx\s+jest\b/, /\bcargo\s+build\b/, /\bmake\s/, /\bdocker\s+build\b/, /\bpip\s+install\b/,
 ];
@@ -112,7 +108,6 @@ export async function kimiEnv(): Promise<NodeJS.ProcessEnv> {
   return env;
 }
 
-// A fresh-context one-shot classifier; only a response STARTING with APPROVE counts.
 export async function classifyWithKimi(
   project: string,
   command: string,
@@ -127,10 +122,7 @@ export async function classifyWithKimi(
   return r.code === 0 && r.stdout.trimStart().startsWith('APPROVE');
 }
 
-// APPROVE verdicts cached by command: one grep must never spawn two classifiers.
-// ASK and timeouts are never cached, so a re-ask always reaches the classifier.
 const approveCache = new Map<string, true>();
-// Fingerprints with a classifier running right now; abandoned cycles skip them.
 const inFlightMarks = new Set<string>();
 const nativeQuestionMarks = new Map<string, string>();
 
@@ -303,7 +295,6 @@ async function maybeAutoApprove(
     }
   }
   if (!command) return;
-  // Whitespace-collapsed key: `git  status` and `git status` share a verdict.
   const cacheKey = command.replace(/\s+/g, ' ');
   let ok = auto || tier1Approves(command);
   if (!auto && !ok && approvals === 'smart') {
@@ -363,11 +354,6 @@ const WEDGE_DUMP_TIMEOUT_MS = 15_000;
 
 export type WakeState = Map<string, { attempts: number; nextAt: number }>;
 
-// Desired vs actual, re-judged every tick: a death is logged and bundled once,
-// but the wake is retried with backoff until the pane is back or the budget
-// runs out (60 attempts at a capped 10-minute backoff span hours of outage).
-// The deaths set is seeded from disk at watch start, so a restart skips the
-// re-report but still owns the wake.
 async function handleDeath(
   root: string,
   project: string,
@@ -397,8 +383,6 @@ async function handleDeath(
   wakes.set(key, { attempts: attempt, nextAt: Date.now() + Math.min(5000 * 2 ** (attempt - 1), 600_000) });
   try {
     const pane = a.orchestrator ? await wake(root, project) : await wakeAgent(root, project, a.name);
-    // A timeout can return an unregistered pane. A resurrection needs both the
-    // returned pane and its new process identity in the team entry.
     const entry = (await readTeam(home)).agents.find((x) => x.name === a.name);
     if (entry?.pane !== pane) {
       throw new Error(`wake returned ${pane} but the team entry still points at ${entry?.pane ?? 'nothing'}`);
@@ -427,9 +411,6 @@ async function handleDeath(
   }
 }
 
-// A live pane with a silent wire log for 15 minutes is a stalled lane.
-// One decision per session, pane, and last wire write. The persisted set
-// carries that episode across restarts without hourly repeats.
 async function flagStale(
   root: string,
   project: string,
@@ -466,7 +447,6 @@ async function stackProbe(sections: string[], title: string, cmd: string, args: 
   }
 }
 
-// Operator standing rule: stack dumps land on disk BEFORE any wedged restart.
 async function captureWedgeDump(home: string, a: TeamEntry): Promise<string> {
   const sections: string[] = [`agent: ${a.name}`, `pane: ${a.pane ?? '?'}`, `pid: ${a.pane_pid ?? '?'}`];
   await stackProbe(sections, `== pstack ${a.pane_pid} ==`, 'sudo', ['-n', 'pstack', String(a.pane_pid)]);
@@ -480,7 +460,6 @@ async function captureWedgeDump(home: string, a: TeamEntry): Promise<string> {
 
 export type Stillness = Map<string, { content: string; since: number; cpu: number | null }>;
 
-// CPU seconds of the pane's whole process tree; null when the pid is gone.
 async function treeCpuTime(pid: number): Promise<number | null> {
   const r = await run('ps', ['-eo', 'pid=,ppid=,times='], undefined, undefined, WEDGE_DUMP_TIMEOUT_MS);
   if (r.code !== 0) return null;
@@ -510,9 +489,6 @@ async function clearWedged(root: string, home: string, project: string, a: TeamE
   await appendWatchLog(root, `${new Date().toISOString()} ${project} ${a.name} is moving again; cleared the wedged mark`);
 }
 
-// A live pane can still be dead weight: kimi's spinner ticks while it works,
-// so a pane frozen on a spinner is suspicious. It is only wedged when nothing
-// corroborates life: no CPU advance in the process tree and a stale wire log.
 async function judgeWedge(
   root: string,
   project: string,
@@ -540,7 +516,6 @@ async function judgeWedge(
   if (Date.now() - seen.since < stillMs) return;
   const cpu = a.pane_pid ? await treeCpuTime(a.pane_pid) : null;
   if (cpu !== null && seen.cpu !== null && cpu > seen.cpu) {
-    // The tree burned CPU while the screen sat still: working, not wedged.
     stills.set(key, { content: raw, since: Date.now(), cpu });
     return;
   }
@@ -576,7 +551,6 @@ async function judgeWedge(
     () => killWindow(pane, { pid: a.pane_pid!, started: a.pane_started! })).catch(async (e: unknown) => {
       await appendWatchLog(root, `${new Date().toISOString()} ${project} killing the wedged pane failed: ${lastLine(e)}`);
     });
-  // The death path re-wakes it on the next tick.
 }
 
 async function redirectNativeQuestion(
@@ -756,8 +730,6 @@ export async function watchCycle(
   }
 }
 
-// The watch loop is a foreground process; systemd owns restart-on-death.
-// A wedged cycle await is abandoned after cycleTimeoutMs; the loop moves on.
 export async function watch(
   root: string,
   { intervalMs = 5000, cycleTimeoutMs = CYCLE_TIMEOUT_MS }: { intervalMs?: number; cycleTimeoutMs?: number } = {},
@@ -772,7 +744,6 @@ export async function watch(
       await appendWatchLog(root, `${new Date().toISOString()} cycle error: ${lastLine(e)}`);
     });
     cycles += 1;
-    // The heartbeat: a stale status file means the watch itself is wedged.
     await writeJson(hubPath(root, 'watch-status.json'), { ts: new Date().toISOString(), cycles }).catch(() => {});
     await sleep(intervalMs);
   }

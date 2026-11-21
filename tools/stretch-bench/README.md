@@ -14,12 +14,12 @@ to rewrite each one as a skim, and measures two things:
 
 ## Run it
 
-Needs the teamkimi proxy up (`pgrep -af teamkimi`) and a signed-in `kimi`.
+Needs the teamkimi proxy up (`pgrep -af teamkimi`) and a signed-in `kimi`. The rewrite is slow: it makes one `kimi -p` call per reply.
 
 ```
-tsx tools/stretch-bench/extract.ts                 # count replies, no writes
-tsx tools/stretch-bench/rewrite.ts --sample 20     # slow: one kimi -p call per reply
-tsx tools/stretch-bench/measure.ts                 # prints the report
+tsx tools/stretch-bench/extract.ts
+tsx tools/stretch-bench/rewrite.ts --sample 20
+tsx tools/stretch-bench/measure.ts
 ```
 
 `rewrite.ts` samples from the 30 most recent wire files, seeded, so a rerun

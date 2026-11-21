@@ -7,8 +7,6 @@ import { APPROVALS_MODES, NEEDS_OWNER_STATES, PROJECT_MODES, TASK_EVENTS } from 
 export const HUB_DIR = '.hive-hub';
 export const HIVE_DIR = '.hive';
 
-// A deliberate refusal with an operator-safe message. The web layer shows
-// these to the client; every other error is infrastructure and stays server-side.
 export class Refusal extends Error {}
 
 export function hubPath(root: string, ...parts: string[]): string {
@@ -19,7 +17,6 @@ export function hivePath(projectHome: string, ...parts: string[]): string {
   return path.join(projectHome, HIVE_DIR, ...parts);
 }
 
-// null means "absent"; a corrupt file throws so callers never overwrite real data.
 export async function readJson<T>(file: string): Promise<T | null> {
   let raw: string;
   try {
@@ -35,7 +32,6 @@ export async function readJson<T>(file: string): Promise<T | null> {
   }
 }
 
-// tmp + rename so a concurrent reader never sees a half-written file.
 export async function writeJson(file: string, value: unknown, mode?: number): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp.${process.pid}`;
@@ -87,7 +83,6 @@ export async function readTaskEvents(root: string): Promise<TaskEvent[]> {
     try {
       out.push(JSON.parse(line) as TaskEvent);
     } catch {
-      // A torn last line (crashed append) is dropped, not fatal.
     }
   }
   return out;
@@ -234,7 +229,6 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
     }
     t.updated = ev.at;
     if (ev.lease_epoch !== undefined) t.lease_epoch = ev.lease_epoch;
-    // Notes, admissions, evidence, progress, and planaccept never rewrite the headline state.
     if (ev.event === 'admission') {
       if (ev.admission) {
         const admissions = t.admissions ??= [];
@@ -267,7 +261,6 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
       if (ev.checkpoint && ev.status) {
         t.progress![ev.checkpoint] = { status: ev.status, note: ev.note, at: ev.at };
         t.last_progress_at = ev.at;
-        // A fresh fail needs a fresh accept; an earlier one does not carry over.
         if (ev.status === 'fail') delete t.checkpoint_accepts![ev.checkpoint];
       }
     } else if (ev.event === 'planaccept') {
@@ -305,7 +298,6 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         t.unblock_condition = ev.note;
       }
       if (ev.event === 'plan') {
-        // A fresh plan replaces the old one: checkpoints and their progress reset.
         previousContracts.set(ev.id, t.contract);
         previousDeadlines.set(ev.id, t.expires_at);
         t.checkpoints = validCheckpoints(ev.checkpoints) ?? [];
@@ -322,9 +314,6 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         t.expires_at = wallDeadline(t.contract, t.admitted_at);
       }
       if (ev.event === 'asked') {
-        // A rebrief is an asked event on an existing task: the old plan, its
-        // approval, and its trail must not carry over. On task creation these
-        // fields already hold their initial values, so the reset is a no-op.
         if (previous) {
           t.lease_epoch = (t.lease_epoch ?? 1) + 1;
           t.lease_revoked = false;
@@ -395,8 +384,6 @@ export function childReconciled(events: TaskEvent[], id: string, project: string
     ? childReconciled(events, covering, project, seen) : false;
 }
 
-// null means the checkpoint list fails the contract: at least one checkpoint,
-// each with a non-empty unique id, a non-empty desc, and an etaMin above zero.
 export function validCheckpoints(cps: unknown): Checkpoint[] | null {
   if (!Array.isArray(cps) || cps.length === 0) return null;
   const ids = new Set<string>();
@@ -412,7 +399,6 @@ export function validCheckpoints(cps: unknown): Checkpoint[] | null {
   return cps as Checkpoint[];
 }
 
-// Why a task may not go done yet, one reason per blocking checkpoint.
 export function doneBlockers(t: HubTask): string[] {
   const out: string[] = [];
   for (const c of t.checkpoints ?? []) {
@@ -431,7 +417,6 @@ export function doneBlockers(t: HubTask): string[] {
   return out;
 }
 
-// The command a permission dialog asks about, when it shows one.
 export function extractCommand(dialogText: string): string | null {
   const m = dialogText.match(/^\s*(?:▶\s*)?\$\s+(.+)$/m);
   return m ? m[1].trim() : null;
@@ -553,7 +538,6 @@ export async function manifestRead(projectHome: string): Promise<ManifestRecord[
     try {
       out.push(JSON.parse(line) as ManifestRecord);
     } catch {
-      // A torn last line (crashed append) is dropped, not fatal.
     }
   }
   return out;
@@ -597,7 +581,6 @@ export async function clearPendingPane(root: string, project: string): Promise<v
   await fs.rm(hubPath(root, 'panes', `${project}.json`), { force: true });
 }
 
-// The decisions log: append-only lore that survives every rotation.
 export async function appendDecision(root: string, d: Omit<Decision, 'at'> & { at?: string }): Promise<void> {
   await fs.mkdir(hubPath(root), { recursive: true });
   await fs.appendFile(
@@ -619,7 +602,6 @@ export async function readDecisions(root: string, latest = 8): Promise<Decision[
     try {
       out.push(JSON.parse(line) as Decision);
     } catch {
-      // A torn last line (crashed append) is dropped, not fatal.
     }
   }
   return out.slice(-latest).reverse();

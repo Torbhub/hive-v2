@@ -29,28 +29,16 @@ const MAX_ENTRIES = 100;
 const TEXT_CAP = 500;
 const CURSOR_KEY = randomBytes(32);
 
-// Wire logs can hold secrets the agent saw mid-turn. These go out over the
-// wire to any browser that reaches the hub, so the common key shapes die here.
-// The kv rule keeps a secret's key name, so it runs before the generic hex
-// rule that would otherwise eat the value. The kv and Authorization rules
-// tolerate backslash-escaped quotes because the tool.call renderer embeds
-// JSON.stringify output, which manufactures exactly those.
 export function redactSecrets(text: string): string {
   return text
     .replace(/hva1\.(?:[a-z][a-z0-9-]{0,62})?(?:\.[0-9a-f]{0,16})?(?:\.[A-Za-z0-9_-]{0,256})?/g, '[redacted-agent-credential]')
-    // Authorization header shapes: the scheme stays, the credential dies.
     .replace(/(authorization\\?["']?\s*[:=]?\s*\\?["']?\s*(?:bearer|basic|token)\s+)[^\s"',}\\]+/gi, '$1[redacted]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
     .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, 'sk-[redacted]')
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/g, '[redacted-gh-token]')
     .replace(/\bxox[bp]-[A-Za-z0-9-]{8,}/g, '[redacted-slack-token]')
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?/g, '[redacted-jwt]')
-    // kv: a quoted value (plain or \"-escaped, 3+ chars) runs to its closing
-    // quote — \\. is one escape pair and the closer may not follow a
-    // backslash, so an interior escaped quote does not end it; a bare value
-    // (8+ chars) ends at space, quote, comma, brace, bracket, or backslash.
     .replace(/((?:api[_-]?key|token|secret|password)\w*\\?["']?\s*[:=]\s*)(?:(\\?["'])(?:\\.|[^"'\\]){3,}?(?<!\\)\2|[^"'\s,}\]\\[]{8,})/gi, '$1$2[redacted]$2')
-    // URL userinfo: //user:pass@ — the user stays, the pass dies.
     .replace(/(\/\/[^\s/"':@]+:)[^\s/"'@\\]+(?=@)/g, '$1[redacted]')
     .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[redacted-aws-key]')
     .replace(/\b[0-9a-f]{32,}\b/gi, '[redacted-hex]');
@@ -65,8 +53,6 @@ function at(ms: unknown): string {
   return typeof ms === 'number' && Number.isFinite(ms) ? new Date(ms).toISOString() : '?';
 }
 
-// One wire.jsonl line → one entry, or null for anything that is not part of
-// the thinking view (steps, usage, results) or does not parse.
 export function parseWireLine(line: string): ParsedLogEntry | null {
   let rec: Record<string, unknown>;
   try {
@@ -283,8 +269,6 @@ async function readLogPage(handle: FileHandle, session: string, before?: string)
   };
 }
 
-// Name validation failures are operator input problems, not infrastructure:
-// they answer as a 400 Refusal, never a 500.
 function nameOrRefusal(kind: string, value: string): void {
   try {
     checkName(kind, value);
@@ -293,8 +277,6 @@ function nameOrRefusal(kind: string, value: string): void {
   }
 }
 
-// Resolve which team entry the operator asked about; a bare name that matches
-// two agents is an error, never a guess (same rule as readDialogFor).
 async function resolveEntry(
   root: string,
   project: string,
@@ -342,8 +324,6 @@ export async function readAgentLog(
   try {
     sessionDir = await findSessionDir(home, entry.session_id);
   } catch {
-    // A rotated session or a box without ~/.kimi-code/sessions: a stale
-    // record is operator-facing state, not a server fault.
     throw new Refusal(`${name}'s session ${entry.session_id} has no wire log under ~/.kimi-code/sessions`);
   }
   const file = path.join(sessionDir, 'agents', 'main', 'wire.jsonl');

@@ -30,8 +30,6 @@ vi.mock('../src/hub.js', async (importOriginal) => {
     buildStatus: vi.fn(async () => ({ hub: { root: '' }, projects: [] })),
     continueProject: vi.fn(async () => '%1'),
     readDialogFor: vi.fn(async () => null),
-    // A successful wake registers the new pane on the team entry, as the real
-    // launchOrchestrator does; the watchdog checks before it logs resurrection.
     wake: vi.fn(async (root: string, project: string) => {
       const pf = await state.readProjects(root);
       const home = pf.projects.find((p) => p.name === project)?.home ?? '';
@@ -97,7 +95,6 @@ function tmp(): string {
   return mkdtempSync(path.join(tmpdir(), 'hive-watch-'));
 }
 
-// Most factory implementations survive. Identity checks start fresh each test.
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(paneExists).mockImplementation(async () => true);
@@ -105,8 +102,6 @@ beforeEach(() => {
   vi.mocked(sleep).mockImplementation(async () => {});
 });
 
-// Stubs every exec probe a death-bundle capture can fire; the suite never
-// runs real tmux/ps/dmesg/free/systemctl.
 function stubProbes(dmesgResult = { code: 0, stdout: 'killed process 11\noom line\n', stderr: '' }) {
   vi.mocked(tmux).mockResolvedValue({ code: 0, stdout: '%1: hive:1.0\n%2: hive:2.0\n', stderr: '' });
   vi.mocked(run).mockImplementation(async (cmd, args) => {
@@ -141,7 +136,6 @@ describe('the approval classifier', () => {
     expect(tier1Approves('jj st && jj git push --bookmark x')).toBe(false);
     expect(tier1Approves('jj describe -m x')).toBe(false);
     expect(tier1Approves('jj new')).toBe(false);
-    // Heavy compute moved to the never-approve list, so it is no leader either.
     expect(tier1Approves('npm test')).toBe(false);
   });
 
@@ -315,15 +309,11 @@ describe('watchCycle watchdog', () => {
     expect(log).toMatch(/demo demo-orchestrator pane %1 died \(pid 11, started a\)/);
     expect(log).toMatch(/demo builder pane %2 died \(pid 22, started b\)/);
     expect(log).toContain('wake attempt 1 failed: the teamkimi proxy is down');
-    // Nothing is recorded in DECISIONS before a wake actually succeeds.
     expect(await readDecisions(root)).toHaveLength(0);
 
-    // The very next tick is inside the backoff window and does not retry.
     await watchCycle(root, {}, deaths, wakes);
     expect(wake).toHaveBeenCalledTimes(1);
 
-    // After the backoff the retry runs, the death is not relogged, and the
-    // resurrection is logged only after the new pane identity registers.
     for (const w of wakes.values()) w.nextAt = 0;
     await watchCycle(root, {}, deaths, wakes);
     expect(wake).toHaveBeenCalledTimes(2);
@@ -340,7 +330,6 @@ describe('watchCycle watchdog', () => {
     });
     vi.mocked(paneExists).mockResolvedValue(false);
     stubProbes();
-    // wake returns a pane but the team entry never moves (waitIdle timed out).
     vi.mocked(wake).mockResolvedValue('%9');
     const wakes = new Map<string, { attempts: number; nextAt: number }>();
     await watchCycle(root, {}, new Set(), wakes);
@@ -447,8 +436,6 @@ describe('watchCycle watchdog', () => {
     });
     vi.mocked(paneExists).mockResolvedValue(false);
     stubProbes();
-    // Implementations leak between tests (clearAllMocks keeps them), so the
-    // success path is set here, not inherited from the hub mock factory.
     vi.mocked(wake)
       .mockRejectedValueOnce(new Error('the teamkimi proxy is down'))
       .mockImplementation(async () => {
@@ -462,8 +449,6 @@ describe('watchCycle watchdog', () => {
     let log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
     expect(log.match(/pane %1 died/g)).toHaveLength(1);
 
-    // Restart: fresh in-memory state, the disk record carries the death over.
-    // The wake is retried (fresh budget) but the death is not reported again.
     const restored = await loadProcessedKeys(root);
     expect(restored.has('%1:11')).toBe(true);
     await watchCycle(root, {}, restored, new Map());
@@ -619,7 +604,6 @@ describe('watchCycle wedge detection', () => {
     vi.mocked(wireLogMtime).mockResolvedValue(Date.now() - 60 * 60_000);
     vi.mocked(run).mockResolvedValue({ code: 0, stdout: 'stack\n', stderr: '' });
     const stills = new Map();
-    // The first sight only records stillness; the verdict lands on the next tick.
     await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
     await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
     const team = await readTeam(home);
@@ -639,7 +623,6 @@ describe('watchCycle wedge detection', () => {
     const decisions = await readDecisions(root);
     expect(decisions[0].summary).toContain('marked builder wedged');
 
-    // A further cycle with the mark set does not restamp, redump, or rekill.
     await watchCycle(root, {}, new Set(), new Map(), stills, { wedgeStillMs: 0 });
     expect(killWindow).toHaveBeenCalledTimes(1);
     expect(await fs.readdir(hivePath(home, 'wedges'))).toHaveLength(1);
@@ -847,8 +830,6 @@ describe('watchCycle auto-approver', () => {
     } as never);
   }
 
-  // Every test drives the approver with its own verdicts/marks, so no test
-  // ever touches the module-level cache or the module-level in-flight guard.
   const freshApprover = () => ({ verdicts: new Map<string, true>(), marks: new Set<string>() });
   const cycle = (root: string, s: { verdicts: Map<string, true>; marks: Set<string> }, env: NodeJS.ProcessEnv = {}) =>
     watchCycle(root, env, new Set(), new Map(), new Map(), { verdicts: s.verdicts, marks: s.marks });
@@ -920,7 +901,6 @@ describe('watchCycle auto-approver', () => {
     await cycle(root, s);
     expect(answerDialog).toHaveBeenCalledTimes(1);
 
-    // A new command, so the cached APPROVE above cannot answer for it.
     vi.mocked(answerDialog).mockClear();
     vi.mocked(readDialogFor).mockResolvedValue(dialogWith('Run this command?\n  $ python3 check_two.py') as never);
     vi.mocked(run).mockImplementation(async (cmd) => (
@@ -1440,20 +1420,14 @@ describe('watchCycle auto-approver', () => {
       markParked();
       return latch;
     });
-    // Both cycles share one approver state: the guard under test is the seam.
     const s = freshApprover();
     const c1 = cycle(root, s);
     try {
-      // The park is observed from inside the mock, not guessed by turns.
       await withTimeout(parked, 10_000, 'classifier park');
-      // Cycle 2 runs to completion with the latch held: the guard must make
-      // it skip the dialog, so no second spawn and no answer at all yet.
       await cycle(root, s);
       expect(kimiCalls()).toHaveLength(1);
       expect(answerDialog).not.toHaveBeenCalled();
     } finally {
-      // Always release and drain cycle 1, so a failed assertion can never
-      // abandon a parked cycle into later tests.
       release({ code: 0, stdout: 'APPROVE after the wait', stderr: '' });
       await c1;
     }

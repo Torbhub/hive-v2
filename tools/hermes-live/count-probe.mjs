@@ -29,7 +29,6 @@ function diagnose(error) {
     writeFileSync(join(dirname(output), 'bootstrap-category'), `${category}\n`, { mode: 0o600 });
     writeFileSync(join(dirname(output), 'bootstrap-origin'), `${origin}\n`, { mode: 0o600 });
   } catch {
-    // paid.sh retains its generic fixed diagnostic when refinement is unavailable.
   }
 }
 process.on('uncaughtException', diagnose);

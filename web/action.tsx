@@ -1,8 +1,6 @@
 import React, { createContext, useContext } from 'react';
 import { Button } from './components/ui/button';
 
-// Every action button reads this: while an action runs all of them disable,
-// and the one that was pressed holds the inverted look until it ends.
 export const ActionContext = createContext<{ acting: boolean; pressed: string | null }>({
   acting: false,
   pressed: null,

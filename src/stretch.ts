@@ -1,17 +1,9 @@
-// Stretchtext markup: `{{short|long}}` in agent prose. The reader sees
-// `short`; opening it puts `long` in its place. `long` may hold further
-// stretches. Code spans and fences are copied as written, so braces in code
-// never open a stretch.
-
 export type Segment = string | Stretch;
 
 export type Stretch = {
-  /** Names the stretch by its short form and its parents', so sibling repeats take `~2`, `~3`. */
   key: string;
   short: string;
-  /** Undefined when no `|` was written: then there is nothing to open. */
   long: Segment[] | undefined;
-  /** False while the closing braces never arrived (truncated text). */
   isClosed: boolean;
 };
 
@@ -23,7 +15,6 @@ export function isOpenable(stretch: Stretch): boolean {
 
 type Frame = { stretch: Stretch; siblings: Map<string, number> };
 
-/** Where the code span opening at `i` ends: past the next run of as many backticks, or at the text's end. */
 function codeSpanEnd(text: string, i: number): number {
   const run = /^`+/.exec(text.slice(i))?.[0] ?? '`';
   const end = text.indexOf(run, i + run.length);
@@ -104,7 +95,6 @@ function keyOf(short: string, parent: Frame | undefined, rootSiblings: Map<strin
   return parent ? `${parent.stretch.key}${KEY_SEPARATOR}${own}` : own;
 }
 
-/** Where a fenced code block opening at `start` ends (past its closing line), or undefined when no fence opens there. */
 function fenceEnd(text: string, start: number): number | undefined {
   const lineEnd = (from: number) => {
     const end = text.indexOf('\n', from);

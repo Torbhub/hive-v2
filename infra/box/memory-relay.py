@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-# Auth relay for the memory core. The core's data plane wants two
-# credentials: the instance Bearer key (root-only in memory.env) and a
-# scoped user key (lanes hold this one). Lanes call this relay with only
-# their user key; the relay swaps in the instance key and forwards to the
-# core on 8420. The instance key never leaves root-owned files.
-#
-# Auth note: lanes run as the ubuntu user, which is in the docker group, so
-# a determined lane can read the memory volume directly regardless. This
-# relay keeps the API surface honest; it is not a hard boundary.
 import http.server
 import http.client
 import re

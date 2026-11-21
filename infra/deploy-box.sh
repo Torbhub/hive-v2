@@ -1,6 +1,4 @@
 #!/bin/bash
-# Deploy payload run ON the box via SSM. Runs as root.
-# Resets the repo to the exact merged commit, rebuilds, reprovisions, health-checks.
 set -euo pipefail
 
 REPO=/home/ubuntu/hive-v2
@@ -16,10 +14,8 @@ runuser -u ubuntu -- git reset --hard "$SHA"
 runuser -u ubuntu -- env PATH=/opt/node22/bin:$PATH npm ci
 runuser -u ubuntu -- env PATH=/opt/node22/bin:$PATH npm run build
 
-# No password on stdin: an existing htpasswd file is preserved.
 bash infra/provision-box.sh </dev/null
 
-# hive-v2-tmux is never touched here: restarting it kills every agent pane.
 systemctl restart hive-v2-web hive-v2-watch
 
 SECRET=$(sed -n 's/^HIVE_WEB_SECRET=//p' /etc/hive-v2/web.env)
@@ -32,7 +28,6 @@ fi
 
 fail=0
 
-# The retrying authed check first: it proves the port is up after the restart.
 code_auth=""
 for _ in $(seq 1 6); do
   code_auth=$(curl -s -o /dev/null -w '%{http_code}' -H "x-hive-auth: $SECRET" "$URL" || true)

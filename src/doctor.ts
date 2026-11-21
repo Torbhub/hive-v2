@@ -20,7 +20,6 @@ const bad = (fix: string, detail: string): CheckResult => ({ ok: false, fix, det
 
 const UNITS = ['hive-v2-watch', 'hive-v2-web', 'hive-v2-tmux'];
 const MIN_NODE_MAJOR = 20;
-// A wedged command (teamkimi status) must not hang the preflight.
 const RUN_TIMEOUT_MS = 15_000;
 
 async function checkTmux(deps: Deps): Promise<CheckResult> {
@@ -97,8 +96,6 @@ async function checkUnits(deps: Deps): Promise<CheckResult> {
   const down: string[] = [];
   for (const unit of UNITS) {
     const r = await deps.run('systemctl', ['is-active', unit]);
-    // is-active exits 3/4 for inactive/failed/missing units while still
-    // printing the state on stdout — only an empty stdout means no answer.
     const state = r.stdout.trim() || `unknown (${r.stderr.trim() || 'systemctl failed'})`;
     states.push(`${unit}=${state}`);
     if (state !== 'active') down.push(unit);
@@ -123,7 +120,6 @@ export const CHECKS: Check[] = [
   { name: 'systemd_units', fn: checkUnits },
 ];
 
-// One failing check never aborts the loop: any throw becomes a precise FAIL.
 async function runCheck(check: Check, deps: Deps): Promise<CheckResult> {
   try {
     return await check.fn(deps);

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Tag HEAD and push the tag before a retro-driven edit of roles/rules/skills lands.
-# Rollback: rm -rf roles rules skills && git checkout <tag> -- roles rules skills
 set -euo pipefail
 note="${1:-}"
 cd "$(git rev-parse --show-toplevel)"

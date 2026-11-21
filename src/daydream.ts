@@ -115,7 +115,6 @@ async function readTaskEvents(root: string): Promise<TaskEvent[]> {
     try {
       events.push(JSON.parse(line) as TaskEvent);
     } catch {
-      // Match the existing task reader's torn-line behavior.
     }
   }
   return events;

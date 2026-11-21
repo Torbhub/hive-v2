@@ -232,8 +232,6 @@ export async function addProject(
   });
 }
 
-// A .git directory, or a .git file holding a worktree pointer. lstat, so a
-// symlink (even one pointing at a real repo) is refused.
 async function looksLikeGit(home: string): Promise<boolean> {
   const gitPath = path.join(home, '.git');
   const st = await fs.lstat(gitPath).catch(() => null);

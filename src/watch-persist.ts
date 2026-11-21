@@ -2,9 +2,6 @@ import { promises as fs } from 'node:fs';
 import { hubPath, readDecisions } from './state.js';
 import type { TeamEntry } from './types.js';
 
-// Keys the watch already handled, so a restart never re-reports them.
-// Death keys are `<pane>:<pid>`. Stale episode keys are
-// `stale:<session>:<pane>:<wire-mtime>` on decisions or migrated records.
 const FILE = 'watch-processed.jsonl';
 
 type ProcessedRecord = { key: string; at: string | undefined };
@@ -20,7 +17,6 @@ async function readProcessedRecords(root: string): Promise<ProcessedRecord[]> {
         out.push({ key: rec.key, at: typeof rec.at === 'string' ? rec.at : undefined });
       }
     } catch {
-      // A torn last line (crashed append) is dropped, not fatal.
     }
   }
   return out;

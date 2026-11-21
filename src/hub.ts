@@ -75,11 +75,9 @@ export async function hubTask(root: string, project: string, text: string): Prom
   if (!pf.projects.some((p) => p.name === project)) throw new Refusal(`unknown project: ${project}`);
   const scope = taskScope(text);
   if (scope.kind === 'invalid') throw new Refusal(`the brief does not parse: ${scope.why}`);
-  // The lock makes id allocation + task file + ledger append one step.
   return withHubLock(root, async () => {
     const id = await nextTaskId(root, project);
     await fs.mkdir(hubPath(root, 'tasks'), { recursive: true });
-    // A brief keeps its frontmatter at the top of the file.
     const body = text.startsWith('---') ? `${text.trimEnd()}\n` : `# ${id}\n\n${text}\n`;
     await fs.writeFile(hubPath(root, 'tasks', `${id}.md`), body);
     await appendTaskEvent(root, { id, project, event: 'asked', at: new Date().toISOString(), lease_epoch: 1 });
@@ -180,7 +178,6 @@ async function projectStatus(
     }
   }
   if (pending) {
-    // A pending pane whose team entry already owns it has registered; the record is stale.
     const registered =
       orchEntry?.pane === pending.pane &&
       (await paneIs(pending.pane, { pid: orchEntry.pane_pid ?? 0, started: orchEntry.pane_started ?? '' }));
@@ -299,8 +296,6 @@ export async function readDialogFor(
   if (agentRefArg) {
     const [name, wt] = agentRefArg.split('@');
     const matches = team.agents.filter((a) => !a.orchestrator && a.name === name);
-    // Two same-named agents are told apart by worktree; a bare name that
-    // matches more than one is an error, never a guess.
     if (wt) entry = matches.find((a) => a.worktree === wt);
     else if (matches.length === 1) entry = matches[0];
     else if (matches.length > 1) {
@@ -329,7 +324,6 @@ export async function readDialogFor(
   };
 }
 
-// A menu answer is a walk: from the cursor's option to the chosen one, then Enter.
 export function menuKeys(choice: number, cursor: number): ('Up' | 'Down' | 'Enter')[] {
   const delta = choice - cursor;
   const keys: ('Up' | 'Down' | 'Enter')[] = Array.from(
@@ -434,8 +428,6 @@ export async function answerDialog(
 
 const PLAN_FEEDBACK_CAP = 500;
 
-// The plan card's fallback when no approval prompt is on the screen (a woken
-// orchestrator loses it): type the verdict as the orchestrator's next line.
 export async function planAnswer(
   root: string,
   project: string,

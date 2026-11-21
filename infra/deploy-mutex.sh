@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# deploy-mutex.sh — the fleet deploy mutex (deploy-discipline skill).
-#
-# One DynamoDB table, citadel-deploy-mutex (us-east-1, the nexus stack owns
-# it). Any AWS act outside a stack deploy holds the mutex first.
-#
-# acquire blocks up to DEPLOY_MUTEX_WAIT_SECONDS (default 600) and exits 1
-# naming the holder when the lock stays taken. renew extends the ttl only for
-# the same owner. release frees the lock, ignores only an owner-mismatch
-# conditional, and returns every other AWS error. A crashed holder's row
-# expires after 25 min (ttl). A later acquire then steals it.
-# Never delete a row by hand to unstick it.
 set -euo pipefail
 
 TABLE="${DEPLOY_MUTEX_TABLE:-citadel-deploy-mutex}"
@@ -56,16 +45,12 @@ case "$cmd" in
         exit 0
       fi
       if ! grep -q ConditionalCheckFailedException "$err_file"; then
-        # Not contention: a missing table, AccessDenied, or a bad call.
-        # Fail closed at once, do not retry.
         cat "$err_file" >&2
         exit 1
       fi
       if [ "$now" -ge "$deadline" ]; then
         holder=$(_ddb get-item --key "$(_key)" \
           --query 'Item.owner.S' --output text 2>/dev/null || echo unknown)
-        # The holder released between the last put and this get: the row is
-        # gone and the query prints None. The next acquire succeeds.
         [ "$holder" = "None" ] && holder=unknown
         echo "mutex $TABLE/$resource held by $holder after ${WAIT_SECONDS}s" >&2
         exit 1

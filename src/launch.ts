@@ -92,8 +92,6 @@ async function launchRegisteredOrchestrator(
   expectedModel: string | undefined,
 ): Promise<string> {
   const project = p.name;
-  // Claim-then-launch under the hub lock: a second start for the same project
-  // must see the pending record, never race past the check.
   const launched = await withHubLock(root, async () => {
     if (await settlePendingPane(root, project)) return 'continue' as const;
     const team = await readTeam(p.home);
@@ -113,7 +111,6 @@ async function launchRegisteredOrchestrator(
     if (kind === 'wake' && !sessionId) {
       throw new Refusal(`${project} has no recorded session to resume; start it instead`);
     }
-    // start and wake both refuse a live orchestrator: a second window would orphan the first.
     if (old?.pane && (await paneIs(old.pane, { pid: old.pane_pid ?? 0, started: old.pane_started ?? '' }))) {
       throw new Refusal(`${project}'s orchestrator is already running`);
     }
@@ -140,7 +137,6 @@ async function launchRegisteredOrchestrator(
     return { pane, identity, pending, sessionId, name, cwd, old, model };
   });
   if (launched === 'continue') {
-    // A live, young pending pane is a start still in flight; finish it instead of refusing.
     return continueProject(root, project);
   }
   const { pane, identity, pending, sessionId, name, cwd, old, model } = launched;

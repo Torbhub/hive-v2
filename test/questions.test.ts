@@ -192,7 +192,6 @@ describe('storage and transitions', () => {
   it('a terminal file left at the open path after a crash is still honored', async () => {
     const r = await root();
     const batch = await createQuestionBatch(r, meta, input());
-    // Simulate a crash between the terminal write and the move to closed/.
     await writeJson(hubPath(r, 'questions', `${batch.id}.json`), {
       ...batch, status: 'answered', answers: [{ question: 'q1', choice: 'c1' }, { question: 'q2', choice: 'c2' }],
     });
@@ -203,7 +202,6 @@ describe('storage and transitions', () => {
 
   it('a non-ENOENT read failure surfaces instead of looking like no questions', async () => {
     const r = await root();
-    // A plain file where the questions dir belongs: readdir throws ENOTDIR.
     await writeJson(hubPath(r, 'questions'), 'not a dir');
     await expect(listOpenQuestionBatches(r)).rejects.toThrow(/ENOTDIR/);
   });

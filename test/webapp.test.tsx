@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -115,7 +114,6 @@ describe('stretchtext decisions', () => {
       stretchSpan('it fits the relational brief').click();
     });
     expect(container.textContent).not.toContain('it fits the relational brief');
-    // A collapse records nothing.
     expect(vi.mocked(fetch).mock.calls.filter(([i]) => String(i).endsWith('api/stretch-opened'))).toHaveLength(1);
   });
 
@@ -142,15 +140,14 @@ describe('instant click feedback', () => {
   it('the moment Resume is clicked the card shows resuming… and all other action buttons disable', async () => {
     const startBtn = [...container.querySelectorAll('button')]
       .find((b) => b.textContent === 'Start task') as HTMLButtonElement;
-    expect(startBtn.disabled).toBe(true); // empty input disables it
+    expect(startBtn.disabled).toBe(true);
     const resume = resumeButton();
     act(() => {
       resume.click();
     });
-    // The action fetch is still in flight; feedback is already visible.
     expect(resolveAction).not.toBeNull();
     expect(container.textContent).toContain('resuming…');
-    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1); // only refresh stays live
+    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1);
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, pane: '%1' }), { status: 200 }));
     });
@@ -172,7 +169,6 @@ describe('instant click feedback', () => {
     });
     expect(container.textContent).toContain('starting…');
     expect(container.querySelector('input[aria-label="new task for demo"]')).toBeNull();
-    // two POSTs: task then start; resolve both
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, id: 'demo-1' }), { status: 200 }));
     });
@@ -229,7 +225,6 @@ describe('instant click feedback', () => {
       });
     });
     await act(async () => {
-      // re-poll with the dialog view in place
       [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
     });
     const option = [...container.querySelectorAll('button')]
@@ -339,7 +334,7 @@ describe('needs-ui', () => {
     });
     expect(resolveAction).not.toBeNull();
     expect(container.textContent).toContain('resolving…');
-    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1); // only refresh
+    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1);
     const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/task-resolve'));
     expect(JSON.parse(String(call![1]?.body))).toEqual({
       project: 'demo', task: 'demo-1', action: 'cancel',
@@ -570,7 +565,7 @@ describe('needs-ui', () => {
   });
 
   it('a stale need is marked and its Nudge posts the status message', async () => {
-    mountWith({ ...VIEW, tasks: [blockedTask] }); // last progress 5h ago
+    mountWith({ ...VIEW, tasks: [blockedTask] });
     await repoll();
     expect(container.textContent).toContain('stale');
     act(() => {
@@ -616,7 +611,6 @@ describe('needs-ui', () => {
     expect(container.textContent).toContain('1/2 checkpoints');
     expect(container.textContent).toContain('on b');
     expect(container.textContent).toContain('failed: a');
-    // A closed task drops off the progress row.
     expect(container.textContent).not.toContain('demo-4');
     expect(container.textContent).toContain('demo:demo-orchestrator');
     expect(container.textContent).toContain('demo:fixer');
@@ -901,7 +895,7 @@ describe('interrupt buttons', () => {
     expect(resolveAction).not.toBeNull();
     const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/interrupt'));
     expect(JSON.parse(String(call![1]?.body))).toEqual({ project: 'demo' });
-    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1); // only refresh stays live
+    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1);
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, target: 'demo-orchestrator', pane: '%1' }), { status: 200 }));
     });
@@ -963,7 +957,6 @@ describe('kill button', () => {
       button('Kill +2').click();
     });
     expect(vi.mocked(fetch).mock.calls.some(([i]) => String(i).endsWith('api/kill'))).toBe(false);
-    // The confirm stays disabled for a beat after arming (double-click guard).
     await act(async () => {
       await new Promise((r) => setTimeout(r, 600));
     });

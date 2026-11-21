@@ -3,8 +3,6 @@ import { appendDecision, readPendingPane, readProjects, readTeam, Refusal } from
 import { paneExists, paneIdentity, paneIs, sendEscape, type PaneIdentity } from './tmux.js';
 import type { TeamEntry } from './types.js';
 
-// Same rules as a dialog read: a bare name that matches two agents is an
-// error, never a guess.
 function resolveAgent(team: { agents: TeamEntry[] }, project: string, ref: string): TeamEntry {
   const [name, wt] = ref.split('@', 2);
   const matches = team.agents.filter((a) => !a.orchestrator && a.name === name);
@@ -18,9 +16,6 @@ function resolveAgent(team: { agents: TeamEntry[] }, project: string, ref: strin
   return entry;
 }
 
-// Escape to a live pane: a running turn stops mid-turn and the session
-// survives, so the owner can steer the agent after. The pane identity is
-// verified before the key lands, like every hive mutation.
 export async function interruptAgent(
   root: string,
   project: string,
@@ -39,7 +34,6 @@ export async function interruptAgent(
   } else {
     target = orchestratorName(project);
     entry = team.agents.find((a) => a.orchestrator);
-    // A starting orchestrator not yet registered still owns its pending pane.
     if (!entry?.pane) {
       const pending = await readPendingPane(root, project);
       if (pending) entry = { name: target, pane: pending.pane };

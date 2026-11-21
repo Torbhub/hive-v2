@@ -80,8 +80,6 @@ def expect_rejection(path, value):
     raise AssertionError(f'accepted faulty mutation: {path}')
 
 
-# PR code can change this check. The protected default-branch workflow blob,
-# GitHub's workflow blob comparison, and rulesets are the trust authority.
 validate(WORKFLOW)
 expect_rejection((True, 'pull_request_target'), {})
 expect_rejection((True, 'push', 'branches'), ['develop'])

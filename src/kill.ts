@@ -31,15 +31,10 @@ async function stampEntry(
   return stamped;
 }
 
-// Conditional on the identity the stamp saw: a respawn racing the kill writes
-// a fresh pane identity first, and that entry is a new lease, not the kill's
-// target — keep it. Returns whether the entry was dropped.
 async function dropEntry(home: string, entry: TeamEntry): Promise<boolean> {
   return await compareAndSwapTeamEntry(home, entry, null) === null;
 }
 
-// tmux failures are plain Errors; the web layer only shows Refusals, so the
-// reason is re-wrapped or the toast would read "internal error".
 async function killPane(entry: TeamEntry): Promise<void> {
   if (!entry.pane || !(await paneExists(entry.pane))) return;
   try {
@@ -49,12 +44,6 @@ async function killPane(entry: TeamEntry): Promise<void> {
   }
 }
 
-// A launch (wake/respawn/continue) that began before a cascade must not
-// re-register afterwards. Re-check under the lock; when the entry was dropped
-// (or, unless
-// allowStamped, is stamped closed — respawn stamps its own entry), take the
-// fresh pane down with its in-hand identity and refuse instead of
-// resurrecting the agent. Worktree pins the match when the caller knows it.
 export async function assertEntryAlive(
   home: string,
   entry: TeamEntry,
@@ -72,9 +61,6 @@ export async function assertEntryAlive(
   throw new Refusal(`${entry.name} was killed while its new pane came up — the pane was taken down too`);
 }
 
-// The watchdog's wakeAgent resurrects any dead pane without a closed_at
-// stamp, so the stamp lands before the kill. A failed kill un-stamps: a
-// surviving stamp would hide a live pane from the watch.
 export async function killEntry(root: string, home: string, entry: TeamEntry): Promise<boolean> {
   const stamped = await stampEntry(root, home, entry, new Date().toISOString());
   if (!stamped) return false;
@@ -88,8 +74,6 @@ export async function killEntry(root: string, home: string, entry: TeamEntry): P
   return dropEntry(home, stamped);
 }
 
-// The cascade targets: the orchestrator's children (team.json entries whose
-// parent is the orchestrator), children first, orchestrator last.
 export function cascadeTargets(team: { agents: TeamEntry[] }): TeamEntry[] {
   const orch = team.agents.find((a) => a.orchestrator);
   if (!orch) return [];
@@ -102,8 +86,6 @@ async function projectHome(root: string, project: string): Promise<string> {
   return p.home;
 }
 
-// A bare name that matches two agents is an error, never a guess (same rule
-// as a dialog read). A named kill is one agent, no cascade: workers spawn nothing.
 function resolveAgent(team: { agents: TeamEntry[] }, project: string, ref: string): TeamEntry {
   const [name, wt] = ref.split('@', 2);
   const matches = team.agents.filter((a) => !a.orchestrator && a.name === name);
@@ -117,10 +99,6 @@ function resolveAgent(team: { agents: TeamEntry[] }, project: string, ref: strin
   return entry;
 }
 
-// Orchestrator + every child. Every target is stamped before any pane dies;
-// a kill that fails mid-cascade hands the survivors' stamps back, so the watch
-// still sees them. Identity is re-proven per pane by killWindow. An entry a
-// respawn re-identified mid-cascade is kept by the drop and is not named as killed.
 async function killCascade(root: string, project: string): Promise<{ target: string; killed: string[] }> {
   const home = await projectHome(root, project);
   const planned = cascadeTargets(await readTeam(home));
@@ -144,7 +122,6 @@ async function killCascade(root: string, project: string): Promise<{ target: str
   } catch (e) {
     const survivors = targets.filter((entry) => !done.includes(entry));
     for (const entry of survivors) await stampEntry(root, home, entry, undefined);
-    // A partial kill is still lore: record plainly what died and what did not.
     try {
       await appendDecision(root, {
         project, by: 'owner',

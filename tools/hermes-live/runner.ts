@@ -470,7 +470,7 @@ async function runT01MatrixInner(options: T01RunnerOptions): Promise<T01Report> 
         try {
           signals.push('SIGKILL');
           await handle.signal('SIGKILL');
-        } catch { /* Reaping remains mandatory after a failed signal. */ }
+        } catch { }
         lifecycle.observe({ type: 'forced-stop' });
         processDone();
       })();

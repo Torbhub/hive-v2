@@ -8,7 +8,7 @@
 html,
 body {
   margin: 0;
-  background: #09090b; /* zinc-950 */
+  background: #09090b;
   color: #f4f4f5;
   font-family: var(--font-sans);
   font-size: 14px;

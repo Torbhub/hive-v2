@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# run one bench task against a candidate action and print a pass/fail verdict
-# usage: bench/run.sh bench/tasks/<id> [action-cmd...]
 set -euo pipefail
 task="$(cd "${1:?usage: bench/run.sh bench/tasks/<id> [action-cmd...]}" && pwd)"
 shift
@@ -13,8 +11,6 @@ git checkout -q "$(cat "$work/task/rev")"
 npm ci --no-audit --no-fund >&2
 bash "$work/task/setup.sh" >&2
 if [ $# -gt 0 ]; then
-  # The agent's own output is diagnostic and goes to stderr; stdout stays
-  # reserved for the verdict line, or the caller's line count breaks.
   "$@" >&2 || true
 fi
 changed="$(git status --porcelain | cut -c4- || true)"

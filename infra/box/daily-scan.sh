@@ -1,7 +1,4 @@
 #!/bin/bash
-# Posts today's daily-scan task to the hub web API and starts the team on
-# it. Runs from hive-v2-daily-scan.timer. HIVE_WEB_SECRET arrives through
-# the unit's EnvironmentFile (/etc/hive-v2/web.env) and is never echoed.
 set -euo pipefail
 
 API=http://127.0.0.1:7684
@@ -48,9 +45,6 @@ start_task() {
   code=${resp##*$'\n'}
   body=${resp%$'\n'*}
   if [ "$code" != 200 ]; then
-    # A live orchestrator never notices a new ledger task on its own, so
-    # nudge it with /api/message. A refusal (dead pane, dialog open) fails
-    # the unit: a missed day must show in systemctl status.
     if grep -q 'already running' <<<"$body"; then
       echo "note: orchestrator already running. Nudging it about $id"
       nudge_running "$id"
@@ -62,10 +56,6 @@ start_task() {
   echo "started: $id"
 }
 
-# Idempotency: the task text opens with the dated marker, so a task file
-# that already carries it means today was posted, by this script or by
-# hand. A closed one stays closed. An open one may be orphaned (posted but
-# never started), so retry the start before exiting.
 file=$(grep -lxF "$MARKER" "$TASKS_DIR/$PROJECT"-*.md 2>/dev/null | head -1 || true)
 if [ -n "$file" ]; then
   id=$(basename "$file" .md)

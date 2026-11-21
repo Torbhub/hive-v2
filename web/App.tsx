@@ -42,8 +42,6 @@ export function App() {
   const [questionsOpen, setQuestionsOpen] = useState(false);
   const actingRef = useRef(false);
 
-  // A failed read (network error, or updatedAt 0 from the server) keeps the
-  // old data and shows the error line, same as the Ink screen.
   const refresh = useCallback(async () => {
     let next: HubView;
     try {
@@ -70,8 +68,6 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [refresh]);
 
-  // One action at a time: a click while another runs is ignored. The pressed
-  // button inverts and everything disables before the network round-trip.
   const act = useCallback(async (
     id: string,
     project: string,

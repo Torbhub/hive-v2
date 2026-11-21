@@ -124,8 +124,6 @@ export function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-// One batch waits per call, but the read loop stays live: ping, cancellation,
-// and EOF all work while an ask_operator call is waiting on the human.
 export function serveMcp(opts: McpOptions): { close: () => void } {
   const pending = new Map<RpcId, AbortController>();
   let closed = false;
@@ -360,8 +358,6 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
     }
   }
 
-  // A bounded splitter: a line over 1MiB is refused and discarded before it
-  // can grow the process, even when no newline ever arrives.
   const MAX_LINE = 1_048_576;
   let buf: Buffer = Buffer.alloc(0);
   let dropping = false;

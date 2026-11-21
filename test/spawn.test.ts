@@ -19,7 +19,6 @@ const PERMISSION = readFileSync(
   'utf8',
 );
 
-// The trust menu with "Trust this folder" as the second option, cursor on the first.
 const TRUST_MENU_2 = [
   'teamkimi run',
   ' ────────────────────────────',
@@ -435,7 +434,6 @@ describe('spawnAgent', () => {
 
   it('creates missing parent dirs for a nested --worktree path', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    // jj workspace add fails when the target's parent does not exist.
     vi.mocked(run).mockImplementation(async (cmd, args) => {
       if (cmd === 'jj' && args[2] === 'workspace' && args[3] === 'add' && !existsSync(path.dirname(args[4]))) {
         return { code: 1, stdout: '', stderr: 'Cannot create workspace: No such file or directory (os error 2)' };
@@ -537,7 +535,6 @@ describe('respawn racing a cascade kill', () => {
   it('a cascade mid-respawn stops the re-registering upsert and the fresh pane dies', async () => {
     const { root, home } = await setup({ name: 'builder', pane: '%1', pane_pid: 111, pane_started: 'earlier' });
     const before = vi.mocked(killWindow).mock.calls.length;
-    // The cascade's drop lands while the respawn's new window comes up.
     vi.mocked(killWindow).mockImplementation(async (pane) => {
       if (pane === '%1') await writeJson(hivePath(home, 'team.json'), { agents: [] });
     });

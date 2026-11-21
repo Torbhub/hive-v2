@@ -1,30 +1,19 @@
 name: no-silent-red
-# Watches the deploy workflow on main. A red gate on the tip spawns a revert
-# PR, gates it on its branch, squash-merges it, and dispatches the deploy on
-# main. A red deploy leg with a green gate alarms only — infra failures are
-# not content to revert. One rolling issue carries the alarm. Operator steps:
-# docs/no-silent-red.md.
-#
-# GITHUB_TOKEN acts (branch push, PR create, merge) fire no other workflows.
-# So the tripwire runs the gate by dispatching deploy on the revert branch
-# (its deploy leg is main-only) and dispatches the deploy on main itself
-# after merging.
 on:
   workflow_run:
     workflows: [deploy]
     types: [completed]
 
-# One tripwire per offending SHA — a rerun of the same failed run must not double-act.
 concurrency:
   group: no-silent-red-${{ github.event.workflow_run.head_sha || github.run_id }}
   cancel-in-progress: false
 
 permissions:
-  contents: write       # push the revert branch, merge the PR
-  pull-requests: write  # open and comment the revert PR
-  issues: write         # the rolling alarm issue
-  checks: read          # poll the gate check on the revert head
-  actions: write        # dispatch deploy on the revert branch and on main
+  contents: write
+  pull-requests: write
+  issues: write
+  checks: read
+  actions: write
 
 jobs:
   red-check:
@@ -54,23 +43,18 @@ jobs:
             echo "outcome=superseded" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Split on the job named `gate` in deploy.yml: red gate is content,
-          # red deploy leg with a green gate is infra.
           GATE="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" --jq '.jobs[] | select(.name == "gate") | .conclusion')"
           if [ "$GATE" != "failure" ]; then
             echo "gate conclusion is ${GATE:-unknown}, not failure — the deploy leg failed, not the content. Alarm-only."
             echo "outcome=deploy-failed" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Loop guard: never auto-revert our own revert PR (alarm stays, human resolves).
           SUBJ="$(git log -1 --format=%s "$TIP")"
           if [[ "$SUBJ" == Revert\ \"* ]]; then
             echo "::warning::tip $TIP is itself a revert — alarm-only, no auto-revert"
             echo "outcome=loop-guarded" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Dedupe: an unmerged revert PR for this SHA already exists (open, or
-          # closed without merge — a rerun must not spawn it again).
           EXISTING="$(gh pr list --state all --limit 100 --json number,title,state --jq ".[] | select(.state != \"MERGED\") | select(.title | test(\"no-silent-red ${TIP:0:7}\")) | .number" | head -1)"
           if [ -n "$EXISTING" ]; then
             echo "revert PR #$EXISTING already exists for ${TIP:0:7} — no-op"
@@ -96,9 +80,6 @@ jobs:
             --body "The gate went red on main at $TIP ([run]($RUN_URL)). This revert restores the last green tree. The tripwire gates this PR on its branch, squash-merges it when green, and dispatches the deploy on main. If the gate stays red, a human resolves — the no-silent-red alarm stays open.")"
           echo "revert PR: $PR_URL"
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
-          # GITHUB_TOKEN fired no checks for this PR, so run the gate by hand:
-          # dispatch deploy on the branch (deploy leg is main-only) and poll
-          # the check it writes on the revert head.
           REVERT_SHA="$(git rev-parse HEAD)"
           gh workflow run deploy.yml --ref "$BRANCH"
           C="pending"
@@ -115,10 +96,7 @@ jobs:
             echo "outcome=revert-gate-red" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Squash, so the merged tip keeps the Revert "..." subject the loop
-          # guard above matches (and main stays all-squash).
           gh pr merge --squash "$PR_URL"
-          # The GITHUB_TOKEN merge fires no push run — dispatch the deploy on main by hand.
           gh workflow run deploy.yml --ref main
           echo "outcome=revert-merged" >> "$GITHUB_OUTPUT"
       - name: Alarm (always — even when the revert path failed)
@@ -146,6 +124,5 @@ jobs:
             gh issue create --title "NO-SILENT-RED: main red at ${RUN_SHA:0:7}" --label no-silent-red --assignee tehalexf --body "$BODY"
           fi
           echo "::error::no-silent-red: deploy failed on main at ${RUN_SHA:0:7} (outcome: ${OUTCOME:-act-step-failed})"
-          # Also comment on the offending PR so its author sees the revert.
           PR_NUM="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RUN_SHA/pulls" --jq '.[0].number // empty' 2>/dev/null || true)"
           [ -n "$PR_NUM" ] && gh pr comment "$PR_NUM" --body "This merge turned main red ([run]($RUN_URL)). no-silent-red tripwire outcome: ${OUTCOME:-act-step-failed}. ${PR_URL:+Revert: $PR_URL}" || true

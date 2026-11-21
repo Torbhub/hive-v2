@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-// Merge the hive-operator MCP registration into a kimi mcp.json without
-// disturbing any other server or top-level field. Idempotent, atomic, and
-// never writes when the existing file is malformed.
-// usage: node infra/merge-mcp.mjs <path-to-mcp.json>
 import { readFileSync, writeFileSync, renameSync, mkdirSync, statSync, lstatSync, rmSync, chmodSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -11,7 +7,6 @@ import path from 'node:path';
 export const HIVE_OPERATOR_ENTRY = {
   command: '/usr/local/bin/hive',
   args: ['mcp'],
-  // Human batches wait for a human: 7 days, not the 60s default.
   toolTimeoutMs: 604800000,
 };
 
@@ -44,8 +39,6 @@ function main() {
   try {
     merged = mergeMcpText(raw);
   } catch (e) {
-    // Native parse errors quote the source; other servers' keys must not
-    // land in provision logs.
     if (e instanceof SyntaxError) throw new Error('mcp.json is malformed; no changes written');
     throw e;
   }
@@ -54,7 +47,6 @@ function main() {
   const tmp = `${file}.tmp.${process.pid}.${randomUUID()}`;
   try {
     writeFileSync(tmp, merged, { flag: 'wx', mode: (mode ?? 0o600) & 0o777 });
-    // The creation mode is umask-masked; chmod preserves the old file's mode.
     chmodSync(tmp, (mode ?? 0o600) & 0o777);
     renameSync(tmp, file);
   } catch (e) {

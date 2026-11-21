@@ -2,15 +2,12 @@ import type { Checkpoint, HubAgent, HubOrchestrator, HubTask, HubView, RootContr
 
 export const ROTATE_AT_PERCENT = 50;
 
-// A task with no progress sign in this window reads as stale.
 export const STALE_MS = 4 * 60 * 60_000;
 
 const STALE_STATES = new Set(['plan', 'question', 'blocked', 'handed']);
 
 export function staleTask(t: HubTask, now: number): boolean {
   if (!STALE_STATES.has(t.state)) return false;
-  // No progress yet: the clock starts at the latest activity, so a rebriefed
-  // old task is not instantly stale.
   const at = Date.parse(t.last_progress_at ?? t.updated);
   return !Number.isNaN(at) && now - at > STALE_MS;
 }
@@ -23,7 +20,6 @@ type TaskProgress = {
   failed: string[];
 };
 
-// The checkpoint trail of one task. null when the task has no plan checkpoints.
 export function taskProgress(t: HubTask): TaskProgress | null {
   const cps = t.checkpoints ?? [];
   if (cps.length === 0) return null;
@@ -48,8 +44,6 @@ export function taskProgress(t: HubTask): TaskProgress | null {
   };
 }
 
-// tmux window names are "<project>:<agent>" (src/tmux.ts windowName); look.ts
-// stays web-bundled, so the format is repeated here instead of imported.
 export function windowLabel(project: string, agent: string): string {
   return `${project}:${agent}`;
 }
@@ -203,8 +197,6 @@ export function buildNeeds(view: HubView, now: number): Need[] {
     view.projects.filter((p) => p.orchestrator.state !== 'none').map((p) => p.name),
   );
   const actionableTasks = view.tasks.filter((t) => t.needs_owner && actionableProjects.has(t.project));
-  // A live orchestrator dialog belongs on the plan card when a plan waits:
-  // one card with one answer, not two rows for the same question.
   const planProjects = new Set(
     actionableTasks.filter((t) => t.state === 'plan').map((t) => t.project),
   );

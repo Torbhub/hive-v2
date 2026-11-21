@@ -121,7 +121,6 @@ describe('interruptAgent', () => {
     await writePendingPane(root, 'demo', { pane: '%5', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at: new Date().toISOString() });
     const r = await interruptAgent(root, 'demo');
     expect(r).toEqual({ target: 'demo-orchestrator', pane: '%5' });
-    // A pending pane carries no recorded identity, so the live one is read.
     expect(vi.mocked(paneIdentity).mock.calls).toEqual([['%5']]);
     expect(vi.mocked(sendEscape).mock.calls).toEqual([['%5', { pid: 9, started: 'z' }]]);
   });

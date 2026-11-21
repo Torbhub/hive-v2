@@ -18,9 +18,6 @@ Parameters:
     Description: ARN of the account-existing GitHub Actions OIDC provider.
   GithubSubjectPrefix:
     Type: String
-    # The repo has GitHub's immutable OIDC subjects on, so the sub claim is
-    # the rename-proof org-id/repo-id form, not repo:Torbhub/hive-v2.
-    # Read it: gh api repos/Torbhub/hive-v2/actions/oidc/customization/sub
     Default: repo:Torbhub@272689427/hive-v2@1416391580
     Description: OIDC sub claim prefix for the hive-v2 repo (immutable-subject form).
 
@@ -110,8 +107,6 @@ Resources:
                   - arn:aws:s3:::hive-v2-t01-evidence-594552273052/*
               - Sid: CloudFormationSelfDeploy
                 Effect: Allow
-                # the complete action set of a changeset-based
-                # `aws cloudformation deploy` against an existing stack
                 Action:
                   - cloudformation:CreateChangeSet
                   - cloudformation:ExecuteChangeSet
@@ -156,8 +151,6 @@ Resources:
                   - iam:SetDefaultPolicyVersion
                 Resource:
                   - arn:aws:iam::594552273052:policy/hive-v2-t01-smoke-health-boundary
-              # The fleet-wide deploy mutex lives in citadel's nexus stack;
-              # the workflow acquires it before the SSM box deploy.
               - Sid: DeployMutex
                 Effect: Allow
                 Action:

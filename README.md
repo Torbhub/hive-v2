@@ -10,7 +10,7 @@ through the teamkimi proxy.
 ```bash
 npm install
 npm run build
-npm link        # puts `hive` on your PATH
+npm link
 ```
 
 Needs: Node 20+, tmux, git, the kimi CLI, and a running teamkimi proxy
@@ -19,14 +19,14 @@ Needs: Node 20+, tmux, git, the kimi CLI, and a running teamkimi proxy
 ## The commands that matter
 
 ```bash
-hive hub init                     # record this folder as your hub root
-hive hub add demo ~/src/demo      # register an existing folder
-hive hub add fresh                # create an empty Git repo at ./fresh
-hive hub add copy --source demo   # create a workspace from a local source
+hive hub init
+hive hub add demo ~/src/demo
+hive hub add fresh
+hive hub add copy --source demo
 hive hub task demo "add a /health endpoint"
-hive ui                           # the hub screen: what waits on you
-hive hub start demo demo-1        # bring the orchestrator up on a task
-hive doctor                       # preflight: is this box ready for a task
+hive ui
+hive hub start demo demo-1
+hive doctor
 hive gate --log g.log -- build "npm run build" test "npm test"
 ```
 
@@ -382,7 +382,9 @@ port-forwarding only, so PR code never touches the deploy role.
 ## Development
 
 ```bash
-npm run build     # tsc
-npm test          # vitest
-test/live-smoke.sh  # real kimi session via teamkimi; spends API quota
+npm run build
+npm test
+test/live-smoke.sh
 ```
+
+The live smoke starts a real Kimi session through teamkimi and spends API quota.

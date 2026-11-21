@@ -33,7 +33,6 @@ try {
   pane = await newWindow(NAME, DIR, "KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro-highspeed'");
   console.log(`smoke: window ${pane} up`);
 
-  // A fresh folder asks for trust once; cursor defaults to "Trust this folder".
   const first = await waitFor(
     (ls) => classify(ls) !== 'unknown' || parseDialog(ls).kind !== 'none',
     120_000,

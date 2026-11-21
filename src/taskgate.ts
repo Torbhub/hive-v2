@@ -25,8 +25,6 @@ function storedTask(events: TaskEvent[], id: string): HubTask {
   return task;
 }
 
-// Owner verdicts enter through plan-answer and accept. Plans carry
-// checkpoints, and terminal outcomes use the registered outcome guards.
 export function assertLogAllowed(task: HubTask, event: string, checkpoints?: Checkpoint[]): void {
   if (event === 'answered' || event === 'planaccept') {
     throw new Refusal(`${event} is owner-only: use hive hub plan-answer or hive hub accept`);
@@ -78,7 +76,6 @@ export async function hubLog(
   });
 }
 
-// One progress event per checkpoint call; the fold turns them into the trail.
 export async function hubProgress(
   root: string, id: string, checkpoint: string, status: string, note?: string, revalidate?: TaskRevalidate,
   project?: string,
@@ -104,7 +101,6 @@ export async function hubProgress(
   });
 }
 
-// The owner accepts a failed checkpoint; only then can done pass with a fail.
 export async function hubAccept(
   root: string, id: string, checkpoint: string, revalidate?: TaskRevalidate,
 ): Promise<void> {
@@ -158,8 +154,6 @@ export async function hubResolve(
   });
 }
 
-// planAnswer's verdict math. A plan without valid checkpoints cannot be
-// approved; approve turns into a send-back so the orchestrator re-plans.
 export function planVerdict(
   task: HubTask,
   verdict: string,
@@ -653,11 +647,8 @@ export async function recordHumanAcceptance(
   });
 }
 
-// A pending-pane record older than this is a crashed start, not a live one.
 const PENDING_STALE_MS = 10 * 60_000;
 
-// True means a live, young start is still in flight: route through continue.
-// A dead or stale record is a crashed start: clear it and let the caller relaunch.
 export async function settlePendingPane(root: string, project: string): Promise<boolean> {
   const existing = await readPendingPane(root, project);
   if (!existing) return false;
@@ -667,7 +658,6 @@ export async function settlePendingPane(root: string, project: string): Promise<
   return false;
 }
 
-// The cli's log/progress/accept handler; argument counts are checked by the caller.
 export async function ledgerCommand(root: string, sub: string, args: string[]): Promise<string> {
   if (sub === 'log') {
     const checkpointIndex = args.indexOf('--checkpoints');
