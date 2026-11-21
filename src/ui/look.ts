@@ -1,4 +1,4 @@
-import type { Checkpoint, HubAgent, HubOrchestrator, HubTask, HubView } from '../types.js';
+import type { Checkpoint, HubAgent, HubOrchestrator, HubTask, HubView, RootContract } from '../types.js';
 
 export const ROTATE_AT_PERCENT = 50;
 
@@ -128,8 +128,68 @@ export type Need = {
   taskId?: string;
   detail?: string;
   checkpoints?: Checkpoint[];
+  contract?: RootContract | null;
+  planDigest?: string | null;
   stale?: boolean;
 };
+
+export function contractLines(need: Pick<Need, 'contract' | 'planDigest'>): string[] {
+  const lines = ['Root contract', `Plan digest: ${need.planDigest ?? '(not recorded)'}`];
+  const contract = need.contract;
+  if (!contract) return [...lines, 'No root contract is recorded.'];
+  lines.push(
+    `Schema: ${contract.schema_version}`,
+    `Kind: ${contract.kind}`,
+    `Objective: ${contract.objective}`,
+    `Consumer: ${contract.consumer}`,
+    `Deliverable: ${contract.deliverable}`,
+  );
+  for (const acceptance of contract.acceptance) {
+    const configuration = (JSON.stringify(acceptance.configuration, null, 2) ?? '{}').split('\n');
+    lines.push(
+      `Acceptance ${acceptance.id}: ${acceptance.predicate_id} v${acceptance.version}`,
+      `  Required: ${acceptance.required !== false}`,
+      `  Configuration: ${configuration[0]}`,
+      ...configuration.slice(1).map((line) => `    ${line}`),
+      `  Evidence: ${acceptance.required_evidence.join(', ')}`,
+    );
+  }
+  const provenance = contract.provenance;
+  lines.push(`Provenance kind: ${provenance.kind ?? 'code'}`);
+  if (provenance.kind === 'research') {
+    lines.push(`Source range: ${provenance.source_range.start} → ${provenance.source_range.end}`);
+    for (const source of provenance.source_range.sources) {
+      lines.push(`  Source ${source.id}: ${source.path} sha256=${source.sha256} observed_at=${source.observed_at}`);
+    }
+    lines.push(`Evidence window: ${provenance.evidence_window.starts_at} → ${provenance.evidence_window.ends_at}`);
+  } else {
+    lines.push(
+      `Repository: ${provenance.repository}`,
+      `Base revision: ${provenance.base_revision}`,
+      `Artifact revision: ${provenance.artifact_revision}`,
+    );
+  }
+  const budget = [
+    `depth=${contract.budget.depth}`,
+    `active_children=${contract.budget.active_children}`,
+    `active_project_records=${contract.budget.active_project_records}`,
+    `attempts=${contract.budget.attempts}`,
+  ];
+  if (contract.budget.wall_seconds !== undefined) budget.push(`wall_seconds=${contract.budget.wall_seconds}`);
+  lines.push(
+    `Write scope: ${contract.write_scope.join(', ') || '(none)'}`,
+    `Action scope: ${contract.action_scope.join(', ') || '(none)'}`,
+    `Budget: ${budget.join(', ')}`,
+    `Delegated output claims: ${contract.delegation.output_claims.join(', ')}`,
+    `Delegated adapters: ${contract.delegation.adapters.join(', ')}`,
+  );
+  if (contract.required_children !== undefined) {
+    lines.push(`Required children: ${contract.required_children.join(', ') || '(none)'}`);
+  }
+  if (contract.preflight_snapshot !== undefined) lines.push(`Preflight snapshot: ${contract.preflight_snapshot}`);
+  if (contract.defect_fingerprint !== undefined) lines.push(`Defect fingerprint: ${contract.defect_fingerprint}`);
+  return lines;
+}
 
 export function buildNeeds(view: HubView, now: number): Need[] {
   const needs: Need[] = [];
@@ -165,6 +225,8 @@ export function buildNeeds(view: HubView, now: number): Need[] {
       taskId: t.id,
       detail: t.last_note?.trim() ? t.last_note : 'no reason recorded',
       checkpoints: t.state === 'plan' ? t.checkpoints ?? [] : undefined,
+      contract: t.state === 'plan' ? t.contract ?? null : undefined,
+      planDigest: t.state === 'plan' ? t.plan_digest ?? null : undefined,
       stale: staleTask(t, now),
     });
   }

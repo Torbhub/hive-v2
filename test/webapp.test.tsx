@@ -2,7 +2,8 @@
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { HubView, QuestionBatch } from '../src/types.js';
+import type { HubView, QuestionBatch, RootContract } from '../src/types.js';
+import { taskContract } from './task-contract.js';
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -408,6 +409,117 @@ describe('needs-ui', () => {
     expect(checkpoints?.querySelector('[data-checkpoint-id="b"] [data-checkpoint-estimate]')?.textContent).toBe('~10m');
     expect(checkpoints!.compareDocumentPosition(button('Approve plan')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     button('Send back');
+  });
+
+  it('shows every build contract field and the stored digest before approval', async () => {
+    const base = taskContract('/r/demo', ['src', 'docs'], 'Return the bounded artifact.');
+    const contract: RootContract = {
+      ...base,
+      objective: 'Ship the reviewed artifact.',
+      consumer: 'release-owner',
+      deliverable: 'A reviewed diff and test evidence.',
+      acceptance: [{
+        id: 'diff', predicate_id: 'git_diff_scope', version: 2, required: true,
+        configuration: {
+          paths: ['src'], limits: { max_files: 2, review: { required: true, tiers: ['owner', 'peer'] } },
+        },
+        required_evidence: ['diff-evidence', 'review-evidence'],
+      }, {
+        id: 'receipt', predicate_id: 'task_receipt', version: 1, required: false,
+        configuration: { output_claim: 'A reviewed diff and test evidence.' }, required_evidence: ['receipt-evidence'],
+      }],
+      provenance: {
+        kind: 'code', repository: '/r/demo', base_revision: '0'.repeat(40), artifact_revision: '1'.repeat(40),
+      },
+      budget: { depth: 2, active_children: 4, active_project_records: 8, attempts: 3, wall_seconds: 900 },
+      delegation: { output_claims: ['A reviewed diff and test evidence.', 'A native review.'], adapters: ['tmux', 'native'] },
+      required_children: ['demo-4', 'demo-5'], preflight_snapshot: 'preflight-v3', defect_fingerprint: 'repo:base:gate:1',
+    };
+    const digest = 'd'.repeat(64);
+    mountWith({
+      ...VIEW,
+      tasks: [{
+        id: 'demo-2', project: 'demo', asked: iso(30), state: 'plan', updated: iso(20),
+        last_note: 'ship the artifact', needs_owner: true, checkpoints: [{ id: 'a', desc: 'write it', etaMin: 5 }],
+        contract, plan_digest: digest,
+      }],
+    });
+    await repoll();
+
+    const block = container.querySelector('[data-root-contract]')!;
+    for (const text of [
+      'Root contract', `Plan digest: ${digest}`, 'Schema: 1', 'Kind: build',
+      'Objective: Ship the reviewed artifact.', 'Consumer: release-owner',
+      'Deliverable: A reviewed diff and test evidence.',
+      'Acceptance diff: git_diff_scope v2', 'Required: true',
+      'Configuration: {', '      "limits": {', '        "review": {', '          "required": true',
+      '          "tiers": [', '            "owner",', 'Evidence: diff-evidence, review-evidence',
+      'Acceptance receipt: task_receipt v1', 'Required: false', '"output_claim": "A reviewed diff and test evidence."',
+      'Evidence: receipt-evidence', 'Provenance kind: code', 'Repository: /r/demo',
+      `Base revision: ${'0'.repeat(40)}`, `Artifact revision: ${'1'.repeat(40)}`,
+      'Write scope: src, docs', 'Action scope: (none)',
+      'Budget: depth=2, active_children=4, active_project_records=8, attempts=3, wall_seconds=900',
+      'Delegated output claims: A reviewed diff and test evidence., A native review.',
+      'Delegated adapters: tmux, native', 'Required children: demo-4, demo-5',
+      'Preflight snapshot: preflight-v3', 'Defect fingerprint: repo:base:gate:1',
+    ]) expect(block.textContent).toContain(text);
+    expect(block.compareDocumentPosition(button('Approve plan')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('shows research provenance and explicit empty scopes before approval', async () => {
+    const base = taskContract('/r/demo', [], 'Return the research report.');
+    const contract: RootContract = {
+      ...base,
+      kind: 'research',
+      provenance: {
+        kind: 'research',
+        source_range: {
+          start: 'source:first', end: 'source:last',
+          sources: [{
+            id: 'source:first', path: 'docs/first.md', sha256: 'a'.repeat(64), observed_at: '2026-11-20T10:00:00.000Z',
+          }, {
+            id: 'source:last', path: 'docs/last.md', sha256: 'b'.repeat(64), observed_at: '2026-11-20T11:00:00.000Z',
+          }],
+        },
+        evidence_window: { starts_at: '2026-11-20T00:00:00.000Z', ends_at: '2026-11-21T00:00:00.000Z' },
+      },
+      write_scope: [], action_scope: [],
+    };
+    mountWith({
+      ...VIEW,
+      tasks: [{
+        id: 'demo-2', project: 'demo', asked: iso(30), state: 'plan', updated: iso(20),
+        last_note: 'review the research', needs_owner: true, contract, plan_digest: 'e'.repeat(64),
+      }],
+    });
+    await repoll();
+
+    const block = container.querySelector('[data-root-contract]')!;
+    for (const text of [
+      'Kind: research', 'Provenance kind: research', 'Source range: source:first → source:last',
+      `Source source:first: docs/first.md sha256=${'a'.repeat(64)} observed_at=2026-11-20T10:00:00.000Z`,
+      `Source source:last: docs/last.md sha256=${'b'.repeat(64)} observed_at=2026-11-20T11:00:00.000Z`,
+      'Evidence window: 2026-11-20T00:00:00.000Z → 2026-11-21T00:00:00.000Z',
+      'Write scope: (none)', 'Action scope: (none)',
+    ]) expect(block.textContent).toContain(text);
+    expect(block.textContent).not.toContain('Repository:');
+    expect(block.compareDocumentPosition(button('Approve plan')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('marks a legacy plan with no contract and still shows its stored digest', async () => {
+    mountWith({
+      ...VIEW,
+      tasks: [{
+        id: 'demo-2', project: 'demo', asked: iso(30), state: 'plan', updated: iso(20),
+        last_note: 'legacy plan', needs_owner: true, plan_digest: 'f'.repeat(64),
+      }],
+    });
+    await repoll();
+
+    expect(container.querySelector('[data-contract-empty]')?.textContent).toBe('No root contract is recorded.');
+    expect(container.querySelector('[data-root-contract]')?.textContent).toContain(`Plan digest: ${'f'.repeat(64)}`);
+    expect(container.querySelector('[data-root-contract]')!.compareDocumentPosition(button('Approve plan'))
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('renders the live plan as complete headed sections and structured checkpoints', async () => {

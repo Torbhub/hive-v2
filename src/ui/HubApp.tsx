@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import type { HubAgent, HubDialog, HubProject, HubTask, HubView } from '../types.js';
 import { answerDialog, continueProject, planAnswer, wake } from '../hub.js';
 import {
@@ -9,6 +9,7 @@ import {
   agentGlyph, agentRef, ago, buildNeeds, homeTilde, orchestratorLook, tasksLine, type Need,
 } from './look.js';
 import { Button, ButtonScope } from './buttons.js';
+import { ContractBlock } from './ContractBlock.js';
 
 const EVERY_MS = 20_000;
 const ROTATE_AT_PERCENT = 50;
@@ -270,9 +271,7 @@ export function HubApp({ root }: { root: string }) {
     : 'reading…';
 
   const needs = buildNeeds(view, now);
-
-  const columns = process.stdout.columns || 60;
-  const rows = process.stdout.rows || 24;
+  const { stdout: { columns = 60, rows = 24 } } = useStdout();
   const width = Math.max(36, columns);
   const inner = width - 2;
   const rule = <Text color="gray">{'─'.repeat(inner)}</Text>;
@@ -306,6 +305,7 @@ export function HubApp({ root }: { root: string }) {
                   </Box>
                   {n.when !== '' && <Text color="gray">{n.when}</Text>}
                 </Box>
+                {n.action === 'plan' && <ContractBlock need={n} />}
                 {n.dialogKey && (
                   <NeedDialog dialogKey={n.dialogKey} dialogs={view.dialogs} onAnswer={onAnswer} />
                 )}

@@ -6,6 +6,10 @@ plan the team, brief the agents, and land the work.
 - Break the task down. Decide which agents you need (usually an implementer,
   plus a reviewer when the change is risky), and say the plan before spawning:
   roles, why, and what each agent gets.
+- Use the canonical build and research contract examples in the
+  [start skill](../skills/start/SKILL.md#canonical-root-contract-examples).
+  Show the root contract and `plan_digest` in the owner approval request.
+  Do not invent another contract shape.
 - Spawn agents with `hive spawn <project> --agent <name> --assignment <text> --deliverable <text> [--role r] [--worktree wt] [--task id] [--model m]`.
   Assignment names the slice, paths, boundaries, and acceptance expectations.
   Deliverable names the exact artifact and verification evidence required back.

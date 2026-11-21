@@ -63,6 +63,7 @@ import { appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readProj
 import { authHeaders, configureSecurity } from './security-fixture.js';
 import { taskContract } from './task-contract.js';
 import { snapshotNativeMessages } from '../src/native-history.js';
+import { buildNeeds } from '../src/ui/look.js';
 
 let server: Server;
 let base: string;
@@ -128,6 +129,56 @@ describe('GET /api/view', () => {
     expect(task.needs_owner).toBe(true);
     expect(view.updatedAt).toBeGreaterThan(0);
     expect(view.error).toBe('');
+  });
+});
+
+describe('plan contract projection', () => {
+  it('shows the canonical digest and preserves contract, digest, and epoch through approval', async () => {
+    const contractRoot = mkdtempSync(path.join(tmpdir(), 'hive-web-contract-display-'));
+    const home = path.join(contractRoot, 'demo');
+    const contract = taskContract(home, ['src'], 'Return the bounded artifact.');
+    const digest = contractDigest(contract);
+    const at = new Date().toISOString();
+    await writeJson(hubPath(contractRoot, 'projects.json'), { projects: [{ name: 'demo', home, repos: [] }] });
+    await writeJson(hubPath(contractRoot, 'hub.json'), { name: 'hub' });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
+    });
+    await appendTaskEvent(contractRoot, { id: 'demo-1', project: 'demo', event: 'asked', at, lease_epoch: 2 });
+    await appendTaskEvent(contractRoot, {
+      id: 'demo-1', project: 'demo', event: 'plan', at, lease_epoch: 2, contract, plan_digest: digest,
+      checkpoints: [{ id: 'work', desc: 'bounded work', etaMin: 5 }],
+    });
+    const listening = await listenOn(contractRoot);
+    const tmux = await import('../src/tmux.js');
+    const identity = vi.spyOn(tmux, 'paneIdentity').mockResolvedValue({ pid: 1, started: 'x' });
+    vi.mocked(capturePane).mockResolvedValue('');
+    vi.mocked(paneExists).mockResolvedValue(true);
+    vi.mocked(typeLine).mockResolvedValue(undefined);
+    try {
+      const view = await (await fetch(`${listening.url}/api/view`)).json();
+      expect(view.tasks[0].contract).toEqual(contract);
+      expect(view.tasks[0].plan_digest).toBe(digest);
+      const need = buildNeeds(view, Date.now())[0];
+      expect(need.contract).toEqual(contract);
+      expect(need.planDigest).toBe(contractDigest(contract));
+
+      const approval = await fetch(`${listening.url}/api/plan-answer`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ project: 'demo', task: 'demo-1', verdict: 'approve' }),
+      });
+      expect(approval.status).toBe(200);
+      const task = foldTasks(await readTaskEvents(contractRoot))[0];
+      expect(task).toMatchObject({
+        state: 'answered', plan_approved: true, contract, plan_digest: digest, lease_epoch: 2,
+      });
+    } finally {
+      listening.s.close();
+      identity.mockRestore();
+      vi.mocked(capturePane).mockRestore();
+      vi.mocked(paneExists).mockRestore();
+      vi.mocked(typeLine).mockRestore();
+    }
   });
 });
 
@@ -1171,7 +1222,7 @@ describe('root-delta question read authorization', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     try {
       const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/view`);
-      return { view: await response.json(), batch, home };
+      return { view: await response.json(), batch, home, planDigest };
     } finally {
       server.close();
       broker.close();
@@ -1187,11 +1238,14 @@ describe('root-delta question read authorization', () => {
     expect(view.questions[0].rootDelta.nextContract.provenance.repository).toBe(home);
   });
 
-  it('hides the root delta, total, contract, and provenance when project read does not include the root task', async () => {
-    const { view, home } = await deltaView(true);
+  it('hides the root delta, total, contract, digest, and provenance when project read does not include the root task', async () => {
+    const { view, home, planDigest } = await deltaView(true);
     expect(view.questions).toEqual([]);
     expect(view.questionsTotal).toBe(0);
+    expect(view.tasks).toEqual([]);
     expect(JSON.stringify(view)).not.toContain('nextContract');
+    expect(JSON.stringify(view)).not.toContain('contract');
+    expect(JSON.stringify(view)).not.toContain(planDigest);
     expect(JSON.stringify(view)).not.toContain(home);
   });
 });
