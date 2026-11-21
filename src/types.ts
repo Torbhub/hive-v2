@@ -66,7 +66,7 @@ export type Decision = {
   at: string;
   project: string;
   task?: string;
-  by: 'owner' | 'watch' | 'orchestrator';
+  by: 'owner' | 'watch' | 'orchestrator' | 'agent';
   summary: string;
   watch_key?: string;
 };

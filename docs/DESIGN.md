@@ -145,13 +145,36 @@ hive ui                                  — the hub screen
 ## Operator questions (ask_operator MCP)
 
 - `hive mcp` (src/mcp.ts) is a stdio MCP server, newline-delimited JSON-RPC,
-  no SDK. It advertises one tool, `ask_operator`, registered for every kimi
-  session as `hive-operator` in `~/.kimi-code/mcp.json` by provision
+  no SDK. It advertises `ask_operator` and `message_agent`, registered for every
+  kimi session as `hive-operator` in `~/.kimi-code/mcp.json` by provision
   (infra/merge-mcp.mjs). `toolTimeoutMs` is 7 days because a batch waits for
-  a human. A call needs `HIVE_HUB_ROOT` and an individual
+  a human. An `ask_operator` call needs `HIVE_HUB_ROOT` and an individual
   `HIVE_AGENT_CREDENTIAL`. The current credential alone selects the owner,
   agent, and project. Every poll rechecks credential status and the write ACL.
-- The tool input is strict (src/questions.ts): an overarching `context` and
+- `message_agent` works only in default single-operator mode. It reads the
+  root, project, and sender from the Hive session environment. An optional
+  `agent` selects a peer in that project. Without it, delivery goes to the
+  project orchestrator. The sender must match a recorded team member. The tool
+  rejects malformed refs and C1 or Unicode formatting controls. Ordinary
+  Unicode text remains valid. The typed line says the peer text is untrusted
+  and has no operator or approval authority.
+- The existing cross-process team lock serializes the complete delivery for
+  MCP and owner web callers. Target resolution, sender verification, screen
+  checks, typing, and audit append share that lock. `src/message.ts` accepts
+  only idle or working screens. Null captures, dialogs, and unknown screens
+  fail closed. Its screen guard rechecks before every Enter. The peer audit
+  contains only the actual sender, canonical target, and folded text length.
+  Owner audit text and attribution stay unchanged. There is no offline queue
+  or automatic wake. The `ask_operator` pending limit does not block messages.
+- Default-mode MCP trusts the session environment. An agent can start another
+  `hive mcp` process with a different sender or with the collaboration flag
+  unset. The MCP registration contains no trusted non-agent-writable mode
+  indicator. Team membership limits the claimed sender but does not
+  authenticate the process. This is the existing default-mode trust boundary.
+  Collaboration mode keeps `message_agent` unsupported and refuses the tool
+  when `HIVE_COLLABORATION_ENABLED=1` is present. Unsetting the flag in a new
+  process remains a residual risk, not an enabled-mode authorization path.
+- The `ask_operator` input is strict (src/questions.ts): an overarching `context` and
   1-20 questions. General questions keep context, choices, and recommendation
   but carry no approval authority. A decision names exactly one action. Legacy
   approval-shaped requests and internal output become safe detail cards.
@@ -227,8 +250,8 @@ hive ui                                  — the hub screen
   `smart` orchestrator launches use supervised `--auto` instead. The model
   is the house default `kimi-code/k3.1-pro-highspeed` unless the spawn passed
   `--model`, and the effective model is stamped into team.json. HIVE_AGENT and HIVE_PROJECT
-  remain pane and hook metadata. They cannot select MCP identity. An individual
-  agent credential selects that identity. The root is shell-quoted.
+  remain pane and hook metadata. They cannot select credentialed MCP identity.
+  An individual agent credential selects that identity. The root is shell-quoted.
   `exec` so
   the pane process IS the CLI (identity check). Pre-flight: Python `tomllib`
   reads the direct model alias from Kimi's `config.toml`. Its provider and

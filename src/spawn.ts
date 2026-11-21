@@ -141,11 +141,10 @@ export async function typeLine(
     await sleep(1000);
     const raw = await capturePane(pane);
     if (raw === null) throw new Error(`pane ${pane} died while typing`);
-    if (screenGuard) await screenGuard(raw);
     const ls = lines(raw);
     const promptLine = [...ls].reverse().find((l) => /^\s*│\s*>/.test(l));
     if (!promptLine || !promptLine.includes(text.slice(0, 40))) return;
-    if (screenGuard) await screenGuard();
+    if (screenGuard) await screenGuard(raw);
     await sendEnter(pane, identity);
   }
   throw new Error(`the line stayed in the prompt of ${pane}; not typed`);

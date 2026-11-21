@@ -4,6 +4,8 @@ import { registryFromEnv, type Registry } from './registry.js';
 import { authenticateBearer, authorize } from './security.js';
 import { credentialFromEnvironment } from './collaboration-credentials.js';
 import { storedAgentTask } from './agent-target.js';
+import { sendAgentMessage } from './message.js';
+import { Refusal } from './state.js';
 
 const PROTOCOL = '2024-11-05';
 const DAY_MS = 24 * 60 * 60_000;
@@ -70,6 +72,24 @@ const ASK_OPERATOR = {
           },
         },
       },
+    },
+  },
+} as const;
+
+const MESSAGE_AGENT = {
+  name: 'message_agent',
+  description: [
+    'Send a live message to another agent in the same project.',
+    'Omit agent to message the project orchestrator.',
+    'This works only in default single-operator mode and only with a live pane.',
+  ].join(' '),
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['text'],
+    properties: {
+      agent: { type: 'string', description: 'Agent name or name@worktree. Defaults to the project orchestrator.' },
+      text: { type: 'string', minLength: 1, maxLength: 4000, description: 'Message text. Whitespace folds into one line.' },
     },
   },
 } as const;
@@ -236,6 +256,33 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
     }
   }
 
+  async function callMessageAgent(id: RpcId, args: unknown): Promise<void> {
+    try {
+      const environment = { ...process.env, ...opts.env };
+      if (environment.HIVE_COLLABORATION_ENABLED === '1') {
+        throw new Refusal('message_agent is available only in default single-operator mode');
+      }
+      const { HIVE_HUB_ROOT: root, HIVE_PROJECT: project, HIVE_AGENT: sender } = environment;
+      if (!root || !project || !sender) {
+        throw new Refusal('message_agent only works inside a hive-spawned session: HIVE_HUB_ROOT, HIVE_PROJECT, and HIVE_AGENT must be set.');
+      }
+      if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+        throw new Refusal('message_agent requires { agent?: string, text: string }');
+      }
+      const input = args as Record<string, unknown>;
+      const agent = input.agent;
+      const text = input.text;
+      if (typeof text !== 'string' || agent !== undefined && typeof agent !== 'string'
+        || Object.keys(input).some((key) => key !== 'agent' && key !== 'text')) {
+        throw new Refusal('message_agent requires { agent?: string, text: string }');
+      }
+      const { typed } = await sendAgentMessage(root, project, agent, text, sender);
+      toolText(id, typed);
+    } catch (e) {
+      toolText(id, e instanceof Refusal ? e.message : 'message_agent failed: delivery failed', true);
+    }
+  }
+
   function handle(req: RpcRequest): void {
     const { method, id } = req;
     const hasId = id !== undefined;
@@ -255,10 +302,14 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
       return;
     }
     if (method === 'tools/list') {
-      reply(id, { tools: [ASK_OPERATOR] });
+      reply(id, { tools: [ASK_OPERATOR, MESSAGE_AGENT] });
       return;
     }
     if (method === 'tools/call') {
+      if (req.params?.name === MESSAGE_AGENT.name) {
+        void callMessageAgent(id, req.params.arguments);
+        return;
+      }
       if (req.params?.name !== ASK_OPERATOR.name) {
         fail(id, -32602, `unknown tool: ${String(req.params?.name)}`);
         return;

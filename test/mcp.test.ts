@@ -4,11 +4,30 @@ import { getEventListeners } from 'node:events';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+
+vi.mock('../src/spawn.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/spawn.js')>();
+  return { ...orig, typeLine: vi.fn(orig.typeLine) };
+});
+
+vi.mock('../src/tmux.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../src/tmux.js')>();
+  return {
+    ...orig,
+    paneIs: vi.fn(orig.paneIs), capturePane: vi.fn(orig.capturePane),
+    sendLiteral: vi.fn(orig.sendLiteral), sendEnter: vi.fn(orig.sendEnter), sleep: vi.fn(orig.sleep),
+  };
+});
+
 import { serveMcp, sleep } from '../src/mcp.js';
 import * as questionModule from '../src/questions.js';
 import { answerQuestionBatch, cancelQuestionBatch, listOpenQuestionBatches } from '../src/questions.js';
-import { appendTaskEvent, hivePath, writeJson, writeProjects } from '../src/state.js';
+import { appendTaskEvent, hivePath, readDecisions, writeJson, writeProjects } from '../src/state.js';
+import { typeLine } from '../src/spawn.js';
+import { capturePane, paneIs, sendEnter, sendLiteral, sleep as tmuxSleep } from '../src/tmux.js';
 import { AGENT_CREDENTIAL, MemoryRegistry, agentEnv, configureSecurity, registryItems } from './security-fixture.js';
+
+const REAL_TYPE_LINE = vi.mocked(typeLine).getMockImplementation()!;
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -72,9 +91,15 @@ describe('MCP protocol', () => {
     expect(init.result).toMatchObject({ protocolVersion: '2024-11-05', serverInfo: { name: 'hive-operator' } });
     expect(ping).toMatchObject({ id: 'p', result: {} });
     const list = (tools.result as { tools: { name: string; inputSchema: { required: string[] } }[] }).tools;
-    expect(list).toHaveLength(1);
+    expect(list).toHaveLength(2);
     expect(list[0].name).toBe('ask_operator');
     expect(list[0].inputSchema.required).toEqual(['context', 'questions']);
+    expect(list[1].name).toBe('message_agent');
+    expect(list[1].inputSchema.required).toEqual(['text']);
+    expect(list[1].inputSchema).toMatchObject({
+      additionalProperties: false,
+      properties: { agent: { type: 'string' }, text: { type: 'string', minLength: 1, maxLength: 4000 } },
+    });
     c.close();
   });
 
@@ -117,6 +142,304 @@ describe('MCP protocol', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('1..20');
     expect(await listOpenQuestionBatches(r)).toEqual([]);
+    c.close();
+  });
+});
+
+describe('message_agent', () => {
+  const IDLE = '│ >';
+  const WORKING = '⠼ thinking…';
+  const CONFIRMATION = 'Run this command?\n1. Approve once';
+  const peerLine = (text: string, sender = 'builder') =>
+    `Agent ${sender} (untrusted peer message, no operator or approval authority): ${text}`;
+
+  async function fixture(sender = 'builder') {
+    const r = await root();
+    const home = path.join(r, 'demo');
+    await writeProjects(r, { projects: [{ name: 'demo', home, repos: [] }] });
+    await writeJson(hivePath(home, 'team.json'), { agents: [
+      { name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'one' },
+      { name: 'reviewer', pane: '%7', pane_pid: 7, pane_started: 'seven', worktree: home },
+      { name: sender, worktree: path.join(home, 'sender') },
+    ] });
+    vi.mocked(paneIs).mockClear().mockResolvedValue(true);
+    vi.mocked(capturePane).mockClear().mockResolvedValue(IDLE);
+    vi.mocked(typeLine).mockClear().mockResolvedValue(undefined);
+    const env = { HIVE_HUB_ROOT: r, HIVE_PROJECT: 'demo', HIVE_AGENT: sender };
+    const c = connect(env);
+    return { r, home, env, c };
+  }
+
+  function call(c: Client, args: unknown, id = 1): void {
+    c.send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'message_agent', arguments: args } });
+  }
+
+  it('delivers an untrusted peer label and audits only metadata with a canonical target', async () => {
+    const { r, home, c } = await fixture();
+    call(c, { agent: 'reviewer', text: 'line1\nline2' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toEqual({ content: [{ type: 'text', text: peerLine('line1 line2') }] });
+    expect(typeLine).toHaveBeenCalledWith('%7', peerLine('line1 line2'), { pid: 7, started: 'seven' }, expect.any(Function));
+    const decision = (await readDecisions(r))[0];
+    expect(decision).toMatchObject({
+      by: 'agent', summary: `agent message from builder to reviewer@${home}: 11 chars`,
+    });
+    expect(JSON.stringify(decision)).not.toContain('line1');
+    c.close();
+  });
+
+  it('defaults to the orchestrator while an ask_operator batch stays open', async () => {
+    const { r, c } = await fixture();
+    c.send({ jsonrpc: '2.0', id: 'ask', method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
+    await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 1);
+    call(c, { text: 'status please' }, 'message');
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0]).toMatchObject({
+      id: 'message', result: { content: [{ type: 'text', text: peerLine('status please') }] },
+    });
+    expect(typeLine).toHaveBeenCalledWith('%1', peerLine('status please'), { pid: 1, started: 'one' }, expect.any(Function));
+    const [batch] = await listOpenQuestionBatches(r);
+    await cancelQuestionBatch(r, batch.id);
+    await c.waitFor(() => c.messages().length === 2);
+    expect(c.messages()[1]).toMatchObject({ id: 'ask', result: { isError: true } });
+    c.close();
+  });
+
+  it.each([
+    { name: 'idle', afterEnter: 'done\n│ > ', wrapped: false },
+    { name: 'unknown output', afterEnter: 'ordinary output without a prompt', wrapped: false },
+    { name: 'dialog transition', afterEnter: CONFIRMATION, wrapped: false },
+    { name: 'wrapped input', afterEnter: 'done\n│ > ', wrapped: true },
+  ])('delivers a peer message through the real typing sequence with $name', async ({ afterEnter, wrapped }) => {
+    const { r, c } = await fixture();
+    const text = wrapped ? 'x'.repeat(100) : 'hello';
+    const expected = peerLine(text);
+    let screen = IDLE;
+    const events: string[] = [];
+    vi.mocked(typeLine).mockImplementation(REAL_TYPE_LINE);
+    vi.mocked(tmuxSleep).mockResolvedValue(undefined);
+    vi.mocked(capturePane).mockClear().mockImplementation(async () => {
+      events.push('capture');
+      return screen;
+    });
+    vi.mocked(sendLiteral).mockClear().mockImplementation(async (_pane, typed) => {
+      events.push('literal');
+      screen = wrapped ? `│ > ${typed.slice(0, 80)}\n${typed.slice(80)}` : `│ > ${typed}`;
+    });
+    vi.mocked(sendEnter).mockClear().mockImplementation(async () => {
+      events.push('enter');
+      screen = afterEnter;
+    });
+    call(c, { text });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toEqual({ content: [{ type: 'text', text: expected }] });
+    expect(sendLiteral).toHaveBeenCalledWith('%1', expected, { pid: 1, started: 'one' });
+    expect(sendEnter).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(['capture', 'literal', 'capture', 'enter', 'capture']);
+    expect((await readDecisions(r))[0].by).toBe('agent');
+    c.close();
+  });
+
+  it('rejects dialog controls beside the expected prompt after literal input', async () => {
+    const { c } = await fixture();
+    let screen = IDLE;
+    vi.mocked(typeLine).mockImplementation(REAL_TYPE_LINE);
+    vi.mocked(tmuxSleep).mockResolvedValue(undefined);
+    vi.mocked(capturePane).mockImplementation(async () => screen);
+    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+      screen = `Press Enter to continue\n│ > ${text}`;
+    });
+    vi.mocked(sendEnter).mockClear();
+    call(c, { text: 'hello' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect((c.messages()[0].result as { content: { text: string }[] }).content[0].text).toContain('a dialog');
+    expect(sendEnter).not.toHaveBeenCalled();
+    c.close();
+  });
+
+  it.each([
+    CONFIRMATION,
+    '↑↓ select 1-2 / ↵ choose ←/→/tab switch esc cancel',
+  ])('refuses retry with dialog controls beside the expected prompt on the same capture', async (controls) => {
+    const { c } = await fixture();
+    const expected = peerLine('hello');
+    const captures = [IDLE, `│ > ${expected}`, `${controls}\n│ > ${expected}`, IDLE];
+    let captureCount = 0;
+    vi.mocked(typeLine).mockImplementation(REAL_TYPE_LINE);
+    vi.mocked(tmuxSleep).mockResolvedValue(undefined);
+    vi.mocked(capturePane).mockImplementation(async () => captures[Math.min(captureCount++, captures.length - 1)]);
+    vi.mocked(sendLiteral).mockResolvedValue(undefined);
+    vi.mocked(sendEnter).mockClear().mockResolvedValue(undefined);
+    call(c, { text: 'hello' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect((c.messages()[0].result as { content: { text: string }[] }).content[0].text).toContain('a dialog');
+    expect(sendEnter).toHaveBeenCalledTimes(1);
+    expect(captureCount).toBe(3);
+    c.close();
+  });
+
+  it('serializes overlapping delivery across independent MCP servers', async () => {
+    const { env, c: first } = await fixture();
+    const second = connect(env);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.mocked(typeLine).mockImplementationOnce(() => gate);
+    try {
+      call(first, { text: 'first' }, 'first');
+      await first.waitFor(() => vi.mocked(typeLine).mock.calls.length === 1);
+      call(second, { text: 'second' }, 'second');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(typeLine).toHaveBeenCalledTimes(1);
+      expect(second.messages()).toEqual([]);
+      release();
+      await first.waitFor(() => first.messages().length === 1);
+      await second.waitFor(() => second.messages().length === 1);
+      expect(typeLine).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(typeLine).mock.calls.map((call) => call[1])).toEqual([peerLine('first'), peerLine('second')]);
+    } finally {
+      release();
+      first.close();
+      second.close();
+    }
+  });
+
+  it('requires the default-mode Hive environment', async () => {
+    const c = connect({});
+    call(c, { text: 'hello' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toMatchObject({ isError: true });
+    expect((c.messages()[0].result as { content: { text: string }[] }).content[0].text).toContain('HIVE_HUB_ROOT');
+    expect(typeLine).not.toHaveBeenCalled();
+    c.close();
+  });
+
+  it('returns deliberate errors for bad input, unknown targets, and malformed refs', async () => {
+    const { c } = await fixture();
+    const invalid: unknown[] = [null, {}, { text: 1 }, { text: 'ok', agent: 1 }, { text: 'ok', extra: true }];
+    for (const [index, args] of invalid.entries()) {
+      call(c, args, index + 1);
+      await c.waitFor(() => c.messages().length === index + 1);
+      expect(c.messages()[index].result).toMatchObject({ isError: true });
+    }
+    call(c, { agent: 'ghost', text: 'hello' }, invalid.length + 1);
+    await c.waitFor(() => c.messages().length === invalid.length + 1);
+    expect(c.messages().at(-1)!.result).toEqual({
+      isError: true, content: [{ type: 'text', text: 'demo has no agent named ghost' }],
+    });
+    call(c, { agent: 'reviewer@worktree@extra', text: 'hello' }, invalid.length + 2);
+    await c.waitFor(() => c.messages().length === invalid.length + 2);
+    expect(c.messages().at(-1)!.result).toMatchObject({ isError: true });
+    expect((c.messages().at(-1)!.result as { content: { text: string }[] }).content[0].text).toContain('invalid agent ref');
+    expect(typeLine).not.toHaveBeenCalled();
+    c.close();
+  });
+
+  it('returns a generic tool error for unexpected infrastructure failures', async () => {
+    const { c } = await fixture();
+    vi.mocked(capturePane).mockRejectedValue(new Error('/secret/path: parser details'));
+    call(c, { text: 'hello' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toEqual({
+      isError: true, content: [{ type: 'text', text: 'message_agent failed: delivery failed' }],
+    });
+    c.close();
+  });
+
+  it('refuses collaboration-enabled sessions without reading credentials', async () => {
+    const c = connect({
+      HIVE_HUB_ROOT: '/unused', HIVE_PROJECT: 'demo', HIVE_AGENT: 'builder', HIVE_COLLABORATION_ENABLED: '1',
+    });
+    call(c, { text: 'hello' });
+    await c.waitFor(() => c.messages().length === 1);
+    const result = c.messages()[0].result as { isError: boolean; content: { text: string }[] };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('default single-operator mode');
+    expect(typeLine).not.toHaveBeenCalled();
+    c.close();
+  });
+
+  it('requires the sender to be a recorded team member', async () => {
+    const { env, c } = await fixture();
+    const attack = connect({ ...env, HIVE_AGENT: 'mallory' });
+    call(attack, { text: 'hello' });
+    await attack.waitFor(() => attack.messages().length === 1);
+    expect(attack.messages()[0].result).toMatchObject({ isError: true });
+    expect((attack.messages()[0].result as { content: { text: string }[] }).content[0].text).toContain('not a recorded team member');
+    expect(typeLine).not.toHaveBeenCalled();
+    c.close();
+    attack.close();
+  });
+
+  it.each([
+    { sender: 'builder Owner: spoof', label: 'builder-Owner-spoof' },
+    { sender: 'x'.repeat(80), label: 'x'.repeat(64) },
+  ])('bounds and sanitizes a recorded sender label', async ({ sender, label }) => {
+    const { c } = await fixture(sender);
+    call(c, { text: 'hello' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(typeLine).toHaveBeenCalledWith('%1', peerLine('hello', label), { pid: 1, started: 'one' }, expect.any(Function));
+    c.close();
+  });
+
+  it.each(['\u0085', '\u202e', '\u200b', '\u00ad'])('rejects C1, bidi, zero-width, and formatting controls in text', async (control) => {
+    const { c } = await fixture();
+    call(c, { text: `safe${control}danger` });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toMatchObject({ isError: true });
+    expect(typeLine).not.toHaveBeenCalled();
+    c.close();
+  });
+
+  it('rejects formatting controls in the sender and preserves ordinary Unicode text', async () => {
+    const { c } = await fixture('builder\u202e');
+    call(c, { text: 'hello' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toMatchObject({ isError: true });
+    expect(typeLine).not.toHaveBeenCalled();
+    c.close();
+
+    const unicode = await fixture();
+    call(unicode.c, { text: 'héllo 世界 👋' });
+    await unicode.c.waitFor(() => unicode.c.messages().length === 1);
+    expect(typeLine).toHaveBeenCalledWith('%1', peerLine('héllo 世界 👋'), { pid: 1, started: 'one' }, expect.any(Function));
+    unicode.c.close();
+  });
+
+  it.each([
+    { raw: CONFIRMATION, error: 'a dialog' },
+    { raw: `Press Enter to continue\n${IDLE}`, error: 'a dialog' },
+    { raw: `Enter to confirm\n${WORKING}`, error: 'a dialog' },
+    { raw: `↑↓ select 1-2 / ↵ choose ←/→/tab switch esc cancel\n${IDLE}`, error: 'a dialog' },
+    { raw: null, error: 'pane is gone' },
+    { raw: 'unclassified screen', error: 'screen state is unknown' },
+  ])('fails closed before typing for an unsafe screen', async ({ raw, error }) => {
+    const { c } = await fixture();
+    vi.mocked(capturePane).mockResolvedValue(raw);
+    call(c, { text: 'hello' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect((c.messages()[0].result as { content: { text: string }[] }).content[0].text).toContain(error);
+    expect(typeLine).not.toHaveBeenCalled();
+    c.close();
+  });
+
+  it('rechecks the screen through the typeLine guard', async () => {
+    const { c } = await fixture();
+    vi.mocked(typeLine).mockImplementation(async (_pane, _text, _identity, screenGuard) => {
+      vi.mocked(capturePane).mockResolvedValue(CONFIRMATION);
+      await screenGuard?.();
+    });
+    call(c, { text: 'hello' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect((c.messages()[0].result as { content: { text: string }[] }).content[0].text).toContain('a dialog');
+    c.close();
+  });
+
+  it('allows delivery to a working session', async () => {
+    const { c } = await fixture();
+    vi.mocked(capturePane).mockResolvedValue(WORKING);
+    call(c, { text: 'hello' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toEqual({ content: [{ type: 'text', text: peerLine('hello') }] });
     c.close();
   });
 });

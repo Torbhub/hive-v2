@@ -68,20 +68,31 @@ describe('compaction input screen guard', () => {
     const prompt = `⠼ thinking…\n│ > ${COMMAND}`;
     vi.mocked(capturePane)
       .mockResolvedValueOnce(prompt)
-      .mockResolvedValueOnce(prompt)
-      .mockResolvedValueOnce(DIALOG);
+      .mockResolvedValueOnce(`${DIALOG}\n${prompt}`);
 
     await expect(typeLine('%2', COMMAND, IDENTITY, (raw) => compactionScreenGuard('%2', raw))).rejects.toThrow('dialog');
 
     expect(sendEnter).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses a dialog after the first Enter and treats delivery as unconfirmed', async () => {
+  it('refuses a native question before a retry Enter', async () => {
+    const native = readFileSync(path.join(import.meta.dirname, 'fixtures', 'dialog-ask-user-question.txt'), 'utf8');
+    const prompt = `⠼ thinking…\n│ > ${COMMAND}`;
+    vi.mocked(capturePane)
+      .mockResolvedValueOnce(prompt)
+      .mockResolvedValueOnce(`${native}\n${prompt}`);
+
+    await expect(typeLine('%2', COMMAND, IDENTITY, (raw) => compactionScreenGuard('%2', raw))).rejects.toThrow('dialog');
+
+    expect(sendEnter).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts a dialog after the expected prompt disappears', async () => {
     vi.mocked(capturePane)
       .mockResolvedValueOnce('⠼ thinking…\n')
       .mockResolvedValueOnce(DIALOG);
 
-    await expect(typeLine('%2', COMMAND, IDENTITY, (raw) => compactionScreenGuard('%2', raw))).rejects.toThrow('dialog');
+    await expect(typeLine('%2', COMMAND, IDENTITY, (raw) => compactionScreenGuard('%2', raw))).resolves.toBeUndefined();
 
     expect(sendEnter).toHaveBeenCalledTimes(1);
   });

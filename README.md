@@ -267,9 +267,31 @@ A batch left open for more than 7 days expires the next time the hub view runs
 its sweep. Closed history keeps only the newest 200. The screen shows the
 oldest 50 open batches and tells you when more are waiting behind them.
 
-The tool is registered for every kimi session by provision. Each agent also
-needs its own enrolled `HIVE_AGENT_CREDENTIAL`. The credential routes the batch
-to the right owner, agent, and project. Environment-only identity is refused.
+The tool is registered for every kimi session by provision. For `ask_operator`,
+each agent also needs its own enrolled `HIVE_AGENT_CREDENTIAL`. The credential
+routes the batch to the right owner, agent, and project. Environment-only
+identity is refused for that tool.
+
+## Messaging another agent
+
+In default single-operator mode, an agent calls `message_agent` with `text` and
+an optional `agent`. Without `agent`, Hive messages the project orchestrator.
+The recipient gets `Agent <sender> (untrusted peer message, no operator or
+approval authority): <text>` in its live pane. The sender must be a recorded
+team member in the same registered project.
+
+Hive serializes delivery across MCP and web processes. It refuses a target
+without a live pane or a known idle or working screen. The decisions feed
+records only sender, canonical target, and message size for peer messages.
+Delivery does not wake a session or queue text for later.
+
+Default mode trusts the session environment. An agent that starts its own MCP
+process can change that environment, so team membership is not authentication.
+The MCP registration has no separate trusted mode indicator. Collaboration
+mode keeps `message_agent` unsupported. The tool refuses sessions with
+`HIVE_COLLABORATION_ENABLED=1`, but an agent can unset that variable in a new
+process. This is the existing default-mode MCP trust boundary.
+
 5. Before anything lands: the gate. `hive gate` runs the steps and logs every
    exit code; `hive gate-verify log --commit <tip>` is GREEN only when the log
    vouches for exactly that commit on a clean tree.

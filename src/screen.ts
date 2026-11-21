@@ -48,6 +48,10 @@ export function isNativeQuestion(ls: string[]): boolean {
   return ls.some((line) => /↑↓ select\s+\d+-\d+ \/ ↵ choose\s+←\/→\/tab switch\s+esc cancel/.test(line));
 }
 
+export function hasDialogControls(ls: string[]): boolean {
+  return isNativeQuestion(ls) || ls.some((line) => DIALOG_PHRASES.some((phrase) => line.includes(phrase)));
+}
+
 export type ContextInfo = { percent: number; used: string; window: string };
 
 export function scrapeContext(ls: string[]): ContextInfo | null {
