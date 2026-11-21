@@ -1,12 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { reconcileTaskBudgets, revokeTaskAdmissionsLocked } from './admission.js';
 import {
+  acceptanceAdmission, acceptanceReceipt, evidenceAcceptanceBound, REGISTERED_PREDICATES, registeredEvidenceBinding,
+} from './acceptance.js';
+import { sweepQuestionBatches } from './questions.js';
+import {
   appendTaskEvent, assertTaskBudgetCurrent, contractDigest, doneBlockers, foldTasks, readProjects, readTaskEvents, Refusal,
   taskBudgetExpired, taskEvidenceDigests, valueDigest, withHubLock, withTeamLock,
 } from './state.js';
 import { CLOSED_STATES } from './types.js';
 import type {
-  HubTask, NativeBranchRecord, TaskAcceptance, TaskEvidence, TaskEvent, TaskOperation,
+  AcceptanceEvidenceRow, HubTask, NativeBranchRecord, TaskAcceptance, TaskEvidence, TaskEvent, TaskOperation,
   TaskReceipt, TeamEntry, WorkTree, WorkTreeNode,
 } from './types.js';
 
@@ -280,6 +284,7 @@ async function appendAdapterEvidence(
     artifact_digest: operation.artifact_digest!,
     verification: {
       adapter_id: 'github_check', evidence_type: 'github_check', provenance_digest: operation.idempotency_key,
+      acceptance_id: operation.acceptance_id,
     },
   };
   const existing = latest(await readTaskEvents(root), (event) => event.id === task.id
@@ -712,6 +717,7 @@ export async function evaluateGithubCheck(root: string, id: string, config: GitH
 
 export async function supervisionPass(root: string, options: GitHubOptions = {}, now = Date.now()): Promise<{ watchers: string[] }> {
   await reconcileTaskBudgets(root, now);
+  await sweepQuestionBatches(root, now);
   const passOptions = { ...options, now };
   const tasks = foldTasks(await readTaskEvents(root));
   for (const task of tasks) {
@@ -766,11 +772,11 @@ function detail(label: string, value: string | undefined): { label: string; valu
   return value ? [{ label, value: bounded(value)! }] : [];
 }
 
-function latestOperations(task: HubTask): TaskOperation[] {
+function latestOperations(task: HubTask, currentOnly = true): TaskOperation[] {
   const operations = new Map<string, TaskOperation>();
   const poisoned = new Set<string>();
   for (const operation of task.operations ?? []) {
-    if (operation.plan_digest !== task.plan_digest || operation.epoch !== task.lease_epoch) continue;
+    if (currentOnly && (operation.plan_digest !== task.plan_digest || operation.epoch !== task.lease_epoch)) continue;
     const previous = operations.get(operation.operation_id);
     const identity = (candidate: TaskOperation) => valueDigest({
       idempotency_key: candidate.idempotency_key, kind: candidate.kind, actor: candidate.actor,
@@ -786,51 +792,149 @@ function latestOperations(task: HubTask): TaskOperation[] {
   return [...operations.values()];
 }
 
-function passingEvidence(task: HubTask, acceptance: TaskAcceptance, events: TaskEvent[]): boolean {
-  const supported = ['task_receipt', 'git_diff_scope', 'native_result', 'github_check'];
-  if (!supported.includes(acceptance.predicate_id)) return false;
-  const receipt = task.last_receipt;
-  if (acceptance.predicate_id === 'task_receipt') {
-    const reconciling = task.state === 'reconciling' || task.state === 'blocked' && task.resume_state === 'reconciling';
-    const configuredHashes = acceptance.configuration.evidence_hashes;
-    if (!reconciling || receipt?.state !== 'reconciling'
-      || receipt.artifact_digest !== acceptance.configuration.artifact_digest
-      || (Array.isArray(configuredHashes) && configuredHashes.some((hash) => !receipt.evidence_hashes.includes(String(hash))))) {
-      return false;
-    }
-  }
-  const passing = events.filter((event) => {
-    const evidence = event.evidence;
-    if (event.id !== task.id || event.event !== 'evidence' || !evidence || evidence.outcome !== 'passed'
-      || evidence.plan_digest !== task.plan_digest || evidence.epoch !== task.lease_epoch
-      || evidence.verification?.adapter_id !== acceptance.predicate_id) return false;
-    const configuredArtifact = acceptance.configuration.artifact_digest;
-    if (typeof configuredArtifact === 'string' && evidence.artifact_digest !== configuredArtifact) return false;
-    return acceptance.predicate_id !== 'task_receipt' || receipt?.evidence_hashes.includes(evidence.evidence_hash);
-  });
-  if (passing.length === 0) return false;
-  return acceptance.required_evidence.filter((item) => /^[0-9a-f]{64}$/.test(item))
-    .every((hash) => passing.some((event) => event.evidence?.evidence_hash === hash));
+function acceptanceOperation(task: HubTask, acceptance: TaskAcceptance): TaskOperation | undefined {
+  return latest(latestOperations(task, false), (operation) => operation.kind === 'github_check'
+    && operation.acceptance_id === acceptance.id);
 }
 
-function acceptanceBlockers(task: HubTask, events: TaskEvent[]): string[] {
-  const blockers: string[] = [];
-  let registeredPasses = 0;
-  for (const acceptance of task.contract?.acceptance ?? []) {
-    const supported = ['task_receipt', 'git_diff_scope', 'native_result', 'github_check'].includes(acceptance.predicate_id);
-    if (!supported) {
+export function githubAcceptanceProvenance(task: HubTask, acceptance: TaskAcceptance): string | undefined {
+  const operation = acceptanceOperation(task, acceptance);
+  return operation && currentOperation(task, operation) && operation.status === 'succeeded'
+    && operation.result?.remote_tip === operation.commit ? operation.idempotency_key : undefined;
+}
+
+function currentEvidenceBinding(
+  task: HubTask, acceptance: TaskAcceptance, evidence: TaskEvidence, operation: TaskOperation | undefined,
+  entries: TeamEntry[], receipt?: TaskReceipt,
+): boolean {
+  const provenance = acceptance.predicate_id === 'github_check' && operation && currentOperation(task, operation)
+    ? operation.idempotency_key : undefined;
+  return registeredEvidenceBinding(task, acceptance, evidence, entries, provenance, receipt);
+}
+
+function legacyBinding(
+  task: HubTask, acceptance: TaskAcceptance, evidence: TaskEvidence, operation: TaskOperation | undefined,
+  entries: TeamEntry[],
+): boolean {
+  if (!evidenceAcceptanceBound(task, acceptance, evidence)) return false;
+  const configuredArtifact = acceptance.configuration.artifact_digest;
+  if (typeof configuredArtifact === 'string' && evidence.artifact_digest !== configuredArtifact) return false;
+  if (acceptance.predicate_id === 'github_check') {
+    return Boolean(operation && evidence.verification!.provenance_digest === operation.idempotency_key);
+  }
+  if (acceptance.predicate_id === 'task_receipt' && !evidence.lease_id) return true;
+  return Boolean(acceptanceAdmission(task, acceptance, evidence, entries));
+}
+
+function rowTarget(task: HubTask, operation: TaskOperation | undefined): string {
+  if (task.contract?.provenance.kind === 'research') return 'n/a research';
+  const result = operation?.result?.remote_tip;
+  return typeof result === 'string' && /^[0-9a-f]{40}$/i.test(result)
+    ? result : task.contract?.provenance.artifact_revision ?? '—';
+}
+
+function rowBlocker(result: AcceptanceEvidenceRow['result']): string | undefined {
+  if (result === 'PASS') return undefined;
+  if (result === 'PENDING') return 'registered evidence is still pending';
+  if (result === 'NOT_RUN') return 'no current registered attempt';
+  return 'registered evidence failed or does not match the current acceptance';
+}
+
+export function acceptanceEvidenceRows(
+  task: HubTask, events: TaskEvent[], entries: TeamEntry[] = [],
+): AcceptanceEvidenceRow[] {
+  const rows: AcceptanceEvidenceRow[] = [];
+  if (!task.contract) return rows;
+  for (const acceptance of task.contract.acceptance) {
+    const operation = acceptance.predicate_id === 'github_check' ? acceptanceOperation(task, acceptance) : undefined;
+    const base = {
+      acceptanceId: bounded(acceptance.id)!, predicateId: bounded(acceptance.predicate_id)!,
+      required: acceptance.required !== false, artifactDigest: '—', target: bounded(rowTarget(task, operation))!,
+    };
+    if (!task.plan_digest || contractDigest(task.contract) !== task.plan_digest) {
+      rows.push({ ...base, result: 'FAIL', blocker: 'the current root contract digest is stale' });
+      continue;
+    }
+    if (!REGISTERED_PREDICATES.includes(acceptance.predicate_id) || acceptance.version !== 1) {
       const human = task.human_acceptance?.[acceptance.id];
       const accepted = acceptance.required === false && human
         && (human.actor.startsWith('user:') || human.actor === 'legacy')
         && human.plan_digest === task.plan_digest && human.epoch === task.lease_epoch;
-      if (!accepted) {
-        blockers.push(acceptance.required === false
+      rows.push(accepted ? { ...base, result: 'PASS' } : {
+        ...base, result: 'FAIL', blocker: bounded(acceptance.required === false
           ? `Extra acceptance ${acceptance.id} needs a human. Required registered passes still apply.`
-          : `Required acceptance ${acceptance.id} is unsupported.`);
-      }
+          : `Required acceptance ${acceptance.id} is unsupported.`),
+      });
       continue;
     }
-    if (passingEvidence(task, acceptance, events)) registeredPasses++;
+    const configuredLease = acceptance.configuration.lease_id;
+    const receipt = acceptance.predicate_id === 'task_receipt'
+      ? acceptanceReceipt(events, task, acceptance, typeof configuredLease === 'string' ? configuredLease : undefined)
+      : undefined;
+    const attempts = events.filter((event) => {
+      const evidence = event.evidence;
+      if (event.id !== task.id || event.event !== 'evidence' || !evidence?.verification) return false;
+      if (evidence.verification.acceptance_id !== undefined) return evidence.verification.acceptance_id === acceptance.id;
+      return legacyBinding(task, acceptance, evidence, operation, entries);
+    });
+    const bound = attempts.filter((event) => acceptance.predicate_id !== 'task_receipt' || Boolean(receipt
+      && event.evidence!.lease_id === receipt.lease_id && receipt.evidence_hashes.includes(event.evidence!.evidence_hash)));
+    const latestEvent = bound.at(-1);
+    const evidence = latestEvent?.evidence;
+    const artifactDigest = evidence && /^[0-9a-f]{64}$/i.test(evidence.artifact_digest) ? evidence.artifact_digest : '—';
+    let result: AcceptanceEvidenceRow['result'];
+    if (operation && (!currentOperation(task, operation) || operation.status === 'failed'
+      || operation.status === 'ambiguous' || operation.detail === 'deadline_exceeded')) {
+      result = 'FAIL';
+    } else if (!evidence) {
+      result = operation ? operation.status === 'succeeded' ? 'FAIL' : 'PENDING'
+        : acceptance.predicate_id === 'task_receipt' && attempts.length > 0 ? 'FAIL' : 'NOT_RUN';
+    } else if (!currentEvidenceBinding(task, acceptance, evidence, operation, entries, receipt)) {
+      result = 'FAIL';
+    } else if (evidence.outcome === 'pending') {
+      result = 'PENDING';
+    } else if (evidence.outcome !== 'passed') {
+      result = 'FAIL';
+    } else if (operation && (operation.status !== 'succeeded' || operation.result?.remote_tip !== operation.commit)) {
+      result = 'PENDING';
+    } else {
+      const passingHashes = new Set(bound.filter((event) => event.evidence?.outcome === 'passed'
+        && currentEvidenceBinding(task, acceptance, event.evidence, operation, entries, receipt))
+        .map((event) => event.evidence!.evidence_hash));
+      result = acceptance.required_evidence.filter((item) => /^[0-9a-f]{64}$/.test(item))
+        .every((hash) => passingHashes.has(hash)) ? 'PASS' : 'FAIL';
+    }
+    rows.push({ ...base, result, artifactDigest, blocker: rowBlocker(result) });
+  }
+  return rows;
+}
+
+export const ACCEPTANCE_ROW_CAP = 50;
+
+function acceptanceGuard(task: HubTask, rows: AcceptanceEvidenceRow[]): { registeredPass: boolean; evidenceIncomplete: boolean } {
+  let registeredPass = false;
+  let missingRequired = false;
+  for (const [index, acceptance] of (task.contract?.acceptance ?? []).entries()) {
+    const result = rows[index]?.result ?? 'FAIL';
+    if (REGISTERED_PREDICATES.includes(acceptance.predicate_id) && acceptance.version === 1 && result === 'PASS') {
+      registeredPass = true;
+    }
+    if (acceptance.required !== false && result !== 'PASS') missingRequired = true;
+  }
+  return { registeredPass, evidenceIncomplete: !registeredPass || missingRequired };
+}
+
+function acceptanceBlockers(task: HubTask, rows: AcceptanceEvidenceRow[]): string[] {
+  const blockers: string[] = [];
+  let registeredPasses = 0;
+  for (const [index, acceptance] of (task.contract?.acceptance ?? []).entries()) {
+    const row = rows[index];
+    const registered = REGISTERED_PREDICATES.includes(acceptance.predicate_id) && acceptance.version === 1;
+    if (!registered) {
+      if (row?.result !== 'PASS' && row?.blocker) blockers.push(row.blocker);
+      continue;
+    }
+    if (row?.result === 'PASS') registeredPasses++;
     else if (acceptance.required !== false) blockers.push(`${acceptance.id} has no passing registered evidence`);
   }
   if (registeredPasses === 0) blockers.push('no registered acceptance predicate passed');
@@ -849,7 +953,8 @@ function childReconciled(task: HubTask, tasks: HubTask[], events: TaskEvent[], s
 }
 
 function taskBlockers(task: HubTask, input: WorkTreeInput, nodes: WorkTreeNode[]): string[] {
-  const blockers = [...doneBlockers(task), ...acceptanceBlockers(task, input.events)];
+  const root = nodes.find((node) => node.kind === 'task' && node.task === task.id && node.project === task.project);
+  const blockers = [...doneBlockers(task), ...acceptanceBlockers(task, root?.acceptance ?? [])];
   if (!task.plan_approved) blockers.push('the plan is not approved');
   for (const operation of latestOperations(task)) {
     if (operation.status !== 'succeeded' || operation.result?.remote_tip !== operation.commit) {
@@ -886,7 +991,7 @@ function taskNode(task: HubTask, input: WorkTreeInput): WorkTreeNode {
     id: `task:${task.project}:${task.id}`, parentId: null, project: task.project, task: task.id,
     kind: 'task', recordId: task.id, adapter: operation ? 'github_check' : 'root', state: task.state,
     active: !CLOSED_STATES.has(task.state), terminal: CLOSED_STATES.has(task.state), done: task.state === 'done',
-    doneEnabled: false, doneBlockers: [], planDigest: task.plan_digest ?? undefined, epoch: task.lease_epoch,
+    doneEnabled: false, doneBlockers: [], registeredPass: false, evidenceIncomplete: false, acceptance: [], acceptanceTruncated: false, planDigest: task.plan_digest ?? undefined, epoch: task.lease_epoch,
     scope: task.contract?.write_scope ?? [], blocker: bounded(task.last_note ?? task.unblock_condition ?? undefined),
     externalId: operation?.external_run_id ?? operation?.external_id, evidenceOutcome: evidence?.outcome,
     details: [
@@ -910,7 +1015,7 @@ export function buildWorkTree(input: WorkTreeInput): WorkTree {
         kind: 'tmux', recordId: admission.lease_id, adapter: 'tmux', state: entry?.admission_status ?? admission.status,
         active: !entry?.closed_at && !['released', 'failed', 'launch_failed', 'superseded', 'revoked'].includes(admission.status),
         terminal: Boolean(entry?.closed_at) || ['released', 'failed', 'launch_failed', 'superseded', 'revoked'].includes(admission.status),
-        done: false, doneEnabled: false, doneBlockers: [], planDigest: admission.plan_digest,
+        done: false, doneEnabled: false, doneBlockers: [], registeredPass: false, evidenceIncomplete: false, acceptance: [], acceptanceTruncated: false, planDigest: admission.plan_digest,
         epoch: admission.root_lease_epoch, scope: admission.write_scope, lineageId: admission.lineage_id,
         attempts: admission.attempts_used, blocker: bounded(admission.launch_error), externalId: admission.external_operation_id,
         details: [...detail('agent', admission.agent), ...detail('pane', entry?.pane), ...detail('session', entry?.session_id)],
@@ -925,7 +1030,7 @@ export function buildWorkTree(input: WorkTreeInput): WorkTree {
       nodes.push({
         id, parentId: `task:${project}:${entry.task}`, project, task: entry.task, kind: 'tmux', recordId: stable,
         adapter: entry.adapter ?? 'tmux', state: entry.closed_at ? 'closed' : entry.admission_status ?? 'recorded',
-        active: !entry.closed_at, terminal: Boolean(entry.closed_at), done: false, doneEnabled: false, doneBlockers: [],
+        active: !entry.closed_at, terminal: Boolean(entry.closed_at), done: false, doneEnabled: false, doneBlockers: [], registeredPass: false, evidenceIncomplete: false, acceptance: [], acceptanceTruncated: false,
         planDigest: entry.plan_digest, epoch: entry.root_lease_epoch, scope: entry.write_scope ?? [],
         lineageId: entry.lineage_id, attempts: entry.attempts_used, externalId: entry.external_operation_id,
         details: [...detail('agent', entry.name), ...detail('pane', entry.pane), ...detail('session', entry.session_id)],
@@ -943,7 +1048,7 @@ export function buildWorkTree(input: WorkTreeInput): WorkTree {
         ? byLease.get(admission.parent_lease_id)! : `task:${task.project}:${task.id}`,
       project: task.project, task: task.id, kind: 'native', recordId: branch.id, adapter: 'native', state: branch.status,
       active: ['creating', 'active', 'unknown'].includes(branch.status), terminal: !['creating', 'active', 'unknown'].includes(branch.status),
-      done: false, doneEnabled: false, doneBlockers: [], planDigest: admission?.plan_digest,
+      done: false, doneEnabled: false, doneBlockers: [], registeredPass: false, evidenceIncomplete: false, acceptance: [], acceptanceTruncated: false, planDigest: admission?.plan_digest,
       epoch: admission?.root_lease_epoch, scope: admission?.write_scope ?? [], lineageId: admission?.lineage_id,
       attempts: admission?.attempts_used, blocker: bounded(branch.error),
       details: [
@@ -970,8 +1075,15 @@ export function buildWorkTree(input: WorkTreeInput): WorkTree {
     if (node.parentId && !included.has(node.parentId)) node.parentId = null;
     if (node.kind === 'task') {
       const task = input.tasks.find((candidate) => candidate.id === node.task && candidate.project === node.project)!;
+      const acceptance = acceptanceEvidenceRows(task, input.events, input.teams[task.project] ?? []);
+      node.acceptance = acceptance;
       node.doneBlockers = taskBlockers(task, input, boundedNodes).map((blocker) => bounded(blocker)!);
       node.doneEnabled = node.active && node.doneBlockers.length === 0;
+      const guard = acceptanceGuard(task, acceptance);
+      node.registeredPass = guard.registeredPass;
+      node.evidenceIncomplete = guard.evidenceIncomplete;
+      node.acceptanceTruncated = acceptance.length > ACCEPTANCE_ROW_CAP;
+      node.acceptance = acceptance.slice(0, ACCEPTANCE_ROW_CAP);
     }
   }
   return { nodes: boundedNodes, truncated: nodes.length > NODE_CAP };

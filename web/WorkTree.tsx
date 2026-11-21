@@ -26,6 +26,7 @@ function rows(nodes: WorkTreeNode[]): Row[] {
 }
 
 function stateLabel(node: WorkTreeNode): string {
+  if (node.state === 'done' && node.evidenceIncomplete) return 'done · evidence incomplete';
   if (node.state === 'blocked_external:deadline_exceeded') return `${node.state} · quarantined`;
   if (node.state === 'blocked_external' || node.state === 'closing_external') return `${node.state} · active`;
   if (['failed', 'superseded', 'unknown'].includes(node.state)) return `${node.state} · not done`;
@@ -134,10 +135,43 @@ export function WorkTreeView({ tree, onChanged }: { tree: WorkTree; onChanged: (
                 <div key={item.label}><dt className="inline text-zinc-500">{item.label}: </dt><dd className="inline break-words">{item.value}</dd></div>
               ))}
             </dl>
+            {current.acceptance.length > 0 && (
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full text-left text-xs" aria-label="Acceptance evidence" data-acceptance-evidence>
+                  <caption className="mb-2 text-left font-medium text-zinc-100">Acceptance evidence</caption>
+                  <thead className="text-zinc-500">
+                    <tr>
+                      <th scope="col" className="pr-2 font-normal">acceptance</th>
+                      <th scope="col" className="pr-2 font-normal">predicate</th>
+                      <th scope="col" className="pr-2 font-normal">result</th>
+                      <th scope="col" className="pr-2 font-normal">artifact digest</th>
+                      <th scope="col" className="font-normal">target</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-zinc-400">
+                    {current.acceptance.map((row, index) => (
+                      <React.Fragment key={index}>
+                        <tr>
+                          <td className="pr-2 align-top">{row.acceptanceId} · {row.required ? 'required' : 'optional'}</td>
+                          <td className="pr-2 align-top">{row.predicateId}</td>
+                          <td className="pr-2 align-top font-medium text-zinc-100">{row.result}</td>
+                          <td className="max-w-32 break-all pr-2 align-top">{row.artifactDigest}</td>
+                          <td className="max-w-32 break-all align-top">{row.target}</td>
+                        </tr>
+                        {row.blocker && (
+                          <tr><td colSpan={5} className="break-words pb-2 text-amber-300">{row.blocker}</td></tr>
+                        )}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
+                {current.acceptanceTruncated && <p className="mt-2 text-amber-300">acceptance evidence truncated</p>}
+              </div>
+            )}
             {current.blocker && <p className="mt-2 break-words text-amber-300">{current.blocker}</p>}
             {current.doneBlockers.length > 0 && (
               <ul className="mt-2 flex flex-col gap-1 text-amber-300" aria-label="Done blockers">
-                {current.doneBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
+                {current.doneBlockers.map((blocker, index) => <li key={index}>{blocker}</li>)}
               </ul>
             )}
             {current.kind === 'task' && current.active && (

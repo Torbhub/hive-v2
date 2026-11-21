@@ -1,7 +1,7 @@
 import { paneExists } from './tmux.js';
 import type {
   Checkpoint, HubTask, NativeBranchClient, RootContract,
-  TaskEvidence, TaskEvent, TaskOperation, TaskOutcome, TaskOutcomeInput, TaskReceipt,
+  TaskAcceptance, TaskEvidence, TaskEvent, TaskOperation, TaskOutcome, TaskOutcomeInput, TaskReceipt,
 } from './types.js';
 import { CLOSED_STATES, PROGRESS_STATUSES, TASK_EVIDENCE_OUTCOMES, TASK_EVENTS } from './types.js';
 import {
@@ -11,6 +11,7 @@ import {
 } from './state.js';
 import { containsInternalContent } from './decisions.js';
 import { assertAdmissionCurrentLocked, revokeTaskAdmissionsLocked } from './admission.js';
+import { evidenceAcceptanceBound } from './acceptance.js';
 import {
   allowsLeaseLessFallback, canonicalActor, evaluateAcceptanceLocked, evaluateRegisteredAcceptanceLocked, matchingEvidence,
 } from './evidence.js';
@@ -245,6 +246,7 @@ type ResumeEvaluation = {
   evidenceHashes: string[];
   after?: string | number;
   adapterId: NonNullable<TaskEvidence['verification']>['adapter_id'] | 'any';
+  acceptance?: TaskAcceptance;
 };
 
 async function evaluateResumeConditionLocked(
@@ -268,14 +270,17 @@ async function evaluateResumeConditionLocked(
     const evidence = event.evidence;
     return index > events.length - 1 && event.id === task.id && event.event === 'evidence'
       && evidence?.outcome === 'passed' && evidence.plan_digest === task.plan_digest && evidence.epoch === task.lease_epoch
-      && evidence.verification?.adapter_id === acceptance.predicate_id
-      && evidence.verification.evidence_type === acceptance.predicate_id
+      && (acceptance.predicate_id !== 'task_receipt' || evidence.lease_id === blocked.lease_id)
+      && evidenceAcceptanceBound(task, acceptance, evidence)
       && (typeof configuredArtifact !== 'string' || evidence.artifact_digest === configuredArtifact);
   });
   if (qualifying.length === 0) return null;
   const hashes = qualifying.map((event) => event.evidence!.evidence_hash);
   if (!requiredHashes.every((hash) => hashes.includes(hash))) return null;
-  return { evidenceHashes: hashes, after: events.length - 1, adapterId: acceptance.predicate_id as ResumeEvaluation['adapterId'] };
+  return {
+    evidenceHashes: hashes, after: events.length - 1,
+    adapterId: acceptance.predicate_id as ResumeEvaluation['adapterId'], acceptance,
+  };
 }
 
 async function assertReceiptTransition(
@@ -408,7 +413,7 @@ export async function recordTaskReceipt(
     if (declaredOutput(task, receipt)) assertDeclaredOutputBinding(task, receipt);
     else if (!matchingEvidence(
       evaluation ? await readTaskEvents(root) : events,
-      id, receipt, task, recovery, false, evaluation?.after, evaluation?.adapterId,
+      id, receipt, task, recovery, false, evaluation?.after, evaluation?.adapterId, evaluation?.acceptance,
     )) {
       throw new Refusal(`${id} receipt evidence is not bound to the current plan, epoch, actor, and artifact`);
     }
@@ -437,6 +442,7 @@ export async function reconcileBlockedTasks(root: string, native?: NativeBranchC
       };
       if (!matchingEvidence(
         await readTaskEvents(root), task.id, receipt, task, false, false, evaluation.after, evaluation.adapterId,
+        evaluation.acceptance,
       )) return;
       assertCurrentBinding(task, receipt);
       await assertWorkerBinding(root, task, receipt);

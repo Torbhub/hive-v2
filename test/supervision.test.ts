@@ -6,6 +6,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { reconcileTaskBudgets } from '../src/admission.js';
 import { OPERATION_REGISTRY, PREDICATE_REGISTRY } from '../src/evidence.js';
+import { recordTaskOutcome } from '../src/hub.js';
 import { buildWorkTree, supervisionPass } from '../src/supervision.js';
 import {
   appendTaskEvent, contractDigest, foldTasks, readTaskEvents, taskEvidenceDigests, withHubLock, writeJson, writeProjects,
@@ -1270,6 +1271,42 @@ describe('github check supervision', () => {
     } finally {
       releaseOversizedResponse();
     }
+  });
+});
+
+describe('acceptance outcome evidence binding', () => {
+  it('rejects another acceptance registered hash through recordTaskOutcome', async () => {
+    const github = await githubServer();
+    const required = taskEvidenceDigests({ run: 'other' }, { conclusion: 'success' });
+    const first = acceptance({ id: 'github-a', required_evidence: [required.evidence_hash] });
+    const second = acceptance({ id: 'github-b' });
+    const current = await fixture([first, second]);
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    for (const acceptanceId of ['github-a', 'github-b']) {
+      const currentConfig = config(await task(current.root), { acceptance_id: acceptanceId });
+      await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', currentConfig, options);
+      Object.assign(github.runs.at(-1)!, { status: 'completed', conclusion: 'success' });
+      const operation = (await task(current.root)).operations!.at(-1)!;
+      await OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', operation.operation_id, options);
+    }
+    const currentTask = await task(current.root);
+    const operationB = currentTask.operations!.find((operation) => operation.acceptance_id === 'github-b')!;
+    await appendTaskEvent(current.root, {
+      id: 'demo-1', project: 'demo', event: 'evidence', at: AT,
+      evidence: {
+        actor: 'adapter:github_check', plan_digest: current.planDigest, epoch: 1, outcome: 'passed',
+        artifact: { run: 'other' }, content: { conclusion: 'success' }, ...required,
+        artifact_digest: ARTIFACT,
+        verification: {
+          adapter_id: 'github_check', evidence_type: 'github_check', acceptance_id: 'github-b',
+          provenance_digest: operationB.idempotency_key,
+        },
+      },
+    });
+    await expect(recordTaskOutcome(current.root, 'demo-1', 'done', {
+      actor: 'legacy', plan_digest: current.planDigest, epoch: 1,
+    })).rejects.toThrow(/registered acceptance/);
+    expect((await task(current.root)).state).not.toBe('done');
   });
 });
 

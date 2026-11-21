@@ -9,6 +9,7 @@ import {
   heartbeatQuestionBatch, listOpenQuestionBatches, readQuestionBatch, validateAnswers, validateBatchInput,
 } from '../src/questions.js';
 import { hubPath, writeJson } from '../src/state.js';
+import { supervisionPass } from '../src/supervision.js';
 
 const meta = { project: 'demo', agent: 'demo-orchestrator' };
 
@@ -273,6 +274,17 @@ describe('sweepQuestionBatches', () => {
     await sweepQuestionBatches(r);
     expect((await readQuestionBatch(r, old.id)).status).toBe('cancelled');
     expect((await readQuestionBatch(r, fresh.id)).status).toBe('open');
+    const audit = await readFile(hubPath(r, 'decisions.jsonl'), 'utf8');
+    expect(audit).toContain(`expired question batch ${old.id}`);
+  });
+
+  it('runs expiry through watch supervision maintenance', async () => {
+    const r = await root();
+    const old = await createQuestionBatch(r, meta, input());
+    const staleDate = new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString();
+    await writeJson(hubPath(r, 'questions', `${old.id}.json`), { ...old, createdAt: staleDate });
+    await supervisionPass(r);
+    expect((await readQuestionBatch(r, old.id)).status).toBe('cancelled');
     const audit = await readFile(hubPath(r, 'decisions.jsonl'), 'utf8');
     expect(audit).toContain(`expired question batch ${old.id}`);
   });

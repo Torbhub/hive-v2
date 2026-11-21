@@ -33,6 +33,12 @@ function publicNode(node: WorkTreeNode): WorkTreeNode {
     doneBlockers: [...node.doneBlockers], planDigest: node.planDigest, epoch: node.epoch,
     scope: [...node.scope], lineageId: node.lineageId, attempts: node.attempts, blocker: node.blocker,
     externalId: node.externalId, evidenceOutcome: node.evidenceOutcome,
+    registeredPass: node.registeredPass, evidenceIncomplete: node.evidenceIncomplete,
+    acceptanceTruncated: node.acceptanceTruncated,
+    acceptance: node.acceptance.map((row) => ({
+      acceptanceId: row.acceptanceId, predicateId: row.predicateId, required: row.required, result: row.result,
+      artifactDigest: row.artifactDigest, target: row.target, blocker: row.blocker,
+    })),
     details: node.details.map(({ label, value }) => ({ label, value })),
   };
 }

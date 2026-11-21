@@ -204,9 +204,9 @@ hive ui                                  — the hub screen
   suppresses stale and wedge checks only while that heartbeat is recent.
 - A dead MCP child never closes its batch: an orphaned batch stays open and
   the owner can cancel it. Its heartbeat expires, so normal watchdog recovery
-  resumes. There is no idempotent resume by design. A lazy
-  sweep (driven by the hub view) cancels open batches older than 7 days with
-  an `expired` audit note, and prunes closed history to the newest 200.
+  resumes. There is no idempotent resume by design. Watch maintenance
+  cancels open batches older than 7 days with an `expired` audit note, and
+  prunes closed history to the newest 200. `/api/view` never runs this sweep.
   `/api/view` carries the oldest 50 open batches and `questionsTotal` counts
   them all, so a full screen never turns into a giant payload.
 

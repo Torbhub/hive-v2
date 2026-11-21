@@ -59,7 +59,7 @@ import { sendOwnerMessage } from '../src/message.js';
 import { typeLine } from '../src/spawn.js';
 import { capturePane, paneExists, paneIs, run, sendLiteral, sleep } from '../src/tmux.js';
 import { createServer } from '../web/server.js';
-import { appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readProjects, readTaskEvents, Refusal, writeJson } from '../src/state.js';
+import { appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readProjects, readTaskEvents, Refusal, valueDigest, writeJson } from '../src/state.js';
 import { authHeaders, configureSecurity } from './security-fixture.js';
 import { taskContract } from './task-contract.js';
 import { snapshotNativeMessages } from '../src/native-history.js';
@@ -1767,12 +1767,24 @@ describe('work-tree read authorization', () => {
         artifact_digest: 'b'.repeat(64), resume_condition: 'success', watcher_id: 'watcher-1',
       },
     });
+    await appendTaskEvent(treeRoot, {
+      id: 'demo-1', project: 'demo', event: 'evidence', at,
+      evidence: {
+        actor: 'agent:builder', plan_digest: planDigest, epoch: 1, outcome: 'passed', lease_id: 'lease-1',
+        artifact: { privatePath: '/secret-native' }, content: { privatePath: '/secret-native' },
+        artifact_digest: 'b'.repeat(64), evidence_hash: 'e'.repeat(64),
+        verification: {
+          adapter_id: 'git_diff_scope' as const, evidence_type: 'git_diff_scope' as const,
+          provenance_digest: valueDigest(rootContract.provenance), acceptance_id: 'diff',
+        },
+      },
+    });
     await writeJson(hivePath(home, 'team.json'), {
       agents: [
         { name: 'demo-orchestrator', orchestrator: true, pane: '%1', session_id: 'orchestrator-session' },
         {
           name: 'builder', task: 'demo-1', pane: '%7', session_id: 'parent-session', lease_id: 'lease-1',
-          admission_status: 'running', parent_id: 'demo-1', plan_digest: planDigest,
+          admission_status: 'running', parent_id: 'demo-1', plan_digest: planDigest, root_lease_epoch: 1, lease_epoch: 1,
         },
       ],
     });
@@ -1807,9 +1819,38 @@ describe('work-tree read authorization', () => {
         { label: 'parent session', value: 'parent-session' }, { label: 'child session', value: 'child-session' },
       ]));
       expect(nodes[0].externalId).toBe('external-run-1');
+      expect(nodes[0].acceptance).toEqual([{
+        acceptanceId: 'diff', predicateId: 'git_diff_scope', required: true, result: 'PASS',
+        artifactDigest: 'b'.repeat(64), target: '1'.repeat(40),
+      }]);
       expect(JSON.stringify(view.workTree)).not.toContain('/secret-native');
       expect(JSON.stringify(view.workTree)).not.toContain('secret-workspace');
+      expect(JSON.stringify(view.workTree)).not.toContain('privatePath');
       expect(await Promise.all(files.map((file) => fs.readFile(file, 'utf8')))).toEqual(before);
+    } finally {
+      listening.s.close();
+    }
+  });
+
+  it('does not expire or rewrite question batches during GET /api/view', async () => {
+    const { treeRoot } = await treeFixture();
+    const batch = await createQuestionBatch(treeRoot, { project: 'demo', agent: 'builder' }, {
+      context: 'Choose the next step.',
+      questions: [{
+        question: 'Continue?', context: 'Owner review.', priority: 1, recommended: 'c1',
+        choices: [{ label: 'Yes', description: 'Continue.' }, { label: 'No', description: 'Stop.' }],
+      }],
+    });
+    const staleDate = new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString();
+    const filename = hubPath(treeRoot, 'questions', `${batch.id}.json`);
+    await writeJson(filename, { ...batch, createdAt: staleDate });
+    const before = await fs.readFile(filename, 'utf8');
+    const listening = await listenOn(treeRoot);
+    try {
+      const response = await fetch(`${listening.url}/api/view`);
+      expect(response.status).toBe(200);
+      expect(await fs.readFile(filename, 'utf8')).toBe(before);
+      expect(JSON.parse(await fs.readFile(filename, 'utf8')).status).toBe('open');
     } finally {
       listening.s.close();
     }
@@ -1838,6 +1879,7 @@ describe('work-tree read authorization', () => {
       expect(JSON.stringify(view.workTree)).not.toContain('external-run-1');
       expect(JSON.stringify(view.workTree)).not.toContain('external-check');
       expect(JSON.stringify(view.workTree)).not.toContain('/secret-native');
+      expect(JSON.stringify(view.workTree)).not.toContain('"acceptanceId":"diff"');
     } finally {
       treeServer.close();
       broker.close();

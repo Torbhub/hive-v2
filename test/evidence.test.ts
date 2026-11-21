@@ -399,6 +399,71 @@ async function evaluateNative(fixture: Awaited<ReturnType<typeof nativeFixture>>
   return evaluateTaskPredicate(fixture.root, 'demo-1', 'native_result', config, 1, fixture.native);
 }
 
+describe('acceptance-bound evidence regressions', () => {
+  it('refuses an ambiguous native config instead of emitting unbound success', async () => {
+    const fixture = await nativeFixture([
+      { id: 'native-a', predicate_id: 'native_result', version: 1, configuration: {}, required_evidence: ['native-a'] },
+      { id: 'native-b', predicate_id: 'native_result', version: 1, configuration: {}, required_evidence: ['native-b'] },
+    ], ['native-a', 'native-b']);
+    await expect(evaluateNative(fixture, { plan_digest: fixture.planDigest })).resolves.toBe(false);
+    expect((await readTaskEvents(fixture.root)).filter((event) => event.event === 'evidence')).toHaveLength(0);
+  });
+
+  it('reuses or appends native evidence by acceptance instead of blocking on a cross-acceptance latest hash', async () => {
+    const fixture = await nativeFixture([
+      { id: 'native-a', predicate_id: 'native_result', version: 1, configuration: {}, required_evidence: ['native-a'] },
+      { id: 'native-b', predicate_id: 'native_result', version: 1, configuration: {}, required_evidence: ['native-b'] },
+    ], ['native-a', 'native-b']);
+    await expect(evaluateNative(fixture, { plan_digest: fixture.planDigest, acceptance_id: 'native-a' })).resolves.toBe(true);
+    await expect(evaluateNative(fixture, { plan_digest: fixture.planDigest, acceptance_id: 'native-b' })).resolves.toBe(true);
+    await expect(evaluateNative(fixture, { plan_digest: fixture.planDigest, acceptance_id: 'native-a' })).resolves.toBe(true);
+    const evidence = (await readTaskEvents(fixture.root)).filter((event) => event.event === 'evidence');
+    expect(evidence).toHaveLength(2);
+    expect(evidence.map((event) => event.evidence?.verification?.acceptance_id)).toEqual(['native-a', 'native-b']);
+  });
+
+  it('selects duplicate task receipts by exact acceptance through the adapter shortcut and Done', async () => {
+    const digest = createHash('sha256').update('artifact\n').digest('hex');
+    const first = { ...outputAcceptance(digest), id: 'receipt-a' };
+    const second = { ...outputAcceptance(digest), id: 'receipt-b' };
+    const fixture = await setup({ acceptance: [first, second], writer: true });
+    const config = await declareOutput(fixture.root, digest);
+    await expect(evaluateTaskPredicate(fixture.root, 'demo-1', 'task_receipt', config)).resolves.toBe(false);
+    expect((await readTaskEvents(fixture.root)).filter((event) => event.event === 'evidence')).toHaveLength(0);
+    await expect(evaluateTaskPredicate(fixture.root, 'demo-1', 'task_receipt', {
+      ...config, acceptance_id: 'receipt-a',
+    })).resolves.toBe(true);
+    await expect(evaluateTaskPredicate(fixture.root, 'demo-1', 'task_receipt', {
+      ...config, acceptance_id: 'receipt-b',
+    })).resolves.toBe(true);
+    await expect(evaluateTaskPredicate(fixture.root, 'demo-1', 'task_receipt', {
+      ...config, acceptance_id: 'receipt-a',
+    })).resolves.toBe(true);
+    const evidence = (await readTaskEvents(fixture.root)).filter((event) => event.event === 'evidence');
+    expect(evidence.map((event) => event.evidence?.verification?.acceptance_id)).toEqual(['receipt-a', 'receipt-b']);
+    const { transitionTmuxAdmission } = await import('../src/admission.js');
+    await transitionTmuxAdmission(fixture.root, fixture.home, 'demo-1', 'builder', 'lease-1', 'released');
+    await recordDone(fixture.root);
+    expect((await currentTask(fixture.root)).state).toBe('done');
+  });
+
+  it('uses the new adapter receipt for required evidence on the first Done evaluation', async () => {
+    const digest = createHash('sha256').update('artifact\n').digest('hex');
+    const artifact = { output_claim: 'a bounded diff', path: 'src/a.ts', content_digest: digest };
+    const content = { bytes: Buffer.byteLength('artifact\n'), declared_sequence: 1 };
+    const item = { ...outputAcceptance(digest), required_evidence: [valueDigest({ artifact, content })] };
+    const fixture = await setup({ acceptance: [item], writer: true });
+    await declareOutput(fixture.root, digest);
+    const { transitionTmuxAdmission } = await import('../src/admission.js');
+    await transitionTmuxAdmission(fixture.root, fixture.home, 'demo-1', 'builder', 'lease-1', 'released');
+    await recordDone(fixture.root);
+    expect((await currentTask(fixture.root)).state).toBe('done');
+    const evidence = (await readTaskEvents(fixture.root)).filter((event) => event.event === 'evidence');
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0].evidence?.verification?.acceptance_id).toBe('receipt');
+  });
+});
+
 describe('native result evidence', () => {
   it('registers verified result evidence once and reconciles the parent outcome', async () => {
     const fixture = await nativeFixture();
@@ -527,7 +592,11 @@ describe('native result evidence', () => {
       admission: { ...fixture.nativeAdmission, acceptance_ids: ['native-a', 'native-b'] },
     });
     await expect(evaluateNative(fixture, configB)).resolves.toBe(true);
-    expect((await readTaskEvents(fixture.root)).filter((event) => event.event === 'evidence')).toHaveLength(2);
+    const rebound = (await readTaskEvents(fixture.root)).filter((event) => event.event === 'evidence');
+    expect(rebound).toHaveLength(3);
+    expect(rebound.at(-1)?.evidence).toMatchObject({
+      lease_id: NATIVE_LEASE_ID, verification: { acceptance_id: 'native-b' },
+    });
   });
 
   it.each(['session_child', 'session_parent'])('rejects cached evidence after %s advances without refresh', async (sessionId) => {
@@ -1080,6 +1149,19 @@ describe('review evidence blockers', () => {
 });
 
 describe('evidence outcomes', () => {
+  it('rejects an agent unverified required hash through recordTaskOutcome', async () => {
+    const item = { ...diffAcceptance(), required_evidence: [DIGESTS.evidence_hash] };
+    const fixture = await setup({ acceptance: [item], writer: true });
+    const current = await currentTask(fixture.root);
+    await recordTaskEvidence(fixture.root, current.id, {
+      actor: 'agent:builder', plan_digest: current.plan_digest!, epoch: 1, lease_id: 'lease-1',
+      outcome: 'passed', artifact: ARTIFACT, content: CONTENT,
+    });
+    await passAcceptance(fixture.root);
+    await expect(recordDone(fixture.root)).rejects.toThrow(/registered acceptance/);
+    expect((await currentTask(fixture.root)).state).not.toBe('done');
+  });
+
   it('requires a registered pass before done', async () => {
     const unverified = await setup();
     await expect(recordDone(unverified.root)).rejects.toThrow(/registered acceptance/);
