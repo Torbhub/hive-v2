@@ -47,7 +47,7 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
   return {
     ...orig,
     paneIs: vi.fn(orig.paneIs), paneExists: vi.fn(orig.paneExists), capturePane: vi.fn(orig.capturePane),
-    sendLiteral: vi.fn(orig.sendLiteral), sleep: vi.fn(orig.sleep), run: vi.fn(orig.run),
+    sendLiteral: vi.fn(orig.sendLiteral), sendEnter: vi.fn(orig.sendEnter), sleep: vi.fn(orig.sleep), run: vi.fn(orig.run),
   };
 });
 
@@ -57,7 +57,7 @@ import { killAgent } from '../src/kill.js';
 import { createQuestionBatch } from '../src/questions.js';
 import { sendOwnerMessage } from '../src/message.js';
 import { typeLine } from '../src/spawn.js';
-import { capturePane, paneExists, paneIs, run, sendLiteral, sleep } from '../src/tmux.js';
+import { capturePane, paneExists, paneIs, run, sendEnter, sendLiteral, sleep } from '../src/tmux.js';
 import { createServer } from '../web/server.js';
 import { appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readProjects, readTaskEvents, Refusal, valueDigest, writeJson } from '../src/state.js';
 import { authHeaders, configureSecurity } from './security-fixture.js';
@@ -66,6 +66,7 @@ import { snapshotNativeMessages } from '../src/native-history.js';
 import { buildNeeds } from '../src/ui/look.js';
 import { lines, parseDialog } from '../src/screen.js';
 
+const REAL_TYPE_LINE = vi.mocked(typeLine).getMockImplementation()!;
 let server: Server;
 let base: string;
 let root: string;
@@ -828,23 +829,69 @@ describe('POST /api/message', () => {
 
   it('the real send folds newlines into one typed line and logs the decision', async () => {
     vi.mocked(paneIs).mockResolvedValue(true);
-    vi.mocked(capturePane).mockResolvedValue('demo-orchestrator is idle at its prompt');
+    vi.mocked(capturePane).mockResolvedValue('│ >');
     vi.mocked(typeLine).mockResolvedValue(undefined);
     try {
       const r = await post('/api/message', { project: 'demo', text: 'line1\nline2' });
       expect(r.status).toBe(200);
       expect((await r.json()).typed).toBe('Owner: line1 line2');
       expect(vi.mocked(typeLine)).toHaveBeenCalledWith(
-        '%999', 'Owner: line1 line2', { pid: 424242, started: 'Mon Jan  1 00:00:00 2024' },
+        '%999', 'Owner: line1 line2', { pid: 424242, started: 'Mon Jan  1 00:00:00 2024' }, expect.any(Function),
       );
       const log = (await fs.readFile(hubPath(root, 'decisions.jsonl'), 'utf8')).trim().split('\n');
       const last = JSON.parse(log[log.length - 1]);
       expect(last.by).toBe('owner');
-      expect(last.summary).toContain('line1 line2');
+      expect(last.summary).toBe('message to demo-orchestrator: line1 line2');
     } finally {
       vi.mocked(paneIs).mockRestore();
       vi.mocked(capturePane).mockRestore();
       vi.mocked(typeLine).mockRestore();
+    }
+  });
+
+  it.each([
+    { name: 'idle', afterEnter: 'done\n│ > ', wrapped: false },
+    { name: 'unknown output', afterEnter: 'ordinary output without a prompt', wrapped: false },
+    { name: 'dialog transition', afterEnter: COMMAND_DIALOG, wrapped: false },
+    { name: 'wrapped input', afterEnter: 'done\n│ > ', wrapped: true },
+  ])('delivers an owner message through the real typing sequence with $name', async ({ afterEnter, wrapped }) => {
+    const text = wrapped ? 'x'.repeat(100) : 'hello';
+    const expected = `Owner: ${text}`;
+    let screen = '│ > ';
+    const events: string[] = [];
+    vi.mocked(paneIs).mockResolvedValue(true);
+    vi.mocked(typeLine).mockImplementation(REAL_TYPE_LINE);
+    vi.mocked(sleep).mockResolvedValue(undefined);
+    vi.mocked(capturePane).mockClear().mockImplementation(async () => {
+      events.push('capture');
+      return screen;
+    });
+    vi.mocked(sendLiteral).mockClear().mockImplementation(async (_pane, typed) => {
+      events.push('literal');
+      screen = wrapped ? `│ > ${typed.slice(0, 80)}\n${typed.slice(80)}` : `│ > ${typed}`;
+    });
+    vi.mocked(sendEnter).mockClear().mockImplementation(async () => {
+      events.push('enter');
+      screen = afterEnter;
+    });
+    try {
+      const response = await post('/api/message', { project: 'demo', text });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true, typed: expected });
+      expect(sendLiteral).toHaveBeenCalledWith(
+        '%999', expected, { pid: 424242, started: 'Mon Jan  1 00:00:00 2024' },
+      );
+      expect(sendEnter).toHaveBeenCalledTimes(1);
+      expect(events).toEqual(['capture', 'literal', 'capture', 'enter', 'capture']);
+      const log = (await fs.readFile(hubPath(root, 'decisions.jsonl'), 'utf8')).trim().split('\n');
+      expect(JSON.parse(log[log.length - 1]).by).toBe('owner');
+    } finally {
+      vi.mocked(paneIs).mockRestore();
+      vi.mocked(capturePane).mockRestore();
+      vi.mocked(typeLine).mockRestore();
+      vi.mocked(sendLiteral).mockRestore();
+      vi.mocked(sendEnter).mockRestore();
+      vi.mocked(sleep).mockRestore();
     }
   });
 });
