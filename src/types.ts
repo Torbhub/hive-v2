@@ -145,6 +145,9 @@ export type TaskOperation = {
   branch: string;
   status: 'pending' | 'ambiguous' | 'succeeded' | 'failed' | 'blocked_external' | 'closing_external';
   updated_at: string;
+  attempt_id?: string;
+  attempted_at?: string;
+  attempt_phase?: 'dispatch_lookup' | 'dispatch_post' | 'cancellation_claim' | 'cancellation_patch';
   result?: TaskOperationResult;
   detail?: string;
   owner?: string;

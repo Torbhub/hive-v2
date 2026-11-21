@@ -4,11 +4,14 @@ import { appendFile, mkdir, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { reconcileTaskBudgets } from '../src/admission.js';
 import { OPERATION_REGISTRY, PREDICATE_REGISTRY } from '../src/evidence.js';
 import { buildWorkTree, supervisionPass } from '../src/supervision.js';
-import { appendTaskEvent, contractDigest, foldTasks, readTaskEvents, taskEvidenceDigests, writeJson, writeProjects } from '../src/state.js';
+import {
+  appendTaskEvent, contractDigest, foldTasks, readTaskEvents, taskEvidenceDigests, withHubLock, writeJson, writeProjects,
+} from '../src/state.js';
 import type {
-  HubTask, NativeBranchRecord, RootContract, TaskAcceptance, TeamEntry,
+  HubTask, NativeBranchRecord, RootContract, TaskAcceptance, TaskEvent, TeamEntry,
 } from '../src/types.js';
 
 const SHA = 'a'.repeat(40);
@@ -35,18 +38,34 @@ type CheckRun = {
 async function githubServer() {
   const runs: CheckRun[] = [];
   const calls = { posts: 0, patches: 0, lists: 0 };
-  const state = { patchFailures: 0 };
+  const state = { getFailures: 0, patchFailures: 0, lostPatchResponses: 0 };
   const requests: { method: string; url: string; authorized: boolean }[] = [];
+  const deferrals: { method: string; markEntered: () => void; wait: Promise<void> }[] = [];
+  const defer = (method: string) => {
+    let markEntered!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    deferrals.push({ method, markEntered, wait });
+    return { entered, release };
+  };
   const server = createServer((req, res) => {
     requests.push({ method: req.method ?? '', url: req.url ?? '', authorized: Boolean(req.headers.authorization) });
     void (async () => {
+      if (req.method === 'POST') calls.posts++;
+      if (req.method === 'PATCH') calls.patches++;
+      const deferralIndex = deferrals.findIndex((candidate) => candidate.method === req.method);
+      if (deferralIndex >= 0) {
+        const [deferral] = deferrals.splice(deferralIndex, 1);
+        deferral.markEntered();
+        await deferral.wait;
+      }
       const url = new URL(req.url ?? '/', 'http://github.test');
       const send = (value: unknown, status = 200) => {
         res.writeHead(status, { 'content-type': 'application/json' });
         res.end(JSON.stringify(value));
       };
       if (req.method === 'POST' && url.pathname === '/repos/octo/hive/check-runs') {
-        calls.posts++;
         let raw = '';
         for await (const chunk of req) raw += chunk;
         const body = JSON.parse(raw) as { head_sha: string; external_id: string; name: string };
@@ -69,17 +88,28 @@ async function githubServer() {
         return;
       }
       if (req.method === 'GET') {
+        if (state.getFailures > 0) {
+          state.getFailures--;
+          send({ message: 'injected GET failure' }, 500);
+          return;
+        }
         send(run);
         return;
       }
       if (req.method === 'PATCH') {
-        calls.patches++;
         if (state.patchFailures > 0) {
           state.patchFailures--;
           send({ message: 'injected PATCH failure' }, 500);
           return;
         }
         run.cancellation_requested = true;
+        if (state.lostPatchResponses > 0) {
+          state.lostPatchResponses--;
+          run.status = 'completed';
+          run.conclusion = 'cancelled';
+          req.socket.destroy();
+          return;
+        }
         send(run);
         return;
       }
@@ -96,6 +126,7 @@ async function githubServer() {
     calls,
     state,
     requests,
+    defer,
     baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
   };
 }
@@ -161,6 +192,17 @@ function events(root: string, kind: string) {
   return readTaskEvents(root).then((items) => items.filter((item) => item.event === kind));
 }
 
+async function noteWhileBlocked(
+  root: string, gate: { entered: Promise<void>; release: () => void }, note: string,
+): Promise<void> {
+  await gate.entered;
+  try {
+    await withHubLock(root, () => appendTaskEvent(root, { id: 'demo-1', project: 'demo', event: 'note', at: AT, note }));
+  } finally {
+    gate.release();
+  }
+}
+
 async function recordFlow(root: string, fixture: string, label: string): Promise<void> {
   const directory = process.env.HIVE_TEST_ARTIFACTS;
   if (!directory) return;
@@ -178,6 +220,470 @@ async function recordFlow(root: string, fixture: string, label: string): Promise
 }
 
 describe('github check supervision', () => {
+  it('allows hub writes while dispatch, reconcile, cancel, and transfer HTTP is blocked', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    const currentConfig = config(await task(current.root));
+
+    const dispatchGate = github.defer('GET');
+    const dispatching = OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', currentConfig, options);
+    await noteWhileBlocked(current.root, dispatchGate, 'dispatch HTTP is outside the hub lock');
+    await dispatching;
+    const operation = (await task(current.root)).operations!.at(-1)!;
+
+    const reconcileGate = github.defer('GET');
+    const reconciling = OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', operation.operation_id, options);
+    await noteWhileBlocked(current.root, reconcileGate, 'reconcile HTTP is outside the hub lock');
+    await reconciling;
+
+    const cancelFindGate = github.defer('GET');
+    const cancelPatchGate = github.defer('PATCH');
+    const cancelling = OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
+    await noteWhileBlocked(current.root, cancelFindGate, 'cancel lookup is outside the hub lock');
+    await noteWhileBlocked(current.root, cancelPatchGate, 'cancel PATCH is outside the hub lock');
+    await cancelling;
+
+    github.runs[0].app.slug = 'new-owner';
+    const transferGate = github.defer('GET');
+    const transferring = OPERATION_REGISTRY.github_check.transfer(current.root, 'demo-1', operation.operation_id, {
+      ...options, newOwner: 'new-owner',
+    });
+    await noteWhileBlocked(current.root, transferGate, 'transfer HTTP is outside the hub lock');
+    await transferring;
+    expect(await events(current.root, 'note')).toHaveLength(5);
+  });
+
+  it('persists one dispatch intent across concurrent callers', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    const currentConfig = config(await task(current.root));
+    const gate = github.defer('POST');
+    const first = OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', currentConfig, options);
+    const second = OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', currentConfig, options);
+    try {
+      await gate.entered;
+      expect(github.calls.posts).toBe(1);
+      expect((await task(current.root)).operations!.at(-1)).toMatchObject({ status: 'pending' });
+    } finally {
+      gate.release();
+    }
+    await Promise.all([first, second]);
+    expect(github.calls.posts).toBe(1);
+    expect(github.runs).toHaveLength(1);
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({
+      status: 'blocked_external', external_run_id: '100',
+    });
+  });
+
+  it('recovers a persisted dispatch intent without a duplicate POST', async () => {
+    const github = await githubServer();
+    const origin = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    const gate = github.defer('POST');
+    const dispatching = OPERATION_REGISTRY.github_check.dispatch(
+      origin.root, 'demo-1', config(await task(origin.root)), options,
+    );
+    let intent: TaskEvent;
+    try {
+      await gate.entered;
+      intent = (await events(origin.root, 'operation'))[0];
+      expect(intent.operation).toMatchObject({ status: 'pending' });
+      expect(intent.operation?.attempt_id).toBeUndefined();
+    } finally {
+      gate.release();
+    }
+    await dispatching;
+
+    const crashed = await fixture();
+    await appendTaskEvent(crashed.root, intent);
+    github.runs.splice(0);
+    const postsBeforeRecovery = github.calls.posts;
+    await supervisionPass(crashed.root, options);
+    expect(github.calls.posts).toBe(postsBeforeRecovery + 1);
+    expect((await task(crashed.root)).operations!.at(-1)).toMatchObject({
+      status: 'blocked_external', external_run_id: '100',
+    });
+    await supervisionPass(crashed.root, options);
+    expect(github.calls.posts).toBe(postsBeforeRecovery + 1);
+  });
+
+  it('fences concurrent recovery callers to one POST', async () => {
+    const github = await githubServer();
+    const origin = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    await OPERATION_REGISTRY.github_check.dispatch(origin.root, 'demo-1', config(await task(origin.root)), options);
+    const bound = (await task(origin.root)).operations!.at(-1)!;
+    const current = await fixture();
+    await appendTaskEvent(current.root, {
+      id: 'demo-1', project: 'demo', event: 'operation', at: AT,
+      operation: { ...bound, status: 'pending', external_run_id: undefined },
+    });
+    github.runs.splice(0);
+    const postsBeforeRecovery = github.calls.posts;
+    const gate = github.defer('POST');
+    const first = supervisionPass(current.root, options);
+    const second = supervisionPass(current.root, options);
+    try {
+      await gate.entered;
+      expect(github.calls.posts).toBe(postsBeforeRecovery + 1);
+    } finally {
+      gate.release();
+    }
+    await Promise.all([first, second]);
+    expect(github.calls.posts).toBe(postsBeforeRecovery + 1);
+    expect(github.runs).toHaveLength(1);
+  });
+
+  it('fences an initial dispatch against overlapping recovery', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    const gate = github.defer('POST');
+    const dispatching = OPERATION_REGISTRY.github_check.dispatch(
+      current.root, 'demo-1', config(await task(current.root)), options,
+    );
+    try {
+      await gate.entered;
+      await supervisionPass(current.root, options);
+      expect(github.calls.posts).toBe(1);
+    } finally {
+      gate.release();
+    }
+    await dispatching;
+    expect(github.calls.posts).toBe(1);
+    expect(github.runs).toHaveLength(1);
+  });
+
+  it('fences a timed-out lookup before a replacement can POST', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    const lookupGate = github.defer('GET');
+    const dispatching = OPERATION_REGISTRY.github_check.dispatch(
+      current.root, 'demo-1', config(await task(current.root)), options,
+    );
+    await lookupGate.entered;
+    const claimed = (await task(current.root)).operations!.at(-1)!;
+    expect(claimed.attempt_phase).toBe('dispatch_lookup');
+    await appendTaskEvent(current.root, {
+      id: 'demo-1', project: 'demo', event: 'operation', at: AT,
+      operation: { ...claimed, attempted_at: '2000-01-01T00:00:00.000Z' },
+    });
+    const postGate = github.defer('POST');
+    const recovering = supervisionPass(current.root, options);
+    try {
+      await postGate.entered;
+      lookupGate.release();
+      await dispatching;
+      expect(github.calls.posts).toBe(1);
+    } finally {
+      lookupGate.release();
+      postGate.release();
+    }
+    await recovering;
+    expect(github.calls.posts).toBe(1);
+    expect(github.runs).toHaveLength(1);
+  });
+
+  it('marks a timed-out dispatch_post ambiguous without another POST', async () => {
+    const github = await githubServer();
+    const origin = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    await OPERATION_REGISTRY.github_check.dispatch(origin.root, 'demo-1', config(await task(origin.root)), options);
+    const bound = (await task(origin.root)).operations!.at(-1)!;
+    const current = await fixture();
+    await appendTaskEvent(current.root, {
+      id: 'demo-1', project: 'demo', event: 'operation', at: AT,
+      operation: {
+        ...bound, status: 'pending', external_run_id: undefined,
+        attempt_id: 'crashed-post', attempted_at: '2000-01-01T00:00:00.000Z', attempt_phase: 'dispatch_post',
+      },
+    });
+    github.runs.splice(0);
+    const postsBeforeRecovery = github.calls.posts;
+    const pass = await supervisionPass(current.root, options);
+    expect(github.calls.posts).toBe(postsBeforeRecovery);
+    expect(github.runs).toHaveLength(0);
+    expect(pass.watchers).toEqual([bound.watcher_id]);
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({
+      status: 'blocked_external', detail: 'dispatch_ambiguous',
+    });
+    expect((await task(current.root)).operations!.at(-1)!.attempt_id).toBeUndefined();
+    await supervisionPass(current.root, options);
+    expect(github.calls.posts).toBe(postsBeforeRecovery);
+    expect((await task(current.root)).operations!.at(-1)!.detail).toBe('dispatch_ambiguous');
+  });
+
+  it('binds a late original run without another POST', async () => {
+    const github = await githubServer();
+    const origin = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    await OPERATION_REGISTRY.github_check.dispatch(origin.root, 'demo-1', config(await task(origin.root)), options);
+    const bound = (await task(origin.root)).operations!.at(-1)!;
+    const current = await fixture();
+    await appendTaskEvent(current.root, {
+      id: 'demo-1', project: 'demo', event: 'operation', at: AT,
+      operation: {
+        ...bound, status: 'pending', external_run_id: undefined,
+        attempt_id: 'crashed-post', attempted_at: '2000-01-01T00:00:00.000Z', attempt_phase: 'dispatch_post',
+      },
+    });
+    github.runs.splice(0);
+    github.runs.push({
+      id: 100, head_sha: SHA, external_id: bound.external_id!, name: `hive-enforcement:${bound.external_id}`,
+      status: 'in_progress', conclusion: null, app: { slug: 'hive-checks' },
+    });
+    const postsBeforeRecovery = github.calls.posts;
+    await supervisionPass(current.root, options);
+    expect(github.calls.posts).toBe(postsBeforeRecovery);
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({
+      status: 'blocked_external', external_run_id: '100',
+    });
+    expect((await task(current.root)).operations!.at(-1)!.attempt_id).toBeUndefined();
+  });
+
+  it('keeps an ambiguous late run bound through reconcile and later empty lookups', async () => {
+    const github = await githubServer();
+    const origin = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    await OPERATION_REGISTRY.github_check.dispatch(origin.root, 'demo-1', config(await task(origin.root)), options);
+    const bound = (await task(origin.root)).operations!.at(-1)!;
+    const current = await fixture();
+    await appendTaskEvent(current.root, {
+      id: 'demo-1', project: 'demo', event: 'operation', at: AT,
+      operation: {
+        ...bound, status: 'pending', external_run_id: undefined,
+        attempt_id: 'crashed-post', attempted_at: '2000-01-01T00:00:00.000Z', attempt_phase: 'dispatch_post',
+      },
+    });
+    github.runs.splice(0);
+    await supervisionPass(current.root, options);
+    expect((await task(current.root)).operations!.at(-1)!.detail).toBe('dispatch_ambiguous');
+    github.runs.push({
+      id: 100, head_sha: SHA, external_id: bound.external_id!, name: `hive-enforcement:${bound.external_id}`,
+      status: 'in_progress', conclusion: null, app: { slug: 'hive-checks' },
+    });
+    await OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', bound.operation_id, options);
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({
+      status: 'blocked_external', external_run_id: '100',
+    });
+    expect((await task(current.root)).operations!.at(-1)!.detail).toBeUndefined();
+    github.runs.splice(0);
+    const postsBeforeRecovery = github.calls.posts;
+    await supervisionPass(current.root, options);
+    expect(github.calls.posts).toBe(postsBeforeRecovery);
+    expect(github.runs).toHaveLength(0);
+    expect((await task(current.root)).operations!.at(-1)!.external_run_id).toBe('100');
+  });
+
+  it('retries dispatch only after a known pre-request Refusal', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    const gate = github.defer('GET');
+    const dispatching = OPERATION_REGISTRY.github_check.dispatch(
+      current.root, 'demo-1', config(await task(current.root)), options,
+    );
+    try {
+      await gate.entered;
+      options.baseUrl = 'http://example.invalid';
+    } finally {
+      gate.release();
+    }
+    await dispatching;
+    expect(github.calls.posts).toBe(0);
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({ status: 'blocked_external' });
+    expect((await task(current.root)).operations!.at(-1)!.attempt_id).toBeUndefined();
+    expect((await task(current.root)).operations!.at(-1)!.attempt_phase).toBeUndefined();
+    options.baseUrl = github.baseUrl;
+    await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
+    expect(github.calls.posts).toBe(1);
+    expect(github.runs).toHaveLength(1);
+  });
+
+  it('does not reopen closing_external when a pending dispatch returns a bound run', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    const gate = github.defer('GET');
+    const dispatching = OPERATION_REGISTRY.github_check.dispatch(
+      current.root, 'demo-1', config(await task(current.root)), options,
+    );
+    await gate.entered;
+    const pending = (await task(current.root)).operations!.at(-1)!;
+    github.runs.push({
+      id: 100, head_sha: SHA, external_id: pending.external_id!, name: `hive-enforcement:${pending.external_id}`,
+      status: 'in_progress', conclusion: null, app: { slug: 'hive-checks' },
+    });
+    await appendTaskEvent(current.root, {
+      id: 'demo-1', project: 'demo', event: 'operation', at: AT,
+      operation: {
+        ...pending, status: 'closing_external', cancellation_requested: false,
+        attempt_id: undefined, attempted_at: undefined, attempt_phase: undefined,
+      },
+    });
+    gate.release();
+    await dispatching;
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({ status: 'closing_external' });
+    expect((await task(current.root)).operations!.at(-1)!.external_run_id).toBeUndefined();
+    expect(github.calls.posts).toBe(0);
+  });
+
+  it('persists cancellation during dispatch lookup and prevents a later POST', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    const gate = github.defer('GET');
+    const dispatching = OPERATION_REGISTRY.github_check.dispatch(
+      current.root, 'demo-1', config(await task(current.root)), options,
+    );
+    await gate.entered;
+    const pending = (await task(current.root)).operations!.at(-1)!;
+    await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', pending.operation_id, options);
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({
+      status: 'closing_external', cancellation_requested: false,
+    });
+    expect((await task(current.root)).operations!.at(-1)!.attempt_id).toBeUndefined();
+    gate.release();
+    await dispatching;
+    await supervisionPass(current.root, options);
+    expect(github.calls.posts).toBe(0);
+    expect(github.runs).toHaveLength(0);
+    expect((await task(current.root)).state).toBe('closing_external');
+  });
+
+  it('fences a completed old run when the plan and epoch change during reconcile', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
+    const operation = (await task(current.root)).operations!.at(-1)!;
+    Object.assign(github.runs[0], { status: 'completed', conclusion: 'success' });
+    const changedContract = { ...current.rootContract, objective: 'A replacement plan.' };
+    const changedDigest = contractDigest(changedContract);
+    const gate = github.defer('GET');
+    const reconciling = OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', operation.operation_id, options);
+    await gate.entered;
+    try {
+      await withHubLock(current.root, async () => {
+        await appendTaskEvent(current.root, {
+          id: 'demo-1', project: 'demo', event: 'plan', at: AT, lease_epoch: 2,
+          contract: changedContract, plan_digest: changedDigest,
+          checkpoints: [{ id: 'work', desc: 'verify', etaMin: 5 }],
+        });
+        await appendTaskEvent(current.root, {
+          id: 'demo-1', project: 'demo', event: 'answered', at: AT, plan_digest: changedDigest,
+        });
+      });
+    } finally {
+      gate.release();
+    }
+    await reconciling;
+
+    expect(await events(current.root, 'evidence')).toHaveLength(0);
+    expect(await events(current.root, 'receipt')).toHaveLength(0);
+    const changed = await task(current.root);
+    expect(changed).toMatchObject({ plan_digest: changedDigest, lease_epoch: 2 });
+    expect(changed.operations!.at(-1)).toMatchObject({ status: 'blocked_external', plan_digest: current.planDigest });
+    await expect(PREDICATE_REGISTRY.github_check.evaluate(current.root, 'demo-1', config(changed))).resolves.toBe(false);
+    await supervisionPass(current.root, options);
+    expect(github.calls.posts).toBe(2);
+    expect(github.runs[0].external_id).not.toBe(github.runs[1].external_id);
+  });
+
+  it('shares one in-flight cancellation PATCH across concurrent callers', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
+    const operation = (await task(current.root)).operations!.at(-1)!;
+    const gate = github.defer('PATCH');
+    const first = OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
+    const second = OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
+    try {
+      await gate.entered;
+      expect(github.calls.patches).toBe(1);
+      expect((await task(current.root)).operations!.at(-1)).toMatchObject({
+        status: 'closing_external', cancellation_requested: false, attempt_phase: 'cancellation_patch',
+      });
+    } finally {
+      gate.release();
+    }
+    await Promise.all([first, second]);
+    expect(github.calls.patches).toBe(1);
+  });
+
+  it('retries a stale pre-PATCH claim when the remote is still active', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
+    const operation = (await task(current.root)).operations!.at(-1)!;
+    await appendTaskEvent(current.root, {
+      id: 'demo-1', project: 'demo', event: 'operation', at: AT,
+      operation: {
+        ...operation, status: 'closing_external', cancellation_requested: false,
+        attempt_id: 'crashed-cancellation', attempted_at: '2000-01-01T00:00:00.000Z',
+        attempt_phase: 'cancellation_claim',
+      },
+    });
+    await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
+    expect(github.calls.patches).toBe(1);
+    expect(github.runs[0]).toMatchObject({ status: 'in_progress', cancellation_requested: true });
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({
+      status: 'closing_external', cancellation_requested: true,
+    });
+    expect((await task(current.root)).operations!.at(-1)!.attempt_id).toBeUndefined();
+    await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
+    await supervisionPass(current.root, options);
+    expect(github.calls.patches).toBe(1);
+  });
+
+  it('retries a timed-out cancellation_patch only while the remote is active and unrequested', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
+    const operation = (await task(current.root)).operations!.at(-1)!;
+    await appendTaskEvent(current.root, {
+      id: 'demo-1', project: 'demo', event: 'operation', at: AT,
+      operation: {
+        ...operation, status: 'closing_external', cancellation_requested: false,
+        attempt_id: 'crashed-patch', attempted_at: '2000-01-01T00:00:00.000Z',
+        attempt_phase: 'cancellation_patch',
+      },
+    });
+    expect(github.calls.patches).toBe(0);
+    expect(github.runs[0].cancellation_requested).toBeUndefined();
+    await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
+    expect(github.calls.patches).toBe(1);
+    expect(github.runs[0]).toMatchObject({ status: 'in_progress', cancellation_requested: true });
+    await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
+    await supervisionPass(current.root, options);
+    expect(github.calls.patches).toBe(1);
+  });
+
+  it('keeps a lost cancellation response ambiguous and reconciles without a blind PATCH', async () => {
+    const github = await githubServer();
+    const current = await fixture();
+    const options = { baseUrl: github.baseUrl, allowLoopback: true };
+    await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
+    const operation = (await task(current.root)).operations!.at(-1)!;
+    github.state.lostPatchResponses = 1;
+    await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({
+      status: 'closing_external', cancellation_requested: true,
+    });
+    expect((await events(current.root, 'evidence')).at(-1)?.evidence?.outcome).toBe('adapter-error');
+    await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
+    await supervisionPass(current.root, options);
+    expect(github.calls.patches).toBe(1);
+    expect((await task(current.root)).state).toBe('cancelled');
+    expect(await events(current.root, 'receipt')).toHaveLength(0);
+  });
+
   it('dispatches once, recovers by identity after a crash, and resumes one record once', async () => {
     const github = await githubServer();
     const first = await fixture();
@@ -192,14 +698,14 @@ describe('github check supervision', () => {
 
     await OPERATION_REGISTRY.github_check.dispatch(crashed.root, 'demo-1', config(await task(crashed.root)), options);
     expect(github.calls.posts).toBe(1);
-    const recovered = (await task(crashed.root)).operations![0];
+    const recovered = (await task(crashed.root)).operations!.at(-1)!;
     expect(recovered).toMatchObject({
       external_id: externalId, external_run_id: '100', watcher_id: recovered.watcher_id,
       plan_digest: crashed.planDigest, artifact_digest: ARTIFACT,
     });
     await OPERATION_REGISTRY.github_check.dispatch(crashed.root, 'demo-1', config(await task(crashed.root)), options);
     expect(github.calls.posts).toBe(1);
-    expect(await events(crashed.root, 'operation')).toHaveLength(1);
+    expect(await events(crashed.root, 'operation')).toHaveLength(3);
 
     Object.assign(github.runs[0], { status: 'completed', conclusion: 'success' });
     await OPERATION_REGISTRY.github_check.reconcile(crashed.root, 'demo-1', recovered.operation_id, options);
@@ -207,7 +713,7 @@ describe('github check supervision', () => {
     expect((await task(crashed.root)).state).toBe('reconciling');
     expect(await events(crashed.root, 'evidence')).toHaveLength(1);
     expect(await events(crashed.root, 'receipt')).toHaveLength(1);
-    expect(await events(crashed.root, 'operation')).toHaveLength(2);
+    expect(await events(crashed.root, 'operation')).toHaveLength(4);
     await expect(PREDICATE_REGISTRY.github_check.evaluate(crashed.root, 'demo-1', firstConfig)).resolves.toBe(true);
     await recordFlow(crashed.root, 'wait-resume', 'resumed');
   });
@@ -230,7 +736,7 @@ describe('github check supervision', () => {
     const first = await fixture();
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
     await OPERATION_REGISTRY.github_check.dispatch(first.root, 'demo-1', config(await task(first.root)), options);
-    const operation = (await task(first.root)).operations![0];
+    const operation = (await task(first.root)).operations!.at(-1)!;
     Object.assign(github.runs[0], { status: 'completed', conclusion: 'success' });
     await OPERATION_REGISTRY.github_check.reconcile(first.root, 'demo-1', operation.operation_id, options);
 
@@ -272,7 +778,7 @@ describe('github check supervision', () => {
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
     const currentTask = await task(current.root);
     await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(currentTask), options);
-    const operation = (await task(current.root)).operations![0];
+    const operation = (await task(current.root)).operations!.at(-1)!;
     await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
     expect((await task(current.root)).state).toBe('closing_external');
     await recordFlow(current.root, 'cancel', 'closing');
@@ -292,7 +798,7 @@ describe('github check supervision', () => {
     const current = await fixture();
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
     await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
-    const operation = (await task(current.root)).operations![0];
+    const operation = (await task(current.root)).operations!.at(-1)!;
     await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
     github.runs[0].app.slug = 'new-owner';
     await OPERATION_REGISTRY.github_check.transfer(current.root, 'demo-1', operation.operation_id, {
@@ -306,13 +812,13 @@ describe('github check supervision', () => {
       owner: 'new-owner', status: 'failed', detail: 'ownership_transferred',
     });
     expect(await events(current.root, 'cancelled')).toHaveLength(1);
-    expect(await events(current.root, 'operation')).toHaveLength(4);
+    expect(await events(current.root, 'operation')).toHaveLength(8);
     Object.assign(github.runs[0], { status: 'completed', conclusion: 'success' });
     await OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', operation.operation_id, options);
     expect((await supervisionPass(current.root, options)).watchers).toEqual([]);
     expect((await task(current.root)).state).toBe('cancelled');
     expect(await events(current.root, 'receipt')).toHaveLength(0);
-    expect(await events(current.root, 'operation')).toHaveLength(4);
+    expect(await events(current.root, 'operation')).toHaveLength(8);
     await recordFlow(current.root, 'transfer', 'ownership-proved');
   });
 
@@ -321,7 +827,7 @@ describe('github check supervision', () => {
     const current = await fixture();
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
     await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
-    const operation = (await task(current.root)).operations![0];
+    const operation = (await task(current.root)).operations!.at(-1)!;
     await appendTaskEvent(current.root, { id: 'demo-2', project: 'demo', event: 'asked', at: AT });
     const { recordTaskOutcome } = await import('../src/hub.js');
     await recordTaskOutcome(current.root, 'demo-1', 'superseded', {
@@ -348,7 +854,7 @@ describe('github check supervision', () => {
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
     const currentConfig = config(await task(current.root));
     await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', currentConfig, options);
-    const operation = (await task(current.root)).operations![0];
+    const operation = (await task(current.root)).operations!.at(-1)!;
     Object.assign(github.runs[0], { head_sha: 'f'.repeat(40), status: 'completed', conclusion: 'success' });
     await OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', operation.operation_id, options);
     expect((await events(current.root, 'evidence')).at(-1)?.evidence?.outcome).toBe('adapter-error');
@@ -365,7 +871,7 @@ describe('github check supervision', () => {
     expect(github.calls.posts).toBe(1);
     expect(first.watchers).toEqual(second.watchers);
     expect(first.watchers).toHaveLength(1);
-    expect(await events(current.root, 'operation')).toHaveLength(1);
+    expect(await events(current.root, 'operation')).toHaveLength(4);
   });
 
   it('rejects wrong-app success and refuses cancellation without a strengthened binding', async () => {
@@ -374,7 +880,7 @@ describe('github check supervision', () => {
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
     const currentConfig = config(await task(current.root));
     await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', currentConfig, options);
-    const operation = (await task(current.root)).operations![0];
+    const operation = (await task(current.root)).operations!.at(-1)!;
     Object.assign(github.runs[0], { status: 'completed', conclusion: 'success', app: { slug: 'attacker' } });
     await OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', operation.operation_id, options);
     expect((await events(current.root, 'evidence')).filter((event) => event.evidence?.outcome === 'passed')).toHaveLength(0);
@@ -441,7 +947,7 @@ describe('github check supervision', () => {
     const current = await fixture();
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
     await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
-    const oldOperation = (await task(current.root)).operations![0];
+    const oldOperation = (await task(current.root)).operations!.at(-1)!;
     await appendTaskEvent(current.root, { id: 'demo-1', project: 'demo', event: 'asked', at: AT });
     await appendTaskEvent(current.root, {
       id: 'demo-1', project: 'demo', event: 'plan', at: AT, lease_epoch: 2,
@@ -454,7 +960,7 @@ describe('github check supervision', () => {
     await supervisionPass(current.root, options);
     const currentTask = await task(current.root);
     expect(currentTask.lease_epoch).toBe(2);
-    expect(currentTask.operations).toHaveLength(2);
+    expect(currentTask.operations).toHaveLength(8);
     expect(github.calls.posts).toBe(2);
     expect(github.runs[0].external_id).not.toBe(github.runs[1].external_id);
     const newOperation = currentTask.operations!.at(-1)!;
@@ -489,7 +995,7 @@ describe('github check supervision', () => {
     const current = await fixture();
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
     await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
-    const operation = (await task(current.root)).operations![0];
+    const operation = (await task(current.root)).operations!.at(-1)!;
     await appendTaskEvent(current.root, {
       id: 'demo-1', project: 'demo', event: 'operation', at: AT,
       operation: { ...operation, deadline: '2026-11-22T12:00:00.000Z' },
@@ -507,7 +1013,7 @@ describe('github check supervision', () => {
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
     const broken = config(await task(unknown.root));
     await OPERATION_REGISTRY.github_check.dispatch(unknown.root, 'demo-1', broken, options);
-    const operation = (await task(unknown.root)).operations![0];
+    const operation = (await task(unknown.root)).operations!.at(-1)!;
     await OPERATION_REGISTRY.github_check.reconcile(unknown.root, 'demo-1', operation.operation_id, options);
     await OPERATION_REGISTRY.github_check.cancel(unknown.root, 'demo-1', operation.operation_id, options);
     await OPERATION_REGISTRY.github_check.transfer(unknown.root, 'demo-1', operation.operation_id, {
@@ -516,11 +1022,11 @@ describe('github check supervision', () => {
     const pass = await supervisionPass(unknown.root, options);
     expect(pass.watchers).toEqual([]);
     expect(github.calls.posts + github.calls.lists + github.calls.patches).toBe(0);
-    expect((await task(unknown.root)).operations![0].detail).toBe('identity_unknown');
+    expect((await task(unknown.root)).operations!.at(-1)!.detail).toBe('identity_unknown');
 
     const stale = await fixture();
     await OPERATION_REGISTRY.github_check.dispatch(stale.root, 'demo-1', config(await task(stale.root)), options);
-    const staleOperation = (await task(stale.root)).operations![0];
+    const staleOperation = (await task(stale.root)).operations!.at(-1)!;
     const changedContract = { ...stale.rootContract, objective: 'A replacement plan.' };
     await appendTaskEvent(stale.root, {
       id: 'demo-1', project: 'demo', event: 'plan', at: AT, contract: changedContract,
@@ -557,15 +1063,88 @@ describe('github check supervision', () => {
     expect(github.calls.posts).toBe(1);
     expect((await task(current.root)).state).toBe('blocked:budget_exhausted');
     const healthyTask = foldTasks(await readTaskEvents(current.root)).find((candidate) => candidate.id === 'demo-2')!;
-    expect(healthyTask.operations![0].status).toBe('blocked_external');
+    expect(healthyTask.operations!.at(-1)!.status).toBe('blocked_external');
   });
+
+  it('does not POST or replace the budget headline when dispatch lookup finishes after expiry', async () => {
+    const github = await githubServer();
+    const current = await fixture([acceptance()], true, 60);
+    const options = { baseUrl: github.baseUrl, allowLoopback: true, now: Date.parse(AT) };
+    const gate = github.defer('GET');
+    const dispatching = OPERATION_REGISTRY.github_check.dispatch(
+      current.root, 'demo-1', config(await task(current.root)), options,
+    );
+    try {
+      await gate.entered;
+      await reconcileTaskBudgets(current.root, Date.parse(AT) + 61_000);
+      expect((await task(current.root)).state).toBe('blocked:budget_exhausted');
+    } finally {
+      gate.release();
+    }
+    await dispatching;
+    expect(github.calls.posts).toBe(0);
+    expect((await task(current.root)).state).toBe('blocked:budget_exhausted');
+    expect(await events(current.root, 'evidence')).toHaveLength(0);
+  });
+
+  it('drops a dispatch binding when POST completes after budget revocation', async () => {
+    const github = await githubServer();
+    const current = await fixture([acceptance()], true, 60);
+    const options = { baseUrl: github.baseUrl, allowLoopback: true, now: Date.parse(AT) };
+    const gate = github.defer('POST');
+    const dispatching = OPERATION_REGISTRY.github_check.dispatch(
+      current.root, 'demo-1', config(await task(current.root)), options,
+    );
+    try {
+      await gate.entered;
+      await reconcileTaskBudgets(current.root, Date.parse(AT) + 61_000);
+    } finally {
+      gate.release();
+    }
+    await dispatching;
+    expect(github.calls.posts).toBe(1);
+    expect(github.runs).toHaveLength(1);
+    expect((await task(current.root)).state).toBe('blocked:budget_exhausted');
+    expect((await task(current.root)).operations!.at(-1)).toMatchObject({
+      status: 'pending', attempt_phase: 'dispatch_post',
+    });
+    expect((await task(current.root)).operations!.at(-1)!.external_run_id).toBeUndefined();
+    expect(await events(current.root, 'evidence')).toHaveLength(0);
+    expect(await events(current.root, 'receipt')).toHaveLength(0);
+  });
+
+  it.each(['active', 'error', 'success'] as const)(
+    'drops a late %s reconcile result after budget revocation', async (result) => {
+      const github = await githubServer();
+      const current = await fixture([acceptance()], true, 60);
+      const options = { baseUrl: github.baseUrl, allowLoopback: true, now: Date.parse(AT) };
+      await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
+      const operation = (await task(current.root)).operations!.at(-1)!;
+      const operationEvents = await events(current.root, 'operation');
+      if (result === 'success') Object.assign(github.runs[0], { status: 'completed', conclusion: 'success' });
+      if (result === 'error') github.state.getFailures = 1;
+      const gate = github.defer('GET');
+      const reconciling = OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', operation.operation_id, options);
+      try {
+        await gate.entered;
+        await reconcileTaskBudgets(current.root, Date.parse(AT) + 61_000);
+      } finally {
+        gate.release();
+      }
+      await reconciling;
+      expect((await task(current.root)).state).toBe('blocked:budget_exhausted');
+      expect(await events(current.root, 'operation')).toHaveLength(operationEvents.length);
+      expect(await events(current.root, 'evidence')).toHaveLength(0);
+      expect(await events(current.root, 'receipt')).toHaveLength(0);
+    },
+  );
 
   it('fences direct success after root expiry without blocking valid closure', async () => {
     const github = await githubServer();
     const current = await fixture([acceptance()], true, 60);
     const options = { baseUrl: github.baseUrl, allowLoopback: true, now: Date.parse(AT) };
     await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
-    const operation = (await task(current.root)).operations![0];
+    const operation = (await task(current.root)).operations!.at(-1)!;
     Object.assign(github.runs[0], { status: 'completed', conclusion: 'success' });
     const expired = Date.parse(AT) + 61_000;
     await supervisionPass(current.root, options, expired);
@@ -581,24 +1160,24 @@ describe('github check supervision', () => {
     const closeOptions = { baseUrl: closeGithub.baseUrl, allowLoopback: true, now: Date.parse(AT) };
     const closing = await fixture([acceptance()], true, 60);
     await OPERATION_REGISTRY.github_check.dispatch(closing.root, 'demo-1', config(await task(closing.root)), closeOptions);
-    const closingOperation = (await task(closing.root)).operations![0];
+    const closingOperation = (await task(closing.root)).operations!.at(-1)!;
     await OPERATION_REGISTRY.github_check.cancel(closing.root, 'demo-1', closingOperation.operation_id, closeOptions);
     Object.assign(closeGithub.runs[0], { status: 'completed', conclusion: 'cancelled' });
     await supervisionPass(closing.root, closeOptions, expired);
     expect((await task(closing.root)).state).toBe('cancelled');
   });
 
-  it('keeps closing state through missing runs and retries a failed close without duplicate PATCH', async () => {
+  it('keeps an uncertain close ambiguous through missing runs without a blind PATCH', async () => {
     const github = await githubServer();
     const current = await fixture();
     const options = { baseUrl: github.baseUrl, allowLoopback: true };
     await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', config(await task(current.root)), options);
-    const operation = (await task(current.root)).operations![0];
+    const operation = (await task(current.root)).operations!.at(-1)!;
     github.state.patchFailures = 1;
     await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
     expect((await task(current.root)).state).toBe('closing_external');
     await OPERATION_REGISTRY.github_check.cancel(current.root, 'demo-1', operation.operation_id, options);
-    expect(github.calls.patches).toBe(2);
+    expect(github.calls.patches).toBe(1);
 
     github.runs.splice(0);
     await OPERATION_REGISTRY.github_check.reconcile(current.root, 'demo-1', operation.operation_id, options);
@@ -666,22 +1245,31 @@ describe('github check supervision', () => {
     expect(redirectedAuthorization).toBe(false);
 
     let completed = false;
+    let releaseOversizedResponse!: () => void;
+    const oversizedResponse = new Promise<void>((resolve) => { releaseOversizedResponse = resolve; });
     const oversized = createServer((req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.write('{"check_runs":[');
       res.write('x'.repeat(1024 * 1024));
-      setTimeout(() => {
+      void oversizedResponse.then(() => {
         res.end(']}');
         completed = true;
-      }, 100);
+      });
     });
     await new Promise<void>((resolve) => oversized.listen(0, '127.0.0.1', resolve));
     servers.add(oversized);
     const oversizedPort = (oversized.address() as AddressInfo).port;
-    await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', currentConfig, {
-      baseUrl: `http://127.0.0.1:${oversizedPort}`, allowLoopback: true,
-    });
-    expect(completed).toBe(false);
+    try {
+      await OPERATION_REGISTRY.github_check.dispatch(current.root, 'demo-1', currentConfig, {
+        baseUrl: `http://127.0.0.1:${oversizedPort}`, allowLoopback: true,
+      });
+      expect(completed).toBe(false);
+      expect((await events(current.root, 'evidence')).at(-1)?.evidence?.content).toMatchObject({
+        detail: 'GitHub API response exceeds the byte cap',
+      });
+    } finally {
+      releaseOversizedResponse();
+    }
   });
 });
 
@@ -739,7 +1327,7 @@ describe('read-only work-tree projection', () => {
       baseUrl: github.baseUrl, allowLoopback: true,
     });
     const currentTask = await task(current.root);
-    const operation = currentTask.operations![0];
+    const operation = currentTask.operations!.at(-1)!;
     await appendTaskEvent(current.root, {
       id: 'demo-1', project: 'demo', event: 'operation', at: AT,
       operation: { ...operation, status: 'succeeded', result: { remote_tip: SHA } },
