@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process';
 import net from 'node:net';
 import path from 'node:path';
 
+export { windowName } from './window-name.js';
+
 export const HIVE_SESSION = 'hive';
 
 export type RunResult = { code: number; stdout: string; stderr: string };
@@ -49,10 +51,6 @@ export async function ensureHiveSession(): Promise<void> {
     const made = await tmux(['new-session', '-d', '-s', HIVE_SESSION, '-n', 'hive', '-x', '220', '-y', '50']);
     if (made.code !== 0) throw new Error(`tmux: cannot create session ${HIVE_SESSION}: ${made.stderr.trim()}`);
   }
-}
-
-export function windowName(project: string, agent: string): string {
-  return `${project}:${agent}`;
 }
 
 export async function newWindow(name: string, cwd: string, shellCommand: string): Promise<string> {

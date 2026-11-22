@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { windowName } from '../src/tmux.js';
 import type { HubTask, HubView } from '../src/types.js';
 import {
   agentRef, ago, buildNeeds, homeTilde, orchestratorLook, staleTask,
@@ -253,8 +254,14 @@ describe('taskProgress', () => {
 });
 
 describe('windowLabel', () => {
-  it('is the tmux window name <project>:<agent>', () => {
-    expect(windowLabel('demo', 'demo-orchestrator')).toBe('demo:demo-orchestrator');
-    expect(windowLabel('demo', 'fixer')).toBe('demo:fixer');
+  it('is the shared tmux window name <project>:<agent>', () => {
+    expect(windowLabel).toBe(windowName);
+    for (const [project, agent, expected] of [
+      ['demo', 'demo-orchestrator', 'demo:demo-orchestrator'],
+      ['demo', 'fixer', 'demo:fixer'],
+    ]) {
+      expect(windowLabel(project, agent)).toBe(expected);
+      expect(windowName(project, agent)).toBe(expected);
+    }
   });
 });

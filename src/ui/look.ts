@@ -1,5 +1,7 @@
 import type { Checkpoint, HubAgent, HubOrchestrator, HubTask, HubView, RootContract } from '../types.js';
 
+export { windowName as windowLabel } from '../window-name.js';
+
 export const ROTATE_AT_PERCENT = 50;
 
 export const STALE_MS = 4 * 60 * 60_000;
@@ -42,10 +44,6 @@ export function taskProgress(t: HubTask): TaskProgress | null {
     lastAt: t.last_progress_at ?? null,
     failed: cps.filter((c) => progress[c.id]?.status === 'fail').map((c) => c.id),
   };
-}
-
-export function windowLabel(project: string, agent: string): string {
-  return `${project}:${agent}`;
 }
 
 export function ago(iso: string, now: number): string {
