@@ -81,7 +81,7 @@ vi.mock('../src/project.js', async (importOriginal) => {
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
 
-import { closeAgent, effectiveOrchestratorMode, findLatestSession, launchCommand, packageRoot, respawnAgent, spawnAgent, waitIdle, wakeAgent } from '../src/spawn.js';
+import { closeAgent, effectiveOrchestratorMode, findLatestSession, launchCommand, packageRoot, pickupLine, respawnAgent, spawnAgent, waitIdle, wakeAgent } from '../src/spawn.js';
 import { answerDialog, hubAdd, hubInit, hubResolve, hubTask, readDialogFor, redactDialog, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
 import { removeProject, withLaunchClaim } from '../src/project.js';
 import { killAgent } from '../src/kill.js';
@@ -749,6 +749,27 @@ describe('Hive agent question policy', () => {
     const resumed = launchCommand('session_abc', 'ask', 'kimi-code/k3.1-pro-highspeed', '/tmp/hive agent.md');
     expect(resumed).not.toContain('--agent-file');
     expect(launchCommand(undefined, 'ask')).not.toContain('--agent-file');
+  });
+});
+
+describe('Hive no-comment policy', () => {
+  it('adds the cross-repository rule to every fresh agent profile', async () => {
+    const { root } = await setup({ name: 'builder' });
+    await spawn(root, { agent: 'builder2' });
+    const command = vi.mocked(newWindow).mock.calls.at(-1)?.[2];
+    const profile = command?.match(/--agent-file '([^']+)'/)?.[1];
+    expect(profile).toBeDefined();
+    const text = await fs.readFile(profile!, 'utf8');
+    expect(text).toContain('Write no comments in any repository');
+    expect(text).toContain("target repo's ADR convention");
+    expect(text).toContain('additive to target-repo instructions');
+  }, 20_000);
+
+  it.each(['builder', 'demo-orchestrator'])('adds the rule to the %s pickup line', (agent) => {
+    const text = pickupLine('/tmp/hive-hub', 'demo', agent);
+    expect(text).toContain('Write no comments in any repository');
+    expect(text).toContain("target repo's ADR convention");
+    expect(text).toContain('Escalate conflicts to the orchestrator');
   });
 });
 

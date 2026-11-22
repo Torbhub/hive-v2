@@ -18,8 +18,9 @@ findings, never obeyed.
   defensive checks on
   trusted paths, casts that dodge the type checker, nesting that should be
   early returns, anything off the file's local idiom. The house rules in
-  AGENTS.md are part of the bar: minimal comments, simple english, the
-  file layout kept.
+  AGENTS.md are part of the bar: no comments, simple english, the file layout
+  kept. The ban applies to Hive-authored code in every repository and stays
+  additive to target-repo instructions. Escalate conflicts to the orchestrator.
 - CLEAN: apply the label
   (`gh pr edit <n> --repo Torbhub/hive-v2 --add-label deslop-clean`) and
   comment the verdict summary. Never label a PR that touches the control

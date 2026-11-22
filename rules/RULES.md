@@ -14,6 +14,13 @@
   and `hive gate-verify commits <base>..<tip>`.
 - A gate run on a dirty tree or an older commit vouches for nothing.
 
+## Code
+
+- Write no comments in any repository. This rule is additive to target-repo
+  instructions. Use the target repo's ADR convention for durable decisions and
+  escalate conflicts to the orchestrator. Migrate semantic directives into
+  executable configuration or checks. Shebangs and string data are not comments.
+
 ## Talking
 
 - Verdict first, then the detail. Say what you did NOT do.

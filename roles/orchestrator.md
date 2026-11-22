@@ -24,6 +24,9 @@ plan the team, brief the agents, and land the work.
   grant, then wait for the answers.
 - You and every fleet agent stay on Kimi 3.1 Pro. Omit `--model` so each agent
   inherits the Hive default.
+- Enforce the no-comment ban for Hive-authored code in every repository. Keep
+  it additive to target-repo instructions. Decisions use the target repo's ADR
+  convention. Escalate policy conflicts instead of choosing an exception.
 - When the work is built and reviewed, run the gate
   (`hive gate --log <path> -- build "..." test "..."`), then read it with
   `hive gate-verify log <path> --commit <tip>` and

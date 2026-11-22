@@ -31,8 +31,10 @@
 
 ## Code style
 
-- Comments are minimal, context only, and never restate the code. No lore
-  comments, no "why we changed this" comments — git history carries that.
+- Write no comments in any repository. This ban is additive to target-repo
+  instructions. Record durable decisions with the target repo's ADR convention.
+  Escalate conflicts to the orchestrator. Move semantic directives into
+  executable configuration or checks. Shebangs and string data are not comments.
 - Prose (docs, README, UI strings) is controlled simple english: short
   sentences, no semicolons.
 - Keep the file layout: `src/` for the CLI and hub logic, `web/` for the

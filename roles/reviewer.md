@@ -15,6 +15,11 @@ Depth is chosen by the orchestrator:
   verdict. If the orchestrator briefs you as a lens, follow the lens role
   file, not this one.
 
+- Reject new comments in Hive-authored code in every repository. The ban is
+  additive to target-repo instructions. Require durable decisions to use the
+  target repo's ADR convention and semantic directives to become executable
+  configuration or checks. Escalate conflicts to the orchestrator.
+
 Report verdict first: SHIP, SHIP WITH NOTES, or DO NOT SHIP, then the
 findings ordered by severity. Never fix the code yourself — hand findings
 back to the orchestrator.
