@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -16,6 +15,7 @@ vi.mock('../src/death-bundle.js', async (importOriginal) => {
 import { maybeCompact } from '../src/compact.js';
 import { hivePath, hubPath, readDecisions, readTeam, writeJson } from '../src/state.js';
 import { capturePane, ensureHiveSession, newWindow, paneIdentity, sleep } from '../src/tmux.js';
+import { cleanupTmuxServers } from './tmux-cleanup.js';
 
 async function waitForText(pane: string, text: string): Promise<void> {
   for (let i = 0; i < 50; i++) {
@@ -45,9 +45,7 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(() => {
-  try {
-    execFileSync('tmux', ['-L', SOCKET, 'kill-server'], { stdio: 'ignore' });
-  } catch { }
+  cleanupTmuxServers([SOCKET]);
 });
 
 describe('auto-compaction against a decoy pane', () => {
