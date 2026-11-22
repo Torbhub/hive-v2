@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import { readJsonl } from './jsonl.js';
 import { hubPath, readDecisions } from './state.js';
 import type { TeamEntry } from './types.js';
 
@@ -7,16 +8,11 @@ const FILE = 'watch-processed.jsonl';
 type ProcessedRecord = { key: string; at: string | undefined };
 
 async function readProcessedRecords(root: string): Promise<ProcessedRecord[]> {
-  const raw = await fs.readFile(hubPath(root, FILE), 'utf8').catch(() => '');
+  const records = await readJsonl<{ key?: unknown; at?: unknown } | null>(hubPath(root, FILE));
   const out: ProcessedRecord[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const rec = JSON.parse(line) as { key?: unknown; at?: unknown };
-      if (typeof rec.key === 'string') {
-        out.push({ key: rec.key, at: typeof rec.at === 'string' ? rec.at : undefined });
-      }
-    } catch {
+  for (const record of records) {
+    if (record && typeof record.key === 'string') {
+      out.push({ key: record.key, at: typeof record.at === 'string' ? record.at : undefined });
     }
   }
   return out;

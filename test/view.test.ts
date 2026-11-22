@@ -65,6 +65,15 @@ describe('buildView decisions feed', () => {
     expect(view.decisions[0].summary).toBe('approved the plan 8');
     expect(vi.mocked(readDecisions).mock.calls[0][1]).toBeGreaterThan(8);
   });
+
+  it('keeps rendering and reports decision read failures', async () => {
+    vi.mocked(readDecisions).mockRejectedValueOnce(new Error('corrupt JSONL in /r/.hive-hub/decisions.jsonl:2'));
+    const view = await buildView('/r');
+    expect(view.hubName).toBe('hub');
+    expect(view.projects).toHaveLength(1);
+    expect(view.decisions).toEqual([]);
+    expect(view.error).toBe('decisions not read: corrupt JSONL in /r/.hive-hub/decisions.jsonl:2');
+  });
 });
 
 describe('buildView', () => {

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { readJsonl } from './jsonl.js';
 import type { Approvals, Checkpoint, Decision, HubTask, ProjectMode, RootContract, TaskEvent, TeamEntry } from './types.js';
 import { APPROVALS_MODES, NEEDS_OWNER_STATES, PROJECT_MODES, TASK_EVENTS } from './types.js';
 
@@ -71,21 +72,7 @@ export async function appendTaskEvent(root: string, ev: TaskEvent): Promise<void
 }
 
 export async function readTaskEvents(root: string): Promise<TaskEvent[]> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(hubPath(root, 'tasks.jsonl'), 'utf8');
-  } catch {
-    return [];
-  }
-  const out: TaskEvent[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      out.push(JSON.parse(line) as TaskEvent);
-    } catch {
-    }
-  }
-  return out;
+  return readJsonl<TaskEvent>(hubPath(root, 'tasks.jsonl'));
 }
 
 export function canonicalJson(value: unknown): string {
@@ -526,21 +513,7 @@ export async function manifestAdd(projectHome: string, rec: ManifestRecord): Pro
 }
 
 export async function manifestRead(projectHome: string): Promise<ManifestRecord[]> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(hivePath(projectHome, 'manifest.jsonl'), 'utf8');
-  } catch {
-    return [];
-  }
-  const out: ManifestRecord[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      out.push(JSON.parse(line) as ManifestRecord);
-    } catch {
-    }
-  }
-  return out;
+  return readJsonl<ManifestRecord>(hivePath(projectHome, 'manifest.jsonl'));
 }
 
 export async function manifestWrite(projectHome: string, recs: ManifestRecord[]): Promise<void> {
@@ -590,19 +563,5 @@ export async function appendDecision(root: string, d: Omit<Decision, 'at'> & { a
 }
 
 export async function readDecisions(root: string, latest = 8): Promise<Decision[]> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(hubPath(root, 'decisions.jsonl'), 'utf8');
-  } catch {
-    return [];
-  }
-  const out: Decision[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      out.push(JSON.parse(line) as Decision);
-    } catch {
-    }
-  }
-  return out.slice(-latest).reverse();
+  return (await readJsonl<Decision>(hubPath(root, 'decisions.jsonl'))).slice(-latest).reverse();
 }

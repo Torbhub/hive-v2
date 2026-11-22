@@ -67,7 +67,10 @@ export async function buildView(root: string): Promise<HubView> {
   const dialogs = await readDialogs(root, status.projects);
   const decisions = await readDecisions(root, DECISIONS_SCANNED)
     .then((ds) => ds.filter(feedKeep).slice(0, DECISIONS_SHOWN))
-    .catch(() => []);
+    .catch((e) => {
+      error = [error, `decisions not read: ${lastLine(e)}`].filter(Boolean).join(' · ');
+      return [];
+    });
   return {
     root,
     hubName: status.hub.name ?? '',

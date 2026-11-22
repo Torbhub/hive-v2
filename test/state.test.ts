@@ -39,7 +39,7 @@ describe('manifestRead', () => {
     const home = tmp();
     await fs.mkdir(hivePath(home), { recursive: true });
     const good = JSON.stringify({ kind: 'tmux', at: 'x', pane: '%1' });
-    await fs.writeFile(hivePath(home, 'manifest.jsonl'), `${good}\n{"kind":"wor\n`);
+    await fs.writeFile(hivePath(home, 'manifest.jsonl'), `${good}\n{"kind":"wor`);
     const recs = await manifestRead(home);
     expect(recs).toHaveLength(1);
     expect(recs[0].pane).toBe('%1');

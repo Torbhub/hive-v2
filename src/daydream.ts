@@ -11,6 +11,7 @@ import {
   verifyDaydreamCitations,
 } from './daydream-brief.js';
 import { briefBinding, commit, readRecord, writeRecord } from './daydream-record.js';
+import { parseJsonl } from './jsonl.js';
 import { redactSecrets } from './logview.js';
 import {
   mappedNativeMessageId,
@@ -102,22 +103,15 @@ async function unknownWithoutEffect(home: string, record: DaydreamRecord, at: st
   });
 }
 async function readTaskEvents(root: string): Promise<TaskEvent[]> {
+  const file = hubPath(root, 'tasks.jsonl');
   let raw: string;
   try {
-    raw = await readBoundedFile(hubPath(root, 'tasks.jsonl'), MAX_TASK_LOG_BYTES);
+    raw = await readBoundedFile(file, MAX_TASK_LOG_BYTES);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw new Refusal(`task evidence must be bounded and regular: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const events: TaskEvent[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      events.push(JSON.parse(line) as TaskEvent);
-    } catch {
-    }
-  }
-  return events;
+  return parseJsonl<TaskEvent>(file, raw);
 }
 async function readHandoff(agent: TeamEntry, home: string) {
   const file = path.resolve(agent.handoff ?? hivePath(agent.worktree ?? home, 'handoffs', `${agent.name}.md`));
