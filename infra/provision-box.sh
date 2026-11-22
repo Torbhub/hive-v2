@@ -199,7 +199,22 @@ systemctl daemon-reload
 systemctl enable --now hive-v2-web hive-v2-watch hive-v2-webterm hive-memory-core hive-memory-panel hive-memory-llm-forward hive-memory-relay >/dev/null
 systemctl enable hive-v2-tmux >/dev/null
 if [ -S /tmp/tmux-1000/hive-v2 ] && runuser -u ubuntu -- tmux -L hive-v2 list-sessions >/dev/null 2>&1; then
-  echo "tmux:    server already up; hive-v2-tmux not started (foreign-owned until it dies)"
+  server_pid=$(runuser -u ubuntu -- tmux -L hive-v2 display-message -p '#{pid}' 2>/dev/null || true)
+  server_cgroup=''
+  if [[ "$server_pid" =~ ^[0-9]+$ ]]; then
+    server_cgroup=$(cat "/proc/$server_pid/cgroup" 2>/dev/null || true)
+  fi
+  if [ -z "$server_cgroup" ]; then
+    echo "FAIL: cannot verify live tmux server ownership; refusing to restart web or watch" >&2
+    exit 1
+  fi
+  if grep -Fqx '0::/system.slice/hive-v2-tmux.service' <<< "$server_cgroup"; then
+    echo "tmux:    managed server already up; hive-v2-tmux not restarted"
+  else
+    echo "FAIL: live foreign-owned tmux server; refusing to restart web or watch" >&2
+    echo "Stop hive-v2-web and hive-v2-watch, run 'runuser -u ubuntu -- tmux -L hive-v2 kill-server', then rerun infra/provision-box.sh" >&2
+    exit 1
+  fi
 else
   systemctl restart hive-v2-tmux
   echo "tmux:    hive-v2-tmux (re)started"
