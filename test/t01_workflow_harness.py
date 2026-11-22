@@ -32,6 +32,31 @@ def evidence_records():
     return records
 
 
+def paid_console_records(manifest_sha, marker=True):
+    records = [record for record in evidence_records() if record['check'] != 'paid_admission_disabled']
+    complete = records.pop()
+    for check in (
+        'trusted_tunnel_ready', 'teamkimi_control_port', 'teamkimi_control_broker',
+        'teamkimi_messages_rejected', 'tunnel_cleanup',
+    ):
+        records.append({'check': check, 'status': 'passed'})
+    records.append({
+        'check': 'count_only_no_generation', 'status': 'passed', 'sha256': 'a' * 64,
+        'requestHash': 'b' * 64, 'model': 'kimi-code/k3.1-pro',
+        'inputTokens': 10, 'baseInputTokens': 2, 'cacheReadInputTokens': 3,
+        'cacheCreationInputTokens': 5, 'cacheCreation5mInputTokens': 1, 'cacheCreation1hInputTokens': 4,
+        'generationRequests': 0, 'timestamp': 1, 'revokedAt': 1, 'proof': 'c' * 64,
+    })
+    if marker:
+        records.append({
+            'check': 'paid_evidence_export', 'status': 'passed', 'sha256': manifest_sha,
+            'credentialId': '0123456789abcdef0123456789abcdef',
+        })
+    records.append({'check': 'paid_matrix_completed', 'status': 'passed', 'policyHash': 'd' * 64})
+    records.append(complete)
+    return records
+
+
 def write_executable(path, content):
     path.write_text(content)
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -74,6 +99,7 @@ def run(root, command, extra_env=None):
         'MOCK_RELEASED': str(root / 'released'),
         'MOCK_RENEW_AFTER_RELEASE': str(root / 'renew-after-release'),
         'GITHUB_RUN_ID': '123',
+        'IMAGE_ACTION': 'discard',
     }
     if extra_env:
         env.update(extra_env)
