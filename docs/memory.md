@@ -50,6 +50,20 @@ pinned in provision so the gateway address is stable. So:
 - `MEMORY_LLM_API_KEY` / `LLM_API_KEY` — the teamkimi `proxy.apiKey`
 - `MEMORY_LLM_MODEL` / `LLM_MODEL` — `kimi-k2`
 
+Each connection has a separate 10-second connect timeout. After connection,
+traffic in either direction resets a 300-second idle limit. A slow active
+response can run longer than 300 seconds in total. Idle expiry, a socket
+failure, or a half-close closes both sockets. The connection thread then ends.
+
+The forwarder runs at most 32 connections at once. It closes each excess
+accepted client immediately. Every connection cleanup returns its slot.
+
+Gateway discovery and listener bind each have a 60-second startup budget.
+The Docker inspection timeout uses the remaining discovery budget. Retry
+delays start at one second and cap at five seconds. Only a missing or empty
+gateway, a Docker inspection timeout, and `EADDRNOTAVAIL` are retried. Other
+failures stop startup with their cause.
+
 After a change: `systemctl restart hive-memory-core hive-memory-panel`.
 
 Provision renders `/etc/hive-v2/tdai-gateway.yaml` from `memory.env` on
