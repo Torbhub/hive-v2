@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { constants, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { hubPath } from './state.js';
@@ -52,7 +52,67 @@ export async function readTailBytes(file: string, bytes: number): Promise<string
 
 export class SessionNotFoundError extends Error {}
 
-export async function findSessionDir(home: string, sessionId: string): Promise<string> {
+async function lstatIfExists(file: string) {
+  return await fs.lstat(file).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  });
+}
+
+async function readStateCwd(file: string): Promise<string | null> {
+  const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  const handle = await fs.open(file, flags).catch((error: unknown) => {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ELOOP') return null;
+    throw error;
+  });
+  if (!handle) return null;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > 1024 * 1024) return null;
+    const buffer = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+      if (bytesRead === 0) return null;
+      offset += bytesRead;
+    }
+    try {
+      const state = JSON.parse(buffer.toString('utf8')) as { cwd?: unknown };
+      return state && typeof state === 'object' && typeof state.cwd === 'string' ? state.cwd : null;
+    } catch {
+      return null;
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+export type SessionLocation = { path: string; dev: number; ino: number };
+
+export async function findSessionLocation(home: string, sessionId: string, cwd: string): Promise<SessionLocation> {
+  const base = path.join(home, '.kimi-code', 'sessions');
+  const dirName = sessionId.startsWith('session_') ? sessionId : `session_${sessionId}`;
+  const workdirs = await fs.readdir(base).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  });
+  const candidates: SessionLocation[] = [];
+  for (const workdir of workdirs) {
+    const workdirPath = path.join(base, workdir);
+    if (!(await lstatIfExists(workdirPath))?.isDirectory()) continue;
+    const candidate = path.join(workdirPath, dirName);
+    const stat = await lstatIfExists(candidate);
+    if (stat?.isDirectory()) candidates.push({ path: candidate, dev: stat.dev, ino: stat.ino });
+  }
+  if (candidates.length !== 1 || await readStateCwd(path.join(candidates[0].path, 'state.json')) !== cwd) {
+    throw new SessionNotFoundError(`no unique ${dirName} for the recorded worktree`);
+  }
+  return candidates[0];
+}
+
+export async function findSessionDir(home: string, sessionId: string, cwd?: string): Promise<string> {
+  if (cwd !== undefined) return (await findSessionLocation(home, sessionId, cwd)).path;
   const base = path.join(home, '.kimi-code', 'sessions');
   const dirName = sessionId.startsWith('session_') ? sessionId : `session_${sessionId}`;
   const workdirs = await fs.readdir(base).catch((e: unknown) => {

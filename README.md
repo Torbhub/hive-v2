@@ -24,6 +24,7 @@ hive hub add demo ~/src/demo
 hive hub add fresh
 hive hub add copy --source demo
 hive hub task demo "add a /health endpoint"
+hive hub usage demo-1
 hive ui
 hive hub start demo demo-1
 hive doctor
@@ -37,6 +38,14 @@ Plain Git sources create a detached worktree from `HEAD`. The new home does
 not inherit `.hive` state. `--source` requires a blank path. Every add prints
 the actual home. Explicit paths cannot name a canonical home that is already
 registered.
+
+`hive hub usage <task>` prints read-only JSON for each exact current attempt and
+explicit orphan. It counts main turns and tool calls. Token totals use only
+main turn-scoped provider usage. Missing sessions, logs, usage, or malformed
+values produce `unknown`, never an assumed zero. An unknown task is an error.
+Cost is always `unknown` without pricing evidence. Historical sessions are
+never guessed. A retry is an orphan with unknown measurements because it can
+reuse the prior session.
 
 Everything else (`wake`, `continue`, `dialog`, `answer`, `spawn`, `cleanup`,
 `push`, `gate-verify`) is one `--help`-less usage line away: run `hive` with

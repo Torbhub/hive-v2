@@ -2,12 +2,14 @@ import { promises as fs } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { parseWireLine, parseWireText, readAgentLog, redactSecrets } from '../src/logview.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { parseWireLine, parseWireText, parseWireUsage, readAgentLog, readWireUsage, redactSecrets } from '../src/logview.js';
 import { hivePath, hubPath, Refusal, writeJson } from '../src/state.js';
 import type { TeamEntry } from '../src/types.js';
 
 const T = 1_761_000_000_000;
+
+afterEach(() => vi.restoreAllMocks());
 
 function loopEvent(event: unknown): string {
   return JSON.stringify({ type: 'context.append_loop_event', agentId: 'main', event, time: T });
@@ -98,6 +100,200 @@ describe('parseWireText', () => {
       loopEvent({ type: 'content.part', part: { type: 'text', text: 'answer' } }),
     ].join('\n');
     expect(parseWireText(raw).map((e) => e.kind)).toEqual(['prompt', 'think', 'text']);
+  });
+});
+
+describe('parseWireUsage', () => {
+  const turnEnd = (type = 'turn.ended', agentId = 'main', turnId = 'turn-1') => JSON.stringify({
+    type, agentId, turnId, time: T,
+  });
+  const toolCall = (payload: string) => loopEvent({
+    type: 'tool.call', name: 'Bash', args: { command: payload },
+  });
+  const usageRecord = (usage: unknown, usageScope = 'turn') => JSON.stringify({
+    type: 'usage.record', agentId: 'main', model: 'kimi-code/k3', usage, usageScope, time: T,
+  });
+
+  it('counts only main top-level turn ends and tool calls and preserves explicit zero usage', () => {
+    const raw = [
+      turnEnd(),
+      turnEnd(),
+      turnEnd('agent.turn.ended'),
+      turnEnd('turn.ended', 'agent-0', 'turn-2'),
+      loopEvent({ type: 'turn.ended', turnId: 'turn-3' }),
+      toolCall('printf fixture'),
+      JSON.stringify({ type: 'context.append_loop_event', agentId: 'agent-0', event: { type: 'tool.call', name: 'Bash' } }),
+      loopEvent({ type: 'tool.result', result: { output: 'not a call' } }),
+      JSON.stringify({ type: 'turn.prompt', time: T, prompt: 'not a turn end' }),
+      usageRecord({ inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 }),
+      usageRecord({ inputOther: 9, output: 9, inputCacheRead: 9, inputCacheCreation: 9 }, 'step'),
+    ].join('\n');
+
+    expect(parseWireUsage(raw)).toEqual({
+      turns: 1, tool_calls: 1, input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 'unknown',
+    });
+  });
+
+  it('deduplicates numeric turn IDs without conflating string IDs', () => {
+    const numeric = (type = 'turn.ended') => JSON.stringify({ type, agentId: 'main', turnId: 0, time: T });
+    const raw = [numeric(), numeric(), numeric('agent.turn.ended'), turnEnd('turn.ended', 'main', '0')].join('\n');
+
+    expect(parseWireUsage(raw)).toEqual({
+      turns: 2, tool_calls: 0, input_tokens: 'unknown', output_tokens: 'unknown',
+      total_tokens: 'unknown', cost_usd: 'unknown',
+    });
+  });
+
+  it('counts valid records around malformed JSONL and uses unknown for missing or malformed values', () => {
+    const mixed = [
+      turnEnd(),
+      '{"torn',
+      toolCall('printf fixture'),
+      usageRecord({ inputOther: '10', output: 4, inputCacheRead: 2, inputCacheCreation: 1 }),
+    ].join('\n');
+    expect(parseWireUsage(mixed)).toEqual({
+      turns: 1, tool_calls: 1, input_tokens: 'unknown', output_tokens: 4,
+      total_tokens: 'unknown', cost_usd: 'unknown',
+    });
+    expect(parseWireUsage('not json\n')).toEqual({
+      turns: 'unknown', tool_calls: 'unknown', input_tokens: 'unknown', output_tokens: 'unknown',
+      total_tokens: 'unknown', cost_usd: 'unknown',
+    });
+    expect(parseWireUsage(turnEnd())).toEqual({
+      turns: 1, tool_calls: 0, input_tokens: 'unknown', output_tokens: 'unknown',
+      total_tokens: 'unknown', cost_usd: 'unknown',
+    });
+  });
+
+  it('sums real input fields and returns metadata without tool arguments or provider payloads', () => {
+    const result = parseWireUsage([
+      toolCall('printf private-tool-payload'),
+      usageRecord({
+        inputOther: 11, output: 7, inputCacheRead: 5, inputCacheCreation: 2,
+        prompt: 'private-provider-prompt', response: 'private-provider-response',
+      }),
+    ].join('\n'));
+
+    expect(result).toEqual({
+      turns: 0, tool_calls: 1, input_tokens: 18, output_tokens: 7, total_tokens: 25, cost_usd: 'unknown',
+    });
+    expect(JSON.stringify(result)).not.toContain('private-tool-payload');
+    expect(JSON.stringify(result)).not.toContain('private-provider-prompt');
+    expect(JSON.stringify(result)).not.toContain('private-provider-response');
+  });
+});
+
+describe('readWireUsage', () => {
+  const unknown = {
+    turns: 'unknown', tool_calls: 'unknown', input_tokens: 'unknown', output_tokens: 'unknown',
+    total_tokens: 'unknown', cost_usd: 'unknown',
+  };
+  const turn = (turnId: string) => JSON.stringify({ type: 'turn.ended', agentId: 'main', turnId, time: T });
+  const tool = (agentId = 'main') => JSON.stringify({
+    type: 'context.append_loop_event', agentId, event: { type: 'tool.call', name: 'Read' }, time: T,
+  });
+  const usage = (inputOther: number, output: number, inputCacheRead = 0, inputCacheCreation = 0) => JSON.stringify({
+    type: 'usage.record', agentId: 'main', model: 'kimi-code/k3', usageScope: 'turn',
+    usage: { inputOther, output, inputCacheRead, inputCacheCreation }, time: T,
+  });
+
+  async function file(raw: string): Promise<string> {
+    const dir = mkdtempSync(path.join(tmpdir(), 'hive-wire-usage-'));
+    const name = path.join(dir, 'wire.jsonl');
+    await fs.writeFile(name, raw);
+    return name;
+  }
+
+  async function mutateAfterInitialStat(mutate: (mtimeMs: number) => Promise<void>): Promise<void> {
+    const open = fs.open;
+    vi.spyOn(fs, 'open').mockImplementationOnce(async (file, flags) => {
+      const handle = await open(file, flags);
+      const stat = handle.stat.bind(handle);
+      vi.spyOn(handle, 'stat').mockImplementationOnce(async () => {
+        const initial = await stat();
+        await mutate(initial.mtimeMs);
+        return initial;
+      });
+      return handle;
+    });
+  }
+
+  it('returns unknown for a same-size content and mtime mutation', async () => {
+    const name = await file(turn('before'));
+    await mutateAfterInitialStat(async (mtimeMs) => {
+      await fs.writeFile(name, turn('change'));
+      await fs.utimes(name, new Date(), new Date(mtimeMs + 1000));
+    });
+
+    expect(await readWireUsage(name)).toEqual(unknown);
+  });
+
+  it('returns unknown for a same-size rewrite with the original mtime restored', async () => {
+    const name = await file(turn('before'));
+    await mutateAfterInitialStat(async (mtimeMs) => {
+      await fs.writeFile(name, turn('change'));
+      await fs.utimes(name, new Date(), new Date(mtimeMs));
+    });
+
+    expect(await readWireUsage(name)).toEqual(unknown);
+  });
+
+  it('returns unknown for a same-size file replacement', async () => {
+    const name = await file(turn('before'));
+    const replacement = `${name}.replacement`;
+    await mutateAfterInitialStat(async (mtimeMs) => {
+      await fs.rename(name, replacement);
+      await fs.writeFile(name, turn('change'));
+      await fs.utimes(name, new Date(), new Date(mtimeMs));
+    });
+
+    expect(await readWireUsage(name)).toEqual(unknown);
+  });
+
+  it('reads split UTF-8 records, deduplicates across chunks, and ignores non-main tool calls', async () => {
+    const split = JSON.stringify({
+      type: 'turn.ended', agentId: 'main', turnId: 'split', time: T, pad: '😀'.repeat(50_000),
+    });
+    const raw = `${[split, split, tool('agent-0'), tool(), usage(4, 3, 2, 1)].join('\n')}\n`;
+
+    expect(await readWireUsage(await file(raw))).toEqual({
+      turns: 1, tool_calls: 1, input_tokens: 7, output_tokens: 3, total_tokens: 10, cost_usd: 'unknown',
+    });
+  });
+
+  it('recovers after an oversized record and parses an unterminated EOF record', async () => {
+    const oversized = JSON.stringify({
+      type: 'turn.ended', agentId: 'main', turnId: 'oversized', time: T, pad: 'x'.repeat(256 * 1024),
+    });
+    const raw = [turn('before'), oversized, turn('after'), tool(), usage(0, 0)].join('\n');
+
+    expect(await readWireUsage(await file(raw))).toEqual({
+      turns: 2, tool_calls: 1, input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 'unknown',
+    });
+  });
+
+  it('reports cumulative and derived total overflow as unknown', async () => {
+    const cumulative = await file(`${usage(Number.MAX_SAFE_INTEGER, 0)}\n${usage(1, 0)}\n`);
+    expect(await readWireUsage(cumulative)).toEqual({
+      turns: 0, tool_calls: 0, input_tokens: 'unknown', output_tokens: 0,
+      total_tokens: 'unknown', cost_usd: 'unknown',
+    });
+    const total = await file(`${usage(Number.MAX_SAFE_INTEGER, 1)}\n`);
+    expect(await readWireUsage(total)).toEqual({
+      turns: 0, tool_calls: 0, input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1,
+      total_tokens: 'unknown', cost_usd: 'unknown',
+    });
+  });
+
+  it('returns unknown for an oversize file and a symlink', async () => {
+    const oversize = await file(turn('small'));
+    await fs.truncate(oversize, 64 * 1024 * 1024 + 1);
+    expect(await readWireUsage(oversize)).toEqual(unknown);
+
+    const target = await file(turn('target'));
+    const link = path.join(path.dirname(target), 'linked.jsonl');
+    await fs.symlink(target, link);
+    expect(await readWireUsage(link)).toEqual(unknown);
   });
 });
 
