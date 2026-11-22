@@ -34,6 +34,7 @@ done
 
 export PYTHONDONTWRITEBYTECODE=1
 python3 test/deploy_workflow_checks.py
+python3 test/llm_forward_checks.py
 npm test
 npm run build
 node scripts/discipline-gate.mjs
