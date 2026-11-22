@@ -21,6 +21,16 @@
   escalate conflicts to the orchestrator. Migrate semantic directives into
   executable configuration or checks. Shebangs and string data are not comments.
 
+## Scripts
+
+- Before a multi-step operation, check the target repo's `scripts/` directory
+  and `scripts/README.md` catalog. Reuse an existing helper when it fits.
+- Keep single commands inline.
+- Put repeated or multi-step reusable operations in tracked scripts under the
+  target repo's `scripts/` directory. Include `set -euo pipefail` and usage text.
+- Delete one-off helpers with their temporary files.
+- Run reusable helpers from their tracked location. Never copy them into lanes.
+
 ## Talking
 
 - Verdict first, then the detail. Say what you did NOT do.
