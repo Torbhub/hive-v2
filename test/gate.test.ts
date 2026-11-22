@@ -1,14 +1,28 @@
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { mkdirSync, mkdtempSync, promises as fs, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
-import { landPr, parseSteps, pushByHash, verifyCommits, verifyLog } from '../src/gate.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { landPr, parseSteps, pushByHash, runGate, verifyCommits, verifyLog } from '../src/gate.js';
 import { run } from '../src/tmux.js';
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('node:child_process')>();
+  return { ...orig, spawn: vi.fn() };
+});
 
 vi.mock('../src/tmux.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/tmux.js')>();
   return { ...orig, run: vi.fn(orig.run) };
+});
+
+afterEach(() => {
+  vi.mocked(spawn).mockReset();
+  if (vi.isMockFunction(process.kill)) vi.mocked(process.kill).mockRestore();
+  if (vi.isMockFunction(process.exit)) vi.mocked(process.exit).mockRestore();
+  if (vi.isMockFunction(fs.open)) vi.mocked(fs.open).mockRestore();
+  vi.useRealTimers();
 });
 
 const SHA = 'a'.repeat(40);
@@ -126,6 +140,103 @@ describe('verifyLog', () => {
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
 }
+
+function gateCase(pid = 987654) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'hive-gate-run-'));
+  git(dir, ['init', '-q']);
+  const file = path.join(dir, 'gate.log');
+  const child = Object.assign(new EventEmitter(), { pid }) as unknown as ChildProcess;
+  vi.mocked(spawn).mockReturnValue(child);
+  const handles: fs.FileHandle[] = [];
+  const open = fs.open;
+  vi.spyOn(fs, 'open').mockImplementation(async (path, flags, mode) => {
+    const handle = await open(path, flags, mode);
+    handles.push(handle);
+    return handle;
+  });
+  const exit = vi.spyOn(process, 'exit').mockImplementation((code) => {
+    expect(handles.map((handle) => handle.fd)).toEqual([-1, -1]);
+    throw new Error(`exit ${code}`);
+  });
+  return { child, dir, exit, file, handles };
+}
+
+async function interruptGate(file: string, dir: string) {
+  const before = process.listeners('SIGINT');
+  const pending = runGate(file, [{ name: 'test', cmd: 'unused' }], dir);
+  await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+  const interrupt = process.listeners('SIGINT').find((listener) => !before.includes(listener));
+  if (!interrupt) throw new Error('gate interrupt listener not registered');
+  return { interrupt: interrupt as () => void, pending };
+}
+
+describe('runGate interruption', () => {
+  it('ignores only an absent process group and releases interrupt cleanup', async () => {
+    const sigint = process.listeners('SIGINT');
+    const sigterm = process.listeners('SIGTERM');
+    const { dir, exit, file, handles } = gateCase();
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    });
+    const { interrupt, pending } = await interruptGate(file, dir);
+    interrupt();
+    await expect(pending).rejects.toThrow('exit 130');
+    expect(exit).toHaveBeenCalledWith(130);
+    expect(await fs.readFile(file, 'utf8')).not.toMatch(/^test exit /m);
+    expect(handles.map((handle) => handle.fd)).toEqual([-1, -1]);
+    expect(process.listeners('SIGINT')).toEqual(sigint);
+    expect(process.listeners('SIGTERM')).toEqual(sigterm);
+  });
+
+  it('surfaces process-group termination failure and closes gate logs', async () => {
+    const { dir, exit, file, handles } = gateCase();
+    const failure = Object.assign(new Error('denied'), { code: 'EPERM' });
+    vi.spyOn(process, 'kill').mockImplementation(() => { throw failure; });
+    const { interrupt, pending } = await interruptGate(file, dir);
+    interrupt();
+    await expect(pending).rejects.toBe(failure);
+    expect(exit).not.toHaveBeenCalled();
+    expect(await fs.readFile(file, 'utf8')).not.toMatch(/^test exit /m);
+    expect(handles.map((handle) => handle.fd)).toEqual([-1, -1]);
+  });
+
+  it('exits 130 after successful termination without a result line', async () => {
+    const { child, dir, exit, file, handles } = gateCase();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const { interrupt, pending } = await interruptGate(file, dir);
+    interrupt();
+    child.emit('close', 0);
+    await expect(pending).rejects.toThrow('exit 130');
+    expect(kill).toHaveBeenCalledWith(-987654, 'SIGTERM');
+    expect(exit).toHaveBeenCalledWith(130);
+    expect(await fs.readFile(file, 'utf8')).not.toMatch(/^test exit /m);
+    expect(handles.map((handle) => handle.fd)).toEqual([-1, -1]);
+  });
+
+  it('reports bounded cleanup failure when a terminated child stays open', async () => {
+    const { dir, exit, file, handles } = gateCase();
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const { interrupt, pending } = await interruptGate(file, dir);
+    vi.useFakeTimers();
+    interrupt();
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(pending).rejects.toThrow('did not exit after SIGTERM');
+    expect(exit).not.toHaveBeenCalled();
+    expect(await fs.readFile(file, 'utf8')).not.toMatch(/^test exit /m);
+    expect(handles.map((handle) => handle.fd)).toEqual([-1, -1]);
+  });
+
+  it('keeps interruption partial when child exit races termination', async () => {
+    const { child, dir, exit, file, handles } = gateCase();
+    vi.spyOn(process, 'kill').mockImplementation(() => { child.emit('close', 0); });
+    const { interrupt, pending } = await interruptGate(file, dir);
+    interrupt();
+    await expect(pending).rejects.toThrow('exit 130');
+    expect(exit).toHaveBeenCalledWith(130);
+    expect(await fs.readFile(file, 'utf8')).not.toMatch(/^test exit /m);
+    expect(handles.map((handle) => handle.fd)).toEqual([-1, -1]);
+  });
+});
 
 describe('verifyCommits', () => {
   function repo(): string {

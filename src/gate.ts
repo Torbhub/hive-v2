@@ -35,31 +35,50 @@ async function gitTracked(file: string, cwd: string): Promise<boolean> {
 }
 
 function runStep(cmd: string, cwd: string, out: fs.FileHandle): Promise<number | null> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn('bash', ['-c', cmd], { cwd, detached: true, stdio: ['ignore', out.fd, out.fd] });
     const pid = child.pid;
     let done = false;
+    let interrupted = false;
+    let timeout: NodeJS.Timeout | undefined;
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      process.removeListener('SIGINT', onSig);
+      process.removeListener('SIGTERM', onSig);
+    };
+    const succeed = (code: number | null) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(code);
+    };
+    const fail = (error: unknown) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(error);
+    };
     const onSig = () => {
-      if (pid) {
-        try {
-          process.kill(-pid, 'SIGTERM');
-        } catch { }
+      if (done || interrupted) return;
+      interrupted = true;
+      if (!pid) {
+        succeed(null);
+        return;
+      }
+      try {
+        process.kill(-pid, 'SIGTERM');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') succeed(null);
+        else fail(error);
+        return;
       }
       if (!done) {
-        done = true;
-        resolve(null);
+        timeout = setTimeout(() => fail(new Error(`gate child ${pid} did not exit after SIGTERM`)), 1000);
       }
     };
     process.once('SIGINT', onSig);
     process.once('SIGTERM', onSig);
-    child.on('close', (code) => {
-      process.removeListener('SIGINT', onSig);
-      process.removeListener('SIGTERM', onSig);
-      if (!done) {
-        done = true;
-        resolve(code ?? 1);
-      }
-    });
+    child.on('close', (code) => succeed(interrupted ? null : code ?? 1));
   });
 }
 
@@ -90,21 +109,28 @@ export async function runGate(logPath: string, steps: GateStep[], cwd: string): 
   await fs.rm(`${logPath}.d`, { recursive: true, force: true });
   await fs.mkdir(`${logPath}.d`, { recursive: true });
   const log = await fs.open(logPath, 'w');
-  await log.write(`# hive-gate steps: ${steps.map((s) => s.name).join(',')} head=${head} dirty=${dirty}\n`);
-  let status = 0;
-  for (const step of steps) {
-    const out = await fs.open(path.join(`${logPath}.d`, `${step.name}.log`), 'a');
-    const rc = await runStep(step.cmd, cwd, out);
-    await out.close();
-    if (rc === null) {
-      await log.close();
-      process.exit(130);
+  try {
+    await log.write(`# hive-gate steps: ${steps.map((s) => s.name).join(',')} head=${head} dirty=${dirty}\n`);
+    let status = 0;
+    for (const step of steps) {
+      const out = await fs.open(path.join(`${logPath}.d`, `${step.name}.log`), 'a');
+      let rc: number | null;
+      try {
+        rc = await runStep(step.cmd, cwd, out);
+      } finally {
+        await out.close();
+      }
+      if (rc === null) {
+        await log.close();
+        process.exit(130);
+      }
+      await log.write(`${step.name} exit ${rc}\n`);
+      if (rc !== 0) status = 1;
     }
-    await log.write(`${step.name} exit ${rc}\n`);
-    if (rc !== 0) status = 1;
+    return status;
+  } finally {
+    if (log.fd !== -1) await log.close();
   }
-  await log.close();
-  return status;
 }
 
 export type VerifyLogResult = { green: boolean; out: string; note?: string };
