@@ -11,6 +11,7 @@ import {
   paneExists, paneIdentity, sendEnter, sendEscape, sendLiteral,
   serverReachable, tmuxSocketPath,
 } from '../src/tmux.js';
+import { cleanupTmuxServers } from './tmux-cleanup.js';
 
 function raw(socket: string, args: string[]): string {
   return execFileSync('tmux', ['-L', socket, ...args], { encoding: 'utf8' });
@@ -25,11 +26,7 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(() => {
-  for (const s of [SOCK, DECOY_SOCK]) {
-    try {
-      execFileSync('tmux', ['-L', s, 'kill-server'], { stdio: 'ignore' });
-    } catch { }
-  }
+  cleanupTmuxServers([SOCK, DECOY_SOCK]);
 });
 
 describe('private socket', () => {

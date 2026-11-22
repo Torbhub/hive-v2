@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { promises as fs, mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,6 +9,7 @@ process.env.HIVE_TMUX_SOCKET = SOCK;
 import { capturePane, ensureHiveSession, newWindow, paneExists, paneIdentity, sleep } from '../src/tmux.js';
 import { hivePath, hubPath, readDecisions, writeJson } from '../src/state.js';
 import { watchCycle } from '../src/watch.js';
+import { cleanupTmuxServers } from './tmux-cleanup.js';
 
 const DECOY_SH = `#!/bin/bash
 set -euo pipefail
@@ -57,9 +57,7 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(() => {
-  try {
-    execFileSync('tmux', ['-L', SOCK, 'kill-server'], { stdio: 'ignore' });
-  } catch { }
+  cleanupTmuxServers([SOCK]);
 });
 
 async function setupDecoy(command: string) {
