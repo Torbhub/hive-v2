@@ -41,7 +41,13 @@ export function serverReachable(socket: string): Promise<boolean> {
 
 async function ensureServer(): Promise<void> {
   if (await serverReachable(tmuxSocketPath())) return;
-  await run('sudo', ['-n', 'systemctl', 'restart', 'hive-v2-tmux'], undefined, undefined, 15_000);
+  const restarted = await run('sudo', ['-n', 'systemctl', 'restart', 'hive-v2-tmux'], undefined, undefined, 15_000);
+  if (restarted.code !== 0) {
+    throw new Error(`tmux: cannot restart hive-v2-tmux: ${restarted.stderr.trim() || `exit ${restarted.code}`}`);
+  }
+  if (!(await serverReachable(tmuxSocketPath()))) {
+    throw new Error('tmux: hive-v2-tmux socket unreachable after restart');
+  }
 }
 
 export async function ensureHiveSession(): Promise<void> {
