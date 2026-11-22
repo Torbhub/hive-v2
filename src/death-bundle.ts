@@ -50,15 +50,24 @@ export async function readTailBytes(file: string, bytes: number): Promise<string
   }
 }
 
+export class SessionNotFoundError extends Error {}
+
 export async function findSessionDir(home: string, sessionId: string): Promise<string> {
   const base = path.join(home, '.kimi-code', 'sessions');
   const dirName = sessionId.startsWith('session_') ? sessionId : `session_${sessionId}`;
-  for (const wd of await fs.readdir(base)) {
+  const workdirs = await fs.readdir(base).catch((e: unknown) => {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw e;
+  });
+  for (const wd of workdirs) {
     const dir = path.join(base, wd, dirName);
-    const st = await fs.stat(dir).catch(() => null);
+    const st = await fs.stat(dir).catch((e: unknown) => {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw e;
+    });
     if (st?.isDirectory()) return dir;
   }
-  throw new Error(`no ${dirName} under ${base}`);
+  throw new SessionNotFoundError(`no ${dirName} under ${base}`);
 }
 
 async function findWireLog(sessionDir: string): Promise<string> {

@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { findSessionDir } from './death-bundle.js';
+import { findSessionDir, SessionNotFoundError } from './death-bundle.js';
 import { checkName } from './names.js';
 import { readProjects, readTeam, Refusal } from './state.js';
 import type { TeamEntry } from './types.js';
@@ -323,11 +323,17 @@ export async function readAgentLog(
   let sessionDir: string;
   try {
     sessionDir = await findSessionDir(home, entry.session_id);
-  } catch {
-    throw new Refusal(`${name}'s session ${entry.session_id} has no wire log under ~/.kimi-code/sessions`);
+  } catch (e) {
+    if (e instanceof SessionNotFoundError) {
+      throw new Refusal(`${name}'s session ${entry.session_id} has no wire log under ~/.kimi-code/sessions`);
+    }
+    throw e;
   }
   const file = path.join(sessionDir, 'agents', 'main', 'wire.jsonl');
-  const handle = await fs.open(file, 'r').catch(() => null);
+  const handle = await fs.open(file, 'r').catch((e: unknown) => {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw e;
+  });
   let page: LogPage = { entries: [], fileGeneration: null, hasOlder: false, olderCursor: null };
   if (handle) {
     try {
