@@ -27,7 +27,6 @@ function fakeStreams() {
   const stdout = new PassThrough() as PassThrough & { columns: number; rows: number };
   stdout.columns = 80;
   stdout.rows = 24;
-  // ink only attaches its input reader when stdin looks like a TTY.
   const stdin = new PassThrough() as PassThrough & {
     isTTY: boolean; setRawMode: (m: boolean) => void; ref: () => unknown; unref: () => unknown;
   };
@@ -38,7 +37,6 @@ function fakeStreams() {
   return { stdout, stdin };
 }
 
-// ink writes styled frames; strip the escape codes before asserting on text.
 function frameReader(stdout: PassThrough) {
   let out = '';
   stdout.on('data', (c) => {
@@ -230,8 +228,6 @@ describe('HubApp plan actions', () => {
     const inst = render(<HubApp root="/r" />, { stdout, stdin, debug: true, patchConsole: false });
     await waitForFrame(frame, 'a approve plan');
     await tick(200);
-    // One burst, delivered a char at a time before React can re-render: b
-    // opens the prompt and the a in "change" must not approve.
     for (const ch of 'b change it') {
       stdin.write(ch);
       await new Promise((r) => process.nextTick(r));

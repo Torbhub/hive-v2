@@ -2,7 +2,6 @@ import React, { useMemo, useState } from 'react';
 import { isOpenable, parse, type Segment, type Stretch } from '../src/stretch';
 import { cn } from './lib/utils';
 
-// The open record is fire-and-forget: a missed line must never break the UI.
 function recordOpen(short: string, pane: string): void {
   void fetch('api/stretch-opened', {
     method: 'POST',
@@ -11,8 +10,6 @@ function recordOpen(short: string, pane: string): void {
   }).catch(() => {});
 }
 
-// A span, not a button: an open stretch's long form can hold further
-// stretches, and nested buttons are invalid HTML.
 function StretchSpan({
   stretch, open, onToggle,
 }: {
@@ -76,7 +73,6 @@ export function StretchText({ text, pane, className }: { text: string; pane: str
       return next;
     });
   };
-  // Truncation only holds while everything is closed; an open long form wraps.
   return (
     <span className={cn(className, open.size === 0 && 'truncate')}>
       {renderSegments(segments, open, onToggle)}

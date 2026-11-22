@@ -15,10 +15,6 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Newest-wins, same as citadel's deploy-nexus: a newer push cancels the
-  # stale run, and the staleness step below keeps a survivor from reverting
-  # the box to an older SHA. A cancelled run reads as normal, not an incident.
-  # PR runs gate per-branch in their own group so they never cancel a deploy.
   group: ${{ github.event_name == 'pull_request' && format('gate-{0}', github.ref) || 'deploy-hive-v2' }}
   cancel-in-progress: true
 
@@ -28,13 +24,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
           cache: npm
       - run: npm ci
-      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c
         with:
           tool: jj-cli
       - run: npm test
@@ -61,8 +57,6 @@ jobs:
 
   deploy:
     needs: gate
-    # Deploys run from main only. A branch dispatch runs the gate alone — the
-    # no-silent-red tripwire uses that to gate its revert before merging.
     if: >-
       ${{ github.event_name == 'push'
          || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
@@ -73,16 +67,11 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
       - name: Skip a superseded push run
         id: staleness
-        # When main moves past this run's SHA, skip the deploy only if the
-        # newer head fires its own deploy run (citadel issue #1811: a merge
-        # that touches no trigger path fires no run, so the older run is the
-        # last deploy carrier and must NOT skip). Dispatches never skip. A
-        # diff that fails to compute fails the step loudly. Never guess.
         if: ${{ github.event_name == 'push' }}
         run: |
           MAIN_HEAD="$(git ls-remote origin refs/heads/main | cut -f1)"
@@ -93,10 +82,6 @@ jobs:
           fi
           git fetch --depth=100 origin "$MAIN_HEAD" || { echo "::error::could not fetch main HEAD $MAIN_HEAD for the supersede diff"; exit 1; }
           DIFF="$(git diff --name-only "${{ github.sha }}" "$MAIN_HEAD")" || { echo "::error::could not diff — refusing to guess skip or deploy"; exit 1; }
-          # Deploy trigger paths, one regex branch per on.push.paths entry:
-          #   src/ web/ infra/  <- src/** web/** infra/**
-          #   package[^/]*\.json  tsconfig[^/]*\.json  <- package*.json tsconfig*.json
-          #   \.github/workflows/deploy\.yml  <- .github/workflows/deploy.yml
           if echo "$DIFF" | grep -qE '^(src/|web/|infra/|\.github/workflows/deploy\.yml|package[^/]*\.json|tsconfig[^/]*\.json)'; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::main HEAD $MAIN_HEAD supersedes ${{ github.sha }} and touches a deploy path — this run skips (the newer head fires its own run)"
@@ -104,20 +89,17 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "::notice::main HEAD $MAIN_HEAD moved past ${{ github.sha }} but touches no deploy path — this run is the last deploy carrier and deploys"
           fi
-      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
         if: ${{ steps.staleness.outputs.skip != 'true' }}
         with:
           role-to-assume: ${{ secrets.HIVE_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
       - name: Update the infra stack when infra/ changed
         if: ${{ steps.staleness.outputs.skip != 'true' }}
-        # Stack deploys are exempt from the mutex: CloudFormation serializes
-        # per-stack, and this step is what grants the role its mutex access.
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             CHANGED=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" -- infra/)
           else
-            # dispatch: no before-sha; a missing HEAD~1 means skip-with-log below
             CHANGED=$(git diff --name-only HEAD~1 HEAD -- infra/ 2>/dev/null || true)
           fi
           if [ -z "$CHANGED" ]; then
@@ -177,6 +159,5 @@ jobs:
           echo "deploy did not reach a terminal state within 10 minutes"
           exit 1
       - name: Release the deploy mutex
-        # Releasing a mutex this run never took is a no-op warn in the script.
         if: always() && steps.staleness.outputs.skip != 'true'
         run: bash infra/deploy-mutex.sh release aws-acts "hive-v2/${{ github.run_id }}"

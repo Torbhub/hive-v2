@@ -45,9 +45,6 @@ export async function readBody(req: http.IncomingMessage, cap = BODY_CAP): Promi
   }
 }
 
-// Cross-site POSTs die here: no-cors forms cannot set a JSON content type,
-// and any browser request from another origin carries a mismatched Origin or
-// Sec-Fetch-Site.
 export function checkBrowserHeaders(req: http.IncomingMessage): void {
   if (req.headers['sec-fetch-site'] === 'cross-site') throw new HttpError(403, 'cross-site request');
   const origin = req.headers.origin;
@@ -127,8 +124,6 @@ export async function handlePost(root: string, pathname: string, body: Record<st
       return { ok: true, pane: await continueProject(root, project) };
     }
     if (pathname === '/api/task') {
-      // Task text only ever lands in tasks/<id>.md; the pickup line names the
-      // file path, so this text never touches a shell or send-keys.
       const text = String(body.text ?? '');
       if (!text.trim()) throw new HttpError(400, 'task text is empty');
       if (text.length > TASK_TEXT_CAP) {

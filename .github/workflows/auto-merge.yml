@@ -1,32 +1,4 @@
 name: auto-merge
-# Tiered auto-merge, ported from citadel with hive-v2 scopes.
-#
-# A PR auto-merges when every shared gate holds and ONE tier admits it.
-# Shared gates:
-#   1. no `gate:*` label (the human-hold mechanism);
-#   2. the latest deploy run on main is green — a red deploy line halts
-#      auto-merge fail-closed;
-#   3. the required `gate` check is green — enforced by GitHub's auto-merge
-#      itself.
-# Tiers:
-#   A. prose — label `auto-merge`, and every changed file is in the
-#      allowlist (docs/, rules/, skills/, README.md, AGENTS.md).
-#      infra/, src/, and roles/ are hard-denied even if the allowlist is
-#      ever widened. Role PRs need manual review and an post-merge main bench.
-#   B. deslop-clean — label `deslop-clean`, applied by the on-box
-#      adversarial reviewer only after a full deslop review comes back
-#      CLEAN (and pulled on SLOPPY). Prose and product code are allowed;
-#      the loop's own control plane is not: infra/**, .github/**,
-#      scripts/**, roles/**, skills/**, rules/**, and AGENTS.md stay
-#      human-territory even with the label. Machinery that can merge its
-#      own steering edits is a supply-chain hole.
-#
-# The merge runs under GITHUB_TOKEN, which does not trigger push workflows.
-# Tier A touches no deploy path (see deploy.yml on.push.paths), so it never
-# strands a deploy. Tier B can merge src/ or web/ changes: those deploy on
-# the next push to main that fires deploy.yml, not on the merge itself.
-# This workflow checks out and runs NO repository code — pure API
-# classification.
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
@@ -48,7 +20,6 @@ jobs:
       - name: Classify and enable (or hold) auto-merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No checkout on purpose — gh needs the repo named explicitly.
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -113,6 +84,5 @@ jobs:
             [ "$HAS_PROSE" = 1 ] && [ "$PROSE_DENY" = 1 ] && WHY="touches infra/, src/, or roles/ (prose hard deny; roles need manual post-merge main bench)"
             [ "$HAS_DESLOP" = 1 ] && [ "$DESLOP_DENY" = 1 ] && WHY="touches the control plane: infra/, .github/, scripts/, roles/, skills/, rules/, AGENTS.md (human territory even with deslop-clean)"
           fi
-          # A held PR must not keep a previously-enabled auto-merge.
           gh pr merge --disable-auto "$PR" || true
           echo "PR #$PR held: $WHY"

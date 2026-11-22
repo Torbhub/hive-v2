@@ -58,7 +58,6 @@ describe('buildView decisions feed', () => {
     const signal: Decision[] = Array.from({ length: 9 }, (_, i) => decision({
       at: `2026-10-13T10:${String(i).padStart(2, '0')}:00Z`, summary: `approved the plan ${i}`,
     }));
-    // readDecisions answers newest first.
     vi.mocked(readDecisions).mockResolvedValueOnce([...noise, ...signal].reverse());
     const view = await buildView('/r');
     expect(view.decisions).toHaveLength(8);
@@ -75,7 +74,6 @@ describe('buildView', () => {
     expect(view.projects).toHaveLength(1);
     expect(view.tasks).toHaveLength(1);
     expect(view.tasks[0].needs_owner).toBe(true);
-    // orchestrator question → "demo", agent question → "demo/fixer"
     expect(Object.keys(view.dialogs).sort()).toEqual(['demo', 'demo/fixer']);
     expect(view.dialogs.demo).toHaveProperty('pane', '%1');
     expect(view.questions).toEqual([]);

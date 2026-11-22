@@ -315,7 +315,6 @@ export async function issueGenerationCredential(baseUrl: string, attemptKey: str
       else if (current.httpStatus === 404) attemptError(current.value, 'credential_attempt_not_found');
       else throw new Error('invalid-credential-attempt-status');
     } catch {
-      // Same-attempt replay is safe when status is unavailable or not found.
     }
     if (!recovered) await new Promise<void>((resolve) => setTimeout(resolve, 25));
   }

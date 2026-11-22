@@ -13,8 +13,6 @@ const COMMAND_DIALOG = readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'dialog-permission.txt'), 'utf8',
 );
 
-// The view reads state only; no pane exists, but keep tmux pointed at a
-// throwaway socket anyway.
 process.env.HIVE_TMUX_SOCKET = `hive-test-${process.pid}`;
 
 vi.mock('../src/hub.js', async (importOriginal) => {
@@ -302,7 +300,7 @@ describe('request hardening', () => {
       origin: base,
       'sec-fetch-site': 'same-origin',
     });
-    expect(sameHost.status).toBe(400); // the usual no-dialog refusal, not a 403
+    expect(sameHost.status).toBe(400);
   });
 
   it('sends cache-control: no-store on API responses', async () => {
@@ -327,7 +325,6 @@ describe('request hardening', () => {
       const text = await r.text();
       expect(JSON.parse(text)).toEqual({ ok: false, detail: 'internal error' });
       expect(text).not.toContain(bad);
-      // The view sanitizes its error line the same way (root is shown by design).
       const view = await (await fetch(`${url}/api/view`)).json();
       expect(view.error).toBe('the status read failed');
       expect(view.error).not.toContain(bad);
@@ -404,7 +401,6 @@ describe('/hive prefix (nexus embed)', () => {
       fetch(`${base}/hive/api/view`),
     ]);
     expect(prefixed.status).toBe(200);
-    // updatedAt is read-time; everything else must be identical.
     const strip = (v: { updatedAt: number }) => ({ ...v, updatedAt: 0 });
     expect(strip(await prefixed.json())).toEqual(strip(await plain.json()));
   });
@@ -416,7 +412,6 @@ describe('/hive prefix (nexus embed)', () => {
   });
 
   it('a lookalike prefix is not stripped', async () => {
-    // /hivex/... is not the API: a POST there is GET-only static territory.
     expect((await post('/hivex/api/wake', { project: 'demo' })).status).toBe(405);
   });
 
@@ -607,7 +602,6 @@ describe('POST /api/approvals + decisions in the view', () => {
 
   it('GET /api/view carries the latest kept decisions, newest first', async () => {
     const { appendDecision } = await import('../src/state.js');
-    // Tier-1 auto-approvals and "Approve once" clicks are noise: the feed drops them.
     await appendDecision(root, { project: 'demo', by: 'watch', summary: 'auto-approved "Approve once" for: $ ls' });
     await appendDecision(root, { project: 'demo', by: 'owner', summary: 'approved the plan' });
     await appendDecision(root, { project: 'demo', by: 'owner', summary: 'answered "Approve once" for: $ rm x' });
@@ -769,7 +763,6 @@ describe('POST /api/project', () => {
 
 describe('POST /api/message', () => {
   beforeAll(async () => {
-    // The recorded pane is not on the throwaway socket, so it reads as dead.
     await writeJson(hivePath(path.join(root, 'demo'), 'team.json'), {
       agents: [{
         name: 'demo-orchestrator', orchestrator: true,
@@ -903,7 +896,6 @@ describe('POST /api/task-resolve', () => {
       id: 'demo-8', project: 'demo', event: 'blocked', at: new Date().toISOString(), note: 'no API key',
     });
     await appendTaskEvent(root, { id: 'demo-9', project: 'demo', event: 'asked', at: new Date().toISOString() });
-    // demo-9 lives the full cycle before its rebrief: approved plan, progress, then blocked.
     await appendTaskEvent(root, {
       id: 'demo-9', project: 'demo', event: 'plan', at: new Date().toISOString(),
       checkpoints: [{ id: 'a', desc: 'write it', etaMin: 5 }],
@@ -938,7 +930,6 @@ describe('POST /api/task-resolve', () => {
   });
 
   it('rebrief without a note is a 400; with a note the task goes back to asked', async () => {
-    // The blocked demo-9 carries an approved plan and a progress trail.
     const before = await (await fetch(`${base}/api/view`)).json();
     const b9 = before.tasks.find((x: { id: string }) => x.id === 'demo-9');
     expect(b9.state).toBe('blocked');
@@ -956,12 +947,10 @@ describe('POST /api/task-resolve', () => {
     expect(t.state).toBe('asked');
     expect(t.last_note).toBe('use postgres, per the brief');
     expect(t.needs_owner).toBe(false);
-    // The old plan's approval, trail, and progress clock must not carry over.
     expect(t.plan_approved).toBe(false);
     expect(t.checkpoints).toEqual([]);
     expect(t.progress).toEqual({});
     expect(t.last_progress_at).toBeNull();
-    // The composed gate: with the approval cleared, handed refuses end-to-end.
     await expect(hubLog(root, 'demo-9', 'handed')).rejects.toThrow(/no approved plan/);
   });
 
@@ -1026,8 +1015,6 @@ describe('POST /api/progress', () => {
 });
 
 describe('POST /api/interrupt', () => {
-  // The spy wraps the real function, so refusal tests below reach it too;
-  // each test starts from a clean call history.
   beforeEach(() => {
     vi.mocked(interruptAgent).mockClear();
   });
@@ -1037,7 +1024,6 @@ describe('POST /api/interrupt', () => {
     expect(noProject.status).toBe(400);
     expect((await noProject.json()).detail).toMatch(/unknown project/);
     expect((await post('/api/interrupt', { project: 'demo', agent: 'bad name' })).status).toBe(400);
-    // The recorded pane %999 is not on the throwaway socket, so it reads as dead.
     const dead = await post('/api/interrupt', { project: 'demo' });
     expect(dead.status).toBe(400);
     expect((await dead.json()).detail).toMatch(/no live pane/);

@@ -31,7 +31,6 @@ export function orchestratorName(project: string): string {
   return `${project}-orchestrator`;
 }
 
-// Compiled this lives in dist/src/, in tests in src/ — walk up to the dir holding roles/.
 export function packageRoot(): string {
   let dir = path.dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 5; i++) {
@@ -128,7 +127,6 @@ async function waitIdleTrust(pane: string, target?: TrustTarget): Promise<'idle'
 
 export class PreInputError extends Error {}
 
-// The first Enter after a literal send is sometimes swallowed by the TUI; one retry, then give up.
 export async function typeLine(
   pane: string, text: string, identity: PaneIdentity, screenGuard?: (raw?: string) => Promise<void>,
 ): Promise<void> {
@@ -150,29 +148,20 @@ export async function typeLine(
   throw new Error(`the line stayed in the prompt of ${pane}; not typed`);
 }
 
-// -S combines with -y/--auto/-m per kimi --help, so mode and model apply to resumes too.
 const MODEL_RE = /^[A-Za-z0-9._/[\]-]{1,64}$/;
 
 type LaunchMode = ProjectMode | 'supervised-auto';
 
-// In ask mode kimi blocks on its own prompt for every command and the watch
-// answers 5-17s later, stalling the lane. With approvals safe|smart the watch
-// is already the backstop, so launch the orchestrator in supervised auto.
-// Launch-time only: the stored project mode is not rewritten, and manual keeps ask.
 export function effectiveOrchestratorMode(mode: ProjectMode, approvals?: Approvals): LaunchMode {
   return mode === 'ask' && (approvals === 'safe' || approvals === 'smart') ? 'supervised-auto' : mode;
 }
 
-// Called before any side effect (worktree add, pane kill): a bad alias is a
-// recoverable config error and must never orphan a worktree or kill a live agent.
 export function checkModel(model: string | undefined): void {
   if (model !== undefined && !MODEL_RE.test(model)) {
     throw new Error(`a model alias is letters, digits, '.', '_', '-', '/', '[', ']': ${model}`);
   }
 }
 
-// Fresh sessions without an explicit model get the house default, not whatever
-// default_model a drifting config.toml happens to say.
 export const DEFAULT_MODEL = 'kimi-code/k3.1-pro-highspeed';
 
 export function launchCommand(
@@ -189,7 +178,6 @@ export function launchCommand(
     mode === 'supervised-auto' ? '--auto' : mode === 'yolo' ? '-y' : '',
     `-m '${model}'`,
   ].filter(Boolean);
-  // No session lock: kimi's take-over repair prompt is interactive, and a hive lane is already one client per session.
   return `KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run${args.length ? ` -- ${args.join(' ')}` : ''}`;
 }
 
@@ -210,9 +198,6 @@ export async function launchWindow(
   beforeWindow?: () => Promise<void>,
 ): Promise<{ pane: string; identity: PaneIdentity }> {
   await assertExecutionAllowed(root, project);
-  // HIVE_AGENT names the pane's own agent: a `hive spawn` run inside the pane
-  // reads it to record its parent, and the memory CLI already reports with it.
-  // HIVE_PROJECT + HIVE_HUB_ROOT route the agent's ask_operator MCP calls.
   const quote = (v: string): string => `'${v.replaceAll("'", `'\\''`)}'`;
   const profile = await ensureAgentProfile(cwd, agent);
   await requireAgentCredential(cwd, project, agent);
@@ -342,7 +327,6 @@ async function finishLaunch(root: string, claim: string, result: LaunchResult): 
   );
 }
 
-// Agents share a cwd, so a session counts only when its first prompt is that agent's pickup line.
 export async function findLatestSession(cwd: string, agent?: string): Promise<string | null> {
   const base = path.join(os.homedir(), '.kimi-code', 'sessions');
   let best: { id: string; at: number } | null = null;
@@ -496,7 +480,6 @@ async function requireWorkerContract(old: TeamEntry, home: string): Promise<void
   }
 }
 
-// Prefer the remote tip; the fallbacks keep offline and master-based repos lane-able.
 async function jjBaseRev(home: string): Promise<string> {
   for (const rev of ['main@origin', 'main', '@']) {
     const probe = await run('jj', ['-R', home, 'log', '-r', rev, '-T', "''", '--no-graph', '--limit', '1'], home);
@@ -505,7 +488,6 @@ async function jjBaseRev(home: string): Promise<string> {
   throw new Error(`jj: no base revision in ${home} (tried main@origin, main, @)`);
 }
 
-// Trash first, then forget: forget is jj's flow for a directory already gone.
 async function undoJjWorkspace(home: string, name: string, wt: string): Promise<void> {
   const dest = path.join(hivePath(home, 'trash', new Date().toISOString().slice(0, 10)), name);
   await fs.mkdir(path.dirname(dest), { recursive: true });
@@ -513,9 +495,6 @@ async function undoJjWorkspace(home: string, name: string, wt: string): Promise<
   await run('jj', ['-R', home, 'workspace', 'forget', name], home);
 }
 
-// A spawn run inside a pane records the pane's agent as the child's parent,
-// so a cascade kill can enumerate the orchestrator's children. In the owner's
-// shell HIVE_AGENT is unset and the spawn has no parent.
 function envParent(self: string): string | undefined {
   const v = process.env.HIVE_AGENT;
   return v && v !== self && AGENT_NAME_RE.test(v) ? v : undefined;
@@ -564,9 +543,7 @@ async function spawnRegisteredAgent(
   let hookInstallFailed = false;
   const worktreeExisted = existsSync(worktree);
   try {
-    // Neither jj workspace add nor git worktree add creates missing parent dirs.
     await fs.mkdir(path.dirname(worktree), { recursive: true });
-    // jj root answers only inside a jj repo; a failure tries git next.
     const jjRepo = (await run('jj', ['root'], home)).code === 0;
     const plainFolder = !opts.worktree && !jjRepo &&
       (await run('git', ['rev-parse', '--is-inside-work-tree'], home)).code !== 0;
@@ -575,7 +552,6 @@ async function spawnRegisteredAgent(
       const existed = existsSync(worktree);
       const made = await run('jj', ['-R', home, 'workspace', 'add', worktree, '-r', base], home);
       if (made.code !== 0) {
-        // jj can register the workspace and create the dir yet still fail.
         if (!existed && existsSync(worktree)) await undoJjWorkspace(home, path.basename(worktree), worktree);
         throw new Error(`jj workspace add failed: ${made.stderr.trim()}`);
       }
@@ -604,7 +580,6 @@ async function spawnRegisteredAgent(
     await ensureAgentFiles(worktree, agent, role);
     await writeWorkerContract(worktree, agent, opts);
     if (task) {
-      // Recall never blocks a spawn: memoryBlockFor fails open in 3s.
       const block = await memoryBlockFor(root, project, task);
       if (block) await applyMemoryBlock(hivePath(worktree, 'handoffs', `${agent}.md`), block);
     }
@@ -921,7 +896,6 @@ export async function closeAgent(root: string, project: string, agent: string): 
   if (entry.orchestrator) await clearPendingPane(root, project);
 }
 
-// Shared tail of respawnAgent and wakeAgent: new window, team record, pickup line.
 async function relaunchAgent(
   root: string,
   p: ProjectsFile['projects'][number],
@@ -1093,8 +1067,6 @@ export async function respawnAgent(
   }
 }
 
-// The watchdog's agent ensure: a dead agent with a recorded session comes back
-// with that session resumed. A stamped close is never woken.
 export async function wakeAgent(root: string, project: string, agent: string): Promise<string> {
   await assertExecutionAllowed(root, project);
   const p = await projectEntry(root, project);

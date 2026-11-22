@@ -70,7 +70,7 @@ roles/         — orchestrator.md, implementer.md, reviewer.md, council-*.md, r
 rules/RULES.md — the team's working rules (git, gate, reporting, handoff format)
 skills/        — start, gate, cleanup, council, retro, digest-triage, experiment (Kimi Code skills; load with --skills-dir)
 web/           — server.ts (node:http, loopback), dictation.tsx (browser audio), + the React/vite SPA (built to web/dist)
-docs/          — this file, hub-ui-spec.md, mechanics.md (what was kept/cut and why), crawl-sources.md + crawl/ (the daily loop's ledger and findings)
+docs/          — this file, hub-ui-spec.md, adr/ (durable design decisions), mechanics.md (what was kept/cut and why), crawl-sources.md + crawl/ (the daily loop's ledger and findings)
 test/          — vitest: screen parsing, gate-verify, task ledger, arg parsing
 README.md      — written for a new SWE: what it is, install, the 6 commands you actually use
 ```

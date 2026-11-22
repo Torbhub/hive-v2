@@ -235,7 +235,6 @@ const MENU = readFileSync(
   'utf8',
 );
 
-// A three-option menu built on the trust menu's structure (cursor on 1).
 const MENU3 = [
   'teamkimi run',
   ' ────────────────────────────',
@@ -356,7 +355,6 @@ describe('decisions from hub actions', () => {
     await hubLog(root, id, 'decided', 'postgres per the brief');
     const decisions = await readDecisions(root);
     expect(decisions[0]).toMatchObject({ by: 'orchestrator', project: 'demo', task: id, summary: 'postgres per the brief' });
-    // a non-decided event does not mirror
     await hubLog(root, id, 'note', 'just a note');
     expect(await readDecisions(root)).toHaveLength(1);
   });
@@ -482,7 +480,6 @@ describe('plan gate', () => {
       agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 1, pane_started: 'x' }],
     });
     const id = await hubTask(root, 'demo', 'build it');
-    // A legacy ledger can hold a plan event with no checkpoints; append it directly.
     await appendTaskEvent(root, {
       id, project: 'demo', event: 'plan', at: new Date().toISOString(), note: 'no cps',
     });
@@ -941,10 +938,6 @@ describe('original launch sending claim', () => {
 });
 
 describe('wake racing a cascade kill', () => {
-  // The exact timeline from the review: the wake's guard passes (entry
-  // present, unstamped), the owner's Kill lands while the new pane comes up,
-  // and the final upsert must refuse instead of resurrecting — with the
-  // fresh pane taken down.
   it('a cascade landing mid-wake stops the final upsert and the fresh pane dies', async () => {
     vi.mocked(killWindow).mockClear();
     const { root, home } = await setup();
@@ -983,8 +976,6 @@ describe('wake racing a cascade kill', () => {
 });
 
 describe('start after a cleanup stamp', () => {
-  // cleanup stamps closed_at without dropping the entry; that stamp is
-  // history, not a kill in flight, and a deliberate start must proceed.
   it('start on a stamped project succeeds and clears the stamp', async () => {
     const { root, home } = await setup();
     await hubTask(root, 'demo', 'do it');
@@ -1057,9 +1048,6 @@ describe('orchestrator launch registration locking', () => {
 });
 
 describe('wake after a cascade kill', () => {
-  // The watch's death path reads the team once per tick and wakes from that
-  // stale snapshot. The cascade drops the orchestrator entry (or stamps it
-  // closed mid-flight), so the wake must re-check and refuse.
   it('refuses when the orchestrator entry is gone', async () => {
     const { root, home } = await setup();
     await writeJson(hivePath(home, 'team.json'), { agents: [] });

@@ -9,15 +9,15 @@ const STATUSES = [USED, PARTIAL, UNUSED];
 export interface Invariant {
   id: string;
   desc: string;
-  evidence: string; // repo-relative test file, optionally ::test-name
+  evidence: string;
 }
 
 export interface Journey {
   id: string;
   desc: string;
   status: string;
-  tracer: string | null; // repo-relative test that proves it, null when UNUSED
-  criteria: string[]; // invariant ids
+  tracer: string | null;
+  criteria: string[];
   note?: string;
 }
 

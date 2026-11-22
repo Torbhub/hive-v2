@@ -1,9 +1,3 @@
-// Measures the bench output: the skim/original word ratio, and a points-coverage proxy.
-// The proxy takes each original's top claims — its first sentence, then each list item's first
-// clause, up to three — and checks each claim against the skim: normalized substring, else fuzzy
-// (most of the claim's content words present in the skim).
-//   tsx tools/stretch-bench/measure.ts [--in tools/stretch-bench/results/replay.jsonl] \
-//     [--root ~/.kimi-code/sessions] [--summary tools/stretch-bench/results/summary.json]
 import { readFileSync, writeFileSync } from 'node:fs';
 import { makeOption } from './args.js';
 import { repliesOf } from './extract.js';
@@ -16,7 +10,6 @@ const summaryPath = option('--summary', new URL('./results/summary.json', import
 const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, ' ').replace(/\s+/g, ' ').trim();
 const contentWords = (s: string) => new Set(norm(s).split(' ').filter((w) => w.length >= 4));
 
-/** First sentence, then each list item's first clause, most important first, at most three. */
 export function claimsOf(original: string): string[] {
   const claims: string[] = [];
   const firstSentence = original.trim().split(/(?<=[.!?])\s/)[0]?.trim() ?? '';
@@ -31,7 +24,6 @@ export function claimsOf(original: string): string[] {
   return claims.slice(0, 3);
 }
 
-/** Substring after normalization, else fuzzy: >= 70% of the claim's content words in the skim. */
 export function covered(claim: string, skim: string): boolean {
   const nClaim = norm(claim), nSkim = norm(skim);
   if (nClaim !== '' && nSkim.includes(nClaim)) return true;

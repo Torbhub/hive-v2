@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# Loopback bridge for the memory stack: the memory-core container lives on
-# the tdai-memory-stack docker network, and teamkimi binds host loopback
-# only. This listens on the network's gateway address so containers can
-# reach teamkimi without widening teamkimi's own bind.
 import socket
 import subprocess
 import threading
@@ -49,8 +45,6 @@ def pump(src, dst):
 def handle(client):
     try:
         upstream = socket.create_connection(TARGET, timeout=10)
-        # create_connection leaves the 10s connect timeout on the socket;
-        # a slow LLM response would read as a dead peer and get torn down.
         upstream.settimeout(None)
     except OSError:
         client.close()
@@ -68,7 +62,6 @@ def main():
             srv.bind((ip, PORT))
             break
         except OSError:
-            # Gateway address appears with the docker bridge; wait for it.
             time.sleep(5)
     srv.listen(128)
     while True:

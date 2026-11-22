@@ -47,7 +47,7 @@ beforeAll(async () => {
 afterAll(() => {
   try {
     execFileSync('tmux', ['-L', SOCKET, 'kill-server'], { stdio: 'ignore' });
-  } catch { /* already gone */ }
+  } catch { }
 });
 
 describe('auto-compaction against a decoy pane', () => {

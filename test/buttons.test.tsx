@@ -8,7 +8,6 @@ function fakeStreams() {
   const stdout = new PassThrough() as PassThrough & { columns: number; rows: number };
   stdout.columns = 80;
   stdout.rows = 24;
-  // ink only attaches its input reader when stdin looks like a TTY.
   const stdin = new PassThrough() as PassThrough & {
     isTTY: boolean; setRawMode: (m: boolean) => void; ref: () => unknown; unref: () => unknown;
   };

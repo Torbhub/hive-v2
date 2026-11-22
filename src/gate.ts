@@ -34,7 +34,6 @@ async function gitTracked(file: string, cwd: string): Promise<boolean> {
   return r.code === 0;
 }
 
-// Each step runs in its own process group so an interrupt writes no line for it — a partial gate is detectably partial.
 function runStep(cmd: string, cwd: string, out: fs.FileHandle): Promise<number | null> {
   return new Promise((resolve) => {
     const child = spawn('bash', ['-c', cmd], { cwd, detached: true, stdio: ['ignore', out.fd, out.fd] });
@@ -44,7 +43,7 @@ function runStep(cmd: string, cwd: string, out: fs.FileHandle): Promise<number |
       if (pid) {
         try {
           process.kill(-pid, 'SIGTERM');
-        } catch { /* already gone */ }
+        } catch { }
       }
       if (!done) {
         done = true;
@@ -68,7 +67,6 @@ export async function runGate(logPath: string, steps: GateStep[], cwd: string): 
   const logDir = path.dirname(logPath);
   const st = await fs.stat(logDir).catch(() => null);
   if (!st?.isDirectory()) throw new Error(`the gate log cannot be written: ${logPath}`);
-  // A git-tracked log is refused: its change would go unseen by the dirty check below.
   if (await gitTracked(logPath, cwd)) throw new Error(`the gate log may not be a file git tracks: ${logPath}`);
   if (await gitTracked(`${logPath}.d`, cwd)) throw new Error(`the gate log may not be a file git tracks: ${logPath}.d`);
 
@@ -111,8 +109,6 @@ export async function runGate(logPath: string, steps: GateStep[], cwd: string): 
 
 export type VerifyLogResult = { green: boolean; out: string; note?: string };
 
-// Exit 0 is not evidence: a test step must show passed > 0, zero failed, and
-// zero errors in the vitest summary of its own output log.
 async function vacuity(file: string, name: string): Promise<string | null> {
   const stepLog = path.join(`${file}.d`, `${name}.log`);
   const out = await fs.readFile(stepLog, 'utf8').catch(() => '');
@@ -234,7 +230,6 @@ export async function verifyCommits(
     if (opts.style === 'conventional' && !CONVENTIONAL_RE.test(subject)) {
       problems.push(`${short} subject: not conventional: ${subject}`);
     }
-    // A merge counts only its own content: the files where it differs from the merge git itself computes.
     const parents = (await run('git', ['rev-list', '--parents', '-n', '1', c], cwd)).stdout.trim().split(/\s+/).length - 1;
     let files: number;
     if (parents <= 1) {

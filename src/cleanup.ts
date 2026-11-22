@@ -8,7 +8,6 @@ import type { TeamEntry } from './types.js';
 
 export type CleanupAction = { record: ManifestRecord; action: string; acted: boolean };
 
-// Cleanup acts only on the manifest, re-judges every record at act time, and trashes instead of deleting.
 export async function cleanupProject(
   root: string,
   project: string,
@@ -29,9 +28,6 @@ export async function cleanupProject(
       const pid = Number(rec.pane_pid ?? 0);
       const started = String(rec.pane_started ?? '');
       const identity: PaneIdentity | null = pid && started ? { pid, started } : null;
-      // A record without identity, or one whose pane was recycled since, is
-      // left alone and kept on the manifest — killing it could hit a window
-      // hive does not own.
       if (!identity || !(await paneIs(pane, identity))) {
         actions.push({
           record: rec,
@@ -43,7 +39,6 @@ export async function cleanupProject(
       }
       actions.push({ record: rec, action: `kill tmux window ${rec.window ?? pane} (${pane})`, acted: !dryRun });
       if (!dryRun) {
-        // Stamp the intent before the kill so watch never reads it as a crash.
         const team = await readTeam(p.home);
         const stamped: TeamEntry[] = [];
         for (const entry of team.agents.filter((candidate) => candidate.pane === pane)) {
@@ -59,7 +54,6 @@ export async function cleanupProject(
         try {
           await killWindow(pane, identity);
         } catch (e) {
-          // The pane survived; a surviving stamp would hide it from the watch.
           for (const entry of stamped) {
             const current = entry.lease_id === undefined ? entry
               : (await readTeam(p.home)).agents.find((candidate) => candidate.lease_id === entry.lease_id);
@@ -79,7 +73,7 @@ export async function cleanupProject(
         if (!dryRun) {
           try {
             process.kill(pid, 'SIGTERM');
-          } catch { /* already gone */ }
+          } catch { }
         }
       }
       continue;
@@ -89,9 +83,6 @@ export async function cleanupProject(
       const abs = wt ? path.resolve(wt) : '';
       const st = abs ? await fs.stat(abs).catch(() => null) : null;
       if (!abs || !st) continue;
-      // The manifest is writable by the agents hive supervises: only trash a
-      // path that sits under the project home AND that git itself lists as a
-      // worktree of it.
       const underHome = abs.startsWith(path.resolve(p.home) + path.sep);
       const listed = underHome
         ? (await run('git', ['worktree', 'list', '--porcelain'], p.home)).stdout
@@ -117,7 +108,6 @@ export async function cleanupProject(
       const abs = wt ? path.resolve(wt) : '';
       const st = abs ? await fs.stat(abs).catch(() => null) : null;
       if (!abs || !st) continue;
-      // Same trust rule as worktrees, with jj as the witness.
       const underHome = abs.startsWith(path.resolve(p.home) + path.sep);
       const listed = underHome
         ? (await run('jj', ['-R', p.home, 'workspace', 'list', '-T', 'root ++ "\\n"'], p.home)).stdout

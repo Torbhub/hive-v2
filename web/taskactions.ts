@@ -5,11 +5,8 @@ import type { TaskRevalidate } from '../src/taskgate.js';
 import type { Principal } from '../src/security.js';
 import type { Checkpoint, RootContract, TaskEvidenceOutcome, TaskOutcome, TaskReceipt } from '../src/types.js';
 
-// Same cap as a task brief.
 const RESOLVE_NOTE_CAP = 4000;
 
-// Owner verdicts on a waiting task: cancel it, or send it back to asked with a
-// new brief. Ledger appends only, so a dead pane never blocks the call.
 async function taskResolve(
   root: string,
   project: string,
@@ -27,8 +24,6 @@ async function taskResolve(
   if (brief.length > RESOLVE_NOTE_CAP) {
     throw new Refusal(`the note is capped at ${RESOLVE_NOTE_CAP} characters`);
   }
-  // Same parity as an owner message: the fold took \t \n \r, so a control
-  // byte left over is hostile or broken input.
   if (/[\x00-\x1f\x7f]/.test(brief)) {
     throw new Refusal('the note holds control characters; they are not typeable');
   }
@@ -51,7 +46,6 @@ async function taskPlan(
   return { ok: true };
 }
 
-// Thin pass-through to the hub progress function; workers mostly use the CLI.
 async function recordProgress(
   root: string,
   project: string,
@@ -135,7 +129,6 @@ async function taskAcceptance(root: string, project: string, body: Record<string
   return { ok: true };
 }
 
-// null means the path is not a task action and the caller keeps dispatching.
 export async function handleTaskAction(
   root: string,
   project: string,

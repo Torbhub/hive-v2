@@ -2,8 +2,6 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-// Tests run against private throwaway tmux servers only. The default socket
-// (the user's sessions) is never touched: every tmux call carries -L.
 const SOCK = `hive-test-${process.pid}`;
 const DECOY_SOCK = `hive-decoy-${process.pid}`;
 process.env.HIVE_TMUX_SOCKET = SOCK;
@@ -22,7 +20,6 @@ let decoyPane = '';
 
 beforeAll(async () => {
   await ensureHiveSession();
-  // A stand-in for the user's own tmux server: a session hive-v2 must never see.
   raw(DECOY_SOCK, ['new-session', '-d', '-s', 'main', '-x', '220', '-y', '50', 'echo DECOY-CONTENT; exec sleep 600']);
   decoyPane = raw(DECOY_SOCK, ['display-message', '-p', '-t', 'main', '#{pane_id}']).trim();
 }, 30_000);
@@ -31,7 +28,7 @@ afterAll(() => {
   for (const s of [SOCK, DECOY_SOCK]) {
     try {
       execFileSync('tmux', ['-L', s, 'kill-server'], { stdio: 'ignore' });
-    } catch { /* already gone */ }
+    } catch { }
   }
 });
 
@@ -42,7 +39,6 @@ describe('private socket', () => {
   });
 
   it('cannot see panes on another tmux server', async () => {
-    // Same pane id or not, capture on our socket can never return the decoy's content.
     const seen = await capturePane(decoyPane);
     expect(seen === null || !seen.includes('DECOY-CONTENT')).toBe(true);
     const stillThere = raw(DECOY_SOCK, ['display-message', '-p', '-t', decoyPane, '#{pane_id}']).trim();
@@ -55,7 +51,6 @@ describe('serverReachable', () => {
     const dir = path.dirname(tmuxSocketPath());
     expect(await serverReachable(tmuxSocketPath())).toBe(true);
     expect(await serverReachable(`${dir}/no-such-${process.pid}`)).toBe(false);
-    // A stale socket file (dead server) is not reachable.
     const stale = `${dir}/hive-stale-${process.pid}`;
     execFileSync('touch', [stale]);
     expect(await serverReachable(stale)).toBe(false);
@@ -71,7 +66,6 @@ describe('assertPane / killWindow', () => {
     await expect(killWindow(pane, { pid: id!.pid + 100_000, started: 'bogus' }))
       .rejects.toThrow(/no longer the process/);
     expect(await paneExists(pane)).toBe(true);
-    // The recorded identity still kills.
     await killWindow(pane, id!);
     expect(await paneExists(pane)).toBe(false);
   });
@@ -90,7 +84,6 @@ describe('assertPane / killWindow', () => {
     ]) {
       await expect(act()).rejects.toThrow(/not hive/);
     }
-    // The foreign window survived.
     expect(raw(SOCK, ['display-message', '-p', '-t', pane, '#{pane_id}']).trim()).toBe(pane);
   });
 });

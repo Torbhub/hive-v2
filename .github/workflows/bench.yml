@@ -24,7 +24,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.expected_main_sha }}
           persist-credentials: false
@@ -39,11 +39,11 @@ jobs:
           git cat-file -e "${EXPECTED_MAIN_SHA}^{commit}"
           MAIN_HEAD="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
           [ "$MAIN_HEAD" = "$EXPECTED_MAIN_SHA" ]
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
       - name: Assume the port-forward-only bench role
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
         with:
           role-to-assume: ${{ secrets.HIVE_BENCH_ROLE_ARN }}
           aws-region: us-east-1

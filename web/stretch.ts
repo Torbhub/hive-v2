@@ -5,7 +5,6 @@ import { HttpError } from './http-error.js';
 
 const STRETCH_FIELD_CAP = 200;
 
-// The stretchtext skill reads this log to know which spans the owner opened.
 function stretchLogPath(): string {
   return process.env.HIVE_STRETCH_LOG
     ?? path.join(os.homedir(), '.kimi-code', 'stretch-opened.jsonl');

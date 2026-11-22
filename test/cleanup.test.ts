@@ -5,8 +5,6 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// No real tmux server in these tests: pane liveness, identity, and kills are
-// stubbed; git (run) stays real for the worktree cases.
 process.env.HIVE_TMUX_SOCKET = `hive-test-${process.pid}`;
 
 vi.mock('../src/tmux.js', async (importOriginal) => {

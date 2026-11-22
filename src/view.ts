@@ -12,8 +12,6 @@ export const ANSWER_TIMEOUT_MS = 30_000;
 const DECISIONS_SHOWN = 8;
 const DECISIONS_SCANNED = 64;
 
-// The feed is signal only: tier-1 auto-approvals and "Approve once" clicks are
-// noise. Plan verdicts, send-backs, watchdog deaths, and wedged marks stay.
 export function feedKeep(d: Decision): boolean {
   if (d.by === 'watch' && d.summary.startsWith('auto-approved "Approve once"')) return false;
   if (d.by === 'owner' && d.summary.startsWith('answered "Approve once"')) return false;
@@ -33,9 +31,6 @@ export function lastLine(e: unknown): string {
   return line.replace(/^hive: /, '');
 }
 
-// One assembly for both screens (Ink and web): status + tasks + the dialogs
-// map, so the two can never drift. updatedAt 0 + error means the status read
-// itself failed; callers keep their previous projects/tasks in that case.
 export async function buildView(root: string): Promise<HubView> {
   let questions: QuestionBatch[] = [];
   let openBatches: QuestionBatch[] = [];
@@ -70,7 +65,6 @@ export async function buildView(root: string): Promise<HubView> {
   }
   const workTree = buildWorkTree({ tasks, teams, branches, events });
   const dialogs = await readDialogs(root, status.projects);
-  // Scan further back than the feed shows, so filtered noise cannot starve it.
   const decisions = await readDecisions(root, DECISIONS_SCANNED)
     .then((ds) => ds.filter(feedKeep).slice(0, DECISIONS_SHOWN))
     .catch(() => []);

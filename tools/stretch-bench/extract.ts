@@ -1,12 +1,7 @@
-// Reads kimi-code wire.jsonl transcripts (~/.kimi-code/sessions/<wd>/<session>/agents/<agent>/wire.jsonl)
-// into replies: one per turn, the turn's text parts concatenated. Turns with no text (pure tool
-// turns) yield nothing.
-//   tsx tools/stretch-bench/extract.ts [sessionsRoot]   — prints counts, no output files
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 export type Reply = {
-  /** Session-relative wire key, e.g. wd_x/session_y/agents/main/wire.jsonl. */
   wire: string;
   turn: string;
   text: string;
@@ -18,7 +13,6 @@ type WireRow = {
   event?: { type?: string; turnId?: string; part?: { type?: string; text?: string } };
 };
 
-/** Words a person reads: whitespace-separated tokens holding a letter or a digit. */
 export function words(text: string): number {
   return text.split(/\s+/).filter((t) => /[\p{L}\p{N}]/u.test(t)).length;
 }
@@ -46,7 +40,6 @@ export function repliesOf(wirePath: string, sessionsRoot: string): Reply[] {
   }).filter((r) => r.words > 0);
 }
 
-/** Every wire.jsonl under the sessions root, most recently modified first. */
 export function wireFiles(sessionsRoot: string): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {

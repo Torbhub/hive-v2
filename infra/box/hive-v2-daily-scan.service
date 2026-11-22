@@ -1,7 +1,5 @@
 [Unit]
 Description=hive-v2 daily scan (posts the daily-scan task to the hub and starts the team)
-# After only: the scan needs the web API up, but a missing unit must never
-# block this one.
 After=network.target hive-v2-web.service
 
 [Service]

@@ -1,7 +1,3 @@
-// Rewrites a sample of long replies (>= MIN_WORDS) as stretchtext skims, calling `kimi -p`
-// through teamkimi, sequentially — the call is slow. Writes one JSON row per reply.
-//   tsx tools/stretch-bench/rewrite.ts [--sample 20] [--seed 7] [--files 30] \
-//     [--root ~/.kimi-code/sessions] [--out tools/stretch-bench/results/replay.jsonl]
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { run } from '../../src/tmux.js';
@@ -21,7 +17,6 @@ const fileCount = Number(option('--files', '30'));
 const root = option('--root', `${process.env.HOME}/.kimi-code/sessions`);
 const out = option('--out', new URL('./results/replay.jsonl', import.meta.url).pathname);
 
-/** A small seeded generator, so the same transcripts always give the same sample. */
 function random(state: number) {
   return () => ((state = (state * 1664525 + 1013904223) >>> 0) / 2 ** 32);
 }
@@ -33,8 +28,6 @@ async function rewrite(reply: string, env: NodeJS.ProcessEnv): Promise<string> {
   const r = await run('kimi', ['-p', PROMPT(reply), '--output-format', 'stream-json'], undefined,
     { ...process.env, ...env, KIMI_CODE_NO_AUTO_UPDATE: '1' }, KIMI_TIMEOUT_MS);
   if (r.code !== 0) throw new Error(`kimi -p exited ${r.code}: ${r.stderr.split('\n')[0] ?? ''}`);
-  // stream-json emits one event per line. Hook notices arrive as assistant events of their own,
-  // with no distinguishing field — the only stable anchor is the label line the harness prints.
   const texts: string[] = [];
   for (const line of r.stdout.split('\n')) {
     if (!line) continue;

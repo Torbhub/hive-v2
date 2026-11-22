@@ -4,10 +4,6 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-// Decoy-pane e2e: a real tmux pane plays a fake approval dialog,
-// the real watchCycle detects it, calls the classifier, and answers the pane.
-// Only the `kimi` binary is a stub on PATH — dialog scraping, classification
-// plumbing, and the pane answer are the shipping code.
 const SOCK = `hive-test-${process.pid}`;
 process.env.HIVE_TMUX_SOCKET = SOCK;
 
@@ -15,8 +11,6 @@ import { capturePane, ensureHiveSession, newWindow, paneExists, paneIdentity, sl
 import { hivePath, hubPath, readDecisions, writeJson } from '../src/state.js';
 import { watchCycle } from '../src/watch.js';
 
-// The decoy shows the dialog, waits for one key, records it, and exits —
-// an answered dialog's pane closes, an unanswered one keeps waiting on read.
 const DECOY_SH = `#!/bin/bash
 set -euo pipefail
 clear
@@ -25,8 +19,6 @@ IFS= read -rsn1 ch || true
 printf '%s' "$ch" > "$2"
 `;
 
-// Answers ASK to anything that looks like a deploy, APPROVE to the rest.
-// Every call is logged so tests can prove the classifier was (not) invoked.
 const KIMI_STUB_SH = `#!/bin/bash
 printf '%s\\n' "$*" >> "\${KIMI_STUB_LOG:?}"
 case "$*" in
@@ -67,7 +59,7 @@ beforeAll(async () => {
 afterAll(() => {
   try {
     execFileSync('tmux', ['-L', SOCK, 'kill-server'], { stdio: 'ignore' });
-  } catch { /* already gone */ }
+  } catch { }
 });
 
 async function setupDecoy(command: string) {

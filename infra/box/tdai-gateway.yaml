@@ -1,7 +1,3 @@
-# Rendered to /etc/hive-v2/tdai-gateway.yaml by provision-box.sh.
-# __PLACEHOLDER__ values come from /etc/hive-v2/memory.env.
-# Mirrors the config that upstream deploy/global-images/start-memory-core.sh
-# generates; the stock image has no config and boots with skill/knowledge off.
 deployMode: standalone
 stateBackend: local
 

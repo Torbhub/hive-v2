@@ -1,8 +1,3 @@
-// Thin client for the Agent Memory stack on the box (docs/memory.md).
-// Every call is fail-open: memory down, slow, or unconfigured returns
-// null/undefined and never throws into the spawn or lane flow.
-// The default URL is the auth relay, which holds the instance key; the
-// caller only ever holds the scoped user key.
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { writeNoFollow } from './safe-write.js';
@@ -12,10 +7,6 @@ const TIMEOUT_MS = 3000;
 const BLOCK_CAP = 2000;
 const QUERY_CAP = 300;
 
-// Two agent buckets under team_id hive-<project>: `team` holds promoted
-// memory that recall searches, `candidates` holds private proposals until
-// the owner promotes them. The v3 data plane has no per-memory visibility
-// field, so the buckets are the write gate.
 const TEAM_AGENT = 'team';
 const CANDIDATES_AGENT = 'candidates';
 
@@ -53,8 +44,6 @@ async function post<T>(path: string, body: Record<string, unknown>): Promise<T |
 
 export type MemoryHit = { id: string; content: string; background?: string };
 
-// The recall block for a spawn brief: one bullet per hit, capped so a
-// memory flood cannot blow up a brief.
 export async function searchMemory(project: string, query: string, limit = 5): Promise<string | null> {
   const data = await post<{ items?: MemoryHit[] }>('/v3/atomic/search', {
     team_id: teamId(project), agent_id: TEAM_AGENT, user_id: 'hive',
@@ -73,11 +62,6 @@ export async function searchMemory(project: string, query: string, limit = 5): P
 
 export type MemoryProvenance = { session?: string };
 
-// The data plane creates atomic notes only through the extraction pipeline,
-// so candidates are written as conversation entries and distilled in place.
-// The text carries its provenance on a trailing line; it survives promote
-// into the team bucket, where it helps the distiller and the audit trail.
-// Returns the server-assigned entry id, or null when memory is down.
 export async function proposeMemory(
   project: string,
   agent: string,
@@ -95,8 +79,6 @@ export async function proposeMemory(
   return data?.accepted_ids?.[0] ?? null;
 }
 
-// conversation/query pages at 100 rows; candidates are few, but page anyway
-// so a stuffed bucket cannot hide a candidate from promote.
 export async function listCandidates(project: string, limit = 50): Promise<MemoryHit[] | null> {
   const out: MemoryHit[] = [];
   let offset = 0;
@@ -119,9 +101,6 @@ export type PromoteResult =
   | { kind: 'missing' }
   | { kind: 'unavailable' };
 
-// Promote is copy across buckets: write the candidate into the team bucket,
-// then delete the candidate. Team first, so a failure mid-way duplicates
-// instead of losing the memory.
 export async function promoteCandidate(project: string, id: string): Promise<PromoteResult> {
   const candidates = await listCandidates(project, 500);
   if (candidates === null) return { kind: 'unavailable' };
@@ -141,8 +120,6 @@ export async function promoteCandidate(project: string, id: string): Promise<Pro
   return { kind: 'promoted', id: teamId2 };
 }
 
-// The recall query is the task brief itself, capped. Returns the block to
-// append to the spawn handoff, or null when there is nothing to add.
 export async function memoryBlockFor(root: string, project: string, task: string): Promise<string | null> {
   try {
     const text = await fs.readFile(hubPath(root, 'tasks', `${task}.md`), 'utf8');
@@ -155,8 +132,6 @@ export async function memoryBlockFor(root: string, project: string, task: string
 
 const MEMORY_HEADING = '\n## Memory\n';
 
-// The block is always the last section of the handoff, so replacing from the
-// heading down refreshes it without touching the handoff proper.
 export async function applyMemoryBlock(handoffFile: string, block: string): Promise<void> {
   try {
     const current = await fs.readFile(handoffFile, 'utf8');
@@ -165,6 +140,5 @@ export async function applyMemoryBlock(handoffFile: string, block: string): Prom
     const worktree = path.dirname(path.dirname(path.dirname(handoffFile)));
     await writeNoFollow(handoffFile, `${base}\n\n${block}`, worktree);
   } catch {
-    // A handoff that cannot be read or written must not fail a spawn.
   }
 }

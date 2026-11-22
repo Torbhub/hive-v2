@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# apply_branch_protection.sh — OPERATOR GATE (NOT run autonomously).
-#
-# Applies the branch-protection spec in docs/governance/BRANCH-PROTECTION.md to
-# `main` of Torbhub/hive-v2. DRY-RUN by default: it prints the current state and
-# the gh api calls it WOULD make, and changes nothing. Pass --apply to mutate
-# settings — that requires a token with repo-admin scope and is a human action.
 set -euo pipefail
 
 REPO="Torbhub/hive-v2"

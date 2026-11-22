@@ -95,7 +95,6 @@ describe('runAll', () => {
 
   it('fails systemd_units per unit and names only the inactive ones in the fix', async () => {
     const deps = allGreenDeps(await tmpRoot(true));
-    // is-active exits non-zero for non-active units but still prints the state.
     deps.run = fakeRun({
       'systemctl is-active hive-v2-watch': { stdout: 'active\n' },
       'systemctl is-active hive-v2-web': { code: 3, stdout: 'failed\n' },

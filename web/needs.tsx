@@ -261,8 +261,6 @@ function ResolveActions({
     return (
       <form
         className="mt-2 flex flex-wrap gap-1.5"
-        // Block the native reload; the Send button's onPress is the one
-        // submit path (Enter in the input clicks the submit button).
         onSubmit={(e) => e.preventDefault()}
       >
         <Input
@@ -326,8 +324,6 @@ function PlanActions({
       {sendingBack && (
         <form
           className="flex flex-wrap gap-1.5"
-          // Block the native reload; the Send button's onPress is the one
-          // submit path (Enter in the input clicks the submit button).
           onSubmit={(e) => e.preventDefault()}
         >
           <Input
@@ -351,7 +347,6 @@ function PlanActions({
   );
 }
 
-// One task's checkpoint trail line on the project card.
 export function ProgressRow({
   task: t, now, busy, onNudge,
 }: {

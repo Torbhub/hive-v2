@@ -1,18 +1,6 @@
 #!/usr/bin/env bash
-# jj-push-gate.sh — pre-push gate for the jj path. `jj git push` fires NO git
-# hooks (upstream: jj-vcs/jj discussion #403), so the repo's pre-push hook is
-# wired here instead: scripts/install-git-hooks.sh installs this script next
-# to the hooks plus a repo-local jj alias, so that `jj push` runs the
-# installed pre-push hook and only then delegates to `jj git push`.
-#
-# Use:  jj push --bookmark <name>     (gated — the only supported jj push path)
-# Never: jj git push ...              (bypasses every gate; do not)
-# Escape hatch: PRESUBMIT=off jj push ... — prints a loud warning. Declare the
-# escape in your lane pulse.
 set -euo pipefail
 
-# A jj workspace has no .git — resolve the root and the shared git dir
-# through jj first, git second.
 if [ -n "${JJ_WORKSPACE_ROOT:-}" ]; then
   root="$JJ_WORKSPACE_ROOT"
 else
@@ -28,10 +16,7 @@ if [ ! -x "$hook" ]; then
   exit 1
 fi
 
-# The hook checks the working tree, which in a jj clone IS the pushed change
-# (@) — no stdin sha resolution needed.
 "$hook" </dev/null
-# Test harnesses can write bytecode even with PYTHONDONTWRITEBYTECODE=1.
 rm -f infra/t01-smoke/__pycache__/health_credential.cpython-312.pyc \
   infra/t01-smoke/__pycache__/runtime.cpython-312.pyc \
   infra/t01-smoke/__pycache__/teamkimi_attestation.cpython-312.pyc \

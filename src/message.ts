@@ -5,7 +5,6 @@ import { classify, hasDialogControls, lines } from './screen.js';
 import { appendDecision, readProjects, readTeam, withTeamLock } from './state.js';
 import type { TeamEntry } from './types.js';
 
-// Same cap as a task brief.
 export const MESSAGE_TEXT_CAP = 4000;
 const FORMATTING_CONTROL_RE = /[\u0080-\u009f\p{Cf}]/u;
 const SENDER_CONTROL_RE = /[\x00-\x1f\x7f-\u009f\p{Cf}]/u;
@@ -38,8 +37,6 @@ function resolveTarget(
   return { entry, target: agentRef, canonicalTarget };
 }
 
-// The recorded identity must still match the pane before anything is typed;
-// typeLine re-checks it again.
 async function sendMessage(
   root: string,
   project: string,
@@ -55,8 +52,6 @@ async function sendMessage(
   if (t.length > MESSAGE_TEXT_CAP) {
     throw new Refusal(`message text is capped at ${MESSAGE_TEXT_CAP} characters`);
   }
-  // The fold already took \t \n \r; a control byte left over is hostile or
-  // broken input, and send-keys -l would deliver it raw (ESC, Ctrl-C, NUL).
   if (/[\x00-\x1f\x7f]/.test(t)) {
     throw new Refusal('message text holds control characters; they are not typeable');
   }
@@ -106,13 +101,11 @@ async function sendMessage(
       await typeLine(pane, line, identity, screenGuard);
     } catch (e) {
       if (e instanceof Refusal) throw e;
-      // typeLine's errors name only the pane, so they are safe to show.
       if (sender === undefined || e instanceof PreInputError) {
         throw new Refusal(e instanceof Error ? e.message : String(e));
       }
       throw e;
     }
-    // A send that cannot be logged is an error, not a success.
     await appendDecision(root, {
       project,
       by: agent === undefined ? 'owner' : 'agent',

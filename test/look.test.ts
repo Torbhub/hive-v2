@@ -213,8 +213,6 @@ describe('buildNeeds', () => {
   it('stale math: 4h past last progress, or past the latest activity, live states only', () => {
     expect(staleTask(task({ state: 'blocked', last_progress_at: '2026-10-13T07:59:59Z' }), NOW)).toBe(true);
     expect(staleTask(task({ state: 'blocked', last_progress_at: '2026-10-13T08:00:01Z' }), NOW)).toBe(false);
-    // No progress yet: the clock starts at the latest activity (updated), so a
-    // rebriefed days-old task is not instantly stale.
     expect(staleTask(task({ state: 'handed', needs_owner: false, updated: '2026-10-13T06:00:00Z' }), NOW)).toBe(true);
     expect(staleTask(task({ state: 'handed', needs_owner: false, asked: '2026-10-10T06:00:00Z' }), NOW)).toBe(false);
     expect(staleTask(task({ state: 'done', needs_owner: false }), NOW)).toBe(false);

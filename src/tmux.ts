@@ -15,9 +15,6 @@ export function run(cmd: string, args: string[], cwd?: string, env?: NodeJS.Proc
   });
 }
 
-// All hive tmux traffic goes to a private server socket so the user's own
-// tmux sessions are structurally unreachable. HIVE_TMUX_SOCKET exists for
-// tests, which must never touch the default socket either.
 export function tmuxSocket(): string {
   return process.env.HIVE_TMUX_SOCKET ?? 'hive-v2';
 }
@@ -32,8 +29,6 @@ export function tmuxSocketPath(): string {
   return path.join(dir, tmuxSocket());
 }
 
-// A bare connect proves a server owns the socket; the server reads EOF and
-// drops it. tmux itself cannot ask this question without starting a server.
 export function serverReachable(socket: string): Promise<boolean> {
   return new Promise((resolve) => {
     const c = net.createConnection(socket);
@@ -42,21 +37,12 @@ export function serverReachable(socket: string): Promise<boolean> {
   });
 }
 
-// The server must run inside hive-v2-tmux.service's cgroup: deploys restart
-// hive-v2-watch and hive-v2-web, and KillMode=control-group takes a server
-// born in one of those cgroups down with every pane. When no server answers,
-// start one through the unit (sudoers provisioned). If that fails, the
-// tmux calls below auto-start one in this cgroup — alive, but deploy-fragile.
 async function ensureServer(): Promise<void> {
   if (await serverReachable(tmuxSocketPath())) return;
-  // RemainAfterExit keeps the unit active after the server dies, so `start`
-  // would be a no-op; restart covers both cases and kills nothing when no
-  // server answers.
   await run('sudo', ['-n', 'systemctl', 'restart', 'hive-v2-tmux'], undefined, undefined, 15_000);
 }
 
 export async function ensureHiveSession(): Promise<void> {
-  // Tests run on throwaway sockets; only the production socket has a unit.
   if (tmuxSocket() === 'hive-v2') await ensureServer();
   const probe = await tmux(['has-session', '-t', HIVE_SESSION]);
   if (probe.code !== 0) {
@@ -71,7 +57,6 @@ export function windowName(project: string, agent: string): string {
 
 export async function newWindow(name: string, cwd: string, shellCommand: string): Promise<string> {
   await ensureHiveSession();
-  // Trailing colon: target the session, not the window that shares its name.
   const r = await tmux([
     'new-window', '-t', `${HIVE_SESSION}:`, '-n', name, '-c', cwd,
     '-P', '-F', '#{pane_id}', shellCommand,
@@ -80,8 +65,6 @@ export async function newWindow(name: string, cwd: string, shellCommand: string)
   return r.stdout.trim();
 }
 
-// Every mutation re-proves the target first: the pane must live in the hive
-// session on our private socket, and (when recorded) still be the same process.
 export async function assertPane(pane: string, identity?: PaneIdentity): Promise<void> {
   const r = await tmux(['display-message', '-p', '-t', pane, '#{pane_id} #{session_name}']);
   const [id, session] = r.stdout.trim().split(' ');
@@ -129,7 +112,6 @@ export async function paneIs(pane: string, id: PaneIdentity | null | undefined):
   return cur !== null && cur.pid === id.pid && cur.started === id.started;
 }
 
-// LC_ALL=C pins the ps date format so a stored start time compares byte-for-byte.
 export async function processStartTime(pid: number): Promise<string | null> {
   const r = await run('ps', ['-o', 'lstart=', '-p', String(pid)], undefined, { ...process.env, LC_ALL: 'C' });
   const started = r.stdout.trim();

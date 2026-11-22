@@ -102,7 +102,6 @@ function NeedAction({
   );
 }
 
-// One-line text entry for the send-back verdict; Esc cancels, Enter sends.
 function FeedbackPrompt({ onSubmit, onCancel }: { onSubmit: (text: string) => void; onCancel: () => void }) {
   const [text, setText] = useState('');
   useInput((input, key) => {
@@ -169,10 +168,8 @@ export function HubApp({ root }: { root: string }) {
   const [toast, setToast] = useState<string | null>(null);
   const [sendingBack, setSendingBack] = useState<string | null>(null);
   const actingRef = useRef(false);
-  // Read at key-event time, so keys in the same stdin chunk as `b` already see it.
   const planInputActiveRef = useRef(false);
 
-  // A failed status read (updatedAt 0) keeps the old data, shows the error.
   const refresh = useCallback(async () => {
     const next = await buildView(root);
     setView((v) => (next.updatedAt === 0 && next.error ? { ...v, error: next.error } : next));
@@ -190,7 +187,6 @@ export function HubApp({ root }: { root: string }) {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // One action at a time: a press while another runs is ignored.
   const act = useCallback(async (
     project: string,
     what: 'resuming' | 'continuing' | 'answering',

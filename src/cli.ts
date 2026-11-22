@@ -20,8 +20,6 @@ function validName(kind: string, value: string): string {
   }
 }
 
-// The @worktree suffix is a display disambiguator matched against recorded
-// team entries; only the name part needs the name rules.
 function validAgentRef(value: string): string {
   validName('agent', value.split('@')[0]);
   return value;

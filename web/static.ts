@@ -16,7 +16,6 @@ const STATIC_HEADERS: Record<string, string> = {
   'content-security-policy': "default-src 'self'; connect-src 'self' http://127.0.0.1:7685; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
 };
 
-// Compiled this file lives in dist/web/, in tests in web/ — find web/dist from either.
 function staticDir(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   for (const up of ['..', '../..']) {
@@ -34,7 +33,6 @@ export async function serveStatic(res: http.ServerResponse, pathname: string): P
   let file = wanted;
   let real = await fs.realpath(file).catch(() => null);
   if (real === null && path.extname(file) === '') {
-    // Single-page app: extensionless paths fall back to the shell.
     file = path.join(dist, 'index.html');
     real = await fs.realpath(file).catch(() => null);
   }
@@ -43,8 +41,6 @@ export async function serveStatic(res: http.ServerResponse, pathname: string): P
     throw new HttpError(404, 'not found');
   }
   const data = await fs.readFile(real);
-  // hashed assets are immutable forever; the html shell must revalidate or a
-  // heuristic cache pins visitors to a stale bundle.
   const hashed = /[.-][0-9A-Za-z_-]{8}\.(js|css|woff2)$/.test(real);
   res.writeHead(200, {
     'content-type': CONTENT_TYPES[path.extname(real)] ?? 'application/octet-stream',

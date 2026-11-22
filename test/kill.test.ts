@@ -116,7 +116,6 @@ describe('killAgent cascade', () => {
     const { root, home } = await setup(TEAM);
     vi.mocked(killWindow).mockImplementation(async (pane) => {
       if (pane === '%2') {
-        // A respawn landed mid-cascade: same name and worktree, fresh pane.
         const team = await readTeam(home);
         await writeJson(hivePath(home, 'team.json'), {
           agents: team.agents.map((a) => (a.name === 'builder'
@@ -129,7 +128,6 @@ describe('killAgent cascade', () => {
     const team = await readTeam(home);
     expect(team.agents.map((a) => a.name).sort()).toEqual(['builder', 'lone']);
     expect(team.agents.find((a) => a.name === 'builder')?.pane).toBe('%9');
-    // The kept entry is not named as killed: the toast and the log name what died.
     expect(r.killed).toEqual(['fixer', 'demo-orchestrator']);
     const decisions = await readDecisions(root);
     expect(decisions[0]).toMatchObject({ summary: 'killed demo-orchestrator + 1 agent' });

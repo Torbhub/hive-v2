@@ -285,7 +285,6 @@ function batchPath(root: string, id: string, closed = false): string {
   return hubPath(root, 'questions', ...(closed ? ['closed'] : []), `${id}.json`);
 }
 
-// Operator decisions are sensitive: restrictive file and directory modes.
 async function writeBatch(root: string, id: string, batch: QuestionBatch): Promise<void> {
   await fs.mkdir(hubPath(root, 'questions'), { recursive: true, mode: 0o700 });
   await writeJson(batchPath(root, id), batch, 0o600);
@@ -760,7 +759,6 @@ export async function listOpenQuestionBatches(root: string): Promise<QuestionBat
   });
   const batches: QuestionBatch[] = [];
   for (const entry of entries) {
-    // Only regular files with a uuid name: no symlinks, dirs, or temp files.
     if (!entry.isFile() || !UUID_RE.test(entry.name.replace(/\.json$/, '')) || !entry.name.endsWith('.json')) continue;
     const batch = await readJson<QuestionBatch>(hubPath(root, 'questions', entry.name));
     if (batch?.status === 'open') batches.push(batch);
@@ -800,9 +798,6 @@ async function closeBatchLocked(
       batch.rootDelta.basePlanDigest, batch.rootDelta.baseEpoch,
     );
   }
-  // The terminal state lands at the open path first. A crash before the
-  // move still leaves a terminal file: the listing filters it out and the
-  // waiter reads it, so no answer is ever shadowed by a stale open copy.
   await writeBatch(root, id, closed);
   await fs.mkdir(hubPath(root, 'questions', 'closed'), { recursive: true, mode: 0o700 });
   await fs.rename(batchPath(root, id), batchPath(root, id, true));
@@ -812,8 +807,6 @@ async function closeBatchLocked(
       summary: audit ?? `${status} question batch ${id} from ${batch.agent} (${batch.questions.length} questions)`,
     });
   } catch (e) {
-    // The close is already committed; an audit gap must not read as a
-    // failed answer to the operator.
     console.error(`hive: question batch ${id} closed but its audit append failed:`, e);
   }
   return closed;
@@ -841,11 +834,7 @@ export const OPEN_BATCH_TTL_MS = 7 * 24 * 60 * 60_000;
 export const CLOSED_BATCH_CAP = 200;
 export const VIEW_BATCH_CAP = 50;
 
-// Watch maintenance expires an open batch older than the wait limit and
-// records an audit note.
-// Closed history is capped so the archive never grows without bound.
 export async function sweepQuestionBatches(root: string, now = Date.now()): Promise<void> {
-  // Nothing on disk means nothing to expire or prune, and no writes at all.
   const present = await fs.stat(hubPath(root, 'questions')).catch(() => null);
   if (!present?.isDirectory()) return;
   await withHubLock(root, async () => {

@@ -434,8 +434,6 @@ export type HubView = {
   decisions: Decision[];
   questions: QuestionBatch[];
   workTree?: WorkTree;
-  // Total open batches, including any beyond the view's first 50. Optional
-  // so older fixtures and callers without a count stay valid.
   questionsTotal?: number;
   updatedAt: number;
   error: string;
@@ -585,14 +583,8 @@ export type TeamEntry = {
   worktree?: string;
   session_id?: string;
   handoff?: string;
-  // The agent that spawned this one (the pane's HIVE_AGENT). A spawn from the
-  // owner's shell has none; the orchestrator's children carry its name.
   parent?: string;
-  // Stamped by a deliberate close (cleanup/close/respawn). A crash never
-  // stamps, so watch treats a stamped pane as intentionally down.
   closed_at?: string;
-  // Stamped by the watchdog when the pane is frozen on a spinner with a stale
-  // wire log. Cleared when the pane moves again or is relaunched.
   wedged_at?: string;
   task?: string;
   model?: string;

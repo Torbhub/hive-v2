@@ -19,11 +19,9 @@
 
 ## How to apply
 
-```bash
-# DRY RUN (default) — prints the current state and the gh api calls it WOULD
-# make, changes nothing:
-scripts/apply_branch_protection.sh
+With no flag, the script is a dry run. It prints the current state and the `gh api` calls it would make, and changes nothing. The `--apply` form is for an operator or administrator only and requires a token with repo-admin scope.
 
-# APPLY — operator/admin only, requires a token with repo-admin scope:
+```bash
+scripts/apply_branch_protection.sh
 scripts/apply_branch_protection.sh --apply
 ```

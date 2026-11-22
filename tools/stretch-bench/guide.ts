@@ -1,5 +1,3 @@
-// The terminal stretchtext contract, adapted from cc-stretch's hooks/guide.ts per
-// ~/.agents/skills/stretchtext/SKILL.md: skim plus trailer, no {{}} markup.
 export const GUIDE = `# Stretchtext skims
 
 The reader's terminal shows your reply at skim level first. Detail opens on demand, one piece at a time, from a trailer line. Write the skim only:
