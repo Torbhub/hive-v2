@@ -28,6 +28,7 @@ const validInputs = {
   SCENARIO: 'preflight',
   MATRIX: 'none',
   PAID_ADMISSION: 'false',
+  IMAGE_ACTION: 'discard',
   MAX_INPUT_TOKENS: '16000',
   MAX_OUTPUT_TOKENS: '2000',
   MAX_REASONING_TOKENS: '4000',

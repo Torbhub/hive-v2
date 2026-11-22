@@ -8,6 +8,11 @@ on:
         required: true
         type: choice
         options: [preflight, count, matrix, count-recovery]
+      image_action:
+        description: Discard the disposable instance or keep a sanitized private image
+        required: true
+        type: choice
+        options: [discard, keep]
       recovery_run_id:
         description: Original numeric count run ID for reviewed recovery
         required: false
@@ -92,6 +97,7 @@ jobs:
           SCENARIO: ${{ inputs.scenario }}
           MATRIX: ${{ inputs.matrix }}
           PAID_ADMISSION: ${{ inputs.paid_admission }}
+          IMAGE_ACTION: ${{ inputs.image_action }}
           MAX_INPUT_TOKENS: ${{ inputs.max_input_tokens }}
           MAX_OUTPUT_TOKENS: ${{ inputs.max_output_tokens }}
           MAX_REASONING_TOKENS: ${{ inputs.max_reasoning_tokens }}
@@ -156,6 +162,7 @@ jobs:
           SCENARIO: ${{ inputs.scenario }}
           MATRIX: ${{ inputs.matrix }}
           PAID_ADMISSION: ${{ inputs.paid_admission }}
+          IMAGE_ACTION: ${{ inputs.image_action }}
           MAX_INPUT_TOKENS: ${{ inputs.max_input_tokens }}
           MAX_OUTPUT_TOKENS: ${{ inputs.max_output_tokens }}
           MAX_REASONING_TOKENS: ${{ inputs.max_reasoning_tokens }}
@@ -238,6 +245,7 @@ jobs:
         if: always() && steps.acquire.outcome == 'success'
         env:
           SCENARIO: ${{ inputs.scenario }}
+          IMAGE_ACTION: ${{ inputs.image_action }}
           PAID_EVIDENCE_VERIFIED: ${{ steps.collect.outcome == 'success' && steps.upload.outcome == 'success' && 'yes' || 'no' }}
           T01_COUNT_STOP_VERIFIED: ${{ steps.count_stop.outcome == 'success' && 'yes' || 'no' }}
         run: bash infra/t01-smoke/workflow.sh cleanup
@@ -261,6 +269,7 @@ jobs:
           T01_RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
           T01_REVIEWED_UNCERTAIN_CLEANUP: 'yes'
           T01_COUNT_STOP_VERIFIED: 'yes'
+          IMAGE_ACTION: ${{ inputs.image_action }}
           GH_TOKEN: ${{ github.token }}
         run: bash infra/t01-smoke/workflow.sh validate-recovery
       - uses: aws-actions/configure-aws-credentials@v4
@@ -274,5 +283,6 @@ jobs:
           T01_RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
           T01_REVIEWED_UNCERTAIN_CLEANUP: 'yes'
           T01_COUNT_STOP_VERIFIED: 'yes'
+          IMAGE_ACTION: ${{ inputs.image_action }}
           GH_TOKEN: ${{ github.token }}
         run: bash infra/t01-smoke/workflow.sh count-recovery

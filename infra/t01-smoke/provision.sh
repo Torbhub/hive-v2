@@ -18,6 +18,15 @@ if [ "$SCENARIO" != preflight ]; then
   BROKER_PORT=8766
 fi
 
+swapoff -a
+mkdir -p /etc/t01 /var/lib/t01/evidence /opt/t01/pm-home /opt/t01/uv-cache
+mount -t tmpfs tmpfs /etc/t01
+mount -t tmpfs tmpfs /var/lib/t01
+mount -t tmpfs tmpfs /opt/t01/pm-home
+mount -t tmpfs tmpfs /opt/t01/uv-cache
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /var/tmp
+
 mkdir -p /opt/t01/source /opt/t01/fixtures /opt/t01/tools /opt/t01/pm-home
 mkdir -p /opt/t01/runner-source /opt/t01/node /var/lib/t01/evidence /var/lib/t01/hermes /var/lib/t01/workspace /etc/t01/broker
 chown root:root /opt/t01 /var/lib/t01 /etc/t01
@@ -247,6 +256,7 @@ tar -xzf /opt/t01/runner.tar.gz -C /opt/t01/runner-source --strip-components=1
 rm -f /opt/t01/runner.tar.gz
 cd /opt/t01/runner-source
 export PATH=/opt/t01/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export npm_config_cache=/opt/t01/uv-cache/npm
 /opt/t01/node/bin/npm ci --ignore-scripts
 /opt/t01/node/bin/node ./node_modules/typescript/bin/tsc -p tools/hermes-live/tsconfig.json
 cp tools/hermes-live/hermes_preflight_probe.py tools/hermes-live/count-probe.mjs dist-t01/tools/hermes-live/
@@ -688,6 +698,22 @@ else
   if [ "$SCENARIO" = count ]; then
     emit paid_admission_disabled passed
   fi
+fi
+systemctl stop t01-paid.service
+systemctl stop t01-hermes-check.service
+stop_tunnel
+if [ "$IMAGE_ACTION" = keep ]; then
+  cp "$EVIDENCE" /opt/t01-provision-evidence
+  rm -rf /etc/t01/broker/teamkimi.json /etc/t01/proxy.env /var/lib/t01/hermes /var/lib/t01/workspace
+  umount /opt/t01/uv-cache
+  umount /opt/t01/pm-home
+  umount /var/tmp
+  umount /tmp
+  umount /var/lib/t01
+  umount /etc/t01
+  cp /opt/t01-provision-evidence "$EVIDENCE"
+  rm -f /opt/t01-provision-evidence
+  emit image_sanitized passed
 fi
 emit complete passed
 publish_evidence

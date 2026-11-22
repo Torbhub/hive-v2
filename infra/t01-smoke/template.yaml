@@ -24,6 +24,9 @@ Parameters:
   AmiId:
     Type: AWS::EC2::Image::Id
     Description: Reviewed Amazon Linux 2023 x86_64 image for this bounded run.
+  ImageAction:
+    Type: String
+    AllowedValues: [discard, keep]
   TeamKimiSecretArn:
     Type: String
     AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:hive-v2-t01-smoke-[A-Za-z0-9/_+=.@-]+$'
@@ -249,6 +252,7 @@ Resources:
           export TEAMKIMI_SECRET_ARN='${TeamKimiSecretArn}'
           export TEAMKIMI_PROXY_SECRET_ARN='${TeamKimiProxySecretArn}'
           export SCENARIO='${Scenario}' MATRIX='${Matrix}' PAID_ADMISSION='${PaidAdmission}'
+          export IMAGE_ACTION='${ImageAction}'
           export T01_TEAMKIMI_HOST_ID='${TeamKimiHostId}'
           export EXPECTED_POLICY_HASH='${ExpectedPolicyHash}'
           export PRICING_ATTESTATION_BASE64='${PricingAttestationBase64}'

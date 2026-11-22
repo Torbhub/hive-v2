@@ -55,7 +55,7 @@ Preflight, count, and matrix use the existing deploy role for the fixed host att
 
 A failed or uncertain stop retains the fleet mutex and the run ledger. Stack and run-secret cleanup still runs. Keep the run state for review. Automatic stop fails closed on an inactive or uncertain listener. Do not dispatch `count-recovery` for a failed or uncertain stop. Use the prior reviewed loopback and manual recovery process. Prove revocation, empty reservations, a closed port, and an unchanged active normal proxy before any further cleanup or release. Keep the original owner and run state during this review. Do not use an offline ledger parser. Do not delete uncertain state or release the mutex by hand. Never continue with an unresolved reservation or failed revocation.
 
-Use `count-recovery` only for an original failed count run whose fixed host stop succeeded but later evidence or cleanup failed. Dispatch this workflow with `scenario=count-recovery` and `recovery_run_id=<original-run-id>`. GitHub verifies the original failed count job and stop evidence before OIDC. The environment approval is the explicit recovery review. The workflow sets `T01_REVIEWED_UNCERTAIN_CLEANUP=yes` and `T01_COUNT_STOP_VERIFIED=yes`. It renews the original owner before cleanup and releases only that owner after successful cleanup. Do not run cleanup manually for this post-stop recovery.
+Use `count-recovery` only for an original failed count run whose fixed host stop succeeded but later evidence or cleanup failed. Dispatch this workflow with `scenario=count-recovery`, `image_action=discard`, and `recovery_run_id=<original-run-id>`. GitHub verifies the original failed count job and stop evidence before OIDC. The environment approval is the explicit recovery review. The workflow sets `T01_REVIEWED_UNCERTAIN_CLEANUP=yes` and `T01_COUNT_STOP_VERIFIED=yes`. It renews the original owner before cleanup and releases only that owner after successful cleanup. Do not run cleanup manually for this post-stop recovery.
 
 A count probe does not authorize generation. The workflow does not issue a generation credential in count mode. Matrix remains separately reviewed and is not enabled by this change.
 
@@ -87,29 +87,33 @@ The CLI generates one random attempt key for generation. Bounded recovery polls 
 
 1. Wait for the connectivity checks and cleanup steps to finish.
 2. Download `t01-preflight-<run-id>`. Every console candidate passes schema-only sanitization before it reaches the artifact. Rejected or oversized input is never uploaded. A runtime-check `bootstrap_error.category` names only the fixed internal subcheck and never contains raw Hermes output.
-3. For a matrix, review `export/manifest.json`, `export/preflight.json`, and every `export/P01.json` through `export/P12.json`. The downloaded manifest hash must equal the console export marker before verification. The workflow checks membership, hashes, scenario outcomes, receipt arithmetic, policy hash, and exact generation revocation. Artifact upload must succeed before cleanup. Failed verification never reaches the artifact and blocks destructive cleanup.
+3. For a matrix, review `export/manifest.json`, `export/preflight.json`, and every `export/P01.json` through `export/P12.json`. The downloaded manifest hash must equal the console export marker before verification. The workflow checks membership, hashes, scenario outcomes, receipt arithmetic, policy hash, and exact generation revocation. Failed verification never reaches the artifact. Disposable cleanup still runs and the mutex stays held.
 4. Check the Hermes commit, source hash, frozen install, and disabled lazy-install records.
 5. Check that every direct-IP, DNS, redirect, IPv6, alternate-port, metadata, container-credential, and TeamKimi control-port check passed. The broker must retain control access while Hermes cannot call it.
 6. Check that `teamkimi_no_model` passed. This check uses the local health validator and sends no model request.
-7. Check that the final `complete` record has `passed` status. Any missing or failed record blocks later smoke work.
+7. Check that the final `complete` record has `passed` status. For `image_action=keep`, also require the exact `image_sanitized` passing record. Any missing or failed record blocks later smoke work.
 8. Record the evidence review in Citadel #2345. Do not copy credentials, raw responses, prompts, reasoning, session databases, or console logs into the issue.
 
 ## Credential revocation
 
-1. Cleanup force-deletes the run health and proxy secrets after the stack is confirmed absent. This revokes the health credential and deletes the control key. No production TeamKimi credential needs revocation.
+1. Cleanup directly terminates the instance and waits before deleting the stack and force-deleting the run health and proxy secrets. Every resource operation is attempted after an earlier failure. This revokes the health credential and deletes the control key. No production TeamKimi credential needs revocation.
 2. Record the public credential identifier, deletion time, operator, and deletion version metadata. Never record the health credential or control key.
 3. Remove `T01_HEALTH_ATTESTATION` after the run.
 4. Treat any evidence leak as a credential exposure. Delete the run secret first, then review the leak.
 
 ## Termination
 
-The instance terminates automatically at the requested lifetime. Its encrypted root volume deletes on termination. The workflow deletes the CloudFormation stack and run secrets after evidence collection, including after a failed run. Matrix stacks remain in place until external evidence verification and artifact upload pass, or the reviewed recovery path permits cleanup.
+The instance terminates automatically at the requested lifetime. Its encrypted root volume deletes on termination. Cleanup also resolves the stack instance ID, terminates it directly, and waits before stack deletion. Stack and run-secret deletion still run when evidence or image operations fail.
+
+Secret and mutable state paths use tmpfs from initial setup, and swap is disabled. Keep finalization stops services and tunnels, then unmounts those paths before the sanitization marker. Only sanitized evidence and installed tooling remain in the retained image. Credentials, workspaces, Hermes state, package caches, and temporary files are excluded.
+
+`image_action=discard` creates no AMI. `image_action=keep` requires full validated evidence, successful collection and upload, and exactly one sanitization record. It creates one run-named private AMI without rebooting. The instance terminates before the image wait. Cleanup retains the AMI only after all other checks pass. A failed keep deregisters a known partial AMI and deletes only its snapshots.
 
 If the workflow stops, start no manual instance. Use the normal stack deployment controls under the fleet deploy mutex to delete `hive-v2-t01-smoke`. Confirm that the instance, instance profile, instance role, security group, and run secrets are gone. Do not change the shared Nexus box or production TeamKimi proxy.
 
 ## Mutex recovery
 
-Cleanup releases the mutex only after confirmed absence of the stack and run secrets. An AccessDenied, throttle, network, delete, or wait error returns nonzero and retains the mutex. Do not release the mutex after an uncertain cleanup. Never delete the mutex row by hand.
+Cleanup releases the mutex only after confirmed resource cleanup and any requested image is available. An AccessDenied, throttle, network, delete, or wait error returns nonzero and retains the mutex. Do not release the mutex after an uncertain cleanup. Never delete the mutex row by hand.
 
 Count and matrix cleanup also requires a valid paid evidence sequence. Stack deletion alone does not prove smoke revocation or reservation reconciliation. If paid evidence is missing, incomplete, or uncertain, cleanup retains the mutex even when the stack is absent.
 
