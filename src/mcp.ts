@@ -274,8 +274,8 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
         || Object.keys(input).some((key) => key !== 'agent' && key !== 'text')) {
         throw new Refusal('message_agent requires { agent?: string, text: string }');
       }
-      const { typed } = await sendAgentMessage(root, project, agent, text, sender);
-      toolText(id, typed);
+      const result = await sendAgentMessage(root, project, agent, text, sender);
+      toolText(id, JSON.stringify(result), result.outcome !== 'delivered');
     } catch (e) {
       toolText(id, e instanceof Refusal ? e.message : 'message_agent failed: delivery failed', true);
     }

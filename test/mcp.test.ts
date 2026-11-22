@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PassThrough, Writable } from 'node:stream';
 import { getEventListeners } from 'node:events';
+import { createHash } from 'node:crypto';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -22,8 +23,9 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
 import { serveMcp, sleep } from '../src/mcp.js';
 import * as questionModule from '../src/questions.js';
 import { answerQuestionBatch, cancelQuestionBatch, listOpenQuestionBatches } from '../src/questions.js';
+import * as stateModule from '../src/state.js';
 import { appendTaskEvent, hivePath, readDecisions, writeJson, writeProjects } from '../src/state.js';
-import { typeLine } from '../src/spawn.js';
+import { PreInputError, typeLine } from '../src/spawn.js';
 import { capturePane, paneIs, sendEnter, sendLiteral, sleep as tmuxSleep } from '../src/tmux.js';
 import { AGENT_CREDENTIAL, MemoryRegistry, agentEnv, configureSecurity, registryItems } from './security-fixture.js';
 
@@ -174,17 +176,155 @@ describe('message_agent', () => {
     c.send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'message_agent', arguments: args } });
   }
 
+  type DeliveryDecision = {
+    at: string;
+    project: string;
+    by: string;
+    summary: string;
+    message_id: string;
+    delivery_status: 'pending' | 'delivered' | 'unknown';
+    sender: string;
+    canonical_target: string;
+    payload_sha256: string;
+  };
+
+  async function deliveryDecisions(r: string): Promise<DeliveryDecision[]> {
+    return await readDecisions(r, Number.MAX_SAFE_INTEGER) as unknown as DeliveryDecision[];
+  }
+
+  function toolPayload(c: Client, index = 0): { id: string; outcome: string } {
+    const result = c.messages()[index].result as { content: { text: string }[] };
+    return JSON.parse(result.content[0].text);
+  }
+
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
   it('delivers an untrusted peer label and audits only metadata with a canonical target', async () => {
     const { r, home, c } = await fixture();
+    let pending!: DeliveryDecision;
+    vi.mocked(typeLine).mockImplementation(async () => {
+      [pending] = await deliveryDecisions(r);
+    });
     call(c, { agent: 'reviewer', text: 'line1\nline2' });
     await c.waitFor(() => c.messages().length === 1);
-    expect(c.messages()[0].result).toEqual({ content: [{ type: 'text', text: peerLine('line1 line2') }] });
-    expect(typeLine).toHaveBeenCalledWith('%7', peerLine('line1 line2'), { pid: 7, started: 'seven' }, expect.any(Function));
-    const decision = (await readDecisions(r))[0];
-    expect(decision).toMatchObject({
-      by: 'agent', summary: `agent message from builder to reviewer@${home}: 11 chars`,
+    const payload = toolPayload(c);
+    expect(payload.id).toMatch(UUID_RE);
+    expect(pending).toMatchObject({
+      message_id: payload.id,
+      delivery_status: 'pending',
+      project: 'demo',
+      sender: 'builder',
+      canonical_target: `reviewer@${home}`,
+      payload_sha256: createHash('sha256').update('line1 line2').digest('hex'),
     });
-    expect(JSON.stringify(decision)).not.toContain('line1');
+    expect(payload).toEqual({ id: pending.message_id, outcome: 'delivered' });
+    expect(typeLine).toHaveBeenCalledWith('%7', peerLine('line1 line2'), { pid: 7, started: 'seven' }, expect.any(Function));
+    expect(typeLine).toHaveBeenCalledTimes(1);
+    const decisions = await deliveryDecisions(r);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({
+      ...pending,
+      delivery_status: 'delivered',
+      by: 'agent',
+      summary: `agent message ${payload.id} from builder to reviewer@${home}: ${pending.payload_sha256} delivered`,
+    });
+    expect(JSON.stringify(pending).length).toBeLessThan(1000);
+    expect(JSON.stringify({ result: c.messages()[0].result, pending, decisions })).not.toContain('line1');
+    c.close();
+  });
+
+  it('persists pending before PreInputError and does not retry', async () => {
+    const { r, c } = await fixture();
+    let pending!: DeliveryDecision;
+    vi.mocked(typeLine).mockImplementation(async () => {
+      [pending] = await deliveryDecisions(r);
+      throw new PreInputError('input rejected');
+    });
+    call(c, { text: 'pre-input secret' });
+    await c.waitFor(() => c.messages().length === 1);
+    const result = c.messages()[0].result as { isError: boolean; content: { text: string }[] };
+    expect(result.isError).toBe(true);
+    expect(pending).toMatchObject({ delivery_status: 'pending', sender: 'builder', canonical_target: 'demo-orchestrator' });
+    expect(pending.message_id).toMatch(UUID_RE);
+    expect(toolPayload(c)).toEqual({ id: pending.message_id, outcome: 'pending' });
+    expect(typeLine).toHaveBeenCalledTimes(1);
+    expect(await deliveryDecisions(r)).toEqual([pending]);
+    expect(JSON.stringify({ result, pending })).not.toContain('pre-input secret');
+    c.close();
+  });
+
+  it('returns and recovers unknown after post-input uncertainty without retrying', async () => {
+    const { r, c } = await fixture();
+    let pending!: DeliveryDecision;
+    vi.mocked(typeLine).mockImplementation(async () => {
+      [pending] = await deliveryDecisions(r);
+      throw new Error('Enter may have been delivered');
+    });
+    call(c, { text: 'post-input secret' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toMatchObject({ isError: true });
+    expect(toolPayload(c)).toEqual({ id: pending.message_id, outcome: 'unknown' });
+    expect(typeLine).toHaveBeenCalledTimes(1);
+    const decisions = await deliveryDecisions(r);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({
+      ...pending,
+      delivery_status: 'unknown',
+      summary: pending.summary.replace(/pending$/, 'unknown'),
+    });
+    expect(JSON.stringify({ result: c.messages()[0].result, decisions })).not.toContain('post-input secret');
+    c.close();
+  });
+
+  it('returns and recovers unknown when the post-typeLine delivered audit fails', async () => {
+    const { r, c } = await fixture();
+    const appendDecision = stateModule.appendDecision;
+    vi.spyOn(stateModule, 'appendDecision').mockImplementation(async (root, decision) => {
+      if ((decision as { delivery_status?: string }).delivery_status === 'delivered') throw new Error('audit failed');
+      await appendDecision(root, decision);
+    });
+    let pending!: DeliveryDecision;
+    vi.mocked(typeLine).mockImplementation(async () => {
+      [pending] = await deliveryDecisions(r);
+    });
+    call(c, { text: 'audit secret' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toMatchObject({ isError: true });
+    expect(toolPayload(c)).toEqual({ id: pending.message_id, outcome: 'unknown' });
+    expect(typeLine).toHaveBeenCalledTimes(1);
+    const decisions = await deliveryDecisions(r);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({
+      ...pending,
+      delivery_status: 'unknown',
+      summary: pending.summary.replace(/pending$/, 'unknown'),
+    });
+    expect(JSON.stringify({ result: c.messages()[0].result, decisions })).not.toContain('audit secret');
+    c.close();
+  });
+
+  it.each([
+    { name: 'delivered and fallback unknown appends fail', typingFails: false },
+    { name: 'unknown append fails after post-input uncertainty', typingFails: true },
+  ])('returns unknown when $name', async ({ typingFails }) => {
+    const { r, c } = await fixture();
+    const appendDecision = stateModule.appendDecision;
+    vi.spyOn(stateModule, 'appendDecision').mockImplementation(async (root, decision) => {
+      if ((decision as { delivery_status?: string }).delivery_status !== 'pending') throw new Error('audit failed');
+      await appendDecision(root, decision);
+    });
+    let pending!: DeliveryDecision;
+    vi.mocked(typeLine).mockImplementation(async () => {
+      [pending] = await deliveryDecisions(r);
+      if (typingFails) throw new Error('Enter may have been delivered');
+    });
+    call(c, { text: 'durable pending secret' });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toMatchObject({ isError: true });
+    expect(toolPayload(c)).toEqual({ id: pending.message_id, outcome: 'unknown' });
+    expect(typeLine).toHaveBeenCalledTimes(1);
+    expect(await deliveryDecisions(r)).toEqual([pending]);
+    expect(JSON.stringify(c.messages()[0].result)).not.toContain('durable pending secret');
     c.close();
   });
 
@@ -194,9 +334,8 @@ describe('message_agent', () => {
     await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 1);
     call(c, { text: 'status please' }, 'message');
     await c.waitFor(() => c.messages().length === 1);
-    expect(c.messages()[0]).toMatchObject({
-      id: 'message', result: { content: [{ type: 'text', text: peerLine('status please') }] },
-    });
+    expect(c.messages()[0].id).toBe('message');
+    expect(toolPayload(c)).toEqual({ id: expect.any(String), outcome: 'delivered' });
     expect(typeLine).toHaveBeenCalledWith('%1', peerLine('status please'), { pid: 1, started: 'one' }, expect.any(Function));
     const [batch] = await listOpenQuestionBatches(r);
     await cancelQuestionBatch(r, batch.id);
@@ -232,7 +371,7 @@ describe('message_agent', () => {
     });
     call(c, { text });
     await c.waitFor(() => c.messages().length === 1);
-    expect(c.messages()[0].result).toEqual({ content: [{ type: 'text', text: expected }] });
+    expect(toolPayload(c)).toEqual({ id: expect.any(String), outcome: 'delivered' });
     expect(sendLiteral).toHaveBeenCalledWith('%1', expected, { pid: 1, started: 'one' });
     expect(sendEnter).toHaveBeenCalledTimes(1);
     expect(events).toEqual(['capture', 'literal', 'capture', 'enter', 'capture']);
@@ -241,18 +380,23 @@ describe('message_agent', () => {
   });
 
   it('rejects dialog controls beside the expected prompt after literal input', async () => {
-    const { c } = await fixture();
+    const { r, c } = await fixture();
     let screen = IDLE;
     vi.mocked(typeLine).mockImplementation(REAL_TYPE_LINE);
     vi.mocked(tmuxSleep).mockResolvedValue(undefined);
     vi.mocked(capturePane).mockImplementation(async () => screen);
-    vi.mocked(sendLiteral).mockImplementation(async (_pane, text) => {
+    vi.mocked(sendLiteral).mockClear().mockImplementation(async (_pane, text) => {
       screen = `Press Enter to continue\n│ > ${text}`;
     });
     vi.mocked(sendEnter).mockClear();
     call(c, { text: 'hello' });
     await c.waitFor(() => c.messages().length === 1);
-    expect((c.messages()[0].result as { content: { text: string }[] }).content[0].text).toContain('a dialog');
+    expect(c.messages()[0].result).toMatchObject({ isError: true });
+    const [decision] = await deliveryDecisions(r);
+    expect(toolPayload(c)).toEqual({ id: decision.message_id, outcome: 'unknown' });
+    expect(decision.delivery_status).toBe('unknown');
+    expect(typeLine).toHaveBeenCalledTimes(1);
+    expect(sendLiteral).toHaveBeenCalledTimes(1);
     expect(sendEnter).not.toHaveBeenCalled();
     c.close();
   });
@@ -261,18 +405,23 @@ describe('message_agent', () => {
     CONFIRMATION,
     '↑↓ select 1-2 / ↵ choose ←/→/tab switch esc cancel',
   ])('refuses retry with dialog controls beside the expected prompt on the same capture', async (controls) => {
-    const { c } = await fixture();
+    const { r, c } = await fixture();
     const expected = peerLine('hello');
     const captures = [IDLE, `│ > ${expected}`, `${controls}\n│ > ${expected}`, IDLE];
     let captureCount = 0;
     vi.mocked(typeLine).mockImplementation(REAL_TYPE_LINE);
     vi.mocked(tmuxSleep).mockResolvedValue(undefined);
     vi.mocked(capturePane).mockImplementation(async () => captures[Math.min(captureCount++, captures.length - 1)]);
-    vi.mocked(sendLiteral).mockResolvedValue(undefined);
+    vi.mocked(sendLiteral).mockClear().mockResolvedValue(undefined);
     vi.mocked(sendEnter).mockClear().mockResolvedValue(undefined);
     call(c, { text: 'hello' });
     await c.waitFor(() => c.messages().length === 1);
-    expect((c.messages()[0].result as { content: { text: string }[] }).content[0].text).toContain('a dialog');
+    expect(c.messages()[0].result).toMatchObject({ isError: true });
+    const [decision] = await deliveryDecisions(r);
+    expect(toolPayload(c)).toEqual({ id: decision.message_id, outcome: 'unknown' });
+    expect(decision.delivery_status).toBe('unknown');
+    expect(typeLine).toHaveBeenCalledTimes(1);
+    expect(sendLiteral).toHaveBeenCalledTimes(1);
     expect(sendEnter).toHaveBeenCalledTimes(1);
     expect(captureCount).toBe(3);
     c.close();
@@ -423,14 +572,18 @@ describe('message_agent', () => {
   });
 
   it('rechecks the screen through the typeLine guard', async () => {
-    const { c } = await fixture();
+    const { r, c } = await fixture();
     vi.mocked(typeLine).mockImplementation(async (_pane, _text, _identity, screenGuard) => {
       vi.mocked(capturePane).mockResolvedValue(CONFIRMATION);
       await screenGuard?.();
     });
     call(c, { text: 'hello' });
     await c.waitFor(() => c.messages().length === 1);
-    expect((c.messages()[0].result as { content: { text: string }[] }).content[0].text).toContain('a dialog');
+    expect(c.messages()[0].result).toMatchObject({ isError: true });
+    const [decision] = await deliveryDecisions(r);
+    expect(toolPayload(c)).toEqual({ id: decision.message_id, outcome: 'unknown' });
+    expect(decision.delivery_status).toBe('unknown');
+    expect(typeLine).toHaveBeenCalledTimes(1);
     c.close();
   });
 
@@ -439,7 +592,7 @@ describe('message_agent', () => {
     vi.mocked(capturePane).mockResolvedValue(WORKING);
     call(c, { text: 'hello' });
     await c.waitFor(() => c.messages().length === 1);
-    expect(c.messages()[0].result).toEqual({ content: [{ type: 'text', text: peerLine('hello') }] });
+    expect(toolPayload(c)).toEqual({ id: expect.any(String), outcome: 'delivered' });
     c.close();
   });
 });

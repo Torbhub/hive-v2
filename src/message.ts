@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { Refusal } from './hub.js';
 import { orchestratorName, PreInputError, typeLine } from './spawn.js';
 import { capturePane, paneIs } from './tmux.js';
@@ -37,13 +38,22 @@ function resolveTarget(
   return { entry, target: agentRef, canonicalTarget };
 }
 
+type DeliveryOutcome = 'pending' | 'delivered' | 'unknown';
+type DeliveryResult = { id: string; outcome: DeliveryOutcome };
+
+function sendMessage(
+  root: string, project: string, agentRef: string | undefined, text: string,
+): Promise<{ typed: string }>;
+function sendMessage(
+  root: string, project: string, agentRef: string | undefined, text: string, sender: string,
+): Promise<DeliveryResult>;
 async function sendMessage(
   root: string,
   project: string,
   agentRef: string | undefined,
   text: string,
   sender?: string,
-): Promise<{ typed: string }> {
+): Promise<{ typed: string } | DeliveryResult> {
   if (FORMATTING_CONTROL_RE.test(text)) {
     throw new Refusal('message text holds control characters or formatting controls; they are not typeable');
   }
@@ -97,23 +107,51 @@ async function sendMessage(
       }
     };
     await screenGuard();
+    const delivery = sender === undefined ? undefined : {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      payloadSha256: createHash('sha256').update(t).digest('hex'),
+    };
+    const appendDelivery = async (outcome: DeliveryOutcome): Promise<void> => {
+      await appendDecision(root, {
+        project,
+        by: 'agent',
+        at: delivery!.at,
+        message_id: delivery!.id,
+        delivery_status: outcome,
+        sender,
+        canonical_target: canonicalTarget,
+        payload_sha256: delivery!.payloadSha256,
+        summary: `agent message ${delivery!.id} from ${sender} to ${canonicalTarget}: ${delivery!.payloadSha256} ${outcome}`,
+      });
+    };
+    if (delivery) await appendDelivery('pending');
+    let outcome: DeliveryOutcome = 'delivered';
     try {
       await typeLine(pane, line, identity, screenGuard);
     } catch (e) {
-      if (e instanceof Refusal) throw e;
-      if (sender === undefined || e instanceof PreInputError) {
+      if (sender === undefined) {
+        if (e instanceof Refusal) throw e;
         throw new Refusal(e instanceof Error ? e.message : String(e));
       }
-      throw e;
+      if (e instanceof PreInputError) return { id: delivery!.id, outcome: 'pending' };
+      outcome = 'unknown';
     }
-    await appendDecision(root, {
-      project,
-      by: agent === undefined ? 'owner' : 'agent',
-      summary: agent === undefined
-        ? `message to ${target}: ${t.slice(0, 120)}`
-        : `agent message from ${sender} to ${canonicalTarget}: ${t.length} chars`,
-    });
-    return { typed: line };
+    if (sender === undefined) {
+      await appendDecision(root, {
+        project,
+        by: 'owner',
+        summary: `message to ${target}: ${t.slice(0, 120)}`,
+      });
+      return { typed: line };
+    }
+    try {
+      await appendDelivery(outcome);
+    } catch {
+      if (outcome === 'delivered') await appendDelivery('unknown').catch(() => {});
+      outcome = 'unknown';
+    }
+    return { id: delivery!.id, outcome };
   });
 }
 
@@ -132,6 +170,6 @@ export async function sendAgentMessage(
   agentRef: string | undefined,
   text: string,
   sender: string,
-): Promise<{ typed: string }> {
+): Promise<DeliveryResult> {
   return sendMessage(root, project, agentRef, text, sender);
 }

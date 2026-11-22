@@ -69,6 +69,11 @@ export type Decision = {
   by: 'owner' | 'watch' | 'orchestrator' | 'agent';
   summary: string;
   watch_key?: string;
+  message_id?: string;
+  delivery_status?: 'pending' | 'delivered' | 'unknown';
+  sender?: string;
+  canonical_target?: string;
+  payload_sha256?: string;
 };
 
 export type HubFolder = { folder: string; kind: string; branch?: string; changed?: number };
