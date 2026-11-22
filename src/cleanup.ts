@@ -73,7 +73,9 @@ export async function cleanupProject(
         if (!dryRun) {
           try {
             process.kill(pid, 'SIGTERM');
-          } catch { }
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+          }
         }
       }
       continue;

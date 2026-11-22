@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 process.env.HIVE_TMUX_SOCKET = `hive-test-${process.pid}`;
 
@@ -22,7 +22,7 @@ import { cleanupProject } from '../src/cleanup.js';
 import { killAgent } from '../src/kill.js';
 import { removeProject } from '../src/project.js';
 import { hivePath, manifestAdd, readTeam, writeJson, hubPath } from '../src/state.js';
-import { killWindow, run } from '../src/tmux.js';
+import { killWindow, processStartTime, run } from '../src/tmux.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -205,5 +205,87 @@ describe('cleanupProject tmux records', () => {
     expect(await fs.stat(path.join(root, claim)).catch(() => null)).toBeNull();
     await killAgent(root, 'proj', 'builder');
     await expect(removeProject(root, 'proj')).resolves.toEqual({ ok: true, name: 'proj' });
+  });
+});
+
+describe('cleanupProject process records', () => {
+  async function setupProcess() {
+    const { root, home } = await setup();
+    const record = {
+      kind: 'process' as const,
+      at: new Date().toISOString(),
+      pid: process.pid,
+      started: await processStartTime(process.pid),
+    };
+    await manifestAdd(home, record);
+    return { root, home, record };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('removes the process record after a successful SIGTERM', async () => {
+    const { root, home, record } = await setupProcess();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    const actions = await cleanupProject(root, 'proj');
+    expect(actions).toEqual([{ record, action: `terminate process ${process.pid}`, acted: true }]);
+    expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+    expect(await fs.readFile(hivePath(home, 'manifest.jsonl'), 'utf8')).toBe('');
+  });
+
+  it('removes the process record when SIGTERM reports ESRCH', async () => {
+    const { root, home, record } = await setupProcess();
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+    });
+
+    const actions = await cleanupProject(root, 'proj');
+    expect(actions).toEqual([{ record, action: `terminate process ${process.pid}`, acted: true }]);
+    expect(await fs.readFile(hivePath(home, 'manifest.jsonl'), 'utf8')).toBe('');
+  });
+
+  it('surfaces EPERM and preserves the process record', async () => {
+    const { root, home, record } = await setupProcess();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    });
+
+    await expect(cleanupProject(root, 'proj')).rejects.toMatchObject({ code: 'EPERM' });
+    expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+    expect(await fs.readFile(hivePath(home, 'manifest.jsonl'), 'utf8')).toBe(JSON.stringify(record) + '\n');
+  });
+
+  it('surfaces an unexpected SIGTERM error and preserves the process record', async () => {
+    const { root, home, record } = await setupProcess();
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('signal failed'), { code: 'EIO' });
+    });
+
+    await expect(cleanupProject(root, 'proj')).rejects.toMatchObject({ code: 'EIO', message: 'signal failed' });
+    expect(await fs.readFile(hivePath(home, 'manifest.jsonl'), 'utf8')).toBe(JSON.stringify(record) + '\n');
+  });
+
+  it('does not rewrite the manifest when SIGTERM fails', async () => {
+    const { root, home } = await setupProcess();
+    const manifestPath = hivePath(home, 'manifest.jsonl');
+    const before = await fs.readFile(manifestPath, 'utf8');
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    });
+
+    await expect(cleanupProject(root, 'proj')).rejects.toMatchObject({ code: 'EPERM' });
+    expect(await fs.readFile(manifestPath, 'utf8')).toBe(before);
+  });
+
+  it('does not signal or rewrite the manifest during a dry run', async () => {
+    const { root, home, record } = await setupProcess();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    const actions = await cleanupProject(root, 'proj', { dryRun: true });
+    expect(actions).toEqual([{ record, action: `terminate process ${process.pid}`, acted: false }]);
+    expect(kill).not.toHaveBeenCalled();
+    expect(await fs.readFile(hivePath(home, 'manifest.jsonl'), 'utf8')).toBe(JSON.stringify(record) + '\n');
   });
 });
