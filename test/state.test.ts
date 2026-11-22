@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  appendDecision, hivePath, manifestRead, readDecisions, readJson, readProjects, releaseDirLock, withTeamLock,
+  appendDecision, hivePath, hubPath, manifestRead, readDecisions, readJson, readProjects, releaseDirLock, withTeamLock,
   writeJson, writeProjects,
 } from '../src/state.js';
 
@@ -129,5 +129,82 @@ describe('decisions log', () => {
   });
   it('reads an absent log as empty', async () => {
     expect(await readDecisions(tmp())).toEqual([]);
+  });
+
+  function messageDecision(id: string, status: 'pending' | 'delivered' | 'unknown', at: string): Record<string, string> {
+    return {
+      at,
+      project: 'demo',
+      by: 'agent',
+      summary: `agent message ${id} from builder to reviewer@/tmp/reviewer: ${'a'.repeat(64)} ${status}`,
+      message_id: id,
+      delivery_status: status,
+      sender: 'builder',
+      canonical_target: 'reviewer@/tmp/reviewer',
+      payload_sha256: 'a'.repeat(64),
+    };
+  }
+
+  async function writeDecisions(root: string, records: Record<string, string>[]): Promise<void> {
+    await fs.mkdir(hubPath(root), { recursive: true });
+    await fs.writeFile(hubPath(root, 'decisions.jsonl'), records.map((record) => JSON.stringify(record)).join('\n') + '\n');
+  }
+
+  async function readMessageDecisions(root: string): Promise<Record<string, string>[]> {
+    return await readDecisions(root, Number.MAX_SAFE_INTEGER) as unknown as Record<string, string>[];
+  }
+
+  it('folds pending message records into their terminal outcomes', async () => {
+    const root = tmp();
+    const delivered = '11111111-1111-4111-8111-111111111111';
+    const unknown = '22222222-2222-4222-8222-222222222222';
+    await writeDecisions(root, [
+      messageDecision(delivered, 'pending', '2026-11-22T00:00:00.000Z'),
+      messageDecision(delivered, 'delivered', '2026-11-22T00:00:01.000Z'),
+      messageDecision(unknown, 'pending', '2026-11-22T00:00:02.000Z'),
+      messageDecision(unknown, 'unknown', '2026-11-22T00:00:03.000Z'),
+    ]);
+    const recovered = await readMessageDecisions(root);
+    expect(recovered).toHaveLength(2);
+    expect(Object.fromEntries(recovered.map((record) => [record.message_id, record.delivery_status]))).toEqual({
+      [delivered]: 'delivered',
+      [unknown]: 'unknown',
+    });
+  });
+
+  it('retains 64 logical messages without disturbing ordinary decisions', async () => {
+    const root = tmp();
+    const at = '2026-11-22T00:00:00.000Z';
+    const ids = Array.from({ length: 65 }, (_, index) => `message-${index}`);
+    const ordinary = (summary: string): Record<string, string> => ({ at, project: 'demo', by: 'watch', summary });
+    await writeDecisions(root, [
+      ordinary('before'),
+      ...ids.map((id) => messageDecision(id, 'delivered', at)),
+      ordinary('middle'),
+      messageDecision(ids[0], 'unknown', at),
+      ordinary('after'),
+    ]);
+    const recovered = await readMessageDecisions(root);
+    expect(recovered.map((record) => record.message_id ?? record.summary)).toEqual([
+      'after', ids[0], 'middle', ...ids.slice(2).reverse(), 'before',
+    ]);
+    expect(recovered[1]).toMatchObject({ message_id: ids[0], delivery_status: 'unknown' });
+  });
+
+  it('reads stale pending as unknown without rewriting the log', async () => {
+    const root = tmp();
+    const id = '33333333-3333-4333-8333-333333333333';
+    const staleAt = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+    await writeDecisions(root, [messageDecision(id, 'pending', staleAt)]);
+    const file = hubPath(root, 'decisions.jsonl');
+    const before = await fs.stat(file, { bigint: true });
+    const raw = await fs.readFile(file, 'utf8');
+    const recovered = await readMessageDecisions(root);
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({ message_id: id, delivery_status: 'unknown' });
+    expect((await fs.stat(file, { bigint: true })).mtimeNs).toBe(before.mtimeNs);
+    expect(await fs.readFile(file, 'utf8')).toBe(raw);
+    expect((await readMessageDecisions(root))[0]).toMatchObject({ message_id: id, delivery_status: 'unknown' });
+    expect((await fs.stat(file, { bigint: true })).mtimeNs).toBe(before.mtimeNs);
   });
 });

@@ -281,9 +281,14 @@ approval authority): <text>` in its live pane. The sender must be a recorded
 team member in the same registered project.
 
 Hive serializes delivery across MCP and web processes. It refuses a target
-without a live pane or a known idle or working screen. The decisions feed
-records only sender, canonical target, and message size for peer messages.
-Delivery does not wake a session or queue text for later.
+without a live pane or a known idle or working screen. Peer delivery returns
+JSON with a message ID and `delivered`, `pending`, or `unknown` outcome.
+Non-delivered outcomes are tool errors. Each decision summary contains the ID,
+canonical target, full payload SHA-256, and outcome without message text. The
+metadata also records the sender. Active pending records stay pending. Pending
+records older than 10 minutes read as unknown without new writes. Reads fold
+repeated IDs and keep at most 64 logical message records. Delivery does not
+retry, wake a session, or queue text for later.
 
 Default mode trusts the session environment. An agent that starts its own MCP
 process can change that environment, so team membership is not authentication.

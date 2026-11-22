@@ -563,5 +563,28 @@ export async function appendDecision(root: string, d: Omit<Decision, 'at'> & { a
 }
 
 export async function readDecisions(root: string, latest = 8): Promise<Decision[]> {
-  return (await readJsonl<Decision>(hubPath(root, 'decisions.jsonl'))).slice(-latest).reverse();
+  const records = await readJsonl<Decision>(hubPath(root, 'decisions.jsonl'));
+  const now = Date.now();
+  const logical = new Map<string, Decision>();
+  let messageCount = 0;
+  for (const [index, decision] of records.entries()) {
+    const key = decision.message_id === undefined ? `decision:${index}` : `message:${decision.message_id}`;
+    if (decision.message_id !== undefined && !logical.has(key)) messageCount++;
+    logical.delete(key);
+    const stale = decision.delivery_status === 'pending' && now - Date.parse(decision.at) > SENDING_CLAIM_STALE_MS;
+    logical.set(key, stale ? {
+      ...decision,
+      delivery_status: 'unknown',
+      summary: decision.summary.replace(/pending$/, 'unknown'),
+    } : decision);
+  }
+  let excess = messageCount - 64;
+  for (const key of logical.keys()) {
+    if (excess <= 0) break;
+    if (key.startsWith('message:')) {
+      logical.delete(key);
+      excess--;
+    }
+  }
+  return [...logical.values()].slice(-latest).reverse();
 }
