@@ -1,0 +1,699 @@
+{
+  "schema_version": 1,
+  "fixture_id": "experiment-5-offline-v1",
+  "base_revision": "60588eaa",
+  "source_cutoff": "2026-11-21T10:56:22.314Z",
+  "tasks": [
+    "hivev2-4",
+    "hivev2-5",
+    "hivev2-6",
+    "hivev2-7",
+    "hivev2-8",
+    "hivev2-9",
+    "hivev2-10",
+    "hivev2-11",
+    "hivev2-12",
+    "citadel-1",
+    "citadel-2",
+    "simplification-agent-1"
+  ],
+  "notes": [
+    {
+      "task_id": "hivev2-4",
+      "note_id": "note-hivev2-4",
+      "status": "approved",
+      "text": "Replace the archived CLI source with the current release feed. Terminal hooks and workspace cleanup wait for upgrades that are not available.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-hivev2-4-tasks_jsonl-1",
+          "store": "tasks_jsonl",
+          "task_id": "hivev2-4",
+          "event": "decided",
+          "at": "2026-10-21T20:53:21.630Z"
+        }
+      ],
+      "supersedes": [],
+      "rejected_options": [
+        {
+          "option_id": "option-hivev2-4-1",
+          "option": "Adopt terminal hooks now",
+          "reason": "The installed terminal does not have the required upgrade.",
+          "source_ids": ["source-hivev2-4-tasks_jsonl-1"]
+        },
+        {
+          "option_id": "option-hivev2-4-2",
+          "option": "Adopt automatic workspace cleanup now",
+          "reason": "The installed workspace tool does not have the required upgrade.",
+          "source_ids": ["source-hivev2-4-tasks_jsonl-1"]
+        }
+      ]
+    },
+    {
+      "task_id": "hivev2-5",
+      "note_id": "note-hivev2-5",
+      "status": "approved",
+      "text": "Use the fully qualified plugin name for the review skill. The control plane requires owner review instead of automatic merge.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-hivev2-5-tasks_jsonl-1",
+          "store": "tasks_jsonl",
+          "task_id": "hivev2-5",
+          "event": "decided",
+          "at": "2026-10-22T13:55:39.592Z"
+        }
+      ],
+      "supersedes": [],
+      "rejected_options": [
+        {
+          "option_id": "option-hivev2-5-1",
+          "option": "Use the bare review-skill name",
+          "reason": "The current client requires the fully qualified plugin name.",
+          "source_ids": ["source-hivev2-5-tasks_jsonl-1"]
+        },
+        {
+          "option_id": "option-hivev2-5-2",
+          "option": "Merge without owner review",
+          "reason": "The control plane requires owner review.",
+          "source_ids": ["source-hivev2-5-tasks_jsonl-1"]
+        }
+      ]
+    },
+    {
+      "task_id": "hivev2-6",
+      "note_id": "note-hivev2-6",
+      "status": "approved",
+      "text": "Disable the client session lock for automated lanes. Interactive repair can block an unattended pane, and lane sessions are unique.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-hivev2-6-tasks_jsonl-1",
+          "store": "tasks_jsonl",
+          "task_id": "hivev2-6",
+          "event": "decided",
+          "at": "2026-10-24T06:55:16.034Z"
+        }
+      ],
+      "supersedes": [],
+      "rejected_options": [
+        {
+          "option_id": "option-hivev2-6-1",
+          "option": "Keep the client session lock enabled",
+          "reason": "Its interactive repair can block an unattended pane.",
+          "source_ids": ["source-hivev2-6-tasks_jsonl-1"]
+        },
+        {
+          "option_id": "option-hivev2-6-2",
+          "option": "Depend on interactive session repair",
+          "reason": "An automated lane cannot answer the repair prompt.",
+          "source_ids": ["source-hivev2-6-tasks_jsonl-1"]
+        }
+      ]
+    },
+    {
+      "task_id": "hivev2-7",
+      "note_id": "note-hivev2-7",
+      "status": "approved",
+      "text": "The supplied ledger records the duplicate-date question but no selected option or owner approval. Neither a no-op nor another scan is justified.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-hivev2-7-tasks_jsonl-1",
+          "store": "tasks_jsonl",
+          "task_id": "hivev2-7",
+          "event": "question",
+          "at": "2026-10-24T13:43:30.062Z"
+        }
+      ],
+      "supersedes": [],
+      "rejected_options": [
+        {
+          "option_id": "option-hivev2-7-1",
+          "option": "Infer a no-op",
+          "reason": "The supplied ledger has no selected option or approval for that inference.",
+          "source_ids": ["source-hivev2-7-tasks_jsonl-1"]
+        },
+        {
+          "option_id": "option-hivev2-7-2",
+          "option": "Infer a second scan",
+          "reason": "The supplied ledger has no selected option or approval for that inference.",
+          "source_ids": ["source-hivev2-7-tasks_jsonl-1"]
+        }
+      ]
+    },
+    {
+      "task_id": "hivev2-8",
+      "note_id": "note-hivev2-8",
+      "status": "approved",
+      "text": "The supplied ledger shows no approval or execution for the old plan. Nothing ran under it, and hivev2-9 superseded it.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-hivev2-8-tasks_jsonl-1",
+          "store": "tasks_jsonl",
+          "task_id": "hivev2-8",
+          "event": "note",
+          "at": "2026-10-26T13:57:21.878Z"
+        }
+      ],
+      "supersedes": [],
+      "rejected_options": [
+        {
+          "option_id": "option-hivev2-8-1",
+          "option": "Execute the old plan",
+          "reason": "It was not approved or executed, and hivev2-9 superseded it.",
+          "source_ids": ["source-hivev2-8-tasks_jsonl-1"]
+        }
+      ]
+    },
+    {
+      "task_id": "hivev2-9",
+      "note_id": "note-hivev2-9",
+      "status": "approved",
+      "text": "The supplied ledger contains a request and plan but no approval, execution, or completion. This case supersedes hivev2-8.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-hivev2-9-tasks_jsonl-1",
+          "store": "tasks_jsonl",
+          "task_id": "hivev2-9",
+          "event": "plan",
+          "at": "2026-10-26T13:57:21.809Z"
+        }
+      ],
+      "supersedes": [
+        {
+          "task_id": "hivev2-8",
+          "source_id": "source-hivev2-8-tasks_jsonl-1"
+        }
+      ],
+      "rejected_options": [
+        {
+          "option_id": "option-hivev2-9-1",
+          "option": "Treat the plan as approved",
+          "reason": "The supplied ledger records no approval.",
+          "source_ids": ["source-hivev2-9-tasks_jsonl-1"]
+        },
+        {
+          "option_id": "option-hivev2-9-2",
+          "option": "Treat the plan as completed",
+          "reason": "The supplied ledger records no execution or completion.",
+          "source_ids": ["source-hivev2-9-tasks_jsonl-1"]
+        }
+      ]
+    },
+    {
+      "task_id": "hivev2-10",
+      "note_id": "note-hivev2-10",
+      "status": "approved",
+      "text": "The supplied ledger shows an expired recovery deadline and root grant. The task stayed budget blocked before any replacement.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-hivev2-10-tasks_jsonl-1",
+          "store": "tasks_jsonl",
+          "task_id": "hivev2-10",
+          "event": "blocked",
+          "at": "2026-11-21T07:37:56.086Z"
+        }
+      ],
+      "supersedes": [],
+      "rejected_options": [
+        {
+          "option_id": "option-hivev2-10-1",
+          "option": "Retry under the expired root grant",
+          "reason": "The recovery deadline and grant expired while the task remained budget blocked.",
+          "source_ids": ["source-hivev2-10-tasks_jsonl-1"]
+        }
+      ]
+    },
+    {
+      "task_id": "hivev2-11",
+      "note_id": "note-hivev2-11",
+      "status": "approved",
+      "text": "The supplied ledger rejects a respawn model change and contains no research findings note. Alternatives violated authorization, lineage, or budget limits. This case supersedes hivev2-10.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-hivev2-11-task_brief-1",
+          "store": "task_brief",
+          "task_id": "hivev2-11",
+          "event": "brief",
+          "at": "2026-11-21T07:39:43.116Z"
+        },
+        {
+          "source_id": "source-hivev2-11-tasks_jsonl-2",
+          "store": "tasks_jsonl",
+          "task_id": "hivev2-11",
+          "event": "blocked",
+          "at": "2026-11-21T09:31:00.886Z"
+        }
+      ],
+      "supersedes": [
+        {
+          "task_id": "hivev2-10",
+          "source_id": "source-hivev2-10-tasks_jsonl-1"
+        }
+      ],
+      "rejected_options": [
+        {
+          "option_id": "option-hivev2-11-1",
+          "option": "Authorize the model change during respawn",
+          "reason": "The model change was not authorized.",
+          "source_ids": [
+            "source-hivev2-11-task_brief-1",
+            "source-hivev2-11-tasks_jsonl-2"
+          ]
+        },
+        {
+          "option_id": "option-hivev2-11-2",
+          "option": "Continue outside the recorded lineage",
+          "reason": "That alternative broke lineage.",
+          "source_ids": [
+            "source-hivev2-11-task_brief-1",
+            "source-hivev2-11-tasks_jsonl-2"
+          ]
+        },
+        {
+          "option_id": "option-hivev2-11-3",
+          "option": "Continue beyond the budget",
+          "reason": "That alternative violated the budget limit.",
+          "source_ids": [
+            "source-hivev2-11-task_brief-1",
+            "source-hivev2-11-tasks_jsonl-2"
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "hivev2-12",
+      "note_id": "note-hivev2-12",
+      "status": "approved",
+      "text": "The supplied ledger records a revoked lease, an unstable draft, and incomplete read-back and diff acceptance. The strongest lead was not accepted. This case supersedes hivev2-11.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-hivev2-12-task_brief-1",
+          "store": "task_brief",
+          "task_id": "hivev2-12",
+          "event": "brief",
+          "at": "2026-11-21T09:29:32.406Z"
+        },
+        {
+          "source_id": "source-hivev2-12-tasks_jsonl-2",
+          "store": "tasks_jsonl",
+          "task_id": "hivev2-12",
+          "event": "blocked",
+          "at": "2026-11-21T10:56:18.023Z"
+        }
+      ],
+      "supersedes": [
+        {
+          "task_id": "hivev2-11",
+          "source_id": "source-hivev2-11-tasks_jsonl-2"
+        }
+      ],
+      "rejected_options": [
+        {
+          "option_id": "option-hivev2-12-1",
+          "option": "Accept the draft",
+          "reason": "The draft is unstable, and read-back and diff acceptance are incomplete.",
+          "source_ids": [
+            "source-hivev2-12-task_brief-1",
+            "source-hivev2-12-tasks_jsonl-2"
+          ]
+        },
+        {
+          "option_id": "option-hivev2-12-2",
+          "option": "Claim universal savings",
+          "reason": "An unaccepted draft cannot support a universal savings claim.",
+          "source_ids": [
+            "source-hivev2-12-task_brief-1",
+            "source-hivev2-12-tasks_jsonl-2"
+          ]
+        },
+        {
+          "option_id": "option-hivev2-12-3",
+          "option": "Promote the lead autonomously",
+          "reason": "The strongest lead was not accepted, and the lease was revoked.",
+          "source_ids": [
+            "source-hivev2-12-task_brief-1",
+            "source-hivev2-12-tasks_jsonl-2"
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "citadel-1",
+      "note_id": "note-citadel-1",
+      "status": "approved",
+      "text": "The original cleanup contract is stale and cancelled. A fresh contract is required before cleanup can continue.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-citadel-1-tasks_jsonl-1",
+          "store": "tasks_jsonl",
+          "task_id": "citadel-1",
+          "event": "cancelled",
+          "at": "2026-10-23T21:39:22.154Z"
+        }
+      ],
+      "supersedes": [],
+      "rejected_options": [
+        {
+          "option_id": "option-citadel-1-1",
+          "option": "Reuse the original cleanup contract",
+          "reason": "The original contract is stale and cancelled.",
+          "source_ids": ["source-citadel-1-tasks_jsonl-1"]
+        },
+        {
+          "option_id": "option-citadel-1-2",
+          "option": "Continue without a fresh contract",
+          "reason": "Cancellation requires a fresh contract before more cleanup.",
+          "source_ids": ["source-citadel-1-tasks_jsonl-1"]
+        }
+      ]
+    },
+    {
+      "task_id": "citadel-2",
+      "note_id": "note-citadel-2",
+      "status": "approved",
+      "text": "The final owner decision makes the cross-run cap permanent through the append-only ledger. It does not reset per run or depend on timestamps.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-citadel-2-task_brief-1",
+          "store": "task_brief",
+          "task_id": "citadel-2",
+          "event": "brief",
+          "at": "2026-10-21T19:45:28.675Z"
+        },
+        {
+          "source_id": "source-citadel-2-tasks_jsonl-2",
+          "store": "tasks_jsonl",
+          "task_id": "citadel-2",
+          "event": "decided",
+          "at": "2026-10-21T20:36:43.762Z"
+        },
+        {
+          "source_id": "source-citadel-2-tasks_jsonl-3",
+          "store": "tasks_jsonl",
+          "task_id": "citadel-2",
+          "event": "done",
+          "at": "2026-10-21T20:39:31.993Z"
+        }
+      ],
+      "supersedes": [
+        {
+          "task_id": "citadel-2",
+          "source_id": "source-citadel-2-task_brief-1"
+        }
+      ],
+      "rejected_options": [
+        {
+          "option_id": "option-citadel-2-1",
+          "option": "Reset the cap for each run",
+          "reason": "The final owner decision superseded the original per-run reset.",
+          "source_ids": [
+            "source-citadel-2-task_brief-1",
+            "source-citadel-2-tasks_jsonl-2",
+            "source-citadel-2-tasks_jsonl-3"
+          ]
+        },
+        {
+          "option_id": "option-citadel-2-2",
+          "option": "Make the cap depend on timestamps",
+          "reason": "The append-only ledger makes the final decision permanent without timestamp dependence.",
+          "source_ids": [
+            "source-citadel-2-task_brief-1",
+            "source-citadel-2-tasks_jsonl-2",
+            "source-citadel-2-tasks_jsonl-3"
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "simplification-agent-1",
+      "note_id": "note-simplification-agent-1",
+      "status": "approved",
+      "text": "The newer base already contains the original M2 work. The scope is now two redundant terminal returns. M1 generated deletion is deferred because it exceeds the chunk cap.",
+      "last_verified": "2026-11-22",
+      "sources": [
+        {
+          "source_id": "source-simplification-agent-1-tasks_jsonl-1",
+          "store": "tasks_jsonl",
+          "task_id": "simplification-agent-1",
+          "event": "decided",
+          "at": "2026-10-27T20:12:26.191Z"
+        },
+        {
+          "source_id": "source-simplification-agent-1-tasks_jsonl-2",
+          "store": "tasks_jsonl",
+          "task_id": "simplification-agent-1",
+          "event": "note",
+          "at": "2026-10-27T21:12:05.954Z"
+        },
+        {
+          "source_id": "source-simplification-agent-1-tasks_jsonl-3",
+          "store": "tasks_jsonl",
+          "task_id": "simplification-agent-1",
+          "event": "note",
+          "at": "2026-10-27T21:20:36.663Z"
+        }
+      ],
+      "supersedes": [],
+      "rejected_options": [
+        {
+          "option_id": "option-simplification-agent-1-1",
+          "option": "Implement the original M2 work again",
+          "reason": "The newer base already contains it.",
+          "source_ids": [
+            "source-simplification-agent-1-tasks_jsonl-1",
+            "source-simplification-agent-1-tasks_jsonl-2",
+            "source-simplification-agent-1-tasks_jsonl-3"
+          ]
+        },
+        {
+          "option_id": "option-simplification-agent-1-2",
+          "option": "Include M1 generated deletion in this chunk",
+          "reason": "That deletion exceeds the chunk cap and is deferred.",
+          "source_ids": [
+            "source-simplification-agent-1-tasks_jsonl-1",
+            "source-simplification-agent-1-tasks_jsonl-2",
+            "source-simplification-agent-1-tasks_jsonl-3"
+          ]
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "question_id": "question-hivev2-4",
+      "task_id": "hivev2-4",
+      "query": "Which source replacement was selected, and which upgrade-dependent actions were deferred?",
+      "tags": ["recency", "rejected_option"],
+      "expected_answer": "Replace the archived CLI source with the current release feed. Defer terminal hooks and workspace cleanup until upgrades are available.",
+      "required_note_ids": ["note-hivev2-4"],
+      "forbidden_option_ids": ["option-hivev2-4-1", "option-hivev2-4-2"]
+    },
+    {
+      "question_id": "question-hivev2-5",
+      "task_id": "hivev2-5",
+      "query": "How should the review skill be named, and can the control plane merge without owner review?",
+      "tags": ["recency", "rejected_option"],
+      "expected_answer": "Use the fully qualified plugin name. Owner review is required before merge.",
+      "required_note_ids": ["note-hivev2-5"],
+      "forbidden_option_ids": ["option-hivev2-5-1", "option-hivev2-5-2"]
+    },
+    {
+      "question_id": "question-hivev2-6",
+      "task_id": "hivev2-6",
+      "query": "Why was the client session lock disabled for automated lanes?",
+      "tags": ["recency", "rejected_option"],
+      "expected_answer": "Interactive repair can block an unattended pane, and lane sessions are unique.",
+      "required_note_ids": ["note-hivev2-6"],
+      "forbidden_option_ids": ["option-hivev2-6-1", "option-hivev2-6-2"]
+    },
+    {
+      "question_id": "question-hivev2-7",
+      "task_id": "hivev2-7",
+      "query": "What did the duplicate-date question decide?",
+      "tags": ["contradictory", "rejected_option"],
+      "expected_answer": "The supplied ledger records no selected option or owner approval. Neither a no-op nor another scan can be inferred.",
+      "required_note_ids": ["note-hivev2-7"],
+      "forbidden_option_ids": ["option-hivev2-7-1", "option-hivev2-7-2"]
+    },
+    {
+      "question_id": "question-hivev2-8",
+      "task_id": "hivev2-8",
+      "query": "Can the old hivev2-8 plan still be executed?",
+      "tags": ["stale", "rejected_option"],
+      "expected_answer": "No. It was not approved or run, and hivev2-9 superseded it.",
+      "required_note_ids": ["note-hivev2-8"],
+      "forbidden_option_ids": ["option-hivev2-8-1"]
+    },
+    {
+      "question_id": "question-hivev2-9",
+      "task_id": "hivev2-9",
+      "query": "What execution state does the supplied ledger establish for hivev2-9?",
+      "tags": ["stale", "rejected_option"],
+      "expected_answer": "It records a request and plan only, with no approval, execution, or completion. It supersedes hivev2-8.",
+      "required_note_ids": ["note-hivev2-9"],
+      "forbidden_option_ids": ["option-hivev2-9-1", "option-hivev2-9-2"]
+    },
+    {
+      "question_id": "question-hivev2-10",
+      "task_id": "hivev2-10",
+      "query": "May recovery retry under the expired root grant?",
+      "tags": ["stale", "rejected_option"],
+      "expected_answer": "No. The recovery deadline and grant expired, and the task stayed budget blocked before any replacement.",
+      "required_note_ids": ["note-hivev2-10"],
+      "forbidden_option_ids": ["option-hivev2-10-1"]
+    },
+    {
+      "question_id": "question-hivev2-11",
+      "task_id": "hivev2-11",
+      "query": "Did the respawn authorize a model change or produce research findings?",
+      "tags": ["contradictory", "rejected_option"],
+      "expected_answer": "No. The supplied ledger rejects the model change and contains no research findings note. Unauthorized, lineage-breaking, and over-budget alternatives remain rejected.",
+      "required_note_ids": ["note-hivev2-11"],
+      "forbidden_option_ids": [
+        "option-hivev2-11-1",
+        "option-hivev2-11-2",
+        "option-hivev2-11-3"
+      ]
+    },
+    {
+      "question_id": "question-hivev2-12",
+      "task_id": "hivev2-12",
+      "query": "Is the strongest draft lead accepted and ready for autonomous promotion?",
+      "tags": ["rejected_option"],
+      "expected_answer": "No. The lease is revoked, the draft is unstable, read-back and diff acceptance are incomplete, and the supplied ledger does not accept the lead.",
+      "required_note_ids": ["note-hivev2-12"],
+      "forbidden_option_ids": [
+        "option-hivev2-12-1",
+        "option-hivev2-12-2",
+        "option-hivev2-12-3"
+      ]
+    },
+    {
+      "question_id": "question-citadel-1",
+      "task_id": "citadel-1",
+      "query": "Can cleanup continue under the original contract?",
+      "tags": ["stale", "rejected_option"],
+      "expected_answer": "No. The original contract is stale and cancelled, so a fresh contract is required.",
+      "required_note_ids": ["note-citadel-1"],
+      "forbidden_option_ids": ["option-citadel-1-1", "option-citadel-1-2"]
+    },
+    {
+      "question_id": "question-citadel-2",
+      "task_id": "citadel-2",
+      "query": "Does the cross-run cap reset for each run or depend on timestamps?",
+      "tags": ["contradictory", "rejected_option"],
+      "expected_answer": "No. The final owner decision makes the cap permanent across runs through the append-only ledger, independent of timestamps.",
+      "required_note_ids": ["note-citadel-2"],
+      "forbidden_option_ids": ["option-citadel-2-1", "option-citadel-2-2"]
+    },
+    {
+      "question_id": "question-simplification-agent-1",
+      "task_id": "simplification-agent-1",
+      "query": "What remains after the newer base changed the simplification scope?",
+      "tags": ["recency", "rejected_option"],
+      "expected_answer": "M2 is already present. Only two redundant terminal returns remain in scope, while M1 generated deletion is deferred because it exceeds the chunk cap.",
+      "required_note_ids": ["note-simplification-agent-1"],
+      "forbidden_option_ids": [
+        "option-simplification-agent-1-1",
+        "option-simplification-agent-1-2"
+      ]
+    }
+  ],
+  "arms": {
+    "no_memory": {
+      "kind": "none",
+      "notes": []
+    },
+    "approved_markdown": {
+      "kind": "inline_markdown",
+      "notes": [
+        "note-hivev2-4",
+        "note-hivev2-5",
+        "note-hivev2-6",
+        "note-hivev2-7",
+        "note-hivev2-8",
+        "note-hivev2-9",
+        "note-hivev2-10",
+        "note-hivev2-11",
+        "note-hivev2-12",
+        "note-citadel-1",
+        "note-citadel-2",
+        "note-simplification-agent-1"
+      ]
+    },
+    "current_memory": {
+      "kind": "capture_required",
+      "captures": [
+        {
+          "question_id": "question-hivev2-4",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-hivev2-5",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-hivev2-6",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-hivev2-7",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-hivev2-8",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-hivev2-9",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-hivev2-10",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-hivev2-11",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-hivev2-12",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-citadel-1",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-citadel-2",
+          "status": "not_captured",
+          "response": null
+        },
+        {
+          "question_id": "question-simplification-agent-1",
+          "status": "not_captured",
+          "response": null
+        }
+      ]
+    }
+  }
+}
