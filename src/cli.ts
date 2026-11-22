@@ -9,7 +9,7 @@ import { cleanupProject } from './cleanup.js';
 import { memoryCommand } from './memory-cli.js';
 import { checkName } from './names.js';
 import { runPushCommand } from './push-cli.js';
-import { UsageError } from './usage.js';
+import { usageCommand, UsageError } from './usage.js';
 import { executionLine } from './rollout.js';
 
 function validName(kind: string, value: string): string {
@@ -29,7 +29,7 @@ const USAGE = `usage:
   hive hub init|add <name> [path] [--source <path>]|status [--json]|tasks [--json]|task <project> <text>|log <id> <event> [note] [--checkpoints <json>]|progress <task> <cp> <started|ok|fail|skip> [note]|accept <task> <cp>
   hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --seen <sha1>
   hive hub wake <project> | start <project> <task-id> | continue <project>
-  hive hub execution <project> off|status
+  hive hub execution <project> off|status | usage <task>
   hive spawn <project> --agent <name> --assignment <text> --deliverable <text> [--role r] [--worktree wt] [--task id] [--model m] | respawn [--assignment <text> --deliverable <text>] | close
   hive gate --log <path> -- <name> <cmd>...
   hive gate-verify log <path> [--expect a,b] [--commit sha] | gate-verify commits <base>..<tip> --max-files <n> --style conventional|free --attribution allow|deny [--no-body]
@@ -70,7 +70,7 @@ const str = (v: string | true | undefined) => (typeof v === 'string' ? v : undef
 
 async function hubCommand(args: string[]): Promise<void> {
   const root = process.cwd();
-  const sub = args[0] ?? fail('hub needs a subcommand');
+  const sub = args[0] ?? fail('hub needs a subcommand'); if (sub === 'usage') return console.log(await usageCommand(root, args));
   switch (sub) {
     case 'init': {
       await hubInit(root, args[1]);

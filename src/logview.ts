@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { constants, promises as fs } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -107,6 +107,179 @@ export function parseWireText(raw: string): ParsedLogEntry[] {
     if (entry) out.push(entry);
   }
   return out;
+}
+
+export type WireUsage = {
+  turns: number | 'unknown';
+  tool_calls: number | 'unknown';
+  input_tokens: number | 'unknown';
+  output_tokens: number | 'unknown';
+  total_tokens: number | 'unknown';
+  cost_usd: 'unknown';
+};
+
+type WireUsageState = {
+  valid: boolean;
+  usageSeen: boolean;
+  turns: number;
+  turnIds: Set<string>;
+  toolCalls: number;
+  input: number | null;
+  output: number | null;
+};
+
+function initialWireUsage(): WireUsageState {
+  return { valid: false, usageSeen: false, turns: 0, turnIds: new Set(), toolCalls: 0, input: 0, output: 0 };
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function safeCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function turnKey(value: unknown): string | undefined {
+  if (typeof value === 'string' && value) return `s:${value}`;
+  if (safeCount(value) !== null) return `n:${value}`;
+  return undefined;
+}
+
+function safeSum(left: number | null, right: number | null): number | null {
+  if (left === null || right === null) return null;
+  const sum = left + right;
+  return Number.isSafeInteger(sum) ? sum : null;
+}
+
+function usageTokens(value: unknown): { input: number | null; output: number | null } {
+  if (!record(value)) return { input: null, output: null };
+  const other = safeCount(value.inputOther);
+  const read = safeCount(value.inputCacheRead);
+  const creation = safeCount(value.inputCacheCreation);
+  return { input: safeSum(safeSum(other, read), creation), output: safeCount(value.output) };
+}
+
+function addWireUsageLine(state: WireUsageState, line: string): WireUsageState {
+  if (!line.trim()) return state;
+  let rec: unknown;
+  try {
+    rec = JSON.parse(line);
+  } catch {
+    return state;
+  }
+  if (!record(rec)) return state;
+  const next = { ...state, valid: true };
+  if (rec.type === 'turn.ended' && rec.agentId === 'main') {
+    const turnId = turnKey(rec.turnId);
+    if (turnId === undefined || !next.turnIds.has(turnId)) {
+      next.turns++;
+      if (turnId !== undefined) next.turnIds.add(turnId);
+    }
+  }
+  if (rec.type === 'context.append_loop_event' && rec.agentId === 'main'
+    && record(rec.event) && rec.event.type === 'tool.call') next.toolCalls++;
+  if (rec.type === 'usage.record' && rec.agentId === 'main' && rec.usageScope === 'turn') {
+    const tokens = usageTokens(rec.usage);
+    next.usageSeen = true;
+    next.input = safeSum(next.input, tokens.input);
+    next.output = safeSum(next.output, tokens.output);
+  }
+  return next;
+}
+
+function wireUsage(state: WireUsageState): WireUsage {
+  if (!state.valid) {
+    return {
+      turns: 'unknown', tool_calls: 'unknown', input_tokens: 'unknown', output_tokens: 'unknown',
+      total_tokens: 'unknown', cost_usd: 'unknown',
+    };
+  }
+  const input = state.usageSeen ? state.input : null;
+  const output = state.usageSeen ? state.output : null;
+  return {
+    turns: state.turns,
+    tool_calls: state.toolCalls,
+    input_tokens: input ?? 'unknown',
+    output_tokens: output ?? 'unknown',
+    total_tokens: safeSum(input, output) ?? 'unknown',
+    cost_usd: 'unknown',
+  };
+}
+
+export function parseWireUsage(raw: string): WireUsage {
+  let state = initialWireUsage();
+  for (const line of raw.split('\n')) state = addWireUsageLine(state, line);
+  return wireUsage(state);
+}
+
+const MAX_WIRE_BYTES = 64 * 1024 * 1024;
+const WIRE_OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+function errorCode(error: unknown): string | undefined {
+  return error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+}
+
+function notRegularFile(): NodeJS.ErrnoException {
+  const error = new Error('wire log is not a regular file') as NodeJS.ErrnoException;
+  error.code = 'EISDIR';
+  return error;
+}
+
+export async function readWireUsage(file: string): Promise<WireUsage> {
+  const unknown = () => wireUsage(initialWireUsage());
+  const handle = await fs.open(file, WIRE_OPEN_FLAGS).catch((error: unknown) => {
+    if (errorCode(error) === 'ENOENT' || errorCode(error) === 'ELOOP') return null;
+    throw error;
+  });
+  if (!handle) return unknown();
+  try {
+    const initial = await handle.stat();
+    if (!initial.isFile()) throw notRegularFile();
+    if (initial.size > MAX_WIRE_BYTES) return unknown();
+    let state = initialWireUsage();
+    let carry = Buffer.alloc(0);
+    let skipping = false;
+    let offset = 0;
+    while (offset < initial.size) {
+      const chunk = Buffer.alloc(Math.min(LOG_CHUNK_BYTES, initial.size - offset));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+      const block = skipping ? chunk.subarray(0, bytesRead) : Buffer.concat([carry, chunk.subarray(0, bytesRead)]);
+      carry = Buffer.alloc(0);
+      let start = 0;
+      for (let index = 0; index < block.length; index++) {
+        if (block[index] !== 10) continue;
+        const line = block.subarray(start, index);
+        if (skipping) skipping = false;
+        else if (line.length <= MAX_RECORD_BYTES) state = addWireUsageLine(state, line.toString('utf8'));
+        start = index + 1;
+      }
+      if (start < block.length && !skipping) {
+        const rest = block.subarray(start);
+        if (rest.length > MAX_RECORD_BYTES) skipping = true;
+        else carry = Buffer.from(rest);
+      }
+    }
+    if (offset !== initial.size) return unknown();
+    if (!skipping && carry.length > 0) state = addWireUsageLine(state, carry.toString('utf8'));
+    const finalHandle = await handle.stat();
+    const finalPath = await fs.stat(file);
+    if (!finalPath.isFile()
+      || finalHandle.dev !== initial.dev || finalHandle.ino !== initial.ino
+      || finalHandle.size !== initial.size || finalHandle.mtimeMs !== initial.mtimeMs
+      || finalHandle.ctimeMs !== initial.ctimeMs
+      || finalPath.dev !== initial.dev || finalPath.ino !== initial.ino
+      || finalPath.size !== initial.size || finalPath.mtimeMs !== initial.mtimeMs
+      || finalPath.ctimeMs !== initial.ctimeMs) return unknown();
+    return wireUsage(state);
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT' || errorCode(error) === 'ELOOP') return unknown();
+    throw error;
+  } finally {
+    await handle.close();
+  }
 }
 
 type LogCursor = {
