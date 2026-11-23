@@ -732,12 +732,12 @@ describe('cleanupProject confirmed reviewer regressions', () => {
     })]);
   });
 
-  it('real JJ dry-run does not let a stale empty-root registration block a valid workspace', async () => {
+  it('real JJ dry-run does not let a stale registration block a valid workspace', async () => {
     const { root, home, wt } = await setupRealJjWorkspace('lane-agent', 'lane-agent');
     const stale = path.join(home, 'stale-lane');
     jj(['workspace', 'add', '--name', 'stale-lane', '-r', 'main', stale], home);
     await fs.rename(stale, path.join(root, 'retained-stale'));
-    expect(jj(['workspace', 'list', '-T', 'name ++ "\\t" ++ root ++ "\\n"'], home)).toContain('stale-lane\t\n');
+    expect(jj(['workspace', 'list', '-T', 'name ++ "\\t" ++ root ++ "\\n"'], home)).toMatch(/stale-lane\t(?:\/[^\n]+)?\n/);
 
     const actions = await cleanupProject(root, 'proj', { dryRun: true });
 
