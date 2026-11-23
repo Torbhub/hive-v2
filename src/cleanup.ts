@@ -307,30 +307,87 @@ async function laneCheck(
 
 async function deregister(home: string, rec: ManifestRecord): Promise<RunResult> {
   const abs = path.resolve(String(rec.path));
-  if (rec.kind === 'worktree') return run('git', ['worktree', 'prune'], home);
-  let name = typeof rec.workspace_name === 'string' ? rec.workspace_name : '';
-  if (!name) {
-    const listing = await listJjWorkspaces(home);
-    if (listing.code !== 0 || !listing.entries) {
-      return { code: 1, stdout: '', stderr: listing.stderr || 'workspace listing failed' };
+  if (rec.kind === 'worktree') {
+    const result = await run('git', ['worktree', 'prune'], home);
+    const listing = await run('git', ['worktree', 'list', '--porcelain'], home);
+    if (listing.code !== 0) return { code: 1, stdout: '', stderr: listing.stderr || 'worktree listing failed' };
+    if (listing.stdout.split('\n').includes(`worktree ${abs}`)) {
+      return result.code === 0
+        ? { code: 1, stdout: '', stderr: `worktree remains registered: ${abs}` }
+        : result;
     }
-    name = listing.entries.find((entry) => entry.root === abs)?.name ?? '';
+    return result;
+  }
+  let name = typeof rec.workspace_name === 'string' ? rec.workspace_name : '';
+  const before = await listJjWorkspaces(home);
+  if (before.code !== 0 || !before.entries) {
+    return { code: 1, stdout: '', stderr: before.stderr || 'workspace listing failed' };
+  }
+  const rootMatches = before.entries.filter((entry) => entry.root === abs);
+  if (rootMatches.length > 1) return { code: 1, stdout: '', stderr: `workspace identity is ambiguous for ${abs}` };
+  const namedEntry = name ? before.entries.find((entry) => entry.name === name) : undefined;
+  if (namedEntry?.root && path.resolve(namedEntry.root) !== abs) {
+    return { code: 1, stdout: '', stderr: `workspace ${name} points at a different root: ${namedEntry.root}. Expected ${abs}` };
+  }
+  if (name && rootMatches.length > 0 && rootMatches[0].name !== name) {
+    return { code: 1, stdout: '', stderr: `recorded workspace name ${name} is stale for ${abs}` };
+  }
+  if (name && !namedEntry) {
+    if (rootMatches.length > 0) {
+      return { code: 1, stdout: '', stderr: `recorded workspace name ${name} is stale for ${abs}` };
+    }
+    if (before.entries.some((entry) => !entry.root)) {
+      return { code: 1, stdout: '', stderr: `workspace identity is ambiguous for missing path ${abs}` };
+    }
+    return { code: 0, stdout: 'workspace already forgotten', stderr: '' };
+  }
+  if (!name) {
+    name = rootMatches[0]?.name ?? '';
+    if (!name && before.entries.some((entry) => !entry.root)) {
+      return { code: 1, stdout: '', stderr: `workspace identity is ambiguous for missing path ${abs}` };
+    }
     if (!name) return { code: 0, stdout: 'workspace already forgotten', stderr: '' };
   }
   const result = await run('jj', ['-R', home, 'workspace', 'forget', name], home);
-  if (result.code === 0) return result;
   const listing = await listJjWorkspaces(home);
-  if (listing.entries && !listing.entries.some((entry) => entry.name === name || entry.root === abs)) {
-    return { code: 0, stdout: 'workspace already forgotten', stderr: '' };
+  if (listing.code !== 0 || !listing.entries) {
+    return { code: 1, stdout: '', stderr: listing.stderr || 'workspace listing failed' };
   }
-  return result;
+  if (listing.entries.some((entry) => entry.name === name || entry.root === abs)) {
+    return result.code === 0
+      ? { code: 1, stdout: '', stderr: `workspace remains registered: ${name}` }
+      : result;
+  }
+  return { code: 0, stdout: 'workspace already forgotten', stderr: '' };
+}
+
+async function deregisterMissingLane(
+  home: string,
+  rec: ManifestRecord,
+  dryRun: boolean,
+  store: StoreRecord,
+): Promise<CleanupAction | null> {
+  const abs = rec.path ? path.resolve(String(rec.path)) : '';
+  if (dryRun) return null;
+  if (abs) {
+    const result = await deregister(home, rec);
+    if (result.code !== 0) {
+      return {
+        record: rec,
+        action: `deregistration failed for missing ${rec.kind} ${abs}: ${result.stderr.trim() || `exit ${result.code}`}. Retry cleanup`,
+        acted: false,
+      };
+    }
+  }
+  await store(rec, null);
+  return null;
 }
 
 function withoutQuarantine(rec: ManifestRecord): ManifestRecord {
   const original = { ...rec };
   for (const key of [
     'quarantine_path', 'quarantined_at', 'quarantine_expires_at', 'quarantine_files',
-    'quarantine_directories', 'quarantine_deregistered', 'quarantine_pending', 'workspace_name',
+    'quarantine_directories', 'quarantine_deregistered', 'quarantine_pending',
   ]) delete original[key];
   return original;
 }
@@ -706,7 +763,8 @@ export async function cleanupProject(
     if (rec.kind === 'worktree' || rec.kind === 'jj-workspace') {
       const abs = rec.path ? path.resolve(String(rec.path)) : '';
       if (!abs || !(await lstat(abs))) {
-        if (!dryRun) await store(rec, null);
+        const action = await deregisterMissingLane(p.home, rec, dryRun, store);
+        if (action) actions.push(action);
         continue;
       }
       actions.push(await quarantineLane(p.home, rec, records, team, trashDir, dryRun, store));

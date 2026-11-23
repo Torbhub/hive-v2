@@ -62,11 +62,13 @@ function publishBranch(home: string, branch: string): void {
 }
 
 function mockJjWorkspace(wt: string, scenario = 'clean'): void {
+  let forgotten = false;
   vi.mocked(run).mockImplementation(async (command, args) => {
     if (args.includes('workspace') && args.includes('list')) {
-      return { code: 0, stdout: `${path.basename(wt)}\t${wt}\n`, stderr: '' };
+      return { code: 0, stdout: forgotten ? '' : `${path.basename(wt)}\t${wt}\n`, stderr: '' };
     }
     if (args.includes('workspace') && args.includes('forget')) {
+      forgotten = true;
       return { code: 0, stdout: '', stderr: '' };
     }
     if (scenario === 'failed-probe' || scenario === 'ambiguous' || scenario === 'unborn') {
@@ -192,9 +194,41 @@ describe('cleanupProject worktree records', () => {
       quarantine_expires_at: expect.any(String), quarantine_files: expect.any(Array),
     })]);
   });
+
+  it('retains a locked renamed worktree until prune really deregisters it', async () => {
+    const { root, home, wt } = await setupLane('worktree');
+    const retained = path.join(home, 'retained-worktree');
+    await fs.writeFile(path.join(wt, 'keep.txt'), 'precious');
+    git(['worktree', 'lock', wt], home);
+    const before = await manifestRead(home);
+    await fs.rename(wt, retained);
+
+    const failed = await cleanupProject(root, 'proj');
+
+    expect(failed).toEqual([expect.objectContaining({ acted: false })]);
+    expect(failed[0].action).toMatch(/registered|prune|failed|retry/i);
+    expect(await manifestRead(home)).toEqual(before);
+    expect(await fs.readFile(path.join(retained, 'keep.txt'), 'utf8')).toBe('precious');
+
+    git(['worktree', 'unlock', wt], home);
+    await cleanupProject(root, 'proj');
+    expect(await manifestRead(home)).toEqual([]);
+    expect(await fs.readFile(path.join(retained, 'keep.txt'), 'utf8')).toBe('precious');
+  });
 });
 
 describe('cleanupProject jj-workspace records', () => {
+  it('drops a pathless record without trying to deregister it', async () => {
+    const { root, home } = await setup();
+    await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: undefined });
+
+    const actions = await cleanupProject(root, 'proj');
+
+    expect(actions).toEqual([]);
+    expect(await manifestRead(home)).toEqual([]);
+    expect(vi.mocked(run).mock.calls.some((call) => call[1].includes('forget'))).toBe(false);
+  });
+
   it('trashes a workspace jj lists and forgets it', async () => {
     const { root, home } = await setup();
     const wt = path.join(home, 'lane-agent');
@@ -324,6 +358,20 @@ describe.each([{ kind: 'worktree' as const }, { kind: 'jj-workspace' as const }]
       expect(await fs.stat(wt).catch(() => null)).toBeNull();
       expect(await fs.stat(dest)).toBeTruthy();
       expect(await manifestRead(home)).toEqual([expect.objectContaining({ path: wt, quarantine_path: dest })]);
+    });
+
+    it('retains a missing lane record when deregistration fails', async () => {
+      const { root, home, wt } = await setupLane(kind);
+      const retained = path.join(home, `retained-${kind}`);
+      await fs.rename(wt, retained);
+      mockFailedDeregistration(kind, wt);
+
+      const actions = await cleanupProject(root, 'proj');
+
+      expect(actions).toEqual([expect.objectContaining({ acted: false })]);
+      expect(actions[0].action).toMatch(/failed|retry|deregister/i);
+      expect(await manifestRead(home)).toEqual([expect.objectContaining({ path: wt })]);
+      expect(await fs.stat(retained)).toBeTruthy();
     });
 
     it('refuses a destination collision without disturbing either path', async () => {
@@ -785,6 +833,120 @@ describe('cleanupProject confirmed reviewer regressions', () => {
     expect(await fs.stat(trashed)).toBeTruthy();
   });
 
+  it('real JJ retains a named registration when forget reports success without forgetting it', async () => {
+    const { root, home, wt } = await setupRealJjWorkspace('internal-lane-name', 'public-basename');
+    const retained = path.join(root, 'retained-lane');
+    await fs.writeFile(path.join(wt, 'keep.txt'), 'precious');
+    await manifestUpdate(home, (current) => current.map((record) => ({ ...record, workspace_name: 'internal-lane-name' })));
+    const before = await manifestRead(home);
+    await fs.rename(wt, retained);
+    vi.mocked(run).mockImplementation(async (command, args, cwd, env, timeout) => {
+      if (args.includes('workspace') && args.includes('forget')) return { code: 0, stdout: '', stderr: '' };
+      return actualRun(command, args, cwd, env, timeout);
+    });
+
+    const failed = await cleanupProject(root, 'proj');
+
+    expect(failed).toEqual([expect.objectContaining({ acted: false })]);
+    expect(failed[0].action).toMatch(/registered|failed|retry/i);
+    expect(await manifestRead(home)).toEqual(before);
+    expect(jj(['workspace', 'list'], home)).toContain('internal-lane-name:');
+    expect(await fs.readFile(path.join(retained, 'keep.txt'), 'utf8')).toBe('precious');
+
+    vi.mocked(run).mockImplementation(actualRun);
+    await cleanupProject(root, 'proj');
+    expect(await manifestRead(home)).toEqual([]);
+    expect(jj(['workspace', 'list'], home)).not.toContain('internal-lane-name:');
+    expect(await fs.readFile(path.join(retained, 'keep.txt'), 'utf8')).toBe('precious');
+  });
+
+  it('real JJ refuses a stale recorded name after a workspace rename', async () => {
+    const { root, home, wt } = await setupRealJjWorkspace('internal-lane-name', 'public-basename');
+    const retained = path.join(root, 'retained-lane');
+    await fs.writeFile(path.join(wt, 'keep.txt'), 'precious');
+    jj(['workspace', 'rename', 'new-name'], wt);
+    await manifestUpdate(home, (current) => current.map((record) => ({ ...record, workspace_name: 'old-name' })));
+    const before = await manifestRead(home);
+    await fs.rename(wt, retained);
+    vi.mocked(run).mockImplementation(async (command, args, cwd, env, timeout) => {
+      if (args.includes('workspace') && args.includes('forget')) return { code: 0, stdout: '', stderr: '' };
+      return actualRun(command, args, cwd, env, timeout);
+    });
+
+    const failed = await cleanupProject(root, 'proj');
+
+    expect(failed).toEqual([expect.objectContaining({ acted: false })]);
+    expect(failed[0].action).toMatch(/stale|ambiguous|registered|retry/i);
+    expect(await manifestRead(home)).toEqual(before);
+    expect(jj(['workspace', 'list'], home)).toContain('new-name:');
+    expect(vi.mocked(run).mock.calls.some((call) => call[1].includes('forget'))).toBe(false);
+    expect(await fs.readFile(path.join(retained, 'keep.txt'), 'utf8')).toBe('precious');
+
+    vi.mocked(run).mockImplementation(actualRun);
+    jj(['workspace', 'forget', 'new-name'], home);
+    await cleanupProject(root, 'proj');
+    expect(await manifestRead(home)).toEqual([]);
+    expect(await fs.readFile(path.join(retained, 'keep.txt'), 'utf8')).toBe('precious');
+  });
+
+  it('real JJ refuses a recorded name reused for a different workspace', async () => {
+    const { root, home, wt } = await setupRealJjWorkspace('internal-lane-name', 'public-basename');
+    const retained = path.join(root, 'retained-lane');
+    const replacement = path.join(root, 'replacement-lane');
+    await fs.writeFile(path.join(wt, 'keep.txt'), 'precious');
+    jj(['workspace', 'forget', 'internal-lane-name'], home);
+    jj(['workspace', 'add', '--name', 'internal-lane-name', '-r', 'main', replacement], home);
+    await manifestUpdate(home, (current) => current.map((record) => ({ ...record, workspace_name: 'internal-lane-name' })));
+    const before = await manifestRead(home);
+    await fs.rename(wt, retained);
+
+    const failed = await cleanupProject(root, 'proj');
+
+    expect(failed).toEqual([expect.objectContaining({ acted: false })]);
+    expect(failed[0].action).toMatch(/different|root|registered|retry/i);
+    expect(await manifestRead(home)).toEqual(before);
+    expect(jj(['workspace', 'list'], home)).toContain('internal-lane-name:');
+    expect(vi.mocked(run).mock.calls.some((call) => call[1].includes('forget'))).toBe(false);
+    expect(await fs.readFile(path.join(retained, 'keep.txt'), 'utf8')).toBe('precious');
+
+    jj(['workspace', 'forget', 'internal-lane-name'], home);
+    await cleanupProject(root, 'proj');
+    expect(await manifestRead(home)).toEqual([]);
+    expect(await fs.readFile(path.join(retained, 'keep.txt'), 'utf8')).toBe('precious');
+  });
+
+  it('real JJ keeps a legacy nameless record until the operator forgets the registration', async () => {
+    const { root, home, wt } = await setupRealJjWorkspace('internal-lane-name', 'public-basename');
+    const retained = path.join(root, 'retained-lane');
+    await fs.writeFile(path.join(wt, 'keep.txt'), 'precious');
+    const before = await manifestRead(home);
+    await fs.rename(wt, retained);
+    mockFailedDeregistration('jj-workspace', wt);
+
+    const failed = await cleanupProject(root, 'proj');
+
+    expect(failed).toEqual([expect.objectContaining({ acted: false })]);
+    expect(failed[0].action).toMatch(/registered|failed|ambiguous|retry/i);
+    expect(await manifestRead(home)).toEqual(before);
+    expect(jj(['workspace', 'list'], home)).toContain('internal-lane-name:');
+    expect(await fs.readFile(path.join(retained, 'keep.txt'), 'utf8')).toBe('precious');
+
+    vi.mocked(run).mockImplementation(async (command, args, cwd, env, timeout) => {
+      const result = await actualRun(command, args, cwd, env, timeout);
+      if (command === 'jj' && args.includes('workspace') && args.includes('list')) {
+        return { ...result, stdout: result.stdout.replace(`internal-lane-name\t${wt}\n`, 'internal-lane-name\t\n') };
+      }
+      return result;
+    });
+    const stillBlocked = await cleanupProject(root, 'proj');
+    expect(stillBlocked).toEqual([expect.objectContaining({ acted: false })]);
+    expect(await manifestRead(home)).toEqual(before);
+    jj(['workspace', 'forget', 'internal-lane-name'], home);
+    await cleanupProject(root, 'proj');
+    expect(await manifestRead(home)).toEqual([]);
+    expect(await fs.readFile(path.join(retained, 'keep.txt'), 'utf8')).toBe('precious');
+  });
+
   it('real JJ forgets the listed workspace name instead of its destination basename', async () => {
     const { root, home, wt } = await setupRealJjWorkspace('internal-lane-name', 'public-basename');
 
@@ -882,6 +1044,26 @@ describe('cleanupProject confirmed reviewer regressions', () => {
     expect(await manifestRead(home)).toEqual([expect.objectContaining({
       quarantine_path: dest, quarantine_deregistered: true,
     })]);
+  });
+
+  it('preserves workspace_name when reconciling a pending quarantine', async () => {
+    const { root, home } = await setup();
+    const source = path.join(home, 'lane-agent');
+    await fs.mkdir(source);
+    const dest = path.join(hivePath(home, 'trash'), '2000-01-01', 'lane-agent');
+    await manifestAdd(home, {
+      kind: 'jj-workspace', at: '2000-01-01T00:00:00.000Z', path: source, workspace_name: 'internal-lane-name',
+      quarantine_path: dest, quarantine_pending: true, quarantine_deregistered: false,
+      quarantine_files: [], quarantine_directories: [],
+    });
+
+    const actions = await cleanupProject(root, 'proj');
+
+    expect(actions).toEqual([expect.objectContaining({ acted: true })]);
+    const reconciled = await manifestRead(home);
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0].workspace_name).toBe('internal-lane-name');
+    expect(reconciled[0].quarantine_path).toBeUndefined();
   });
 
   it('does not lose a concurrent manifestAdd during quarantine', async () => {
