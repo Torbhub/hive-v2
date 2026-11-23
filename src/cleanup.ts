@@ -314,7 +314,8 @@ async function deregister(home: string, rec: ManifestRecord): Promise<RunResult>
     if (listing.code !== 0 || !listing.entries) {
       return { code: 1, stdout: '', stderr: listing.stderr || 'workspace listing failed' };
     }
-    name = listing.entries.find((entry) => entry.root === abs)?.name ?? '';
+    name = listing.entries.find((entry) => entry.root === abs
+      || !entry.root && entry.name === path.basename(abs))?.name ?? '';
     if (!name) return { code: 0, stdout: 'workspace already forgotten', stderr: '' };
   }
   const result = await run('jj', ['-R', home, 'workspace', 'forget', name], home);
