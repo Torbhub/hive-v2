@@ -309,8 +309,13 @@ process. This is the existing default-mode MCP trust boundary.
 5. Before anything lands: the gate. `hive gate` runs the steps and logs every
    exit code; `hive gate-verify log --commit <tip>` is GREEN only when the log
    vouches for exactly that commit on a clean tree.
-6. When the task is done: `hive cleanup demo` trashes what hive created
-   (tmux windows, worktrees), never deletes.
+6. When the task is done: `hive cleanup demo --dry-run`, then `hive cleanup demo`.
+   Cleanup quarantines registered lanes and retains their recovery metadata.
+   Reclamation needs a separate dry run and explicit owner approval:
+   `hive cleanup demo --dry-run --reclaim-trash`, then
+   `hive cleanup demo --reclaim-trash --owner-approved`. Only verified expired
+   quarantine is deleted. Reclamation stages that path and checks its content
+   again. Historical unverified trash remains.
 
 ## State layout
 

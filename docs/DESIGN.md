@@ -58,7 +58,7 @@ src/
   spawn.ts     — spawn/respawn/close of orchestrator + agent sessions
   gate.ts      — gate runner + gate-verify (log, commits)
   handy.ts     — loopback-only Handy CLI bridge for browser dictation
-  cleanup.ts   — manifest-driven cleanup, trash-not-delete
+  cleanup.ts   — manifest-driven quarantine and approved verified reclamation
   watch.ts     — watchdog (dead-pane log + wake), safe/smart approvals, and grant-checked Auto operations
   compact.ts   — idle compaction policy, durable attempts, and per-worker controls
   cache-expiry.ts — exact cache-dialog parsing and identity-checked cursor input
@@ -120,8 +120,24 @@ Per project, `<project>/.hive/`:
   Memory sections. Writes refuse symlinks. New handoffs include a Progress
   heading. The agent updates that section without removing the contract.
 - `manifest.jsonl` — typed records of what hive-v2 created (`worktree`,
-  `tmux`, `process`). Cleanup acts only on the manifest and trashes instead
-  of deleting.
+  `jj-workspace`, `tmux`, `process`). Cleanup acts only on the manifest.
+  Quarantine records retain the original path, destination, expiry, and content
+  identity. Reclamation deletes only verified expired quarantine after separate
+  owner approval. Historical unverified trash remains.
+
+Cleanup writes pending quarantine intent before a move. Manifest updates share
+one lock with additions, reread inside the lock, and use atomic file replacement.
+JJ cleanup checks the content diff and published parents. It retains the listed
+workspace name for deregistration. Git-backed JJ cleanup also checks ignored
+files and current remote heads without fetching. Pre-move comparisons exclude
+internal `.git` and `.jj` metadata. Durable quarantine identity includes that
+metadata. Reclamation stages the recorded path under a unique name and checks
+its full content identity before deletion. The cleanup CLI resolves the Hub root
+with realpath and requires the existing `.hive-hub/hub.json` marker.
+
+Remote and content checks are point-in-time checks. Cleanup rechecks a lane
+before and after its move. Reclamation rechecks the staged path before deletion.
+A writer with access to that staging path can still race the final deletion.
 
 ## Commands (the whole surface)
 
@@ -133,7 +149,7 @@ hive hub wake <project> | start <project> <task-id> | continue <project>
 hive spawn <project> --agent <name> --assignment <text> --deliverable <text> [--role r] [--worktree wt] | respawn [--assignment <text> --deliverable <text>] | close
 hive gate --log <path> -- <name> <cmd>... | gate-verify log <path> [--commit sha] | gate-verify commits <base>..<tip>
 hive push <remote> <40-char sha> <branch> [--approval <batch>/<question>] — fast-forward only, one-time grant for agents
-hive cleanup <project> [--dry-run]
+hive cleanup <project> [--dry-run] [--reclaim-trash --owner-approved]
 hive compact <project> [agent] on|off
 hive handy-bridge [--origin URL]         — local Handy transcription bridge
 hive ui                                  — the hub screen

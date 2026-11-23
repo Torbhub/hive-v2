@@ -1,11 +1,12 @@
 #!/usr/bin/env node
+import path from 'node:path';
 import {
   answerDialog, buildStatus, continueProject, hubAdd, hubInit, hubTask, ledgerCommand,
   listTasks, planAnswer, readDialogFor, redactDialog, startProject, wake,
 } from './hub.js';
 import { closeAgent, respawnAgent, spawnAgent } from './spawn.js';
 import { parseSteps, runGate, verifyCommits, verifyLog } from './gate.js';
-import { cleanupProject } from './cleanup.js';
+import { cleanupCommand } from './cleanup-cli.js';
 import { memoryCommand } from './memory-cli.js';
 import { checkName } from './names.js';
 import { runPushCommand } from './push-cli.js';
@@ -35,11 +36,15 @@ const USAGE = `usage:
   hive gate-verify log <path> [--expect a,b] [--commit sha] | gate-verify commits <base>..<tip> --max-files <n> --style conventional|free --attribution allow|deny [--no-body]
   hive push <remote> <sha> <branch>
   hive land <remote> <sha> <branch> [--title t] [--body b] | --bookmark <name> [--title t] [--body b]
-  hive cleanup <project> [--dry-run]
+  hive cleanup <project> [--dry-run] [--reclaim-trash --owner-approved]
   hive interrupt <project> [agent] | hive kill <project> [agent] | hive compact <project> [agent] on|off
   hive doctor | ui | watch | web [--port N] | handy-bridge [--origin URL] | mcp
   hive memory propose <project> <text...> | ls <project> | promote <project> <id> | hive branch create|status|refresh|result|reconcile ... | hive daydream mine|verify|recover|status|automation|reconcile|prune ...`;
-const VALUELESS_FLAGS = new Set(['json', 'dry-run', 'no-body']);
+const VALUELESS_FLAGS = new Set(['json', 'no-body']);
+
+function hubRoot(): string {
+  return path.resolve(process.env.HIVE_HUB_ROOT ?? process.cwd());
+}
 
 function parseFlags(args: string[], names: string[]): { flags: Record<string, string | true>; pos: string[] } {
   const out: Record<string, string | true> = {};
@@ -69,7 +74,7 @@ const fail = (msg: string): never => { throw new UsageError(msg); };
 const str = (v: string | true | undefined) => (typeof v === 'string' ? v : undefined);
 
 async function hubCommand(args: string[]): Promise<void> {
-  const root = process.cwd();
+  const root = args[0] === 'init' ? process.cwd() : hubRoot();
   const sub = args[0] ?? fail('hub needs a subcommand'); if (sub === 'usage') return console.log(await usageCommand(root, args));
   switch (sub) {
     case 'init': {
@@ -161,7 +166,7 @@ async function hubCommand(args: string[]): Promise<void> {
 }
 
 async function spawnCommand(args: string[]): Promise<void> {
-  const root = process.cwd();
+  const root = hubRoot();
   let sub: 'spawn' | 'respawn' | 'close' = 'spawn';
   let rest = args;
   if (args[0] === 'respawn' || args[0] === 'close') {
@@ -237,21 +242,13 @@ async function main(): Promise<void> {
     case 'land': {
       throw new UsageError('push and pull request creation need separate structured approvals');
     }
-    case 'cleanup': {
-      const project = args[1];
-      if (!project) throw new UsageError('usage: hive cleanup <project> [--dry-run]');
-      const dryRun = args.includes('--dry-run');
-      const actions = await cleanupProject(process.cwd(), validName('project', project), { dryRun });
-      if (actions.length === 0) console.log(`hive: nothing to clean for ${project}`);
-      for (const a of actions) console.log(`${dryRun ? 'would ' : ''}${a.action}`);
-      return;
-    }
-    case 'doctor': process.exit(await (await import('./doctor.js')).doctor(process.cwd()));
+    case 'cleanup': return cleanupCommand(args.slice(1));
+    case 'doctor': process.exit(await (await import('./doctor.js')).doctor(hubRoot()));
     case 'ui': {
       const { render } = await import('ink');
       const { createElement } = await import('react');
       const { HubApp } = await import('./ui/HubApp.js');
-      render(createElement(HubApp, { root: process.cwd() }));
+      render(createElement(HubApp, { root: hubRoot() }));
       return;
     }
     case 'interrupt':
@@ -260,16 +257,16 @@ async function main(): Promise<void> {
       const fn = cmd === 'kill'
         ? (await import('./kill.js')).killLine
         : (await import('./interrupt.js')).interruptLine;
-      console.log(await fn(process.cwd(), validName('project', args[1]), args[2] && validAgentRef(args[2])));
+      console.log(await fn(hubRoot(), validName('project', args[1]), args[2] && validAgentRef(args[2])));
       return;
     }
-    case 'branch': return (await import('./branch-cli.js')).branchCommand(process.cwd(), args.slice(1));
-    case 'daydream': return (await import('./daydream-cli.js')).daydreamCommand(process.cwd(), args.slice(1));
-    case 'compact': return (await import('./compact.js')).compactCommand(process.cwd(), args.slice(1));
+    case 'branch': return (await import('./branch-cli.js')).branchCommand(hubRoot(), args.slice(1));
+    case 'daydream': return (await import('./daydream-cli.js')).daydreamCommand(hubRoot(), args.slice(1));
+    case 'compact': return (await import('./compact.js')).compactCommand(hubRoot(), args.slice(1));
     case 'watch': {
       const { watch } = await import('./watch.js');
-      console.log(`hive: watching ${process.cwd()} (deaths + approvals per projects.json)`);
-      return watch(process.cwd());
+      console.log(`hive: watching ${hubRoot()} (deaths + approvals per projects.json)`);
+      return watch(hubRoot());
     }
     case 'web': {
       const { flags: f } = parseFlags(args.slice(1), ['port']);
@@ -277,8 +274,8 @@ async function main(): Promise<void> {
       const port = Number(raw);
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new UsageError(`a port is 1-65535: ${raw}`);
       const { listen } = await import('../web/server.js');
-      await listen(process.cwd(), port);
-      console.log(`hive: hub web on http://127.0.0.1:${port} (root ${process.cwd()})`);
+      await listen(hubRoot(), port);
+      console.log(`hive: hub web on http://127.0.0.1:${port} (root ${hubRoot()})`);
       return;
     }
     case 'handy-bridge': return (await import('./handy.js')).handyBridgeCommand(args.slice(1)); case 'mcp': return (await import('./mcp.js')).main();
