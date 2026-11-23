@@ -507,9 +507,23 @@ export async function upsertTeamEntry(projectHome: string, entry: TeamEntry): Pr
 
 export type ManifestRecord = { kind: 'worktree' | 'jj-workspace' | 'tmux' | 'process'; at: string; [k: string]: unknown };
 
+export async function manifestUpdate(
+  projectHome: string,
+  updater: (records: ManifestRecord[]) => ManifestRecord[] | Promise<ManifestRecord[]>,
+): Promise<ManifestRecord[]> {
+  return withDirLock(hivePath(projectHome, 'manifest.jsonl.lock'), async () => {
+    const current = await manifestRead(projectHome);
+    const next = await updater(current);
+    const file = hivePath(projectHome, 'manifest.jsonl');
+    const tmp = `${file}.tmp.${process.pid}.${randomUUID()}`;
+    await fs.writeFile(tmp, next.map((r) => JSON.stringify(r)).join('\n') + (next.length ? '\n' : ''));
+    await fs.rename(tmp, file);
+    return next;
+  });
+}
+
 export async function manifestAdd(projectHome: string, rec: ManifestRecord): Promise<void> {
-  await fs.mkdir(hivePath(projectHome), { recursive: true });
-  await fs.appendFile(hivePath(projectHome, 'manifest.jsonl'), JSON.stringify(rec) + '\n');
+  await manifestUpdate(projectHome, (records) => [...records, rec]);
 }
 
 export async function manifestRead(projectHome: string): Promise<ManifestRecord[]> {
@@ -517,10 +531,7 @@ export async function manifestRead(projectHome: string): Promise<ManifestRecord[
 }
 
 export async function manifestWrite(projectHome: string, recs: ManifestRecord[]): Promise<void> {
-  await fs.writeFile(
-    hivePath(projectHome, 'manifest.jsonl'),
-    recs.map((r) => JSON.stringify(r)).join('\n') + (recs.length ? '\n' : ''),
-  );
+  await manifestUpdate(projectHome, () => recs);
 }
 
 export type PendingPane = {
