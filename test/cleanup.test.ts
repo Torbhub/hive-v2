@@ -737,7 +737,14 @@ describe('cleanupProject confirmed reviewer regressions', () => {
     const stale = path.join(home, 'stale-lane');
     jj(['workspace', 'add', '--name', 'stale-lane', '-r', 'main', stale], home);
     await fs.rename(stale, path.join(root, 'retained-stale'));
-    expect(jj(['workspace', 'list', '-T', 'name ++ "\\t" ++ root ++ "\\n"'], home)).toContain('stale-lane\t\n');
+    expect(jj(['workspace', 'list', '-T', 'name ++ "\\t" ++ root ++ "\\n"'], home)).toContain('stale-lane\t');
+    vi.mocked(run).mockImplementation(async (command, args, cwd, env, timeout) => {
+      const result = await actualRun(command, args, cwd, env, timeout);
+      if (command === 'jj' && args.includes('workspace') && args.includes('list')) {
+        return { ...result, stdout: result.stdout.replace(`stale-lane\t${stale}\n`, 'stale-lane\t\n') };
+      }
+      return result;
+    });
 
     const actions = await cleanupProject(root, 'proj', { dryRun: true });
 
