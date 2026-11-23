@@ -58,6 +58,11 @@ describe('parseWireLine', () => {
     expect(e?.text).toBe('please fix the gate');
   });
 
+  it('masks pane ids and tmux targets while preserving percent escapes', () => {
+    const e = parseWireLine(textLine('hive: wake returned %9\nanswered "Allow" for: $ tmux send-keys -t \'%7\' text && echo %20'));
+    expect(e?.text).toBe('hive: wake returned ?\nanswered "Allow" for: $ tmux send-keys -t \'?\' text && echo %20');
+  });
+
   it('ignores steps, tool results, and non-user messages', () => {
     expect(parseWireLine(loopEvent({ type: 'step.begin', step: 1 }))).toBeNull();
     expect(parseWireLine(loopEvent({ type: 'tool.result', result: { output: 'x' } }))).toBeNull();

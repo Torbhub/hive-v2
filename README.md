@@ -85,6 +85,10 @@ The web composers can insert local Handy transcripts at the cursor. Run
 Dictation never submits a prompt or approval. Normal typing works without Handy.
 See [Handy dictation](docs/handy-dictation.md) for setup, privacy, and limits.
 
+## Attach
+
+`hive attach demo` rechecks the orchestrator's recorded pane identity before attaching the exact tmux pane. The numeric pane ID stays inside Hive and is not printed. If the identity changed, Hive refuses to attach.
+
 ## Interrupt vs kill
 
 `hive interrupt demo [agent]` — or the Interrupt buttons on the web screen —

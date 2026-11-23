@@ -9,6 +9,7 @@ import {
   taskBudgetExpired, taskEvidenceDigests, valueDigest, withHubLock, withTeamLock,
 } from './state.js';
 import { CLOSED_STATES } from './types.js';
+import { withoutPaneIds } from './window-name.js';
 import type {
   AcceptanceEvidenceRow, HubTask, NativeBranchRecord, TaskAcceptance, TaskEvidence, TaskEvent, TaskOperation,
   TaskReceipt, TeamEntry, WorkTree, WorkTreeNode,
@@ -768,6 +769,10 @@ function bounded(value: string | undefined): string | undefined {
   return value?.slice(0, TEXT_CAP);
 }
 
+function boundedBlocker(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : bounded(withoutPaneIds(value));
+}
+
 function detail(label: string, value: string | undefined): { label: string; value: string }[] {
   return value ? [{ label, value: bounded(value)! }] : [];
 }
@@ -992,10 +997,10 @@ function taskNode(task: HubTask, input: WorkTreeInput): WorkTreeNode {
     kind: 'task', recordId: task.id, adapter: operation ? 'github_check' : 'root', state: task.state,
     active: !CLOSED_STATES.has(task.state), terminal: CLOSED_STATES.has(task.state), done: task.state === 'done',
     doneEnabled: false, doneBlockers: [], registeredPass: false, evidenceIncomplete: false, acceptance: [], acceptanceTruncated: false, planDigest: task.plan_digest ?? undefined, epoch: task.lease_epoch,
-    scope: task.contract?.write_scope ?? [], blocker: bounded(task.last_note ?? task.unblock_condition ?? undefined),
+    scope: task.contract?.write_scope ?? [], blocker: boundedBlocker(task.last_note ?? task.unblock_condition ?? undefined),
     externalId: operation?.external_run_id ?? operation?.external_id, evidenceOutcome: evidence?.outcome,
     details: [
-      ...detail('orchestrator', orchestrator?.name), ...detail('pane', orchestrator?.pane),
+      ...detail('orchestrator', orchestrator?.name),
       ...detail('session', orchestrator?.session_id),
     ],
   };
@@ -1017,8 +1022,8 @@ export function buildWorkTree(input: WorkTreeInput): WorkTree {
         terminal: Boolean(entry?.closed_at) || ['released', 'failed', 'launch_failed', 'superseded', 'revoked'].includes(admission.status),
         done: false, doneEnabled: false, doneBlockers: [], registeredPass: false, evidenceIncomplete: false, acceptance: [], acceptanceTruncated: false, planDigest: admission.plan_digest,
         epoch: admission.root_lease_epoch, scope: admission.write_scope, lineageId: admission.lineage_id,
-        attempts: admission.attempts_used, blocker: bounded(admission.launch_error), externalId: admission.external_operation_id,
-        details: [...detail('agent', admission.agent), ...detail('pane', entry?.pane), ...detail('session', entry?.session_id)],
+        attempts: admission.attempts_used, blocker: boundedBlocker(admission.launch_error), externalId: admission.external_operation_id,
+        details: [...detail('agent', admission.agent), ...detail('session', entry?.session_id)],
       });
     }
   }
@@ -1033,7 +1038,7 @@ export function buildWorkTree(input: WorkTreeInput): WorkTree {
         active: !entry.closed_at, terminal: Boolean(entry.closed_at), done: false, doneEnabled: false, doneBlockers: [], registeredPass: false, evidenceIncomplete: false, acceptance: [], acceptanceTruncated: false,
         planDigest: entry.plan_digest, epoch: entry.root_lease_epoch, scope: entry.write_scope ?? [],
         lineageId: entry.lineage_id, attempts: entry.attempts_used, externalId: entry.external_operation_id,
-        details: [...detail('agent', entry.name), ...detail('pane', entry.pane), ...detail('session', entry.session_id)],
+        details: [...detail('agent', entry.name), ...detail('session', entry.session_id)],
       });
     }
   }
@@ -1050,7 +1055,7 @@ export function buildWorkTree(input: WorkTreeInput): WorkTree {
       active: ['creating', 'active', 'unknown'].includes(branch.status), terminal: !['creating', 'active', 'unknown'].includes(branch.status),
       done: false, doneEnabled: false, doneBlockers: [], registeredPass: false, evidenceIncomplete: false, acceptance: [], acceptanceTruncated: false, planDigest: admission?.plan_digest,
       epoch: admission?.root_lease_epoch, scope: admission?.write_scope ?? [], lineageId: admission?.lineage_id,
-      attempts: admission?.attempts_used, blocker: bounded(branch.error),
+      attempts: admission?.attempts_used, blocker: boundedBlocker(branch.error),
       details: [
         ...detail('kind', branch.kind), ...detail('parent session', branch.parentSessionId),
         ...detail('child session', branch.childSessionId ?? undefined),

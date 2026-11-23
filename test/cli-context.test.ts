@@ -8,12 +8,12 @@ import { describe, expect, it } from 'vitest';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-function cli(args: string[], cwd: string, hubRoot: string) {
+function cli(args: string[], cwd: string, hubRoot: string, env: NodeJS.ProcessEnv = {}) {
   const tsx = path.join(repository, 'node_modules', '.bin', 'tsx');
   return spawnSync(tsx, [path.join(repository, 'src', 'cli.ts'), ...args], {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, HIVE_HUB_ROOT: hubRoot },
+    env: { ...process.env, ...env, HIVE_HUB_ROOT: hubRoot },
     timeout: 30_000,
   });
 }
@@ -43,6 +43,75 @@ describe('cli hub context', () => {
     const gate = cli(['gate', '--log', 'gate.log', '--', 'ok', 'true'], nested, root);
     expect(gate.status).toBe(0);
     expect(await fs.readFile(path.join(nested, 'gate.log'), 'utf8')).toContain('ok exit 0');
+  });
+
+  it('interrupt and attach output masks pane ids in success and error text', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hive-cli-display-'));
+    const home = path.join(root, 'proj');
+    await fs.mkdir(path.join(home, '.hive'), { recursive: true });
+    expect(cli(['hub', 'init'], root, root).status).toBe(0);
+    await fs.writeFile(path.join(root, '.hive-hub', 'projects.json'), JSON.stringify({
+      projects: [{ name: 'demo', home, repos: [{ folder: home }] }],
+    }));
+    await fs.writeFile(path.join(home, '.hive', 'team.json'), JSON.stringify({
+      agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%7', pane_pid: 123, pane_started: 'now' }],
+    }));
+    const bin = path.join(root, 'bin');
+    await fs.mkdir(bin);
+    await fs.writeFile(path.join(bin, 'tmux'), `#!/bin/bash
+case "\${@: -1}" in
+  '#{pane_id}') printf '%s\\n' '%7' ;;
+  '#{pane_id} #{session_name}') printf '%s\\n' '%7 hive' ;;
+  '#{pane_pid}') printf '%s\\n' '123' ;;
+  Escape) ;;
+esac
+`);
+    await fs.writeFile(path.join(bin, 'ps'), "#!/bin/bash\nprintf '%s\\n' 'now'\n");
+    await fs.chmod(path.join(bin, 'tmux'), 0o755);
+    await fs.chmod(path.join(bin, 'ps'), 0o755);
+
+    const result = cli(['interrupt', 'demo'], home, root, { PATH: `${bin}:${process.env.PATH}` });
+
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('hive: interrupted demo-orchestrator');
+
+    const attached = cli(['attach', 'demo'], home, root, { PATH: `${bin}:${process.env.PATH}` });
+    expect(attached.status).toBe(0);
+    expect(attached.stdout).toBe('');
+    expect(attached.stderr).toBe('');
+
+    await fs.writeFile(path.join(bin, 'tmux'), `#!/bin/bash
+case "\${@: -1}" in
+  '#{pane_id}') printf '%s\\n' '%7' ;;
+  '#{pane_id} #{session_name}') printf '%s\\n' '%7 hive' ;;
+  '#{pane_pid}') printf '%s\\n' '123' ;;
+  Escape) printf '%s\\n' 'cannot use %7' >&2; exit 1 ;;
+esac
+`);
+    const failure = cli(['interrupt', 'demo'], home, root, { PATH: `${bin}:${process.env.PATH}` });
+    expect(failure.status).toBe(1);
+    expect(failure.stderr).toContain('cannot send Escape to ?');
+    expect(failure.stderr).not.toContain('%7');
+  });
+
+  it('masks pane ids in task notes', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hive-cli-note-'));
+    const home = path.join(root, 'proj');
+    await fs.mkdir(home, { recursive: true });
+    expect(cli(['hub', 'init'], root, root).status).toBe(0);
+    await fs.writeFile(path.join(root, '.hive-hub', 'projects.json'), JSON.stringify({
+      projects: [{ name: 'demo', home, repos: [{ folder: home }] }],
+    }));
+    await fs.writeFile(path.join(root, '.hive-hub', 'tasks.jsonl'), `${JSON.stringify({
+      id: 'demo-1', project: 'demo', event: 'blocked', at: '2026-11-23T00:00:00Z', note: 'blocked on pane %7',
+    })}\n`);
+
+    const result = cli(['hub', 'tasks'], home, root);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('blocked on pane ?');
+    expect(result.stdout).not.toContain('%7');
   });
 
   it('refuses cleanup from a handwritten Hub root without initialized identity', async () => {

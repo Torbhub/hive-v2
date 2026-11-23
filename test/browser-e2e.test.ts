@@ -571,9 +571,10 @@ describe('real Chrome work tree E2E', () => {
     }
     await click('[data-work-tree-node="tmux:demo:lease-1"]');
     const tmuxDetails = await cdp.evaluate(`document.querySelector('[data-work-tree-details]').textContent`);
-    for (const text of ['%7', 'parent-session', 'lineage-1', 'attempts: 2', 'scope: src']) {
+    for (const text of ['parent-session', 'lineage-1', 'attempts: 2', 'scope: src']) {
       expect(tmuxDetails).toContain(text);
     }
+    expect(tmuxDetails).not.toContain('%7');
     await click('[data-work-tree-node="native:demo:branch-1"]');
     expect(await cdp.evaluate(`document.querySelector('[data-work-tree-details]').textContent`)).toContain('child-session');
 

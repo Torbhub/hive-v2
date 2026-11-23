@@ -1,4 +1,6 @@
 import type { Decision, HubProject, HubTask, HubView, NativeBranchRecord, QuestionBatch, TaskEvent, TeamEntry } from './types.js';
+import { displayText } from './window-name.js';
+export { displayText } from './window-name.js';
 import { buildStatus, listTasks, readDialogFor, redactDialog } from './hub.js';
 import { listNativeBranches } from './branches.js';
 import { VIEW_BATCH_CAP, listOpenQuestionBatches } from './questions.js';
@@ -31,6 +33,10 @@ export function lastLine(e: unknown): string {
   return line.replace(/^hive: /, '');
 }
 
+export function displayLine(e: unknown): string {
+  return displayText(lastLine(e));
+}
+
 export async function buildView(root: string): Promise<HubView> {
   let questions: QuestionBatch[] = [];
   let openBatches: QuestionBatch[] = [];
@@ -41,13 +47,13 @@ export async function buildView(root: string): Promise<HubView> {
     questionsTotal = openBatches.length;
     questions = openBatches.slice(0, VIEW_BATCH_CAP);
   } catch (e) {
-    error = `questions not read: ${lastLine(e)}`;
+    error = `questions not read: ${displayLine(e)}`;
   }
   let status;
   try {
     status = await withTimeout(buildStatus(root, openBatches), READ_TIMEOUT_MS, 'status');
   } catch (e) {
-    return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], questionsTotal: 0, updatedAt: 0, error: lastLine(e) };
+    return { root, hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], questionsTotal: 0, updatedAt: 0, error: displayLine(e) };
   }
   let tasks: HubTask[] = [];
   let events: TaskEvent[] = [];
@@ -55,7 +61,7 @@ export async function buildView(root: string): Promise<HubView> {
     tasks = await withTimeout(listTasks(root), READ_TIMEOUT_MS, 'tasks');
     events = await readTaskEvents(root).catch(() => []);
   } catch (e) {
-    error = [error, `tasks not read: ${lastLine(e)}`].filter(Boolean).join(' · ');
+    error = [error, `tasks not read: ${displayLine(e)}`].filter(Boolean).join(' · ');
   }
   const teams: Record<string, TeamEntry[]> = {};
   const branches: NativeBranchRecord[] = [];
@@ -66,9 +72,10 @@ export async function buildView(root: string): Promise<HubView> {
   const workTree = buildWorkTree({ tasks, teams, branches, events });
   const dialogs = await readDialogs(root, status.projects);
   const decisions = await readDecisions(root, DECISIONS_SCANNED)
-    .then((ds) => ds.filter(feedKeep).slice(0, DECISIONS_SHOWN))
+    .then((ds) => ds.filter(feedKeep).slice(0, DECISIONS_SHOWN)
+      .map((d) => ({ ...d, summary: displayText(d.summary) })))
     .catch((e) => {
-      error = [error, `decisions not read: ${lastLine(e)}`].filter(Boolean).join(' · ');
+      error = [error, `decisions not read: ${displayLine(e)}`].filter(Boolean).join(' · ');
       return [];
     });
   return {

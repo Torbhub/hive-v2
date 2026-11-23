@@ -131,7 +131,7 @@ export function WorkTreeView({ tree, onChanged }: { tree: WorkTree; onChanged: (
               {current.lineageId && <div><dt className="inline text-zinc-500">lineage: </dt><dd className="inline break-words">{current.lineageId}</dd></div>}
               {current.attempts !== undefined && <div><dt className="inline text-zinc-500">attempts: </dt><dd className="inline">{current.attempts}</dd></div>}
               {current.scope.length > 0 && <div><dt className="inline text-zinc-500">scope: </dt><dd className="inline break-words">{current.scope.join(', ')}</dd></div>}
-              {current.details.map((item) => (
+              {current.details.filter((item) => item.label !== 'pane').map((item) => (
                 <div key={item.label}><dt className="inline text-zinc-500">{item.label}: </dt><dd className="inline break-words">{item.value}</dd></div>
               ))}
             </dl>

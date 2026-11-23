@@ -1321,10 +1321,11 @@ describe('read-only work-tree projection', () => {
     for (let iteration = 0; iteration < 40; iteration++) {
       const states = ['running', 'blocked_external', 'closing_external', 'done', 'already_fixed', 'duplicate', 'no_op', 'failed', 'unknown', 'superseded'];
       const state = states[Math.floor(random() * states.length)];
+      const currentContract = contract([{ ...acceptance(), id: 'custom%20', predicate_id: 'predicate%20' }]);
       const current = {
         id: 'demo-1', project: 'demo', asked: AT, updated: AT, state, last_note: null, needs_owner: false,
-        plan_digest: 'c'.repeat(64), lease_epoch: 1, plan_approved: true,
-        contract: contract([acceptance()]),
+        plan_digest: contractDigest(currentContract), lease_epoch: 1, plan_approved: true,
+        contract: currentContract,
       } as HubTask;
       const child: TeamEntry = {
         name: 'builder', task: 'demo-1', pane: '%7', session_id: 'session-parent', lease_id: 'lease-1',
@@ -1351,7 +1352,14 @@ describe('read-only work-tree projection', () => {
       const root = tree.nodes.find((node) => node.kind === 'task')!;
       expect(root.done).toBe(state === 'done');
       expect(root.active).toBe(!['done', 'already_fixed', 'duplicate', 'no_op', 'failed', 'unknown', 'superseded', 'cancelled'].includes(state));
+      expect(root.acceptance[0]).toMatchObject({
+        acceptanceId: 'custom%20', predicateId: 'predicate%20', blocker: expect.stringContaining('custom%20'),
+      });
+      expect(root.doneBlockers.some((blocker) => blocker.includes('custom%20'))).toBe(true);
       expect(JSON.stringify(tree)).not.toContain('/secret');
+      expect(JSON.stringify(tree)).not.toContain('%7');
+      expect(JSON.stringify(tree)).toContain('builder');
+      expect(JSON.stringify(tree)).toContain('custom%20');
     }
   });
 

@@ -129,6 +129,6 @@ describe('interruptAgent', () => {
 describe('interruptLine', () => {
   it('prints one line for the CLI', async () => {
     const root = await setupTeam();
-    expect(await interruptLine(root, 'demo')).toBe('hive: interrupted demo-orchestrator (pane %1)');
+    expect(await interruptLine(root, 'demo')).toBe('hive: interrupted demo-orchestrator');
   });
 });

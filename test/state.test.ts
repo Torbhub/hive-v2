@@ -127,6 +127,15 @@ describe('decisions log', () => {
     expect(latest[0].summary).toBe('decision 10');
     expect(latest[7].summary).toBe('decision 3');
   });
+  it('preserves raw decision text', async () => {
+    const root = tmp();
+    await appendDecision(root, { project: 'demo', by: 'watch', summary: 'wake returned %9 after %1 died' });
+    expect((await readDecisions(root))[0].summary).toBe('wake returned %9 after %1 died');
+    const raw = await fs.readFile(hubPath(root, 'decisions.jsonl'), 'utf8');
+    expect(raw).toContain('%9');
+    expect(raw).toContain('%1');
+  });
+
   it('reads an absent log as empty', async () => {
     expect(await readDecisions(tmp())).toEqual([]);
   });

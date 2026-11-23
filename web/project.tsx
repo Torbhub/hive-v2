@@ -75,7 +75,6 @@ export function ProjectCard({
           <span>
             <span className="text-zinc-100">{orchName}</span>
             {o.name && <span className="text-zinc-500">{`  ${windowLabel(p.name, o.name)}`}</span>}
-            {o.state === 'unregistered' && o.pane && <span className="text-zinc-500">{`  pane ${o.pane}`}</span>}
             {typeof o.context === 'number' && (
               <span className={o.context_assumed ? 'text-zinc-500' : o.context >= ROTATE_AT_PERCENT ? 'text-amber-300' : 'text-emerald-400'}>
                 {`  ${o.context}%`}
@@ -214,7 +213,7 @@ export function ProjectCard({
           </div>
         )}
         <div className="mt-2 border-t border-zinc-800 pt-2.5 font-mono text-xs text-zinc-500">
-          {`attach: tmux -L hive-v2 attach${o.state === 'running' && o.pane ? ` -t hive \\; select-window -t ${o.pane} \\; select-pane -t ${o.pane}` : ''}`}
+          {o.state === 'running' && o.pane && o.name ? `attach: hive attach ${p.name}` : 'attach: tmux -L hive-v2 attach'}
         </div>
       </CardContent>
     </Card>

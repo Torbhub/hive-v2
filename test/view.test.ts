@@ -28,7 +28,7 @@ vi.mock('../src/state.js', async (importOriginal) => {
 import { buildStatus, listTasks } from '../src/hub.js';
 import { readDecisions } from '../src/state.js';
 import type { Decision } from '../src/types.js';
-import { buildView, feedKeep } from '../src/view.js';
+import { buildView, displayLine, feedKeep, lastLine } from '../src/view.js';
 
 const decision = (over: Partial<Decision>): Decision => ({
   at: '2026-10-13T11:00:00Z', project: 'demo', by: 'owner', summary: 'x', ...over,
@@ -73,6 +73,47 @@ describe('buildView decisions feed', () => {
     expect(view.projects).toHaveLength(1);
     expect(view.decisions).toEqual([]);
     expect(view.error).toBe('decisions not read: corrupt JSONL in /r/.hive-hub/decisions.jsonl:2');
+  });
+});
+
+describe('display text', () => {
+  it('keeps raw error text for diagnostics and masks only display text', () => {
+    expect(lastLine(new Error('hive: tmux failed for %9'))).toBe('tmux failed for %9');
+    expect(displayLine(new Error('hive: tmux failed for %9'))).toBe('tmux failed for ?');
+  });
+
+  it('masks pane ids in legacy decisions without changing stored records', async () => {
+    const stored = decision({ summary: 'wake returned %9 after %1 died' });
+    vi.mocked(readDecisions).mockResolvedValueOnce([stored]);
+    const view = await buildView('/r');
+    expect(view.decisions[0].summary).toBe('wake returned ? after ? died');
+    expect(stored.summary).toBe('wake returned %9 after %1 died');
+  });
+
+  it('preserves percent escapes and masks tmux targets in approved commands', async () => {
+    const stored = decision({ by: 'watch', summary: 'auto-approved "Yes, always allow" for: $ echo pane %20' });
+    const tmux = decision({ by: 'watch', summary: 'answered "Yes, always allow" for: $ tmux send-keys -t \'%7\' text && tmux send-keys -t "%8" other' });
+    vi.mocked(readDecisions).mockResolvedValueOnce([stored, tmux]);
+    const view = await buildView('/r');
+    expect(view.decisions[0].summary).toBe(stored.summary);
+    expect(view.decisions[1].summary).toBe('answered "Yes, always allow" for: $ tmux send-keys -t \'?\' text && tmux send-keys -t "?" other');
+    expect(tmux.summary).toBe('answered "Yes, always allow" for: $ tmux send-keys -t \'%7\' text && tmux send-keys -t "%8" other');
+  });
+
+  it('preserves every line and prefix of a stored decision', async () => {
+    const stored = decision({ summary: 'hive: first %9\nsecond %1' });
+    vi.mocked(readDecisions).mockResolvedValueOnce([stored]);
+    const view = await buildView('/r');
+    expect(view.decisions[0].summary).toBe('hive: first ?\nsecond ?');
+    expect(stored.summary).toBe('hive: first %9\nsecond %1');
+  });
+
+  it('masks a pane id before a command while preserving the command percent escape', async () => {
+    const stored = decision({ summary: 'hive: wake returned %9\nanswered "Allow" for: $ echo %20' });
+    vi.mocked(readDecisions).mockResolvedValueOnce([stored]);
+    const view = await buildView('/r');
+    expect(view.decisions[0].summary).toBe('hive: wake returned ?\nanswered "Allow" for: $ echo %20');
+    expect(stored.summary).toBe('hive: wake returned %9\nanswered "Allow" for: $ echo %20');
   });
 });
 

@@ -9,6 +9,7 @@ import {
 import { revokeTmuxAdmission } from './admission.js';
 import { releasePendingLaunchClaim } from './project.js';
 import type { TeamEntry } from './types.js';
+import { withoutPaneIds } from './window-name.js';
 
 export type CleanupAction = { record: ManifestRecord; action: string; acted: boolean };
 type CleanupOptions = { dryRun?: boolean; reclaimTrash?: boolean; ownerApproved?: boolean };
@@ -23,7 +24,7 @@ type LaneCheck = { error?: string; workspaceName?: string };
 const QUARANTINE_MS = 7 * 24 * 60 * 60 * 1000;
 
 function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return withoutPaneIds(error instanceof Error ? error.message : String(error));
 }
 
 function processIsAbsent(pid: number): boolean {
@@ -682,12 +683,12 @@ export async function cleanupProject(
       if (!identity || !(await paneIs(pane, identity))) {
         actions.push({
           record: rec,
-          action: `left tmux window ${rec.window ?? pane} (${pane}) alone: ${identity ? 'pane identity no longer matches the record' : 'record has no pane identity'}`,
+          action: `left tmux window ${rec.window ?? withoutPaneIds(pane)} alone: ${identity ? 'pane identity no longer matches the record' : 'record has no pane identity'}`,
           acted: false,
         });
         continue;
       }
-      actions.push({ record: rec, action: `kill tmux window ${rec.window ?? pane} (${pane})`, acted: !dryRun });
+      actions.push({ record: rec, action: `kill tmux window ${rec.window ?? withoutPaneIds(pane)}`, acted: !dryRun });
       if (!dryRun) {
         const latestTeam = await readTeam(p.home);
         const stamped: TeamEntry[] = [];

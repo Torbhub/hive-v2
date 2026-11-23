@@ -1,5 +1,5 @@
 import type { QuestionBatch } from './types.js';
-import { cancelQuestionBatch, createQuestionBatch, heartbeatQuestionBatch, readQuestionBatch } from './questions.js';
+import { createQuestionBatch, heartbeatQuestionBatch, readQuestionBatch } from './questions.js';
 import { registryFromEnv, type Registry } from './registry.js';
 import { authenticateBearer, authorize } from './security.js';
 import { credentialFromEnvironment } from './collaboration-credentials.js';
@@ -190,10 +190,7 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
     let batch: QuestionBatch;
     try {
       batch = await createQuestionBatch(root, { project: identity.project, agent: identity.agentRef }, args);
-      if (signal.aborted) {
-        await cancelQuestionBatch(root, batch.id);
-        return;
-      }
+      if (signal.aborted) return;
     } catch (e) {
       if (!signal.aborted) {
         toolText(id, `the batch was rejected; fix the input and call again: ${e instanceof Error ? e.message : e}`, true);
@@ -287,7 +284,11 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
     if (method === 'notifications/initialized') return;
     if (method === 'notifications/cancelled') {
       const target = req.params?.requestId;
-      if (typeof target === 'string' || typeof target === 'number') pending.get(target)?.abort();
+      if (typeof target === 'string' || typeof target === 'number') {
+        const controller = pending.get(target);
+        pending.delete(target);
+        controller?.abort();
+      }
       return;
     }
     if (!hasId) return;
@@ -318,7 +319,9 @@ export function serveMcp(opts: McpOptions): { close: () => void } {
       }
       const controller = new AbortController();
       pending.set(id, controller);
-      void callAskOperator(id, req.params.arguments, controller.signal).finally(() => pending.delete(id));
+      void callAskOperator(id, req.params.arguments, controller.signal).finally(() => {
+        if (pending.get(id) === controller) pending.delete(id);
+      });
       return;
     }
     fail(id, -32601, `method not found: ${method}`);

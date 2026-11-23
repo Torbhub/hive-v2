@@ -15,12 +15,13 @@ vi.mock('../src/hub.js', () => ({
   readDialogFor: vi.fn(async () => null),
   answerDialog: vi.fn(),
   continueProject: vi.fn(),
+  currentOrchestratorName: vi.fn(),
   planAnswer: vi.fn(async () => ({ typed: '' })),
   wake: vi.fn(),
 }));
 
 import { HubApp } from '../src/ui/HubApp.js';
-import { buildStatus, listTasks, planAnswer } from '../src/hub.js';
+import { buildStatus, continueProject, currentOrchestratorName, listTasks, planAnswer, wake } from '../src/hub.js';
 import { taskContract } from './task-contract.js';
 
 function fakeStreams() {
@@ -61,6 +62,7 @@ beforeEach(() => {
   vi.mocked(buildStatus).mockClear();
   vi.mocked(listTasks).mockClear().mockResolvedValue([]);
   vi.mocked(planAnswer).mockClear().mockResolvedValue({ typed: '' });
+  vi.mocked(currentOrchestratorName).mockReset().mockImplementation(async (_root, project) => `${project}-orchestrator`);
 });
 
 describe('HubApp polling', () => {
@@ -72,6 +74,94 @@ describe('HubApp polling', () => {
     expect(afterMount).toBe(1);
     await tick(1000);
     expect(vi.mocked(buildStatus).mock.calls.length).toBe(afterMount);
+    inst.unmount();
+  });
+});
+
+describe('HubApp agent names', () => {
+  it('resume toast names the orchestrator without a pane id', async () => {
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '/r', name: 'hub' },
+      projects: [{
+        name: 'demo', home: '/r/demo', repos: [], agents: [], open_tasks: 0,
+        orchestrator: { state: 'stopped', question: false, name: 'demo-orchestrator', session_id: 'session_x' },
+      }],
+    });
+    vi.mocked(wake).mockResolvedValue('%7');
+    const { stdout, stdin } = fakeStreams();
+    const frame = frameReader(stdout);
+    const inst = render(<HubApp root="/r" />, { stdout, stdin, debug: true, patchConsole: false });
+    await waitForFrame(frame, 'Resume · 1 session');
+    await tick(200);
+    stdin.write('\t');
+    await tick(100);
+    stdin.write('\r');
+    await waitForFrame(frame, 'demo-orchestrator is coming up');
+    expect(frame()).not.toContain('%7');
+    inst.unmount();
+  });
+
+  it('resume toast uses the name returned by the current registration', async () => {
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '/r', name: 'hub' },
+      projects: [{
+        name: 'simplification-agent', home: '/r/demo', repos: [], agents: [], open_tasks: 0,
+        orchestrator: { state: 'stopped', question: false, name: 'citadel-orchestrator', session_id: 'session_x' },
+      }],
+    });
+    vi.mocked(wake).mockResolvedValue('%15');
+    vi.mocked(currentOrchestratorName).mockResolvedValue('simplification-agent-orchestrator');
+    const { stdout, stdin } = fakeStreams();
+    const frame = frameReader(stdout);
+    const inst = render(<HubApp root="/r" />, { stdout, stdin, debug: true, patchConsole: false });
+    await waitForFrame(frame, 'Resume · 1 session');
+    await tick(200);
+    stdin.write('\t');
+    await tick(100);
+    stdin.write('\r');
+    await waitForFrame(frame, 'simplification-agent-orchestrator is coming up');
+    expect(currentOrchestratorName).toHaveBeenCalledWith('/r', 'simplification-agent');
+    inst.unmount();
+  });
+
+  it('continue toast names the orchestrator without a pane id', async () => {
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '/r', name: 'hub' },
+      projects: [{
+        name: 'demo', home: '/r/demo', repos: [], agents: [], open_tasks: 0,
+        orchestrator: {
+          state: 'none', name: 'demo-orchestrator',
+          starting: { pane: '%9', kind: 'start', at: new Date().toISOString() },
+        },
+      }],
+    });
+    vi.mocked(continueProject).mockResolvedValue('%9');
+    const { stdout, stdin } = fakeStreams();
+    const frame = frameReader(stdout);
+    const inst = render(<HubApp root="/r" />, { stdout, stdin, debug: true, patchConsole: false });
+    await waitForFrame(frame, 'Continue');
+    await tick(200);
+    stdin.write('\t');
+    await tick(100);
+    stdin.write('\r');
+    await waitForFrame(frame, "demo-orchestrator's first line was sent");
+    expect(frame()).not.toContain('%9');
+    inst.unmount();
+  });
+
+  it('unregistered orchestrator label omits the pane id', async () => {
+    vi.mocked(buildStatus).mockResolvedValue({
+      hub: { root: '/r', name: 'hub' },
+      projects: [{
+        name: 'demo', home: '/r/demo', repos: [], agents: [], open_tasks: 0,
+        orchestrator: { state: 'unregistered', question: false, name: 'demo-orchestrator', pane: '%11' },
+      }],
+    });
+    const { stdout, stdin } = fakeStreams();
+    const frame = frameReader(stdout);
+    const inst = render(<HubApp root="/r" />, { stdout, stdin, debug: true, patchConsole: false });
+    await waitForFrame(frame, 'demo-orchestrator');
+    expect(frame()).not.toContain('%11');
     inst.unmount();
   });
 });

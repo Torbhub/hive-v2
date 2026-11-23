@@ -147,6 +147,7 @@ hive hub dialog <project> [agent] | answer <project> [agent] --choice <n|esc> --
 hive hub plan-answer <project> <task-id> <approve|sendback> [feedback]
 hive hub wake <project> | start <project> <task-id> | continue <project>
 hive spawn <project> --agent <name> --assignment <text> --deliverable <text> [--role r] [--worktree wt] | respawn [--assignment <text> --deliverable <text>] | close
+hive attach <project> — recheck the recorded orchestrator pane identity, then attach the exact pane without printing its numeric ID
 hive gate --log <path> -- <name> <cmd>... | gate-verify log <path> [--commit sha] | gate-verify commits <base>..<tip>
 hive push <remote> <40-char sha> <branch> [--approval <batch>/<question>] — fast-forward only, one-time grant for agents
 hive cleanup <project> [--dry-run] [--reclaim-trash --owner-approved]

@@ -696,14 +696,27 @@ describe('ask_operator lifecycle', () => {
     const c = connect(envFor(r));
     c.send({ jsonrpc: '2.0', id: 0, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
     await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 1);
-    c.send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 0 } });
-    await new Promise((res) => setTimeout(res, 30));
+    c.chunk(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 0 } })}\n${JSON.stringify({ jsonrpc: '2.0', id: 'abc', method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } })}\n`);
     expect(c.messages()).toEqual([]);
-    c.send({ jsonrpc: '2.0', id: 'abc', method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
     await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 2);
+    expect((await listOpenQuestionBatches(r)).map((batch) => batch.status)).toEqual(['open', 'open']);
     c.send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'abc' } });
     await new Promise((res) => setTimeout(res, 30));
     expect(c.messages()).toEqual([]);
+    expect(await listOpenQuestionBatches(r)).toHaveLength(2);
+    c.close();
+  });
+
+  it('reuses a cancelled request id without losing the new pending entry', async () => {
+    const r = await root();
+    const c = connect(envFor(r));
+    c.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
+    await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 1);
+    c.chunk(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } })}\n${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } })}\n`);
+    await c.waitFor(async () => (await listOpenQuestionBatches(r)).length === 2);
+    c.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'ask_operator', arguments: GOOD_BATCH } });
+    await c.waitFor(() => c.messages().length === 1);
+    expect(c.messages()[0].result).toMatchObject({ isError: true });
     expect(await listOpenQuestionBatches(r)).toHaveLength(2);
     c.close();
   });

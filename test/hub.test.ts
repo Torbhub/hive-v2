@@ -43,7 +43,7 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
 
 import { capturePane, killWindow, newWindow, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendLiteral } from '../src/tmux.js';
 import {
-  answerDialog, buildStatus, continueProject, hubAccept, hubAdd, hubInit, hubLog, hubProgress, hubTask, listTasks, menuKeys, planAnswer,
+  answerDialog, buildStatus, continueProject, currentOrchestratorName, hubAccept, hubAdd, hubInit, hubLog, hubProgress, hubTask, listTasks, menuKeys, planAnswer,
   readDialogFor, setProjectApprovals, setProjectMode, startProject, wake,
 } from '../src/hub.js';
 import { handleCurrentOrchestratorDialog } from '../src/watch.js';
@@ -92,6 +92,16 @@ describe('buildStatus pane identity', () => {
     const status = await buildStatus(root);
     expect(status.projects[0].orchestrator).toMatchObject({ state: 'running', pane: '%15' });
   });
+  it('reads the current orchestrator name after a registration change', async () => {
+    const { root, home } = await setup();
+    await writeJson(hivePath(home, 'team.json'), { agents: [{ name: 'citadel-orchestrator', orchestrator: true }] });
+    await expect(currentOrchestratorName(root, 'demo')).resolves.toBe('citadel-orchestrator');
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'simplification-agent-orchestrator', orchestrator: true }],
+    });
+    await expect(currentOrchestratorName(root, 'demo')).resolves.toBe('simplification-agent-orchestrator');
+  });
+
   it('exposes compaction status without the preservation instruction', async () => {
     const { root, home } = await setup();
     const compaction = {
