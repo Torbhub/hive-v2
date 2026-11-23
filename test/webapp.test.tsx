@@ -136,6 +136,72 @@ describe('stretchtext decisions', () => {
   });
 });
 
+describe('task presets', () => {
+  it('lists the five workflows and explains why Encord and SieveData are disabled', () => {
+    const summary = [...container.querySelectorAll('summary')].find((item) => item.textContent === 'Preset');
+    expect(summary).toBeDefined();
+    act(() => summary!.click());
+    const options = [...container.querySelectorAll('button[data-task-preset]')];
+    expect(options.map((option) => option.textContent)).toEqual([
+      'Appen — mostly processedProcess selected recordings into Appen’s processed MCAP episode drop under a chosen destination. Optionally force task difficulty to hard.',
+      'Turing / OpenAIBuild and validate a Turing delivery drop with registry-issued sequential episode IDs, configured chunking, and any required calibration packages.',
+      'PixelsTwo — raw session transferCopy complete selected sessions—all raw MCAP files plus session.json—to the configured PixelsTwo R2 destination. Do not annotate or rebake.',
+      'Encord — sample curationHistorical workflow for selecting and reviewing 20–30 minute clips and preparing transcode/crop work. Requires a source set, destination, and output contract.',
+      'SieveDataNot configured. No job contract is defined yet.',
+    ]);
+    expect(options.map((option) => option.disabled)).toEqual([false, false, false, true, true]);
+  });
+
+  it.each([
+    {
+      label: 'Appen — mostly processed',
+      profile: 'sellable_raw_mostly_processed',
+      placeholders: ['[REQUIRED SELECTED RECORDINGS]', '[REQUIRED DESTINATION PREFIX]', '[OPTIONAL YES OR NO]'],
+    },
+    {
+      label: 'Turing / OpenAI',
+      profile: 'turing_openai',
+      placeholders: ['[REQUIRED DESTINATION]', '[REQUIRED VENDOR CODE]', '[REQUIRED REGISTRY]'],
+    },
+    {
+      label: 'PixelsTwo — raw session transfer',
+      profile: '',
+      placeholders: ['[REQUIRED SOURCE]', '[REQUIRED R2 DESTINATION]'],
+    },
+  ])('inserts $label as an editable draft without submitting it', ({ label, profile, placeholders }) => {
+    act(() => {
+      ([...container.querySelectorAll('summary')].find((item) => item.textContent === 'Preset') as HTMLElement).click();
+    });
+    act(() => {
+      (container.querySelector(`button[data-task-preset="${label}"]`) as HTMLButtonElement).click();
+    });
+    const input = container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement;
+    for (const placeholder of placeholders) expect(input.value).toContain(placeholder);
+    if (profile) expect(input.value).toContain(`minipipe profile ${profile}`);
+    expect(input.value).toContain('First present a plan for my approval.');
+    expect(input.value).toContain('After approval, use normal Hive execution.');
+    expect(document.activeElement).toBe(input);
+    expect(vi.mocked(fetch).mock.calls.filter(([target]) => !String(target).endsWith('api/view'))).toHaveLength(0);
+  });
+
+  it('preserves arbitrary task text when a preset is inserted', () => {
+    const input = container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+    act(() => {
+      setter.call(input, 'keep this arbitrary task');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      ([...container.querySelectorAll('summary')].find((item) => item.textContent === 'Preset') as HTMLElement).click();
+    });
+    act(() => {
+      (container.querySelector('button[data-task-preset="PixelsTwo — raw session transfer"]') as HTMLButtonElement).click();
+    });
+    expect(input.value).toMatch(/^keep this arbitrary task Copy complete selected sessions/);
+    expect(vi.mocked(fetch).mock.calls.filter(([target]) => !String(target).endsWith('api/view'))).toHaveLength(0);
+  });
+});
+
 describe('instant click feedback', () => {
   it('the moment Resume is clicked the card shows resuming… and all other action buttons disable', async () => {
     const startBtn = [...container.querySelectorAll('button')]
