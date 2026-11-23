@@ -690,7 +690,7 @@ export async function allocateAgentLane(home: string, project: string, agent: st
         const hooks = await run('bash', ['scripts/install-git-hooks.sh'], worktree);
         hookInstallFailed = hooks.code !== 0;
       }
-      await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: worktree });
+      await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: worktree, workspace_name: name });
       return { worktree, existed, jjWorkspace: name, hookInstallFailed, rollback };
     }
     if (plainFolder) {

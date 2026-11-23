@@ -295,6 +295,7 @@ describe('spawnAgent', () => {
     const recs = (await manifestRead(home)).filter((r) => r.kind === 'jj-workspace');
     expect(recs).toHaveLength(1);
     expect(recs[0].path).toBe(wt);
+    expect(recs[0].workspace_name).toBe('builder2');
     expect((await readTeam(home)).agents.find((a) => a.name === 'builder2')?.worktree).toBe(wt);
   }, 20_000);
 
