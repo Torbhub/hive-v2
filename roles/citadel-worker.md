@@ -28,8 +28,8 @@ orchestrator hands you a chunk brief. You build it, push it, and open the PR.
 - Scope wrong or too big? Report back to the orchestrator. Never widen it
   yourself.
 - boneyard is frozen read-only.
-- More than one trivial step is a named script file with
-  `set -euo pipefail`. No chained pipes, no `python3 -c` blobs.
+- Follow the shared script rules in `rules/RULES.md`. Check the target repo's
+  catalog before a multi-step operation.
 - A command running over 2 minutes emits a progress pulse.
 
 ## Build style
