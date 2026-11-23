@@ -732,6 +732,52 @@ describe('cleanupProject confirmed reviewer regressions', () => {
     })]);
   });
 
+  it('real JJ dry-run does not let a stale empty-root registration block a valid workspace', async () => {
+    const { root, home, wt } = await setupRealJjWorkspace('lane-agent', 'lane-agent');
+    const stale = path.join(home, 'stale-lane');
+    jj(['workspace', 'add', '--name', 'stale-lane', '-r', 'main', stale], home);
+    await fs.rename(stale, path.join(root, 'retained-stale'));
+    expect(jj(['workspace', 'list', '-T', 'name ++ "\\t" ++ root ++ "\\n"'], home)).toContain('stale-lane\t\n');
+
+    const actions = await cleanupProject(root, 'proj', { dryRun: true });
+
+    expect(actions).toEqual([expect.objectContaining({
+      acted: false,
+      action: expect.stringContaining(`trash jj workspace ${wt} ->`),
+    })]);
+    expect(await fs.stat(wt)).toBeTruthy();
+    expect(jj(['workspace', 'list'], home)).toContain('stale-lane:');
+    expect(await manifestRead(home)).toEqual([expect.objectContaining({ path: wt })]);
+  });
+
+  it('real JJ retains a post-rename deregistration failure for retry', async () => {
+    const { root, home, wt } = await setupRealJjWorkspace('lane-agent', 'lane-agent');
+    const trashed = path.join(hivePath(home, 'trash'), new Date().toISOString().slice(0, 10), 'lane-agent');
+    mockFailedDeregistration('jj-workspace', wt);
+
+    const failed = await cleanupProject(root, 'proj');
+
+    expect(failed).toEqual([expect.objectContaining({
+      acted: false,
+      action: expect.stringContaining('deregistration failed after quarantine'),
+    })]);
+    expect(await manifestRead(home)).toEqual([expect.objectContaining({
+      path: wt, quarantine_deregistered: false, quarantine_pending: false,
+    })]);
+    expect(jj(['workspace', 'list'], home)).toContain('lane-agent:');
+    expect(await fs.stat(trashed)).toBeTruthy();
+
+    vi.mocked(run).mockImplementation(actualRun);
+    const retried = await cleanupProject(root, 'proj');
+
+    expect(retried).toEqual([expect.objectContaining({
+      acted: true, action: expect.stringContaining('deregistered quarantined'),
+    })]);
+    expect(jj(['workspace', 'list'], home)).not.toContain('lane-agent:');
+    expect(await manifestRead(home)).toEqual([expect.objectContaining({ quarantine_deregistered: true })]);
+    expect(await fs.stat(trashed)).toBeTruthy();
+  });
+
   it('real JJ forgets the listed workspace name instead of its destination basename', async () => {
     const { root, home, wt } = await setupRealJjWorkspace('internal-lane-name', 'public-basename');
 
