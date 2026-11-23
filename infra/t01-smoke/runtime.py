@@ -23,7 +23,7 @@ SIMPLE_CHECKS = BASE_SIMPLE_CHECKS | {
     'paid_admission_disabled', 'trusted_tunnel_ready', 'count_only_no_generation',
     'teamkimi_control_port', 'teamkimi_control_broker',
     'teamkimi_generation_rejected', 'teamkimi_messages_rejected',
-    'tunnel_cleanup', 'paid_evidence_export', 'paid_matrix_completed',
+    'tunnel_cleanup', 'paid_evidence_export', 'paid_matrix_completed', 'image_sanitized',
 }
 ALLOWED_CHECKS = SIMPLE_CHECKS | {'bootstrap_error', 'hermes_version', 'source_sha256', 'provisioning', 'complete'}
 ALLOWED_FIELDS = {
@@ -524,6 +524,8 @@ def classify_records_with_reason(records):
             }
         else:
             required.add('paid_admission_disabled')
+        if 'image_sanitized' in seen:
+            required.add('image_sanitized')
         if seen != required or any(record['status'] != 'passed' for record in records):
             return 'invalid', 'wrong-record-set'
         return 'passed', 'none'

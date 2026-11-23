@@ -405,22 +405,28 @@ def cleanup_stop_case(stop_verified):
         mock_aws(root, '''#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MOCK_CALLS"
 case "$1 $2" in
-  'cloudformation describe-stacks')
-    printf 'ValidationError: Stack with id hive-v2-t01-smoke does not exist\n' >&2
-    exit 254
-    ;;
+  'cloudformation describe-stacks') printf 'i-test\n' ;;
+  'cloudformation delete-stack'|'cloudformation wait') exit 0 ;;
+  'ec2 terminate-instances'|'ec2 wait') exit 0 ;;
   'secretsmanager describe-secret')
-    printf 'ResourceNotFoundException: secret not found\n' >&2
-    exit 254
+    if grep -q "delete-secret --secret-id $4 " "$MOCK_CALLS"; then
+      printf 'ResourceNotFoundException: secret not found\n' >&2
+      exit 254
+    fi
+    exit 0
     ;;
+  'secretsmanager delete-secret') exit 0 ;;
+  *) exit 99 ;;
 esac
+exit 0
 ''')
         result = run(root, 'cleanup', {
             'SCENARIO': 'count', 'EVIDENCE_DIR': str(artifact),
             'T01_COUNT_STOP_VERIFIED': stop_verified,
         })
         calls = (root / 'calls').read_text()
-        assert 'secretsmanager describe-secret' in calls
+        assert 'cloudformation delete-stack --stack-name hive-v2-t01-smoke' in calls, calls
+        assert 'delete-secret --secret-id hive-v2-t01-smoke-health-123 --force-delete-without-recovery' in calls, calls
         if stop_verified == 'yes':
             assert result.returncode == 0, (result.stdout, result.stderr)
             assert 'release aws-acts hive-v2-t01-smoke/123' in calls
@@ -456,10 +462,9 @@ def recovery_case(overrides=None, command='count-recovery'):
         mock_aws(root, '''#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MOCK_CALLS"
 case "$1 $2" in
-  'cloudformation describe-stacks')
-    printf 'ValidationError: Stack with id hive-v2-t01-smoke does not exist\n' >&2
-    exit 254
-    ;;
+  'cloudformation describe-stacks') printf 'i-test\n' ;;
+  'cloudformation delete-stack'|'cloudformation wait') exit 0 ;;
+  'ec2 terminate-instances'|'ec2 wait') exit 0 ;;
   'secretsmanager describe-secret')
     if grep -q delete-secret "$MOCK_CALLS"; then
       printf 'ResourceNotFoundException: secret not found\n' >&2
@@ -467,7 +472,9 @@ case "$1 $2" in
     fi
     ;;
   'secretsmanager delete-secret') exit 0 ;;
+  *) exit 99 ;;
 esac
+exit 0
 ''')
         (root / 'gh-response.json').write_text(response)
         write_executable(root / 'bin/gh', '''#!/usr/bin/env bash
@@ -554,6 +561,7 @@ for command in ('validate-recovery', 'count-recovery'):
         {'T01_RECOVERY_RUN_ID': '42941131826/evidence'},
         {'T01_REVIEWED_UNCERTAIN_CLEANUP': 'no'},
         {'T01_COUNT_STOP_VERIFIED': 'no'},
+        {'IMAGE_ACTION': 'keep'},
     ):
         result, calls, gh_calls = recovery_case(overrides, command)
         assert result.returncode != 0, (command, overrides)

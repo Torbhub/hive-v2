@@ -2,7 +2,7 @@ import hashlib
 import importlib.util
 import json
 import subprocess
-from t01_workflow_harness import ROOT, evidence_records, mock_aws, run, workspace, write_executable
+from t01_workflow_harness import ROOT, evidence_records, mock_aws, paid_console_records, run, workspace, write_executable
 
 spec = importlib.util.spec_from_file_location('t01_runtime', ROOT / 'infra/t01-smoke/runtime.py')
 runtime = importlib.util.module_from_spec(spec)
@@ -28,6 +28,9 @@ def classify_cli(records, expected):
 
 
 classify_evidence(evidence_records(), 'passed')
+sanitized_records = evidence_records()
+sanitized_records.insert(-1, {'check': 'image_sanitized', 'status': 'passed'})
+classify_evidence(sanitized_records, 'passed')
 classify_evidence([{'check': 'complete', 'status': 'passed'}], 'invalid')
 classify_evidence([record for record in evidence_records() if record['check'] != 'lazy_install_disabled'], 'invalid')
 wrong_version = evidence_records()
@@ -325,31 +328,6 @@ fi
     assert (root / 'calls').read_text().count('ec2 get-console-output') == 2
 
 
-def paid_console_records(manifest_sha, marker=True):
-    records = [record for record in evidence_records() if record['check'] != 'paid_admission_disabled']
-    complete = records.pop()
-    for check in (
-        'trusted_tunnel_ready', 'teamkimi_control_port', 'teamkimi_control_broker',
-        'teamkimi_messages_rejected', 'tunnel_cleanup',
-    ):
-        records.append({'check': check, 'status': 'passed'})
-    records.append({
-        'check': 'count_only_no_generation', 'status': 'passed', 'sha256': 'a' * 64,
-        'requestHash': 'b' * 64, 'model': 'kimi-code/k3.1-pro',
-        'inputTokens': 10, 'baseInputTokens': 2, 'cacheReadInputTokens': 3,
-        'cacheCreationInputTokens': 5, 'cacheCreation5mInputTokens': 1, 'cacheCreation1hInputTokens': 4,
-        'generationRequests': 0, 'timestamp': 1, 'revokedAt': 1, 'proof': 'c' * 64,
-    })
-    if marker:
-        records.append({
-            'check': 'paid_evidence_export', 'status': 'passed', 'sha256': manifest_sha,
-            'credentialId': '0123456789abcdef0123456789abcdef',
-        })
-    records.append({'check': 'paid_matrix_completed', 'status': 'passed', 'policyHash': 'd' * 64})
-    records.append(complete)
-    return records
-
-
 classify_with_reason([None], 'invalid', 'bad-schema:unknown:record')
 classify_with_reason([{'check': 'uv_install', 'status': 'pending'}], 'invalid', 'bad-schema:uv_install:status')
 classify_with_reason(
@@ -456,10 +434,44 @@ assert 'external-verify' in calls and 's3 rm' not in calls, calls
 
 temporary, root = workspace()
 with temporary:
-    result = run(root, 'cleanup', {'SCENARIO': 'matrix', 'PAID_EVIDENCE_VERIFIED': 'no'})
+    artifact = root / 'artifact'
+    artifact.mkdir()
+    valid = ''.join(json.dumps(record, separators=(',', ':')) + '\n' for record in paid_console_records('a' * 64))
+    (artifact / 'preflight.jsonl').write_text(valid)
+    mock_aws(root, '''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MOCK_CALLS"
+case "$1 $2" in
+  'cloudformation describe-stacks')
+    if [[ "$*" = *InstanceId* ]]; then
+      printf 'i-test\n'
+    else
+      printf '{"Stacks":[{"StackStatus":"CREATE_COMPLETE"}]}\n'
+    fi
+    ;;
+  'cloudformation delete-stack'|'cloudformation wait') exit 0 ;;
+  'ec2 terminate-instances'|'ec2 wait') exit 0 ;;
+  'secretsmanager describe-secret')
+    if grep -q "delete-secret --secret-id $4 " "$MOCK_CALLS"; then
+      printf 'ResourceNotFoundException: secret not found\n' >&2
+      exit 254
+    fi
+    exit 0
+    ;;
+  'secretsmanager delete-secret') exit 0 ;;
+  *) exit 99 ;;
+esac
+exit 0
+''')
+    result = run(root, 'cleanup', {
+        'SCENARIO': 'matrix', 'IMAGE_ACTION': 'discard', 'PAID_EVIDENCE_VERIFIED': 'no',
+        'EVIDENCE_DIR': str(artifact),
+    })
     assert result.returncode != 0, (result.stdout, result.stderr)
-    calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
-    assert 'delete-stack' not in calls and 'delete-secret' not in calls and 's3 rm' not in calls, calls
+    calls = (root / 'calls').read_text()
+    assert 'cloudformation delete-stack --stack-name hive-v2-t01-smoke' in calls, calls
+    assert 'delete-secret --secret-id hive-v2-t01-smoke-health-123 --force-delete-without-recovery' in calls, calls
+    assert 'delete-secret --secret-id hive-v2-t01-smoke-proxy-123 --force-delete-without-recovery' in calls, calls
+    assert 's3 rm' not in calls, calls
     assert 'release aws-acts' not in calls, calls
 
 def proxy_cleanup_case(delete_rc):
@@ -472,10 +484,10 @@ def proxy_cleanup_case(delete_rc):
         mock_aws(root, '''#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MOCK_CALLS"
 case "$1 $2" in
-  'cloudformation describe-stacks')
-    printf 'ValidationError: Stack with id hive-v2-t01-smoke does not exist\n' >&2
-    exit 254
-    ;;
+  'cloudformation describe-stacks') printf 'i-test\n' ;;
+  'cloudformation delete-stack'|'cloudformation wait') exit 0 ;;
+  'ec2 terminate-instances'|'ec2 wait') exit 0 ;;
+  's3 rm') exit 0 ;;
   'secretsmanager describe-secret')
     if [[ "$*" = *proxy* ]]; then
       count=$(grep -c 'describe-secret.*proxy' "$MOCK_CALLS" || true)
@@ -489,7 +501,9 @@ case "$1 $2" in
     exit 254
     ;;
   'secretsmanager delete-secret') exit "${MOCK_PROXY_DELETE_RC:-0}" ;;
+  *) exit 99 ;;
 esac
+exit 0
 ''')
         result = run(root, 'cleanup', {
             'SCENARIO': 'matrix', 'PAID_EVIDENCE_VERIFIED': 'yes', 'EVIDENCE_DIR': str(artifact),

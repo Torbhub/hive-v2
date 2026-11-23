@@ -159,6 +159,25 @@ health_policy = SMOKE_TEMPLATE['Resources']['InstanceRole']['Properties']['Polic
 proxy_condition = health_policy[1]
 assert proxy_condition[0] == 'Matrix' and proxy_condition[2] == 'AWS::NoValue'
 health_policy = [health_policy[0], proxy_condition[1], *health_policy[2:]]
+assert SMOKE_TEMPLATE['Parameters']['ImageAction']['AllowedValues'] == ['discard', 'keep']
+user_data = SMOKE_TEMPLATE['Resources']['Instance']['Properties']['UserData']['Fn::Base64']
+assert "export IMAGE_ACTION='${ImageAction}'" in user_data
+RUN_IMAGE = 'arn:aws:ec2:us-east-1::image/ami-new'
+SNAPSHOT = 'arn:aws:ec2:us-east-1::snapshot/snap-new'
+assert allows('ec2:CreateImage', INSTANCE, **{'aws:ResourceTag/Role': 'hive-v2-t01-smoke'})
+assert not allows('ec2:CreateImage', INSTANCE)
+assert allows('ec2:CreateImage', RUN_IMAGE, **ROLE_TAG)
+for resource in (RUN_IMAGE, SNAPSHOT):
+    assert allows('ec2:CreateTags', resource, **ROLE_TAG, **{'ec2:CreateAction': 'CreateImage'})
+assert allows('ec2:DeregisterImage', RUN_IMAGE, **{'aws:ResourceTag/Role': 'hive-v2-t01-smoke'})
+assert not allows('ec2:DeregisterImage', RUN_IMAGE)
+assert allows('ec2:DeleteSnapshot', SNAPSHOT, **{'aws:ResourceTag/Role': 'hive-v2-t01-smoke'})
+assert not allows('ec2:DeleteSnapshot', SNAPSHOT)
+for action, resource in (
+    ('ec2:CreateImage', INSTANCE), ('ec2:CreateImage', RUN_IMAGE),
+    ('ec2:DeregisterImage', RUN_IMAGE), ('ec2:DeleteSnapshot', SNAPSHOT),
+):
+    assert not allows(action, resource, statements=health_policy, **ROLE_TAG)
 HOST = 'arn:aws:ec2:us-east-1:594552273052:instance/*'
 DOCUMENT_ARN = 'arn:aws:ssm:us-east-1:594552273052:document/hive-v2-t01-teamkimi-port-forward'
 DOCUMENT = TEMPLATE['Resources']['T01TeamKimiPortForwardDocument']['Properties']['Content']

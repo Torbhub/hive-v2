@@ -94,6 +94,7 @@ The count probe revokes its count-only credential before the service can issue a
 Outer CLI and runner guards revoke the exact generation credential after JSON reads, adapter construction, start, workspace setup, and each later failure. Final status must prove that ID and proof.
 The CLI generates one random attempt key for generation. Bounded recovery polls that attempt and retries the same mint after a 404. Public-only recovery revokes the resolved ID and fails closed. Broad revocation is never used for recovery.
 The firewall denies `t01hermes` on control port 8765. Only the trusted broker can use smoke control routes. Prompt files live in a broker-owned `0555` directory with `0400` files.
+Secret and mutable state paths use tmpfs from initial setup, and swap is disabled. `image_action=discard` creates no AMI. `image_action=keep` unmounts those paths after services and tunnels stop, then adds `image_sanitized` to the existing evidence file. The retained private AMI contains sanitized evidence and installed tooling, not credentials or runtime state. Cleanup requires full validated evidence and successful collection and upload before image creation.
 The runbook owns the evidence order, normal stack deploy and rollback, and live-only checks.
 
 ## Installation and policy preflight
@@ -157,7 +158,7 @@ All retained and exported collections are capped. Files are mode `0600`, and the
 The manifest starts with `review.status = pending` and registers the workspace path and cleanup deadline.
 The workflow downloads the export into quarantine and compares the manifest hash with the console export marker before `verify`.
 Verification checks manifest membership, file hashes, scenario outcomes, receipt arithmetic, policy hash, and exact generation revocation.
-P07 must fail, P08 through P10 must cancel, and every other scenario must succeed. Incorrect outcomes, incomplete evidence, or failed artifact upload block cleanup.
+P07 must fail, P08 through P10 must cancel, and every other scenario must succeed. Incorrect outcomes, incomplete evidence, or failed artifact upload retain the mutex while disposable cleanup still runs.
 Approval enumerates the export directory and requires exact manifest membership.
 It also validates structure, mode, and every artifact hash before approving export.
 Unlisted, raw, or modified files block approval.

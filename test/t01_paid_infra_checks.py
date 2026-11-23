@@ -24,6 +24,9 @@ assert 'deploy-mutex.sh release aws-acts' not in CLEANUP_SOURCE
 WORKFLOW_CONFIG = yaml.safe_load(WORKFLOW)
 INPUTS = WORKFLOW_CONFIG[True]['workflow_dispatch']['inputs']
 assert INPUTS['scenario']['options'] == ['preflight', 'count', 'matrix', 'count-recovery']
+assert INPUTS['image_action']['type'] == 'choice'
+assert INPUTS['image_action']['required'] is True
+assert INPUTS['image_action']['options'] == ['discard', 'keep']
 assert INPUTS['recovery_run_id']['type'] == 'string'
 assert INPUTS['recovery_run_id']['required'] is False
 assert WORKFLOW_CONFIG['jobs']['preflight']['if'] == "inputs.scenario != 'count-recovery'"
@@ -39,6 +42,7 @@ RECOVERY_ENV = {
     'T01_RECOVERY_RUN_ID': '${{ inputs.recovery_run_id }}',
     'T01_REVIEWED_UNCERTAIN_CLEANUP': 'yes',
     'T01_COUNT_STOP_VERIFIED': 'yes',
+    'IMAGE_ACTION': '${{ inputs.image_action }}',
     'GH_TOKEN': '${{ github.token }}',
 }
 validation_step = RECOVERY_JOB['steps'][1]
@@ -51,10 +55,13 @@ recovery_step = RECOVERY_JOB['steps'][3]
 assert recovery_step['run'] == 'bash infra/t01-smoke/workflow.sh count-recovery'
 assert recovery_step['env'] == RECOVERY_ENV
 WORKFLOW_STEPS = WORKFLOW_CONFIG['jobs']['preflight']['steps']
+validate_step = next(step for step in WORKFLOW_STEPS if step.get('run') == 'bash infra/t01-smoke/workflow.sh validate-inputs')
+assert validate_step['env']['IMAGE_ACTION'] == '${{ inputs.image_action }}'
 collect_step = next(step for step in WORKFLOW_STEPS if step.get('id') == 'collect')
 assert collect_step['env']['SCENARIO'] == '${{ inputs.scenario }}'
 upload_step = next(step for step in WORKFLOW_STEPS if step.get('id') == 'upload')
 cleanup_step = next(step for step in WORKFLOW_STEPS if step.get('run') == 'bash infra/t01-smoke/workflow.sh cleanup')
+assert cleanup_step['env']['IMAGE_ACTION'] == '${{ inputs.image_action }}'
 verified = cleanup_step['env']['PAID_EVIDENCE_VERIFIED']
 assert "steps.collect.outcome == 'success'" in verified
 assert "steps.upload.outcome == 'success'" in verified
@@ -67,6 +74,8 @@ assert proxy_step['env']['TEAMKIMI_PROXY_KEY'] == '${{ secrets.TEAMKIMI_PROXY_KE
 assert proxy_step['run'] == 'bash infra/t01-smoke/workflow.sh issue-proxy-credential'
 deploy_step = next(step for step in WORKFLOW_STEPS if step.get('id') == 'deploy')
 assert deploy_step['env']['TEAMKIMI_PROXY_SECRET_ARN'] == '${{ steps.proxy.outputs.arn }}'
+assert deploy_step['env']['IMAGE_ACTION'] == '${{ inputs.image_action }}'
+assert '"ImageAction=$IMAGE_ACTION"' in WORKFLOW_SCRIPT
 health_step = next(step for step in WORKFLOW_STEPS if step.get('id') == 'health')
 assert 'TEAMKIMI_PROXY_KEY' not in health_step.get('env', {})
 assert WORKFLOW.count('secrets.TEAMKIMI_PROXY_KEY') == 1
@@ -80,6 +89,7 @@ BASE = {
     'SCENARIO': 'preflight',
     'MATRIX': 'none',
     'PAID_ADMISSION': 'false',
+    'IMAGE_ACTION': 'discard',
     'MAX_INPUT_TOKENS': '16000',
     'MAX_OUTPUT_TOKENS': '2000',
     'MAX_REASONING_TOKENS': '4000',
@@ -145,12 +155,15 @@ def validate(overrides):
 
 
 assert validate({}) == 0
+assert validate({'IMAGE_ACTION': 'keep'}) == 0
 assert validate({**PAID}) == 0
 assert validate({**BASE, 'SCENARIO': 'count', 'MAX_TOTAL_TOKENS': '0', 'MAX_API_CALLS': '0', 'MAX_ESTIMATED_COST_USD': '0', 'T01_TEAMKIMI_HOST_ID': 'i-0123456789abcdef0'}) == 0
 for override in (
     {'PAID_ADMISSION': 'true'},
     {'SCENARIO': 'matrix'},
     {'MATRIX': 'full'},
+    {'IMAGE_ACTION': ''},
+    {'IMAGE_ACTION': 'keep-all'},
     {**PAID, 'MAX_PAID_ADMISSIONS': '11'},
     {**PAID, 'MAX_PAID_ADMISSIONS': '13'},
     {**PAID, 'MAX_TOTAL_TOKENS': '22000'},
@@ -164,6 +177,31 @@ for override in (
 
 PROVISION = (ROOT / 'infra/t01-smoke/provision.sh').read_text()
 PAID_SERVICE = (ROOT / 'infra/t01-smoke/paid.sh').read_text()
+MUTABLE_MOUNTS = (
+    '/etc/t01', '/var/lib/t01', '/opt/t01/pm-home', '/opt/t01/uv-cache', '/tmp', '/var/tmp',
+)
+initial_setup = PROVISION[:PROVISION.index('mkdir -p /opt/t01/source')]
+assert 'swapoff -a' in initial_setup
+for path in MUTABLE_MOUNTS:
+    assert re.search(r'mount -t tmpfs[^\n]*\s' + re.escape(path) + r'(?:\s|$)', initial_setup), path
+keep_sanitization = re.search(
+    r'if \[ "\$IMAGE_ACTION" = keep \]; then\n(?P<body>[\s\S]*?)\nfi\nemit complete passed',
+    PROVISION,
+)
+assert keep_sanitization
+sanitization = keep_sanitization.group('body')
+assert PROVISION.index('systemctl stop t01-broker.service') < keep_sanitization.start()
+assert PROVISION.index('systemctl start t01-paid.service') < keep_sanitization.start()
+assert 'systemctl stop t01-paid.service' in PROVISION[:keep_sanitization.start()]
+for path in (
+    '/etc/t01/broker/teamkimi.json', '/etc/t01/proxy.env',
+    '/var/lib/t01/hermes', '/var/lib/t01/workspace',
+):
+    assert any(line.strip().startswith('rm ') and path in line for line in sanitization.splitlines()), path
+for path in MUTABLE_MOUNTS:
+    assert f'umount {path}' in sanitization, path
+assert sanitization.index('rm ') < sanitization.index('umount ') < sanitization.index('emit image_sanitized passed')
+assert 'curl ' not in sanitization
 assert PROVISION.index('start-session') < PROVISION.index('lock_down\nemit default_deny_lockdown')
 assert PAID_SERVICE.index('count-probe.mjs') < PAID_SERVICE.index('cli.js" run')
 assert 'issue-generation-credential.mjs' not in PAID_SERVICE
@@ -336,18 +374,3 @@ result, category, origin, artifact = paid_count_case()
 assert result.returncode == 0
 assert category is None and origin is None
 assert artifact == '{"check":"count_only_no_generation","status":"passed"}\n'
-
-with tempfile.TemporaryDirectory() as directory:
-    marker = Path(directory) / 'aws-called'
-    bin_dir = Path(directory) / 'bin'
-    bin_dir.mkdir()
-    aws = bin_dir / 'aws'
-    aws.write_text(f'#!/usr/bin/env bash\ncase "$1" in cloudformation|secretsmanager|s3) touch {marker} ;; esac\nexit 0\n')
-    aws.chmod(0o755)
-    result = subprocess.run(
-        ['bash', 'infra/t01-smoke/workflow.sh', 'cleanup'], cwd=ROOT,
-        env={'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'SCENARIO': 'matrix', 'PAID_EVIDENCE_VERIFIED': 'no'},
-        capture_output=True, text=True, timeout=5,
-    )
-    assert result.returncode != 0
-    assert not marker.exists(), 'unverified matrix reached destructive AWS cleanup'

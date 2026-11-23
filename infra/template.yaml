@@ -382,6 +382,46 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:ResourceTag/Role: hive-v2-t01-smoke
+              - Sid: T01SmokeCreateImage
+                Effect: Allow
+                Action: ec2:CreateImage
+                Resource: arn:aws:ec2:us-east-1:594552273052:instance/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Role: hive-v2-t01-smoke
+              - Sid: T01SmokeCreateImageArtifacts
+                Effect: Allow
+                Action: ec2:CreateImage
+                Resource:
+                  - arn:aws:ec2:us-east-1::image/*
+                  - arn:aws:ec2:us-east-1::snapshot/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Role: hive-v2-t01-smoke
+              - Sid: T01SmokeTagOnCreateImage
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource:
+                  - arn:aws:ec2:us-east-1::image/*
+                  - arn:aws:ec2:us-east-1::snapshot/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Role: hive-v2-t01-smoke
+                    ec2:CreateAction: CreateImage
+              - Sid: T01SmokeDeregisterImage
+                Effect: Allow
+                Action: ec2:DeregisterImage
+                Resource: arn:aws:ec2:us-east-1::image/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Role: hive-v2-t01-smoke
+              - Sid: T01SmokeDeleteImageSnapshots
+                Effect: Allow
+                Action: ec2:DeleteSnapshot
+                Resource: arn:aws:ec2:us-east-1::snapshot/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Role: hive-v2-t01-smoke
               - Sid: T01SmokeDeleteSecurityGroup
                 Effect: Allow
                 Action: ec2:DeleteSecurityGroup

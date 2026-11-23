@@ -32,6 +32,11 @@ validate_inputs() {
   require_env SCENARIO
   require_env MATRIX
   require_env PAID_ADMISSION
+  require_env IMAGE_ACTION
+  case "$IMAGE_ACTION" in
+    discard|keep) ;;
+    *) echo "image action must be discard or keep" >&2; exit 2 ;;
+  esac
   validate_integer_cap MAX_INPUT_TOKENS 16000
   validate_integer_cap MAX_OUTPUT_TOKENS 2000
   validate_integer_cap MAX_REASONING_TOKENS 4000
@@ -193,7 +198,7 @@ health_secret_arn() {
 
 deploy_stack() {
   local name
-  for name in VPC_ID SUBNET_ID RESOLVER_IP AMI_ID GITHUB_REPOSITORY GITHUB_SHA; do
+  for name in VPC_ID SUBNET_ID RESOLVER_IP AMI_ID IMAGE_ACTION GITHUB_REPOSITORY GITHUB_SHA; do
     require_env "$name"
   done
   if [ "$SCENARIO" = matrix ]; then
@@ -214,6 +219,7 @@ deploy_stack() {
       "SubnetId=$SUBNET_ID" \
       "ResolverIp=$RESOLVER_IP" \
       "AmiId=$AMI_ID" \
+      "ImageAction=$IMAGE_ACTION" \
       "TeamKimiSecretArn=$TEAMKIMI_SECRET_ARN" \
       "TeamKimiProxySecretArn=${TEAMKIMI_PROXY_SECRET_ARN:-}" \
       "Scenario=$SCENARIO" \
@@ -374,28 +380,116 @@ delete_run_secret() {
   return "$describe_rc"
 }
 
-cleanup() {
-  local status=0
-  if [ "${SCENARIO:-preflight}" = matrix ] && [ "${PAID_EVIDENCE_VERIFIED:-no}" != yes ] \
-      && [ "${T01_REVIEWED_UNCERTAIN_CLEANUP:-}" != yes ]; then
-    echo "external paid evidence is not verified; retaining resources and the fleet mutex" >&2
-    return 1
+record_cleanup_failure() {
+  local rc="$1"
+  if (( status == 0 && rc != 0 )); then
+    status="$rc"
   fi
+}
+
+attempt_cleanup() {
+  local rc=0
+  "$@" || rc=$?
+  record_cleanup_failure "$rc"
+}
+
+stack_instance_id() {
+  local instance_id describe_rc
+  if instance_id="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+    --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue | [0]' --output text 2>"$CLEANUP_ERROR")"; then
+    [ -n "$instance_id" ] && [ "$instance_id" != None ] || return 1
+    printf '%s\n' "$instance_id"
+    return 0
+  else
+    describe_rc=$?
+  fi
+  if grep -q ValidationError "$CLEANUP_ERROR" && grep -q 'does not exist' "$CLEANUP_ERROR"; then
+    return 0
+  fi
+  return "$describe_rc"
+}
+
+create_image() {
+  require_env GITHUB_RUN_ID
+  aws ec2 create-image --instance-id "$1" --name "$STACK_NAME-$GITHUB_RUN_ID" --no-reboot \
+    --tag-specifications \
+      "ResourceType=image,Tags=[{Key=Role,Value=hive-v2-t01-smoke},{Key=RunId,Value=$GITHUB_RUN_ID}]" \
+      "ResourceType=snapshot,Tags=[{Key=Role,Value=hive-v2-t01-smoke},{Key=RunId,Value=$GITHUB_RUN_ID}]" \
+    --query ImageId --output text
+}
+
+discover_image() {
+  require_env GITHUB_RUN_ID
+  local image_id
+  image_id="$(aws ec2 describe-images --owners self --filters \
+    "Name=name,Values=$STACK_NAME-$GITHUB_RUN_ID" \
+    "Name=tag:Role,Values=hive-v2-t01-smoke" \
+    "Name=tag:RunId,Values=$GITHUB_RUN_ID" \
+    --query 'Images[].ImageId' --output text)" || return $?
+  [[ "$image_id" =~ ^ami-[A-Za-z0-9]+$ ]] || return 1
+  printf '%s\n' "$image_id"
+}
+
+validate_image_evidence() {
+  local evidence="${EVIDENCE_DIR:-$PWD/t01-evidence}/preflight.jsonl"
+  [ "${PAID_EVIDENCE_VERIFIED:-no}" = yes ] || return 1
+  python3 infra/t01-smoke/runtime.py validate-evidence "$evidence" || return $?
+  [ "$(grep -Fxc '{"check":"image_sanitized","status":"passed"}' "$evidence" 2>/dev/null)" = 1 ]
+}
+
+terminate_instance() {
+  aws ec2 terminate-instances --instance-ids "$1" || return $?
+  aws ec2 wait instance-terminated --instance-ids "$1"
+}
+
+delete_image() {
+  local image_id="$1" snapshots snapshot
+  snapshots="$(aws ec2 describe-images --image-ids "$image_id" \
+    --query 'Images[0].BlockDeviceMappings[].Ebs.SnapshotId' --output text)" || return $?
+  aws ec2 deregister-image --image-id "$image_id" || return $?
+  for snapshot in $snapshots; do
+    if [ "$snapshot" != None ]; then
+      aws ec2 delete-snapshot --snapshot-id "$snapshot" || return $?
+    fi
+  done
+}
+
+cleanup() {
+  local status=0 instance_id= image_id= image_evidence_valid=0 rc
   CLEANUP_OUTPUT="$(mktemp)"
   CLEANUP_ERROR="$(mktemp)"
   trap "rm -f $CLEANUP_OUTPUT $CLEANUP_ERROR" EXIT
   if [ "${SCENARIO:-preflight}" = matrix ] && [ "${PAID_EVIDENCE_VERIFIED:-no}" = yes ]; then
     require_env GITHUB_RUN_ID
-    aws s3 rm "s3://${T01_EVIDENCE_BUCKET:-hive-v2-t01-evidence-594552273052}/hive-v2-t01-smoke/$GITHUB_RUN_ID/" --recursive || status=$?
+    attempt_cleanup aws s3 rm "s3://${T01_EVIDENCE_BUCKET:-hive-v2-t01-evidence-594552273052}/hive-v2-t01-smoke/$GITHUB_RUN_ID/" --recursive
   fi
-  if (( status == 0 )); then
-    delete_stack "$STACK_NAME" || status=$?
+  instance_id="$(stack_instance_id)" || record_cleanup_failure "$?"
+  if [ "${IMAGE_ACTION:-discard}" = keep ]; then
+    if validate_image_evidence; then
+      image_evidence_valid=1
+    else
+      record_cleanup_failure "$?"
+    fi
+    if [ "$image_evidence_valid" = 1 ] && [ -n "$instance_id" ]; then
+      image_id="$(create_image "$instance_id")" || {
+        rc=$?
+        record_cleanup_failure "$rc"
+        if [ -z "$image_id" ]; then
+          image_id="$(discover_image)" || record_cleanup_failure "$?"
+        fi
+      }
+    fi
   fi
-  if (( status == 0 )); then
-    delete_run_secret "$HEALTH_SECRET_NAME" || status=$?
+  if [ -n "$instance_id" ]; then
+    attempt_cleanup terminate_instance "$instance_id"
   fi
-  if (( status == 0 )) && [ "${SCENARIO:-preflight}" = matrix ]; then
-    delete_run_secret "$PROXY_SECRET_NAME" || status=$?
+  if [ -n "$image_id" ]; then
+    attempt_cleanup aws ec2 wait image-available --image-ids "$image_id"
+  fi
+  attempt_cleanup delete_stack "$STACK_NAME"
+  attempt_cleanup delete_run_secret "$HEALTH_SECRET_NAME"
+  if [ "${SCENARIO:-preflight}" = matrix ]; then
+    attempt_cleanup delete_run_secret "$PROXY_SECRET_NAME"
   fi
   if (( status == 0 )) && [ "${SCENARIO:-preflight}" != preflight ] && [ "${T01_REVIEWED_UNCERTAIN_CLEANUP:-}" != yes ]; then
     if ! python3 infra/t01-smoke/runtime.py validate-evidence "${EVIDENCE_DIR:-$PWD/t01-evidence}/preflight.jsonl"; then
@@ -403,10 +497,18 @@ cleanup() {
       status=1
     fi
   fi
+  if (( status == 0 )) && [ "${SCENARIO:-preflight}" = matrix ] && [ "${PAID_EVIDENCE_VERIFIED:-no}" != yes ] \
+      && [ "${T01_REVIEWED_UNCERTAIN_CLEANUP:-}" != yes ]; then
+    echo "matrix evidence collection and upload are not verified; retaining the fleet mutex" >&2
+    status=1
+  fi
   if (( status == 0 )) && { [ "${SCENARIO:-preflight}" = count ] || [ "${SCENARIO:-preflight}" = count-recovery ]; } \
       && [ "${T01_COUNT_STOP_VERIFIED:-no}" != yes ]; then
     echo "count host stop is not proven; retaining the fleet mutex and run state" >&2
     status=1
+  fi
+  if [ -n "$image_id" ] && (( status != 0 )); then
+    attempt_cleanup delete_image "$image_id"
   fi
   return "$status"
 }
@@ -418,6 +520,7 @@ count_host() {
 
 validate_recovery() {
   [ "${SCENARIO:-}" = count-recovery ] || { echo "count recovery requires SCENARIO=count-recovery" >&2; exit 2; }
+  [ "${IMAGE_ACTION:-}" = discard ] || { echo "count recovery requires image discard" >&2; exit 2; }
   require_env T01_RECOVERY_RUN_ID
   [[ "$T01_RECOVERY_RUN_ID" =~ ^[0-9]+$ ]] || { echo "recovery run ID must be numeric" >&2; exit 2; }
   [ "${T01_REVIEWED_UNCERTAIN_CLEANUP:-}" = yes ] || { echo "count recovery requires reviewed uncertain cleanup" >&2; exit 2; }
