@@ -50,11 +50,16 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
   return {
     ...orig,
     typeLine: vi.fn(async () => {}),
-    wakeAgent: vi.fn(async (root: string, project: string, agent: string) => {
+    wakeAgent: vi.fn(async (root: string, project: string, agent: string, expected?: { name?: string; worktree?: string; pane?: string }) => {
       const pf = await state.readProjects(root);
       const home = pf.projects.find((p) => p.name === project)?.home ?? '';
-      await state.upsertTeamEntry(home, {
-        name: agent, pane: '%8', pane_pid: 88, pane_started: 'fresh',
+      const team = await state.readTeam(home);
+      await state.writeJson(state.hivePath(home, 'team.json'), {
+        agents: team.agents.map((entry) => (expected
+          ? entry.name === expected.name && entry.worktree === expected.worktree && entry.pane === expected.pane
+          : entry.name === agent)
+          ? { ...entry, name: agent, pane: '%8', pane_pid: 88, pane_started: 'fresh' }
+          : entry),
       });
       return '%8';
     }),
@@ -376,6 +381,66 @@ describe('watchCycle watchdog', () => {
     expect(await readDecisions(root)).toHaveLength(1);
   });
 
+  it('does not accept a duplicate orchestrator registration as recovery', async () => {
+    const { root, home } = await setupProject({
+      agents: [{
+        name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'old',
+        session_id: 'session_x',
+      }],
+    });
+    const stale = (await readTeam(home)).agents[0];
+    vi.mocked(paneExists).mockResolvedValue(false);
+    stubProbes();
+    vi.mocked(wake).mockImplementationOnce(async () => {
+      await writeJson(hivePath(home, 'team.json'), {
+        agents: [
+          { ...stale, pane: '%9', pane_pid: 99, pane_started: 'replacement' },
+          stale,
+        ],
+      });
+      return '%9';
+    });
+
+    await watchCycle(root, {}, new Set(), new Map());
+
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(killWindow).not.toHaveBeenCalled();
+    expect(await readDecisions(root)).toEqual([]);
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log).not.toContain('resurrected demo-orchestrator');
+    expect(log).toMatch(/duplicate|ambiguous/);
+  });
+
+  it('does not accept a duplicate worker registration as recovery', async () => {
+    const worktree = '/recorded/isolated-worker';
+    const { root, home } = await setupProject({
+      agents: [{
+        name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'old', session_id: 'session_b', worktree,
+      }],
+    });
+    const stale = (await readTeam(home)).agents[0];
+    vi.mocked(paneExists).mockResolvedValue(false);
+    stubProbes();
+    vi.mocked(wakeAgent).mockImplementationOnce(async () => {
+      await writeJson(hivePath(home, 'team.json'), {
+        agents: [
+          { ...stale, pane: '%8', pane_pid: 88, pane_started: 'replacement' },
+          stale,
+        ],
+      });
+      return '%8';
+    });
+
+    await watchCycle(root, {}, new Set(), new Map());
+
+    expect(wakeAgent).toHaveBeenCalledTimes(1);
+    expect(killWindow).not.toHaveBeenCalled();
+    expect(await readDecisions(root)).toEqual([]);
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log).not.toContain('resurrected builder');
+    expect(log).toMatch(/duplicate|ambiguous/);
+  });
+
   it('gives up waking after the attempts run out and says so once', async () => {
     const { root } = await setupProject({
       agents: [{ name: 'demo-orchestrator', orchestrator: true, pane: '%1', pane_pid: 11, pane_started: 'a' }],
@@ -419,7 +484,7 @@ describe('watchCycle watchdog', () => {
     vi.mocked(paneExists).mockResolvedValue(false);
     stubProbes();
     await watchCycle(root, {}, new Set(), new Map());
-    expect(wakeAgent).toHaveBeenCalledWith(root, 'demo', 'builder');
+    expect(wakeAgent).toHaveBeenCalledWith(root, 'demo', 'builder', expect.objectContaining({ name: 'builder' }));
     expect(wakeAgent).toHaveBeenCalledTimes(1);
     expect(wake).not.toHaveBeenCalled();
     const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
@@ -428,6 +493,31 @@ describe('watchCycle watchdog', () => {
     expect(log).not.toContain('resurrected logger');
     const decisions = await readDecisions(root);
     expect(decisions[0].summary).toBe('woke builder after pane %2 died');
+  });
+
+  it('wakes only the exact dead entry when same-name workers use different worktrees', async () => {
+    const liveWorktree = '/recorded/live-worker';
+    const deadWorktree = '/recorded/dead-worker';
+    const { root, home } = await setupProject({
+      agents: [
+        { name: 'builder', pane: '%3', pane_pid: 33, pane_started: 'live', session_id: 'session_live', worktree: liveWorktree },
+        { name: 'builder', pane: '%2', pane_pid: 22, pane_started: 'dead', session_id: 'session_dead', worktree: deadWorktree },
+      ],
+    });
+    vi.mocked(paneExists).mockImplementation(async (pane) => pane !== '%2');
+    stubProbes();
+
+    await watchCycle(root, {}, new Set(), new Map());
+
+    expect(wakeAgent).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(wakeAgent).mock.calls[0]).toEqual([
+      root, 'demo', 'builder', expect.objectContaining({ pane: '%2', worktree: deadWorktree }),
+    ]);
+    const agents = (await readTeam(home)).agents;
+    expect(agents.find((agent) => agent.worktree === liveWorktree)?.pane).toBe('%3');
+    expect(agents.find((agent) => agent.worktree === deadWorktree)?.pane).toBe('%8');
+    const log = await fs.readFile(hubPath(root, 'watch.log'), 'utf8');
+    expect(log).toContain('resurrected builder in pane %8');
   });
 
   it('records a death to disk; a restarted watch re-wakes it without re-logging or re-bundling', async () => {

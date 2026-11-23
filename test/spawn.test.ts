@@ -70,7 +70,11 @@ vi.mock('../src/admission.js', async (importOriginal) => {
 
 vi.mock('../src/state.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/state.js')>();
-  return { ...orig, compareAndSwapTeamEntry: vi.fn(orig.compareAndSwapTeamEntry) };
+  return {
+    ...orig,
+    compareAndSwapTeamEntry: vi.fn(orig.compareAndSwapTeamEntry),
+    manifestUpdate: vi.fn(orig.manifestUpdate),
+  };
 });
 
 vi.mock('../src/project.js', async (importOriginal) => {
@@ -86,7 +90,7 @@ import { answerDialog, hubAdd, hubInit, hubResolve, hubTask, readDialogFor, reda
 import { removeProject, withLaunchClaim } from '../src/project.js';
 import { killAgent } from '../src/kill.js';
 import { completeTmuxLaunch } from '../src/admission.js';
-import { appendTaskEvent, compareAndSwapTeamEntry, hivePath, hubPath, manifestRead, readDecisions, readProjects, readTaskEvents, readTeam, valueDigest, withHubLock, writeJson, writeProjects } from '../src/state.js';
+import { appendTaskEvent, compareAndSwapTeamEntry, hivePath, hubPath, manifestAdd, manifestRead, manifestUpdate, readDecisions, readProjects, readTaskEvents, readTeam, valueDigest, withHubLock, writeJson, writeProjects } from '../src/state.js';
 import { capturePane, killWindow, newWindow, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep } from '../src/tmux.js';
 import { watchCycle } from '../src/watch.js';
 import { approveContract, taskContract } from './task-contract.js';
@@ -158,6 +162,23 @@ describe('respawnAgent', () => {
     expect(tmuxRecs[0].pane).toBe('%9');
     expect(tmuxRecs[0].pane_pid).toBe(4242);
     expect(tmuxRecs[0].pane_started).toBe('later');
+  }, 20_000);
+
+  it('reuses the recorded isolated worktree', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder');
+    await fs.mkdir(worktree, { recursive: true });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{
+        ...(await readTeam(home)).agents[0], worktree,
+        pane: '%1', pane_pid: 111, pane_started: 'earlier',
+      }],
+    });
+
+    await expect(respawnAgent(root, 'demo', 'builder')).resolves.toBe('%9');
+
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[1]).toBe(worktree);
+    expect((await readTeam(home)).agents[0].worktree).toBe(worktree);
   }, 20_000);
 
   it('clears the close stamp when the kill fails', async () => {
@@ -279,14 +300,14 @@ describe('spawnAgent', () => {
 
   it('launches and warns when jj lane hook installation fails', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    const wt = path.join(home, 'lane');
+    const wt = hivePath(home, 'lanes', 'builder2');
     await fs.mkdir(path.join(wt, 'scripts'), { recursive: true });
     await fs.writeFile(path.join(wt, 'scripts', 'install-git-hooks.sh'), '#!/bin/sh\n');
     vi.mocked(run).mockImplementation(async (cmd) => cmd === 'bash'
       ? { code: 1, stdout: '', stderr: 'fatal: not a git repository' }
       : { code: 0, stdout: '', stderr: '' });
     try {
-      await expect(spawn(root, { agent: 'builder2', worktree: 'lane' })).resolves.toBe('%9');
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
@@ -302,7 +323,7 @@ describe('spawnAgent', () => {
 
   it('keeps the launched worker and jj lane when the hook warning cannot be logged', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    const wt = path.join(home, 'lane');
+    const wt = hivePath(home, 'lanes', 'builder2');
     await fs.mkdir(path.join(wt, 'scripts'), { recursive: true });
     await fs.writeFile(path.join(wt, 'scripts', 'install-git-hooks.sh'), '#!/bin/sh\n');
     await fs.mkdir(path.join(root, '.hive-hub', 'decisions.jsonl'));
@@ -311,7 +332,7 @@ describe('spawnAgent', () => {
       ? { code: 1, stdout: '', stderr: 'fatal: not a git repository' }
       : { code: 0, stdout: '', stderr: '' });
     try {
-      await expect(spawn(root, { agent: 'builder2', worktree: 'lane' })).resolves.toBe('%9');
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
       expect(error).toHaveBeenCalledWith(expect.stringContaining('hive: the decision was not logged:'));
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
@@ -394,23 +415,51 @@ describe('spawnAgent', () => {
     expect(recs).toEqual([]);
   }, 20_000);
 
-  it('preserves an absolute --worktree path', async () => {
-    const { root, home } = await setup({ name: 'builder' });
-    const wt = path.join(root, 'absolute-lane');
-    await spawn(root, { agent: 'builder2', worktree: wt });
-    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[2] === home && c[1].includes('add'));
-    expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', wt, '-r', 'main@origin']);
-    expect((await readTeam(home)).agents.find((a) => a.name === 'builder2')?.worktree).toBe(wt);
-  }, 20_000);
+  it.each(['home', 'shared', 'symlink', 'absolute-outside', 'traversal', 'noncanonical', 'jj-name-collision'] as const)(
+    'rejects a %s fresh worker worktree before VCS or pane side effects',
+    async (kind) => {
+      const { root, home } = await setup({ name: 'builder' });
+      let worktree = kind === 'home' ? home
+        : kind === 'absolute-outside' ? path.join(root, 'absolute-lane')
+          : kind === 'traversal' ? '../outside-lane'
+            : kind === 'noncanonical' ? 'lane'
+              : kind === 'jj-name-collision' ? path.join('.hive', 'lanes', 'worker1')
+                : hivePath(home, 'lanes', 'builder2');
+      if (kind === 'shared') {
+        worktree = path.join(home, 'shared-lane');
+        await fs.mkdir(worktree, { recursive: true });
+        const current = (await readTeam(home)).agents[0];
+        await writeJson(hivePath(home, 'team.json'), {
+          agents: [{ ...current, worktree, pane: '%1', pane_pid: 111, pane_started: 'earlier' }],
+        });
+      }
+      if (kind === 'symlink') {
+        const target = path.join(root, 'symlink-target');
+        await fs.mkdir(target, { recursive: true });
+        await fs.mkdir(path.dirname(worktree), { recursive: true });
+        await fs.symlink(target, worktree, 'dir');
+      }
+      const vcsCalls = () => vi.mocked(run).mock.calls.filter((call) => call[0] === 'jj' || call[0] === 'git').length;
+      const vcsBefore = vcsCalls();
+      const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+
+      await expect(spawn(root, { agent: 'builder2', worktree })).rejects.toThrow(/unsafe|isolated|worktree|lane/);
+
+      expect(vcsCalls()).toBe(vcsBefore);
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
+      expect((await readTeam(home)).agents.some((agent) => agent.name === 'builder2')).toBe(false);
+    },
+    20_000,
+  );
 
   it('lanes into a jj workspace when jj root answers in the project home', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    await spawn(root, { agent: 'builder2', worktree: 'lane' });
+    await spawn(root, { agent: 'builder2' });
     const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[2] === home && c[1].includes('add'));
-    expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', path.join(home, 'lane'), '-r', 'main@origin']);
+    expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', hivePath(home, 'lanes', 'builder2'), '-r', 'main@origin']);
     const recs = (await manifestRead(home)).filter((r) => r.kind === 'jj-workspace');
     expect(recs).toHaveLength(1);
-    expect(recs[0].path).toBe(path.join(home, 'lane'));
+    expect(recs[0].path).toBe(hivePath(home, 'lanes', 'builder2'));
     expect(recs[0].branch).toBeUndefined();
     expect(vi.mocked(run).mock.calls.some((c) => c[0] === 'git' && c[2] === home && c[1][0] === 'worktree')).toBe(false);
   }, 20_000);
@@ -421,49 +470,268 @@ describe('spawnAgent', () => {
       ? { code: 1, stdout: '', stderr: 'no jj here' }
       : { code: 0, stdout: '', stderr: '' });
     try {
-      await spawn(root, { agent: 'builder2', worktree: 'lane' });
+      await spawn(root, { agent: 'builder2' });
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
     const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'git' && c[2] === home && c[1][0] === 'worktree');
-    expect(add?.[1]).toEqual(['worktree', 'add', '-q', '-b', 'demo/builder2', path.join(home, 'lane'), 'HEAD']);
+    expect(add?.[1]).toEqual(['worktree', 'add', '-q', '-b', 'demo/builder2', hivePath(home, 'lanes', 'builder2'), 'HEAD']);
     const recs = (await manifestRead(home)).filter((r) => r.kind === 'worktree');
     expect(recs).toHaveLength(1);
     expect(recs[0].branch).toBe('demo/builder2');
   }, 20_000);
 
-  it('creates missing parent dirs for a nested --worktree path', async () => {
+  it('rejects a nested non-canonical --worktree before VCS or pane side effects', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    vi.mocked(run).mockImplementation(async (cmd, args) => {
-      if (cmd === 'jj' && args[2] === 'workspace' && args[3] === 'add' && !existsSync(path.dirname(args[4]))) {
-        return { code: 1, stdout: '', stderr: 'Cannot create workspace: No such file or directory (os error 2)' };
-      }
-      return { code: 0, stdout: '', stderr: '' };
-    });
-    try {
-      await spawn(root, { agent: 'builder2', worktree: 'lanes/chunk-1' });
-    } finally {
-      vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
-    }
-    const add = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1][4] === path.join(home, 'lanes', 'chunk-1'));
-    expect(add?.[1]).toEqual(['-R', home, 'workspace', 'add', path.join(home, 'lanes', 'chunk-1'), '-r', 'main@origin']);
-    const recs = (await manifestRead(home)).filter((r) => r.kind === 'jj-workspace');
-    expect(recs).toHaveLength(1);
-    expect(recs[0].path).toBe(path.join(home, 'lanes', 'chunk-1'));
+    const runs = vi.mocked(run).mock.calls.length;
+    const windows = vi.mocked(newWindow).mock.calls.length;
+
+    await expect(spawn(root, { agent: 'builder2', worktree: 'lanes/chunk-1' })).rejects.toThrow(/canonical|unsafe|worktree|lane/);
+
+    expect(vi.mocked(run).mock.calls).toHaveLength(runs);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+    expect((await manifestRead(home)).filter((record) => record.kind === 'jj-workspace')).toEqual([]);
   }, 20_000);
 
-  it('forgets the jj workspace when the launch fails after it was made', async () => {
+  it('forgets a failed jj lane and permits a same-agent retry', async () => {
     const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
     vi.mocked(newWindow).mockRejectedValueOnce(new Error('tmux down'));
-    await expect(spawn(root, { agent: 'builder2', worktree: 'lane' })).rejects.toThrow('tmux down');
-    const forget = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1].includes('forget'));
-    expect(forget?.[1]).toEqual(['-R', home, 'workspace', 'forget', 'lane']);
-    expect(await fs.stat(path.join(home, 'lane')).catch(() => null)).toBeNull();
+
+    await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow('tmux down');
+
+    const forget = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[2] === home && c[1].includes('forget'));
+    expect(forget?.[1]).toEqual(['-R', home, 'workspace', 'forget', 'builder2']);
+    expect(vi.mocked(run).mock.calls.some((c) =>
+      c[0] === 'git' && c[2] === home && c[1].join(' ') === 'worktree prune')).toBe(true);
+    expect(await fs.stat(worktree).catch(() => null)).toBeNull();
+    expect((await readTeam(home)).agents.some((agent) => agent.name === 'builder2')).toBe(false);
+    expect((await manifestRead(home)).filter((record) => record.kind === 'jj-workspace')).toEqual([]);
+
+    await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
+    expect((await readTeam(home)).agents.filter((agent) => agent.name === 'builder2')).toHaveLength(1);
+    expect((await manifestRead(home)).filter((record) => record.kind === 'jj-workspace' && record.path === worktree)).toHaveLength(1);
+  }, 20_000);
+
+  it('removes a failed git lane and branch before a same-agent retry', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
+    const branch = 'demo/builder2';
+    let branchExists = false;
+    const defaultRun = vi.mocked(run).getMockImplementation()!;
+    vi.mocked(run).mockImplementation(async (cmd, args) => {
+      if (cmd === 'jj') return { code: 1, stdout: '', stderr: 'no jj here' };
+      if (cmd === 'git' && args[0] === 'worktree' && args[1] === 'add') {
+        if (branchExists) return { code: 128, stdout: '', stderr: 'branch already exists' };
+        branchExists = true;
+        await fs.mkdir(worktree, { recursive: true });
+      }
+      if (cmd === 'git' && args[0] === 'worktree' && args[1] === 'remove') {
+        await fs.rm(worktree, { recursive: true, force: true });
+      }
+      if (cmd === 'git' && args[0] === 'branch' && args.includes(branch)) branchExists = false;
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    vi.mocked(newWindow).mockRejectedValueOnce(new Error('tmux down'));
+    try {
+      await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow('tmux down');
+
+      expect(await fs.stat(worktree).catch(() => null)).toBeNull();
+      expect(branchExists).toBe(false);
+      expect((await readTeam(home)).agents.some((agent) => agent.name === 'builder2')).toBe(false);
+      expect((await manifestRead(home)).filter((record) => record.kind === 'worktree')).toEqual([]);
+
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
+    } finally {
+      vi.mocked(run).mockImplementation(defaultRun);
+    }
+    expect((await readTeam(home)).agents.filter((agent) => agent.name === 'builder2')).toHaveLength(1);
+    expect((await manifestRead(home)).filter((record) => record.kind === 'worktree' && record.path === worktree)).toHaveLength(1);
+  }, 20_000);
+
+  it('removes a failed plain lane before a same-agent retry', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
+    const defaultRun = vi.mocked(run).getMockImplementation()!;
+    vi.mocked(run).mockImplementation(async (cmd) => cmd === 'jj' || cmd === 'git'
+      ? { code: 1, stdout: '', stderr: 'no repository here' }
+      : { code: 0, stdout: '', stderr: '' });
+    vi.mocked(newWindow).mockRejectedValueOnce(new Error('tmux down'));
+    try {
+      await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow('tmux down');
+
+      expect(await fs.stat(worktree).catch(() => null)).toBeNull();
+      expect((await readTeam(home)).agents.some((agent) => agent.name === 'builder2')).toBe(false);
+
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
+    } finally {
+      vi.mocked(run).mockImplementation(defaultRun);
+    }
+    expect((await readTeam(home)).agents.filter((agent) => agent.name === 'builder2')).toHaveLength(1);
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[1]).toBe(worktree);
+  }, 20_000);
+
+  it('rolls back the exact registration after post-registration failure while preserving the lane', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
+    const originalAgents = (await readTeam(home)).agents;
+    const casBefore = vi.mocked(compareAndSwapTeamEntry).mock.calls.length;
+    const killsBefore = vi.mocked(killWindow).mock.calls.length;
+    let registered: unknown;
+    vi.mocked(sendLiteral).mockImplementationOnce(async () => {
+      registered = (await readTeam(home)).agents.find((agent) => agent.name === 'builder2');
+      await fs.writeFile(path.join(worktree, 'user-work.txt'), 'preserve me\n');
+      throw new Error('input failed');
+    });
+
+    await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow('input failed');
+
+    const rollback = vi.mocked(compareAndSwapTeamEntry).mock.calls.slice(casBefore)
+      .find((call) => call[2] === null && call[1].name === 'builder2');
+    expect(rollback?.[1]).toEqual(registered);
+    expect(vi.mocked(killWindow).mock.calls.slice(killsBefore)).toEqual([['%9', { pid: 4242, started: 'later' }]]);
+    expect((await readTeam(home)).agents).toEqual(originalAgents);
+    expect(await fs.readFile(path.join(worktree, 'user-work.txt'), 'utf8')).toBe('preserve me\n');
+
+    vi.mocked(paneIs).mockResolvedValueOnce(false);
+    await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
+    expect((await readTeam(home)).agents.filter((agent) => agent.name === 'builder2')).toHaveLength(1);
+  }, 20_000);
+
+  it('keeps a tasked admission registration for launch_failed reconciliation after typing fails', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const task = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, task);
+    const worktree = hivePath(home, 'lanes', 'worker1');
+    const casBefore = vi.mocked(compareAndSwapTeamEntry).mock.calls.length;
+    vi.mocked(sendLiteral).mockImplementationOnce(async () => {
+      await fs.writeFile(path.join(worktree, 'user-work.txt'), 'preserve tasked work\n');
+      throw new Error('tasked input failed');
+    });
+
+    await expect(spawn(root, { agent: 'worker1', task })).rejects.toThrow('tasked input failed');
+
+    expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')).toMatchObject({
+      task, pane: '%9', lease_epoch: 1, lease_revoked: true, admission_status: 'launch_failed',
+      launch_error: 'tasked input failed', attempts_used: 1, closed_at: expect.any(String),
+    });
+    expect(vi.mocked(compareAndSwapTeamEntry).mock.calls.slice(casBefore)
+      .some((call) => call[2] === null && call[1].name === 'worker1')).toBe(false);
+    expect(await fs.readFile(path.join(worktree, 'user-work.txt'), 'utf8')).toBe('preserve tasked work\n');
+  }, 20_000);
+
+  it('retains registration and surfaces cleanup failure when the verified new-pane kill fails', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const casBefore = vi.mocked(compareAndSwapTeamEntry).mock.calls.length;
+    vi.mocked(sendLiteral).mockRejectedValueOnce(new Error('input failed'));
+    vi.mocked(killWindow).mockRejectedValueOnce(new Error('tmux cleanup failed'));
+
+    const error = await spawn(root, { agent: 'builder2' }).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors.map(String).join('\n')).toContain('tmux cleanup failed');
+    expect(killWindow).toHaveBeenCalledWith('%9', { pid: 4242, started: 'later' });
+    expect((await readTeam(home)).agents.find((agent) => agent.name === 'builder2')?.pane).toBe('%9');
+    expect(vi.mocked(compareAndSwapTeamEntry).mock.calls.slice(casBefore)
+      .some((call) => call[2] === null && call[1].name === 'builder2')).toBe(false);
+  }, 20_000);
+
+  it('preserves a registered pending-dialog worker and its lane', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
+    const casBefore = vi.mocked(compareAndSwapTeamEntry).mock.calls.length;
+    vi.mocked(capturePane).mockImplementation(async () => PERMISSION);
+    try {
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
+
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'builder2')?.launch_pending).toBeDefined();
+      expect((await fs.stat(worktree)).isDirectory()).toBe(true);
+      expect(vi.mocked(compareAndSwapTeamEntry).mock.calls.slice(casBefore)
+        .some((call) => call[2] === null && call[1].name === 'builder2')).toBe(false);
+    } finally {
+      vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    }
+  }, 20_000);
+
+  it('preserves possible user work when finalization fails after typing', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
+    vi.mocked(sendLiteral).mockImplementationOnce(async () => {
+      const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'builder2')!;
+      const claim = path.join(worktree, worker.launch_claim_path!);
+      await fs.rm(claim, { force: true });
+      await fs.mkdir(claim, { recursive: true });
+      await fs.writeFile(path.join(worktree, 'user-work.txt'), 'keep finalization work\n');
+    });
+
+    await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow();
+
+    expect(await fs.readFile(path.join(worktree, 'user-work.txt'), 'utf8')).toBe('keep finalization work\n');
+    expect((await readTeam(home)).agents.some((agent) => agent.name === 'builder2')).toBe(false);
+  }, 20_000);
+
+  it('uses the successful session CAS result for rollback and retry', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
+    const defaultHome = os.homedir();
+    const testHome = mkdtempSync(path.join(tmpdir(), 'hive-spawn-session-rollback-'));
+    vi.mocked(os.homedir).mockReturnValue(testHome);
+    const casBefore = vi.mocked(compareAndSwapTeamEntry).mock.calls.length;
+    try {
+      const session = path.join(testHome, '.kimi-code', 'sessions', 'wd_rollback', 'session_found');
+      await fs.mkdir(session, { recursive: true });
+      await fs.writeFile(path.join(session, 'state.json'), JSON.stringify({
+        cwd: worktree, updatedAt: 1, lastPrompt: 'You are builder2 of project demo.',
+      }));
+      vi.mocked(sendLiteral).mockImplementationOnce(async () => {
+        const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'builder2')!;
+        const claim = path.join(worktree, worker.launch_claim_path!);
+        await fs.rm(claim, { force: true });
+        await fs.mkdir(claim, { recursive: true });
+        await fs.writeFile(path.join(worktree, 'user-work.txt'), 'preserve session work\n');
+      });
+
+      await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow();
+
+      const calls = vi.mocked(compareAndSwapTeamEntry).mock.calls.slice(casBefore);
+      expect(calls.some((call) => call[2]?.session_id === 'session_found')).toBe(true);
+      const rollback = calls.find((call) => call[2] === null && call[1].name === 'builder2');
+      expect(rollback?.[1]).toMatchObject({ pane: '%9', session_id: 'session_found' });
+      expect((await readTeam(home)).agents.some((agent) => agent.name === 'builder2')).toBe(false);
+      expect(await fs.readFile(path.join(worktree, 'user-work.txt'), 'utf8')).toBe('preserve session work\n');
+
+      vi.mocked(paneIs).mockResolvedValueOnce(false);
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
+      expect((await readTeam(home)).agents.find((agent) => agent.name === 'builder2')?.session_id).toBe('session_found');
+    } finally {
+      vi.mocked(os.homedir).mockReturnValue(defaultHome);
+    }
+  }, 20_000);
+
+  it('uses unique recoverable JJ trash destinations across repeated failed retries', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    vi.mocked(newWindow)
+      .mockRejectedValueOnce(new Error('first tmux failure'))
+      .mockRejectedValueOnce(new Error('second tmux failure'));
+
+    await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow('first tmux failure');
+    await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow('second tmux failure');
+
+    const trash = hivePath(home, 'trash', new Date().toISOString().slice(0, 10));
+    const recovered = (await fs.readdir(trash, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+    expect(recovered).toHaveLength(2);
+    expect(new Set(recovered.map((entry) => entry.name)).size).toBe(2);
+    for (const entry of recovered) {
+      expect((await fs.stat(hivePath(path.join(trash, entry.name), 'team', 'builder2', 'agent.md'))).isFile()).toBe(true);
+    }
+    expect((await readTeam(home)).agents.some((agent) => agent.name === 'builder2')).toBe(false);
+
+    await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
   }, 20_000);
 
   it('rolls back a workspace that jj registered despite a failed add', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    const wt = path.join(home, 'lane');
+    const wt = hivePath(home, 'lanes', 'builder2');
     vi.mocked(run).mockImplementation(async (cmd, args) => {
       if (cmd === 'jj' && args[2] === 'workspace' && args[3] === 'add') {
         await fs.mkdir(args[4], { recursive: true });
@@ -472,14 +740,135 @@ describe('spawnAgent', () => {
       return { code: 0, stdout: '', stderr: '' };
     });
     try {
-      await expect(spawn(root, { agent: 'builder2', worktree: 'lane' })).rejects.toThrow(/jj workspace add failed/);
+      await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow(/jj workspace add failed/);
     } finally {
       vi.mocked(run).mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }));
     }
     const forget = vi.mocked(run).mock.calls.find((c) => c[0] === 'jj' && c[1][1] === home && c[1].includes('forget'));
-    expect(forget?.[1]).toEqual(['-R', home, 'workspace', 'forget', 'lane']);
+    expect(forget?.[1]).toEqual(['-R', home, 'workspace', 'forget', 'builder2']);
     expect(await fs.stat(wt).catch(() => null)).toBeNull();
     expect((await manifestRead(home)).filter((r) => r.kind === 'jj-workspace')).toHaveLength(0);
+  }, 20_000);
+
+  it('uses manifestUpdate so a concurrent tmux append survives lane rollback', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
+    const actualUpdate = vi.mocked(manifestUpdate).getMockImplementation()!;
+    let markUpdate!: () => void;
+    let releaseUpdate!: () => void;
+    const entered = new Promise<void>((resolve) => { markUpdate = resolve; });
+    const release = new Promise<void>((resolve) => { releaseUpdate = resolve; });
+    vi.mocked(manifestUpdate).mockImplementation(async (projectHome, updater) => {
+      const next = await updater([{ kind: 'worktree', at: 'probe', path: worktree }]);
+      if (next.length !== 0) return actualUpdate(projectHome, updater);
+      markUpdate();
+      await release;
+      return actualUpdate(projectHome, updater);
+    });
+    vi.mocked(newWindow).mockRejectedValueOnce(new Error('tmux down'));
+    const spawning = spawn(root, { agent: 'builder2' });
+    try {
+      await entered;
+      await manifestAdd(home, {
+        kind: 'tmux', at: new Date().toISOString(), pane: '%90', window: 'demo:other',
+        pane_pid: 90, pane_started: 'live',
+      });
+      releaseUpdate();
+      await expect(spawning).rejects.toThrow('tmux down');
+    } finally {
+      releaseUpdate();
+      await spawning.catch(() => {});
+      vi.mocked(manifestUpdate).mockImplementation(actualUpdate);
+    }
+
+    const records = await manifestRead(home);
+    expect(records.some((record) => record.kind === 'tmux' && record.pane === '%90')).toBe(true);
+    expect(records.some((record) => record.kind === 'worktree' && record.path === worktree)).toBe(false);
+  }, 20_000);
+
+  it.each(['git', 'jj', 'plain'] as const)('allocates, rolls back, and retries a real %s lane', async (kind) => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
+    const actual = await vi.importActual<typeof import('../src/tmux.js')>('../src/tmux.js');
+    const defaultRun = vi.mocked(run).getMockImplementation()!;
+    vi.mocked(run).mockImplementation(async (cmd, args, cwd, env, timeoutMs) => cmd === 'teamkimi'
+      ? { code: 0, stdout: '', stderr: '' }
+      : actual.run(cmd, args, cwd, env, timeoutMs));
+    try {
+      if (kind === 'git') {
+        expect((await run('git', ['init', '-b', 'main'], home)).code).toBe(0);
+        expect((await run('git', ['config', 'user.email', 'test@example.invalid'], home)).code).toBe(0);
+        expect((await run('git', ['config', 'user.name', 'Test'], home)).code).toBe(0);
+        await fs.writeFile(path.join(home, 'base.txt'), 'base\n');
+        expect((await run('git', ['add', 'base.txt'], home)).code).toBe(0);
+        expect((await run('git', ['commit', '-m', 'base'], home)).code).toBe(0);
+      }
+      if (kind === 'jj') expect((await run('jj', ['git', 'init', '--colocate', '.'], home)).code).toBe(0);
+      vi.mocked(newWindow).mockRejectedValueOnce(new Error('tmux down'));
+
+      await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow('tmux down');
+
+      expect(await fs.stat(worktree).catch(() => null)).toBeNull();
+      expect((await readTeam(home)).agents.some((agent) => agent.name === 'builder2')).toBe(false);
+      expect((await manifestRead(home)).filter((record) => record.kind === 'worktree' || record.kind === 'jj-workspace')).toEqual([]);
+      if (kind === 'git') {
+        const worktrees = await run('git', ['worktree', 'list', '--porcelain'], home);
+        expect(worktrees.stdout).not.toContain(worktree);
+        expect((await run('git', ['branch', '--list', 'demo/builder2'], home)).stdout.trim()).toBe('');
+      }
+      if (kind === 'jj') expect((await run('jj', ['workspace', 'list'], home)).stdout).not.toContain('builder2');
+
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
+      expect((await fs.stat(worktree)).isDirectory()).toBe(true);
+      expect((await readTeam(home)).agents.filter((agent) => agent.name === 'builder2')).toHaveLength(1);
+    } finally {
+      vi.mocked(run).mockImplementation(defaultRun);
+    }
+  }, 20_000);
+
+  it.each(['committed', 'dirty'] as const)('preserves %s user work after post-registration typing failure', async (kind) => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder2');
+    const actual = await vi.importActual<typeof import('../src/tmux.js')>('../src/tmux.js');
+    const defaultRun = vi.mocked(run).getMockImplementation()!;
+    vi.mocked(run).mockImplementation(async (cmd, args, cwd, env, timeoutMs) => cmd === 'teamkimi'
+      ? { code: 0, stdout: '', stderr: '' }
+      : actual.run(cmd, args, cwd, env, timeoutMs));
+    try {
+      expect((await run('git', ['init', '-b', 'main'], home)).code).toBe(0);
+      expect((await run('git', ['config', 'user.email', 'test@example.invalid'], home)).code).toBe(0);
+      expect((await run('git', ['config', 'user.name', 'Test'], home)).code).toBe(0);
+      await fs.writeFile(path.join(home, 'base.txt'), 'base\n');
+      expect((await run('git', ['add', 'base.txt'], home)).code).toBe(0);
+      expect((await run('git', ['commit', '-m', 'base'], home)).code).toBe(0);
+      vi.mocked(sendLiteral).mockImplementationOnce(async () => {
+        await fs.writeFile(path.join(worktree, 'user-work.txt'), `${kind} work\n`);
+        if (kind === 'committed') {
+          expect((await run('git', ['add', 'user-work.txt'], worktree)).code).toBe(0);
+          expect((await run('git', ['commit', '-m', 'user work'], worktree)).code).toBe(0);
+        }
+        throw new Error('input failed');
+      });
+
+      await expect(spawn(root, { agent: 'builder2' })).rejects.toThrow('input failed');
+
+      expect(await fs.readFile(path.join(worktree, 'user-work.txt'), 'utf8')).toBe(`${kind} work\n`);
+      expect((await readTeam(home)).agents.some((agent) => agent.name === 'builder2')).toBe(false);
+      const status = await run('git', ['status', '--porcelain', '--', 'user-work.txt'], worktree);
+      if (kind === 'committed') {
+        expect(status.stdout.trim()).toBe('');
+        expect((await run('git', ['log', '-1', '--format=%s'], worktree)).stdout.trim()).toBe('user work');
+      } else {
+        expect(status.stdout).toContain('user-work.txt');
+      }
+
+      vi.mocked(paneIs).mockImplementation(async () => true).mockResolvedValueOnce(false);
+      await expect(spawn(root, { agent: 'builder2' })).resolves.toBe('%9');
+      expect(await fs.readFile(path.join(worktree, 'user-work.txt'), 'utf8')).toBe(`${kind} work\n`);
+    } finally {
+      vi.mocked(run).mockImplementation(defaultRun);
+      vi.mocked(paneIs).mockImplementation(async () => true);
+    }
   }, 20_000);
 
   it('delete refuses an active worker launch claim', async () => {
@@ -628,6 +1017,210 @@ describe('wakeAgent', () => {
   });
 });
 
+describe('recorded worktree ownership', () => {
+  it.each(['respawn', 'wake'] as const)('keeps a legacy external worktree resumable through %s', async (operation) => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = path.join(root, 'legacy-external');
+    await fs.mkdir(worktree, { recursive: true });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{
+        ...(await readTeam(home)).agents[0], worktree,
+        pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b',
+      }],
+    });
+    if (operation === 'wake') vi.mocked(paneIs).mockResolvedValueOnce(false);
+
+    const result = operation === 'wake'
+      ? await wakeAgent(root, 'demo', 'builder')
+      : await respawnAgent(root, 'demo', 'builder');
+
+    expect(result).toBe('%9');
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[1]).toBe(worktree);
+    expect((await readTeam(home)).agents[0].worktree).toBe(worktree);
+  }, 20_000);
+
+  it.each(['same path', 'realpath alias'] as const)('refuses a %s shared by another live entry', async (kind) => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder');
+    await fs.mkdir(worktree, { recursive: true });
+    let otherWorktree = worktree;
+    if (kind === 'realpath alias') {
+      otherWorktree = path.join(home, 'lane-alias');
+      await fs.symlink(worktree, otherWorktree, 'dir');
+    }
+    const builder = {
+      ...(await readTeam(home)).agents[0], worktree,
+      pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b',
+    };
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [builder, {
+        name: 'other', worktree: otherWorktree, pane: '%2', pane_pid: 222, pane_started: 'live',
+        model: 'kimi-code/k3.1-pro-highspeed',
+      }],
+    });
+    vi.mocked(paneIs).mockImplementation(async (pane) => pane !== '%1');
+    const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+    const killsBefore = vi.mocked(killWindow).mock.calls.length;
+    try {
+      await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/shared|in use|worktree/);
+
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
+      expect(vi.mocked(killWindow).mock.calls).toHaveLength(killsBefore);
+      expect((await readTeam(home)).agents).toHaveLength(2);
+    } finally {
+      vi.mocked(paneIs).mockImplementation(async () => true);
+    }
+  }, 20_000);
+  it('does not exempt a duplicate legacy same-name live entry from sharing checks', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder');
+    await fs.mkdir(worktree, { recursive: true });
+    const builder = {
+      ...(await readTeam(home)).agents[0], worktree,
+      pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b',
+    };
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [builder, { ...builder, pane: '%2', pane_pid: 222, pane_started: 'live' }],
+    });
+    vi.mocked(paneIs).mockImplementation(async (pane) => pane !== '%1');
+    const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+    try {
+      await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/shared|duplicate|ambiguous|worktree/);
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
+      expect((await readTeam(home)).agents).toHaveLength(2);
+    } finally {
+      vi.mocked(paneIs).mockImplementation(async () => true);
+    }
+  }, 20_000);
+
+  it.each(['ancestor', 'descendant'] as const)('refuses canonical %s overlap with a live entry', async (kind) => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = kind === 'ancestor' ? hivePath(home, 'lanes', 'builder') : hivePath(home, 'lanes');
+    const otherWorktree = kind === 'ancestor' ? hivePath(home, 'lanes') : hivePath(home, 'lanes', 'builder');
+    await fs.mkdir(worktree, { recursive: true });
+    const builder = {
+      ...(await readTeam(home)).agents[0], worktree,
+      pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b',
+    };
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [builder, {
+        name: 'other', worktree: otherWorktree, pane: '%2', pane_pid: 222, pane_started: 'live',
+        model: 'kimi-code/k3.1-pro-highspeed',
+      }],
+    });
+    vi.mocked(paneIs).mockImplementation(async (pane) => pane !== '%1');
+    const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+    try {
+      await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/overlap|shared|worktree/);
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
+      expect((await readTeam(home)).agents).toHaveLength(2);
+    } finally {
+      vi.mocked(paneIs).mockImplementation(async () => true);
+    }
+  }, 20_000);
+  it('refuses a bare-name wake with same-name workers on different worktrees', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const base = (await readTeam(home)).agents[0];
+    const agents = ['a', 'b'].map((suffix, index) => ({
+      ...base, worktree: hivePath(home, 'lanes', `builder-${suffix}`),
+      pane: `%${index + 1}`, pane_pid: 111 + index, pane_started: `old-${suffix}`,
+      session_id: `session_${suffix}`,
+    }));
+    await writeJson(hivePath(home, 'team.json'), { agents });
+    vi.mocked(paneIs).mockImplementation(async () => false);
+    const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+    try {
+      await expect(wakeAgent(root, 'demo', 'builder')).rejects.toThrow(/ambiguous|duplicate/);
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
+      expect((await readTeam(home)).agents).toEqual(agents);
+    } finally {
+      vi.mocked(paneIs).mockImplementation(async () => true);
+    }
+  }, 20_000);
+});
+
+describe('atomic launch ownership', () => {
+  it('allows only one concurrent plain spawn to reserve a canonical path', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const defaultRun = vi.mocked(run).getMockImplementation()!;
+    vi.mocked(run).mockImplementation(async (cmd) => cmd === 'jj' || cmd === 'git'
+      ? { code: 1, stdout: '', stderr: 'no repository here' }
+      : { code: 0, stdout: '', stderr: '' });
+    let markWindow!: () => void;
+    let releaseWindow!: () => void;
+    const entered = new Promise<void>((resolve) => { markWindow = resolve; });
+    const release = new Promise<void>((resolve) => { releaseWindow = resolve; });
+    vi.mocked(newWindow).mockImplementationOnce(async () => {
+      markWindow();
+      await release;
+      return '%9';
+    });
+    const options = { agent: 'worker1', worktree: path.join('.hive', 'lanes', 'worker1') };
+    const first = spawn(root, options);
+    let second: ReturnType<typeof spawn> | undefined;
+    try {
+      await entered;
+      const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+      vi.mocked(run).mockClear();
+      second = spawn(root, options);
+      await expect(second).rejects.toThrow(/pending lane reservation|reserved/);
+      expect(vi.mocked(run).mock.calls.filter((call) => call[0] === 'jj' || call[0] === 'git')).toEqual([]);
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
+      expect((await readTeam(home)).agents.some((agent) => agent.name === 'worker1')).toBe(false);
+      releaseWindow();
+      await expect(first).resolves.toBe('%9');
+    } finally {
+      releaseWindow();
+      await Promise.allSettled(second ? [first, second] : [first]);
+      vi.mocked(run).mockImplementation(defaultRun);
+    }
+    expect((await readTeam(home)).agents.filter((agent) => agent.name === 'worker1')).toHaveLength(1);
+  }, 20_000);
+
+  it('claims the expected old worker before concurrent wake launches', async () => {
+    const { root, home } = await setup({ name: 'builder' });
+    const worktree = hivePath(home, 'lanes', 'builder');
+    await fs.mkdir(worktree, { recursive: true });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{
+        ...(await readTeam(home)).agents[0], worktree,
+        pane: '%1', pane_pid: 111, pane_started: 'earlier', session_id: 'session_b',
+      }],
+    });
+    vi.mocked(paneIs).mockImplementation(async (pane) => pane !== '%1');
+    vi.mocked(newWindow).mockClear();
+    let markWindow!: () => void;
+    let releaseWindow!: () => void;
+    const entered = new Promise<void>((resolve) => { markWindow = resolve; });
+    const release = new Promise<void>((resolve) => { releaseWindow = resolve; });
+    vi.mocked(newWindow)
+      .mockImplementationOnce(async () => {
+        markWindow();
+        await release;
+        return '%9';
+      })
+      .mockResolvedValueOnce('%10');
+    const first = wakeAgent(root, 'demo', 'builder');
+    let second: ReturnType<typeof wakeAgent> | undefined;
+    try {
+      await entered;
+      second = wakeAgent(root, 'demo', 'builder');
+      const secondResult = second.catch((error: unknown) => error);
+      await Promise.resolve();
+      releaseWindow();
+      await expect(first).resolves.toBe('%9');
+      expect(String(await secondResult)).toMatch(/closed|changed|already|pending|claim/);
+      expect(newWindow).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseWindow();
+      await Promise.allSettled(second ? [first, second] : [first]);
+      vi.mocked(paneIs).mockImplementation(async () => true);
+    }
+    expect((await readTeam(home)).agents).toHaveLength(1);
+    expect((await readTeam(home)).agents[0].pane).toBe('%9');
+  }, 20_000);
+});
+
 describe('worker contract edge cases', () => {
   const contract = {
     assignment: 'Audit\nand keep the second line intact.',
@@ -676,13 +1269,13 @@ describe('worker contract edge cases', () => {
 
   it('refuses a handoff symlink instead of overwriting its target', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    const worktree = path.join(home, 'lane');
+    const worktree = hivePath(home, 'lanes', 'builder2');
     const file = hivePath(worktree, 'handoffs', 'builder2.md');
     const outside = path.join(root, 'outside.md');
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(outside, 'do not overwrite\n');
     await fs.symlink(outside, file);
-    await expect(spawn(root, { agent: 'builder2', worktree: 'lane', ...contract })).rejects.toThrow(/symlink|follow/);
+    await expect(spawn(root, { agent: 'builder2', ...contract })).rejects.toThrow(/symlink|follow/);
     expect(await fs.readFile(outside, 'utf8')).toBe('do not overwrite\n');
   });
 
@@ -697,12 +1290,12 @@ describe('worker contract edge cases', () => {
 
   it('refuses parent-directory symlinks before creating any agent files', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    const worktree = path.join(home, 'lane');
+    const worktree = hivePath(home, 'lanes', 'builder2');
     const outside = path.join(root, 'outside');
     await fs.mkdir(worktree, { recursive: true });
     await fs.mkdir(outside);
     await fs.symlink(outside, hivePath(worktree));
-    await expect(spawn(root, { agent: 'builder2', worktree: 'lane', ...contract })).rejects.toThrow(/symlink|follow/);
+    await expect(spawn(root, { agent: 'builder2', ...contract })).rejects.toThrow(/symlink|follow/);
     expect(await fs.readdir(outside)).toEqual([]);
   });
 
@@ -1014,6 +1607,25 @@ describe('worker output contracts', () => {
 });
 
 describe('spawn gate', () => {
+  it('rejects a tasked unsafe path before preflight, claims, admission, VCS, or panes', async () => {
+    vi.mocked(paneIs).mockImplementation(async () => true);
+    const { root, home } = await setup({ name: 'builder' });
+    const task = await hubTask(root, 'demo', 'do it');
+    await approvePlan(root, task);
+    const runs = vi.mocked(run).mock.calls.length;
+    const claims = vi.mocked(withLaunchClaim).mock.calls.length;
+    const windows = vi.mocked(newWindow).mock.calls.length;
+
+    await expect(spawn(root, { agent: 'worker1', task, worktree: '../outside' })).rejects.toThrow(/unsafe|worktree|lane/);
+
+    expect(vi.mocked(run).mock.calls).toHaveLength(runs);
+    expect(vi.mocked(withLaunchClaim).mock.calls).toHaveLength(claims);
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
+    expect((await readTaskEvents(root)).some((event) => event.event === 'admission')).toBe(false);
+    expect(await fs.readdir(hubPath(root, 'launches')).catch(() => [])).toEqual([]);
+    expect((await readTeam(home)).agents.some((agent) => agent.name === 'worker1')).toBe(false);
+  });
+
   it('refuses a worker spawn on a task with no approved plan, before any side effect', async () => {
     const { root, home } = await setup({ name: 'builder' });
     const id = await hubTask(root, 'demo', 'do it');
@@ -1349,14 +1961,16 @@ describe('trust dialog at spawn', () => {
 
   it('never auto-trusts a caller-supplied existing worktree even when its path matches', async () => {
     const { root, home } = await setup({ name: 'builder' });
-    const worktree = path.join(home, 'lane');
+    const worktree = hivePath(home, 'lanes', 'builder2');
     await fs.mkdir(worktree, { recursive: true });
     await setProjectMode(root, 'demo', 'auto');
     vi.mocked(capturePane).mockImplementation(async () => trustAt(worktree));
     vi.mocked(sendArrow).mockClear();
     vi.mocked(sendEnter).mockClear();
     try {
-      await expect(spawn(root, { agent: 'builder2', worktree: 'lane' })).resolves.toBe('%9');
+      await expect(spawn(root, {
+        agent: 'builder2', worktree: path.join('.hive', 'lanes', 'builder2'),
+      })).resolves.toBe('%9');
       expect(sendArrow).not.toHaveBeenCalled();
       expect(sendEnter).not.toHaveBeenCalled();
     } finally {
@@ -1469,7 +2083,7 @@ describe('trust dialog at spawn', () => {
     const { root, home, id, worker, approval } = await pendingLaunch();
     const windows = vi.mocked(newWindow).mock.calls.length;
     try {
-      await expect(spawn(root, { agent: 'worker1', task: id })).rejects.toThrow(/already has an agent/);
+      await expect(spawn(root, { agent: 'worker1', task: id })).rejects.toThrow(/already has an agent|overlaps live agent/);
       expect(vi.mocked(newWindow).mock.calls).toHaveLength(windows);
       expect((await readTeam(home)).agents.find((agent) => agent.name === 'worker1')?.attempts_used).toBe(1);
 
@@ -1712,11 +2326,11 @@ describe('trust dialog at spawn', () => {
     const { root, home } = await setup({ name: 'builder' });
     const id = await hubTask(root, 'demo', 'do it');
     await approvePlan(root, id);
-    const worktree = path.join(home, 'lane');
+    const worktree = hivePath(home, 'lanes', 'worker1');
     await fs.mkdir(worktree, { recursive: true });
     const menu = trustAt(worktree, true);
     vi.mocked(capturePane).mockImplementation(async () => menu);
-    await spawn(root, { agent: 'worker1', task: id, worktree: 'lane' });
+    await spawn(root, { agent: 'worker1', task: id, worktree: path.join('.hive', 'lanes', 'worker1') });
     const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
     const approval = redactDialog((await readDialogFor(root, 'demo', 'worker1'))!).fingerprint;
     let answered = false;
@@ -1958,12 +2572,12 @@ describe('trust dialog at spawn', () => {
     const { root, home } = await setup({ name: 'builder' });
     const id = await hubTask(root, 'demo', 'do it');
     await approvePlan(root, id);
-    const worktree = path.join(home, 'lane');
+    const worktree = hivePath(home, 'lanes', 'worker1');
     await fs.mkdir(worktree, { recursive: true });
     const menu = trustAt(worktree, true);
     let screen = menu;
     vi.mocked(capturePane).mockImplementation(async () => screen);
-    await spawn(root, { agent: 'worker1', task: id, worktree: 'lane' });
+    await spawn(root, { agent: 'worker1', task: id, worktree: path.join('.hive', 'lanes', 'worker1') });
     const approval = redactDialog((await readDialogFor(root, 'demo', 'worker1'))!).fingerprint;
     vi.mocked(sendArrow).mockImplementation(async () => { screen = menu.replace('Trust this folder?', 'Trust this folder NOW?'); });
     vi.mocked(sendEnter).mockClear();
@@ -2186,12 +2800,19 @@ describe('trust dialog at spawn', () => {
     }
   }, 20_000);
 
-  it('still kills the pane, forgets the workspace, and deletes the claim on timeout', async () => {
+  it('still kills the pane, preserves the workspace, and deletes the claim on timeout', async () => {
+    vi.mocked(paneIs).mockImplementation(async () => true);
     const { root, home } = await setup({ name: 'builder' });
     vi.mocked(capturePane).mockImplementation(async () => IDLE);
     const id = await hubTask(root, 'demo', 'do it');
     await approvePlan(root, id);
     const worktree = hivePath(home, 'lanes', 'worker1');
+    vi.mocked(newWindow).mockReset();
+    let createdPane: string | undefined;
+    vi.mocked(newWindow).mockImplementationOnce(async () => {
+      createdPane = '%10';
+      return createdPane;
+    });
     const kills = vi.mocked(killWindow).mock.calls.length;
     vi.mocked(capturePane).mockImplementation(async () => 'starting');
     try {
@@ -2199,12 +2820,14 @@ describe('trust dialog at spawn', () => {
       const worker = (await readTeam(home)).agents.find((agent) => agent.name === 'worker1')!;
       expect(worker).toMatchObject({ admission_status: 'launch_failed', lease_revoked: true });
       expect(worker.launch_pending).toBeUndefined();
-      expect(vi.mocked(killWindow).mock.calls.slice(kills)).toContainEqual(['%9', { pid: 4242, started: 'later' }]);
-      expect(await fs.stat(worktree).catch(() => null)).toBeNull();
+      expect(createdPane).toBeDefined();
+      expect(vi.mocked(killWindow).mock.calls.slice(kills)).toContainEqual([createdPane, { pid: 4242, started: 'later' }]);
+      expect((await fs.stat(worktree)).isDirectory()).toBe(true);
       expect(await fs.stat(path.join(root, worker.launch_claim_path!)).catch(() => null)).toBeNull();
-      expect(vi.mocked(run).mock.calls.some((call) => call[0] === 'jj' && call[1].includes('forget'))).toBe(true);
+      expect(vi.mocked(run).mock.calls.some((call) => call[0] === 'jj' && call[2] === home && call[1].includes('forget'))).toBe(false);
     } finally {
       vi.mocked(capturePane).mockImplementation(async () => IDLE);
+      vi.mocked(newWindow).mockImplementation(async () => '%9');
     }
   }, 20_000);
 });
