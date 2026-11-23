@@ -884,6 +884,38 @@ describe('cleanupProject confirmed reviewer regressions', () => {
     })]);
   });
 
+  it('deregisters a legacy quarantined workspace whose stale root is empty', async () => {
+    const { root, home } = await setup();
+    const source = path.join(home, 'lane-agent');
+    const dest = path.join(hivePath(home, 'trash'), '2000-01-01', 'lane-agent');
+    await fs.mkdir(dest, { recursive: true });
+    await manifestAdd(home, {
+      kind: 'jj-workspace', at: '2000-01-01T00:00:00.000Z', path: source,
+      quarantine_path: dest, quarantine_deregistered: false,
+      quarantine_files: [], quarantine_directories: [],
+    });
+    let registered = true;
+    vi.mocked(run).mockImplementation(async (_command, args) => {
+      if (args.includes('workspace') && args.includes('list')) {
+        return { code: 0, stdout: `${registered ? 'lane-agent\t\n' : ''}default\t${home}\n`, stderr: '' };
+      }
+      if (args.includes('workspace') && args.includes('forget')) {
+        expect(args).toEqual(['-R', home, 'workspace', 'forget', 'lane-agent']);
+        registered = false;
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+
+    const actions = await cleanupProject(root, 'proj');
+
+    expect(actions).toEqual([expect.objectContaining({ acted: true })]);
+    expect(registered).toBe(false);
+    expect(await manifestRead(home)).toEqual([expect.objectContaining({
+      quarantine_path: dest, quarantine_deregistered: true,
+    })]);
+  });
+
   it('does not lose a concurrent manifestAdd during quarantine', async () => {
     const { root, home, wt } = await setupLane('jj-workspace');
     const added = {
