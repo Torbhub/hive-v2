@@ -10,8 +10,9 @@ import {
 } from './tmux.js';
 import { classify, dialogFingerprint, lines, parseDialog } from './screen.js';
 import {
-  appendDecision, compareAndSwapTeamEntry, foldTasks, hivePath, hubPath, insertTeamEntry, manifestAdd,
-  readProjects, readTaskEvents, readTeam, clearPendingPane, Refusal, valueDigest, withTeamLock, type ProjectsFile,
+  appendDecision, canonicalJson, compareAndSwapTeamEntry, foldTasks, hivePath, hubPath, insertTeamEntry,
+  manifestAdd, manifestRead, manifestUpdate, readProjects, readTaskEvents, readTeam, clearPendingPane, Refusal,
+  valueDigest, withTeamLock, type PendingPane, type ProjectsFile,
 } from './state.js';
 import type { Approvals, ProjectMode, TeamEntry, TmuxAdmission } from './types.js';
 import { releasePendingLaunchClaim, withLaunchClaim, withProjectLock } from './project.js';
@@ -189,6 +190,10 @@ async function ensureAgentProfile(cwd: string, agent: string): Promise<string> {
   return file;
 }
 
+function windowStartedError(error: unknown): Error {
+  return Object.assign(error instanceof Error ? error : new Error(String(error)), { windowStarted: true });
+}
+
 export async function launchWindow(
   root: string,
   project: string,
@@ -198,13 +203,14 @@ export async function launchWindow(
   mode: LaunchMode = 'ask',
   model?: string,
   beforeWindow?: () => Promise<void>,
+  credentialCwd = cwd,
 ): Promise<{ pane: string; identity: PaneIdentity }> {
   await assertExecutionAllowed(root, project);
   const quote = (v: string): string => `'${v.replaceAll("'", `'\\''`)}'`;
   const profile = await ensureAgentProfile(cwd, agent);
-  await requireAgentCredential(cwd, project, agent);
+  await requireAgentCredential(credentialCwd, project, agent);
   const credentialFile = process.env.HIVE_COLLABORATION_ENABLED === '1'
-    ? `HIVE_COLLABORATION_ENABLED=1 HIVE_AGENT_REF=${quote(`${agent}@${cwd}`)} HIVE_AGENT_CREDENTIAL= HIVE_AGENT_CREDENTIAL_FILE=${quote(hivePath(cwd, 'team', agent, 'credential.env'))} ` : '';
+    ? `HIVE_COLLABORATION_ENABLED=1 HIVE_AGENT_REF=${quote(`${agent}@${cwd}`)} HIVE_AGENT_CREDENTIAL= HIVE_AGENT_CREDENTIAL_FILE=${quote(hivePath(credentialCwd, 'team', agent, 'credential.env'))} ` : '';
   await assertExecutionAllowed(root, project);
   await beforeWindow?.();
   const pane = await newWindow(
@@ -221,17 +227,21 @@ export async function launchWindow(
       await sleep(500);
     }
   } catch (error) {
-    await killWindow(pane, identity ?? undefined).catch((cleanupError: unknown) => {
+    let cleanupError: unknown;
+    await killWindow(pane, identity ?? undefined).catch((cause: unknown) => { cleanupError = cause; });
+    if (cleanupError) {
       const detail = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-      throw new Error(`new pane cleanup failed: ${detail}`, { cause: error });
-    });
-    throw error;
+      throw windowStartedError(new Error(`new pane cleanup failed: ${detail}`, { cause: error }));
+    }
+    throw windowStartedError(error);
   }
-  await killWindow(pane).catch((cleanupError: unknown) => {
+  let cleanupError: unknown;
+  await killWindow(pane).catch((cause: unknown) => { cleanupError = cause; });
+  if (cleanupError) {
     const detail = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-    throw new Error(`new pane cleanup failed: ${detail}`);
-  });
-  throw new Error(`pane ${pane} never got a process identity`);
+    throw windowStartedError(new Error(`new pane cleanup failed: ${detail}`));
+  }
+  throw windowStartedError(new Error(`pane ${pane} never got a process identity`));
 }
 
 async function hashRuntimeDirectory(worktree: string, relative: string, runtime_files: Record<string, string>): Promise<void> {
@@ -490,11 +500,230 @@ async function jjBaseRev(home: string): Promise<string> {
   throw new Error(`jj: no base revision in ${home} (tried main@origin, main, @)`);
 }
 
+async function removeLaneManifest(home: string, worktree: string): Promise<void> {
+  await manifestUpdate(home, (records) => records.filter((record) =>
+    !(record.kind === 'worktree' || record.kind === 'jj-workspace') || record.path !== worktree));
+}
+
 async function undoJjWorkspace(home: string, name: string, wt: string): Promise<void> {
-  const dest = path.join(hivePath(home, 'trash', new Date().toISOString().slice(0, 10)), name);
+  const dest = path.join(hivePath(home, 'trash', new Date().toISOString().slice(0, 10)), `${name}-${randomUUID()}`);
+  const errors: unknown[] = [];
   await fs.mkdir(path.dirname(dest), { recursive: true });
-  await fs.rename(wt, dest).catch(() => {});
-  await run('jj', ['-R', home, 'workspace', 'forget', name], home);
+  await fs.rename(wt, dest).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') errors.push(error);
+  });
+  const forgotten = await run('jj', ['-R', home, 'workspace', 'forget', name], home).catch((error: unknown) => {
+    errors.push(error);
+    return null;
+  });
+  if (forgotten && forgotten.code !== 0) {
+    errors.push(new Error(`jj workspace forget failed: ${forgotten.stderr.trim() || `exit ${forgotten.code}`}`));
+  }
+  if (!errors.length && forgotten?.code === 0) {
+    const pruned = await run('git', ['worktree', 'prune'], home).catch((error: unknown) => {
+      errors.push(error);
+      return null;
+    });
+    if (pruned && pruned.code !== 0) {
+      errors.push(new Error(`git worktree prune failed: ${pruned.stderr.trim() || `exit ${pruned.code}`}`));
+    }
+  }
+  if (errors.length) throw new AggregateError(errors, `failed to roll back jj workspace ${wt}`);
+  await removeLaneManifest(home, wt);
+}
+
+async function undoGitWorktree(home: string, worktree: string, branch: string): Promise<void> {
+  const errors: unknown[] = [];
+  const removed = await run('git', ['worktree', 'remove', '--force', worktree], home).catch((error: unknown) => {
+    errors.push(error);
+    return null;
+  });
+  if (removed && removed.code !== 0) {
+    errors.push(new Error(`git worktree remove failed: ${removed.stderr.trim() || `exit ${removed.code}`}`));
+  }
+  const deleted = await run('git', ['branch', '-D', branch], home).catch((error: unknown) => {
+    errors.push(error);
+    return null;
+  });
+  if (deleted && deleted.code !== 0) {
+    errors.push(new Error(`git branch rollback failed: ${deleted.stderr.trim() || `exit ${deleted.code}`}`));
+  }
+  if (errors.length) throw new AggregateError(errors, `failed to roll back git worktree ${worktree}`);
+  await removeLaneManifest(home, worktree);
+}
+
+async function canonicalWorktree(worktree: string): Promise<string> {
+  return fs.realpath(worktree).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return path.resolve(worktree);
+    throw error;
+  });
+}
+
+function worktreesOverlap(left: string, right: string): boolean {
+  const contained = (parent: string, child: string) => {
+    const relative = path.relative(parent, child);
+    return !relative || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  };
+  return contained(left, right) || contained(right, left);
+}
+
+export async function assertWorktreeNotShared(home: string, worktree: string, self?: TeamEntry): Promise<void> {
+  const expected = await canonicalWorktree(worktree);
+  for (const candidate of (await readTeam(home)).agents) {
+    if (self && canonicalJson(candidate) === canonicalJson(self)) continue;
+    if (candidate.closed_at || !candidate.pane || !candidate.worktree) continue;
+    if (!await paneIs(candidate.pane, { pid: candidate.pane_pid ?? 0, started: candidate.pane_started ?? '' })) continue;
+    if (worktreesOverlap(await canonicalWorktree(candidate.worktree), expected)) {
+      throw new Refusal(`worktree ${worktree} overlaps live agent ${candidate.name} at ${candidate.worktree}`);
+    }
+  }
+}
+
+export async function verifiedPendingPaneIdentity(pending: PendingPane): Promise<PaneIdentity> {
+  if (typeof pending.pane_pid !== 'number' || !pending.pane_started) {
+    throw new Refusal(`pending pane ${pending.pane} has no recorded process identity`);
+  }
+  const expected = { pid: pending.pane_pid, started: pending.pane_started };
+  const current = await paneIdentity(pending.pane);
+  if (!current || current.pid !== expected.pid || current.started !== expected.started) {
+    throw new Refusal(`pending pane ${pending.pane} has a stale or reused process identity`);
+  }
+  return current;
+}
+
+export async function assertNoLiveAgentReplacement(
+  home: string, project: string, agent: string, old?: TeamEntry,
+): Promise<void> {
+  const records = (await manifestRead(home)).filter((record) => record.kind === 'tmux' && record.window === windowName(project, agent));
+  let currentRecord = -1;
+  records.forEach((record, index) => {
+    if (old?.pane === record.pane && old?.pane_pid === record.pane_pid && old?.pane_started === record.pane_started) currentRecord = index;
+  });
+  for (const record of records.slice(currentRecord + 1)) {
+    if (typeof record.pane !== 'string' || typeof record.pane_pid !== 'number' || typeof record.pane_started !== 'string') continue;
+    if (await paneIs(record.pane, { pid: record.pane_pid, started: record.pane_started })) {
+      throw new Refusal(`${agent} has a verified live replacement in pane ${record.pane}; refusing a duplicate launch`);
+    }
+  }
+}
+
+async function freshWorktree(home: string, agent: string, requested?: string): Promise<string> {
+  if (requested?.split(/[\\/]/).includes('..')) throw new Refusal(`unsafe worktree traversal: ${requested}`);
+  const worktree = requested ? path.resolve(home, requested) : hivePath(home, 'lanes', agent);
+  const canonical = hivePath(home, 'lanes', agent);
+  if (worktree !== canonical) throw new Refusal(`worktree must be the canonical lane ${canonical}`);
+  const relative = path.relative(home, worktree);
+  let current = home;
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    const stat = await fs.lstat(current).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    });
+    if (stat?.isSymbolicLink()) throw new Refusal(`unsafe symlink in worktree path: ${current}`);
+  }
+  return worktree;
+}
+
+export async function withAgentLaneReservation<T>(
+  home: string, project: string, agent: string, requested: string | undefined,
+  fn: (worktree: string) => Promise<T>,
+): Promise<T> {
+  const worktree = await freshWorktree(home, agent, requested);
+  await assertWorktreeNotShared(home, worktree);
+  await assertNoLiveAgentReplacement(home, project, agent);
+  const reservation = hivePath(home, 'lanes', `.${agent}.reserve`);
+  try {
+    await fs.mkdir(path.dirname(reservation), { recursive: true });
+    await fs.mkdir(reservation);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Refusal(`${agent} already has a pending lane reservation`);
+    }
+    throw error;
+  }
+  try {
+    return await fn(worktree);
+  } finally {
+    await fs.rm(reservation, { recursive: true, force: true });
+  }
+}
+
+export type AgentLane = {
+  worktree: string;
+  existed: boolean;
+  jjWorkspace?: string;
+  hookInstallFailed: boolean;
+  rollback: () => Promise<void>;
+};
+
+export async function allocateAgentLane(home: string, project: string, agent: string, requested?: string): Promise<AgentLane> {
+  const worktree = await freshWorktree(home, agent, requested);
+  const existed = existsSync(worktree);
+  if (existed) {
+    const preserved = (await manifestRead(home)).find((record) =>
+      (record.kind === 'worktree' || record.kind === 'jj-workspace') && record.path === worktree);
+    if (preserved) {
+      return {
+        worktree, existed, hookInstallFailed: false, rollback: async () => {},
+        ...(preserved.kind === 'jj-workspace' ? { jjWorkspace: agent } : {}),
+      };
+    }
+  }
+  let rollback: (() => Promise<void>) | undefined;
+  try {
+    await fs.mkdir(path.dirname(worktree), { recursive: true });
+    const jjRepo = (await run('jj', ['root'], home)).code === 0;
+    const plainFolder = !jjRepo
+      && (await run('git', ['rev-parse', '--is-inside-work-tree'], home)).code !== 0;
+    if (jjRepo) {
+      const base = await jjBaseRev(home);
+      const name = path.basename(worktree);
+      const made = await run('jj', ['-R', home, 'workspace', 'add', worktree, '-r', base], home);
+      if (made.code !== 0) {
+        if (!existed && existsSync(worktree)) rollback = () => undoJjWorkspace(home, name, worktree);
+        throw new Error(`jj workspace add failed: ${made.stderr.trim()}`);
+      }
+      rollback = existed ? async () => {} : () => undoJjWorkspace(home, name, worktree);
+      let hookInstallFailed = false;
+      if (existsSync(path.join(worktree, 'scripts', 'install-git-hooks.sh'))) {
+        const hooks = await run('bash', ['scripts/install-git-hooks.sh'], worktree);
+        hookInstallFailed = hooks.code !== 0;
+      }
+      await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: worktree });
+      return { worktree, existed, jjWorkspace: name, hookInstallFailed, rollback };
+    }
+    if (plainFolder) {
+      if (existed) return { worktree, existed, hookInstallFailed: false, rollback: async () => {} };
+      await fs.mkdir(worktree, { recursive: true });
+      rollback = () => fs.rm(worktree, { recursive: true, force: true });
+      return { worktree, existed, hookInstallFailed: false, rollback };
+    }
+    const branch = `${project}/${agent}`;
+    const head = await run('git', ['rev-parse', '--verify', '-q', 'HEAD'], home);
+    if (head.code !== 0 && head.code !== 1) {
+      throw new Error(`git HEAD lookup failed: ${head.stderr.trim() || `exit ${head.code}`}`);
+    }
+    const add = head.code === 0
+      ? ['worktree', 'add', '-q', '-b', branch, worktree, 'HEAD']
+      : ['worktree', 'add', '-q', '--orphan', '-b', branch, worktree];
+    const made = await run('git', add, home);
+    if (made.code !== 0) {
+      if (!existed && existsSync(worktree)) rollback = () => undoGitWorktree(home, worktree, branch);
+      throw new Error(`git worktree add failed: ${made.stderr.trim()}`);
+    }
+    rollback = existed ? async () => {} : () => undoGitWorktree(home, worktree, branch);
+    await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: worktree, branch });
+    return { worktree, existed, hookInstallFailed: false, rollback };
+  } catch (error) {
+    if (!rollback) throw error;
+    try {
+      await rollback();
+    } catch (cleanup) {
+      throw new AggregateError([error, cleanup], error instanceof Error ? error.message : String(error));
+    }
+    throw error;
+  }
 }
 
 function envParent(self: string): string | undefined {
@@ -508,13 +737,16 @@ export async function spawnAgent(root: string, project: string, opts: SpawnOptio
   checkWorkerContract(opts);
   const model = opts.model ?? DEFAULT_MODEL;
   checkModel(model);
-  await preflight(model);
-  const launched = await withLaunchClaim(
-    root, project,
-    (p, launchClaim, launchClaimDigest) => spawnRegisteredAgent(root, p, opts, launchClaim, launchClaimDigest),
-    { preserveClaim: (result) => result.claimPending === true },
-  );
-  return launched.pane;
+  const p = await projectEntry(root, project);
+  return withAgentLaneReservation(p.home, project, opts.agent, opts.worktree, async () => {
+    await preflight(model);
+    const launched = await withLaunchClaim(
+      root, project,
+      (registered, launchClaim, launchClaimDigest) => spawnRegisteredAgent(root, registered, opts, launchClaim, launchClaimDigest),
+      { preserveClaim: (result) => result.claimPending === true },
+    );
+    return launched.pane;
+  });
 }
 
 async function spawnRegisteredAgent(
@@ -539,46 +771,11 @@ async function spawnRegisteredAgent(
     { parent, worktree, model },
   ) : undefined;
 
+  let lane: Awaited<ReturnType<typeof allocateAgentLane>> | undefined;
   let launched: { pane: string; identity: PaneIdentity } | null = null;
   let registered: TeamEntry | undefined;
-  let jjLane: { name: string; path: string } | null = null;
-  let hookInstallFailed = false;
-  const worktreeExisted = existsSync(worktree);
   try {
-    await fs.mkdir(path.dirname(worktree), { recursive: true });
-    const jjRepo = (await run('jj', ['root'], home)).code === 0;
-    const plainFolder = !opts.worktree && !jjRepo &&
-      (await run('git', ['rev-parse', '--is-inside-work-tree'], home)).code !== 0;
-    if (jjRepo) {
-      const base = await jjBaseRev(home);
-      const existed = existsSync(worktree);
-      const made = await run('jj', ['-R', home, 'workspace', 'add', worktree, '-r', base], home);
-      if (made.code !== 0) {
-        if (!existed && existsSync(worktree)) await undoJjWorkspace(home, path.basename(worktree), worktree);
-        throw new Error(`jj workspace add failed: ${made.stderr.trim()}`);
-      }
-      jjLane = { name: path.basename(worktree), path: worktree };
-      if (existsSync(path.join(worktree, 'scripts', 'install-git-hooks.sh'))) {
-        const hooks = await run('bash', ['scripts/install-git-hooks.sh'], worktree);
-        hookInstallFailed = hooks.code !== 0;
-      }
-      await manifestAdd(home, { kind: 'jj-workspace', at: new Date().toISOString(), path: worktree });
-    } else if (plainFolder) {
-      await fs.mkdir(worktree, { recursive: true });
-    } else {
-      const branch = `${project}/${agent}`;
-      const head = await run('git', ['rev-parse', '--verify', '-q', 'HEAD'], home);
-      if (head.code !== 0 && head.code !== 1) {
-        throw new Error(`git HEAD lookup failed: ${head.stderr.trim() || `exit ${head.code}`}`);
-      }
-      const add = head.code === 0
-        ? ['worktree', 'add', '-q', '-b', branch, worktree, 'HEAD']
-        : ['worktree', 'add', '-q', '--orphan', '-b', branch, worktree];
-      const made = await run('git', add, home);
-      if (made.code !== 0) throw new Error(`git worktree add failed: ${made.stderr.trim()}`);
-      await manifestAdd(home, { kind: 'worktree', at: new Date().toISOString(), path: worktree, branch });
-    }
-
+    lane = await allocateAgentLane(home, project, agent, opts.worktree);
     await ensureAgentFiles(worktree, agent, role);
     await writeWorkerContract(worktree, agent, opts);
     if (task) {
@@ -612,7 +809,7 @@ async function spawnRegisteredAgent(
     } else {
       registered = await withProjectLock(root, project, () => insertTeamEntry(home, { name: agent, ...patch }));
     }
-    if (hookInstallFailed) {
+    if (lane.hookInstallFailed) {
       try {
         await appendDecision(root, {
           project, by: 'orchestrator',
@@ -623,10 +820,10 @@ async function spawnRegisteredAgent(
       }
     }
 
-    const idle = await waitIdleTrust(pane, worktreeExisted ? undefined : { cwd: worktree, identity });
+    const idle = await waitIdleTrust(pane, lane.existed ? undefined : { cwd: worktree, identity });
     if (idle === 'dialog') {
       if (!registered) throw new Error(`${agent} launch was not registered`);
-      await registerPendingWorkerLaunch(root, project, home, registered, worktree, launchClaim, launchClaimDigest, jjLane?.name);
+      await registerPendingWorkerLaunch(root, project, home, registered, worktree, launchClaim, launchClaimDigest, lane.jjWorkspace);
       return { pane, identity, home, worktree, admission, claimPending: true };
     }
     if (idle !== 'idle') throw new Error(`${pane} never went idle; nothing was typed`);
@@ -643,16 +840,39 @@ async function spawnRegisteredAgent(
     }
     const sessionId = await findLatestSession(worktree, agent);
     if (sessionId && registered) {
-      await withProjectLock(root, project, () => compareAndSwapTeamEntry(home, registered!, { session_id: sessionId }));
+      const withSession = await withProjectLock(root, project, () =>
+        compareAndSwapTeamEntry(home, registered!, { session_id: sessionId }));
+      if (!withSession) throw new Error(`${agent} session registration changed before finalization`);
+      registered = withSession;
     }
     await finishLaunch(root, launchClaim, { pane, identity, home, worktree, admission });
     return { pane, identity, home, worktree, admission };
   } catch (error) {
-    if (task) {
-      await recordTmuxLaunchOutcome(root, home, task, agent, admission!.lease_id, error instanceof Error ? error.message : String(error));
+    const cleanupErrors: unknown[] = [];
+    let paneCleanupFailed = false;
+    if (launched) {
+      await killWindow(launched.pane, launched.identity).catch((cleanup: unknown) => {
+        paneCleanupFailed = true;
+        cleanupErrors.push(cleanup);
+      });
     }
-    if (launched) await killWindow(launched.pane, launched.identity).catch(() => {});
-    if (jjLane) await undoJjWorkspace(home, jjLane.name, jjLane.path);
+    if (registered && !task && !paneCleanupFailed) {
+      try {
+        const removed = await compareAndSwapTeamEntry(home, registered, null);
+        if (removed === undefined) throw new Error(`${agent} registration changed during rollback`);
+      } catch (cleanup) {
+        cleanupErrors.push(cleanup);
+      }
+    }
+    if (task) {
+      await recordTmuxLaunchOutcome(root, home, task, agent, admission!.lease_id, error instanceof Error ? error.message : String(error))
+        .catch((cleanup: unknown) => { cleanupErrors.push(cleanup); });
+    }
+    const possibleWork = launched !== null || (error as { windowStarted?: boolean }).windowStarted === true;
+    if (lane && !possibleWork) await lane.rollback().catch((cleanup: unknown) => { cleanupErrors.push(cleanup); });
+    if (cleanupErrors.length) {
+      throw new AggregateError([error, ...cleanupErrors], error instanceof Error ? error.message : String(error));
+    }
     throw error;
   }
 }
@@ -954,8 +1174,21 @@ async function relaunchRegisteredAgent(
     } else {
       await withProjectLock(root, p.name, async () => {
         await assertEntryAlive(home, old, { pane, identity }, { allowStamped: true, cleanup: false });
-        const fresh = (await readTeam(home)).agents.find((entry) => entry.name === old.name);
-        if (fresh) registered = await compareAndSwapTeamEntry(home, fresh, patch) ?? undefined;
+        let claimedMatches = (await readTeam(home)).agents.filter((entry) => entry.name === old.name
+          && Boolean(entry.orchestrator) === Boolean(old.orchestrator)
+          && entry.pane === old.pane && entry.pane_pid === old.pane_pid && entry.pane_started === old.pane_started);
+        if (old.lease_id !== undefined) {
+          claimedMatches = claimedMatches.filter((entry) => entry.lease_id === old.lease_id);
+        } else {
+          const expectedWorktree = await canonicalWorktree(old.worktree || home);
+          const matches: TeamEntry[] = [];
+          for (const entry of claimedMatches) {
+            if (await canonicalWorktree(entry.worktree || home) === expectedWorktree) matches.push(entry);
+          }
+          claimedMatches = matches;
+        }
+        const claimed = claimedMatches.length === 1 ? claimedMatches[0] : undefined;
+        if (claimed) registered = await compareAndSwapTeamEntry(home, claimed, patch) ?? undefined;
         if (!registered) throw new Error(`${old.name} was killed while its new pane came up`);
       });
     }
@@ -1016,6 +1249,8 @@ export async function respawnAgent(
   const home = p.home;
   const old = (await readTeam(home)).agents.find((entry) => entry.name === agent);
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
+  await assertNoLiveAgentReplacement(home, project, agent, old);
+  await assertWorktreeNotShared(home, old.worktree || home, old);
   if (old.model === undefined && options.model === undefined) {
     throw new Error(`${agent} is missing its recorded model. Use hive spawn respawn ${project} --agent ${agent} --model ${DEFAULT_MODEL}`);
   }
@@ -1069,11 +1304,15 @@ export async function respawnAgent(
   }
 }
 
-export async function wakeAgent(root: string, project: string, agent: string): Promise<string> {
+export async function wakeAgent(root: string, project: string, agent: string, expected?: TeamEntry): Promise<string> {
   await assertExecutionAllowed(root, project);
   const p = await projectEntry(root, project);
-  const old = (await readTeam(p.home)).agents.find((entry) => entry.name === agent);
+  const matches = (await readTeam(p.home)).agents.filter((entry) => entry.name === agent);
+  if (!expected && matches.length > 1) throw new Error(`${project} has ambiguous workers named ${agent}`);
+  const old = expected ? matches.find((entry) => canonicalJson(entry) === canonicalJson(expected)) : matches[0];
   if (!old) throw new Error(`${project} has no agent named ${agent}`);
+  await assertNoLiveAgentReplacement(p.home, project, agent, old);
+  await assertWorktreeNotShared(p.home, old.worktree || p.home, old);
   if (old.closed_at) throw new Error(`${agent} was closed on purpose at ${old.closed_at}; not waking it`);
   if (!old.session_id) throw new Error(`${agent} has no recorded session to resume; respawn it instead`);
   if (old.model === undefined) {
@@ -1088,13 +1327,21 @@ export async function wakeAgent(root: string, project: string, agent: string): P
     throw new Error(`${agent} is already running`);
   }
   const admission = await admitReplacement(root, p.home, old, true);
+  const reserved = admission
+    ? (await readTeam(p.home)).agents.find((entry) => entry.lease_id === admission.lease_id)
+    : old;
+  const claimed = reserved
+    ? await compareAndSwapTeamEntry(p.home, reserved, { closed_at: new Date().toISOString() })
+    : null;
+  if (!claimed) throw new Error(`${agent} wake claim changed before launch`);
   try {
     await releasePendingLaunchClaim(root, old);
-    return await relaunchAgent(root, p, { ...old, launch_pending: undefined }, old.session_id, admission);
+    return await relaunchAgent(root, p, { ...claimed, launch_pending: undefined }, old.session_id, admission);
   } catch (error) {
     if (old.task && !old.orchestrator) {
       await recordTmuxLaunchOutcome(root, p.home, old.task, agent, admission!.lease_id, error instanceof Error ? error.message : String(error));
     }
+    await compareAndSwapTeamEntry(p.home, claimed, { closed_at: old.closed_at });
     throw error;
   }
 }

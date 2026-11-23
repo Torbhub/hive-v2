@@ -15,9 +15,12 @@ vi.mock('../src/tmux.js', async (importOriginal) => {
     ...orig,
     newWindow: vi.fn(async () => '%9'),
     paneExists: vi.fn(async () => true),
-    paneIdentity: vi.fn(async () => ({ pid: 1, started: 'x' })),
+    paneIdentity: vi.fn(async (pane: string) => pane === '%7'
+      ? { pid: 7, started: 'pending' }
+      : { pid: 1, started: 'x' }),
     paneIs: vi.fn(async () => true),
     capturePane: vi.fn(async () => DIALOG),
+    run: vi.fn(orig.run),
     killWindow: vi.fn(async () => {}),
     sleep: vi.fn(async () => {}),
     sendEnter: vi.fn(async () => {}),
@@ -38,13 +41,13 @@ vi.mock('../src/spawn.js', async (importOriginal) => {
   };
 });
 
-import { capturePane, killWindow, newWindow, paneExists, paneIs, sendArrow, sendEnter, sendLiteral } from '../src/tmux.js';
+import { capturePane, killWindow, newWindow, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendLiteral } from '../src/tmux.js';
 import {
   answerDialog, buildStatus, continueProject, hubAccept, hubAdd, hubInit, hubLog, hubProgress, hubTask, listTasks, menuKeys, planAnswer,
   readDialogFor, setProjectApprovals, setProjectMode, startProject, wake,
 } from '../src/hub.js';
 import { handleCurrentOrchestratorDialog } from '../src/watch.js';
-import { preflight, typeLine, waitIdle } from '../src/spawn.js';
+import { findLatestSession, preflight, typeLine, waitIdle } from '../src/spawn.js';
 import { killAgent } from '../src/kill.js';
 import { removeProject } from '../src/project.js';
 import { lines, parseDialog } from '../src/screen.js';
@@ -689,12 +692,131 @@ describe('continue sending claim', () => {
   async function setupPending() {
     const { root } = await setup();
     await writePendingPane(root, 'demo', {
-      pane: '%7', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+      pane: '%7', pane_pid: 7, pane_started: 'pending', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
     });
     vi.mocked(capturePane).mockImplementation(async () => IDLE);
     vi.mocked(typeLine).mockClear();
     return root;
   }
+
+  it('registers and discovers the session in the actual pending worktree', async () => {
+    const { root, home } = await setup();
+    const worktree = hivePath(home, 'lanes', 'demo-orchestrator');
+    await fs.mkdir(worktree, { recursive: true });
+    const pending = {
+      pane: '%7', pane_pid: 7, pane_started: 'pending', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false,
+      model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false,
+      line: 'You are demo-orchestrator.', worktree,
+    };
+    await writePendingPane(root, 'demo', pending);
+    vi.mocked(capturePane).mockImplementation(async () => IDLE);
+    vi.mocked(findLatestSession).mockClear();
+
+    await expect(continueProject(root, 'demo')).resolves.toBe('%7');
+
+    expect((await readTeam(home)).agents[0]).toMatchObject({
+      name: 'demo-orchestrator', orchestrator: true, worktree,
+      handoff: hivePath(worktree, 'handoffs', 'demo-orchestrator.md'),
+    });
+    expect(findLatestSession).toHaveBeenCalledWith(worktree, 'demo-orchestrator');
+  });
+
+  async function setupIdentifiedPending() {
+    const { root, home } = await setup();
+    const worktree = hivePath(home, 'lanes', 'demo-orchestrator');
+    await fs.mkdir(worktree, { recursive: true });
+    await writePendingPane(root, 'demo', {
+      pane: '%7', pane_pid: 7, pane_started: 'pending', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false,
+      model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false,
+      line: 'You are demo-orchestrator.', worktree,
+    });
+    vi.mocked(capturePane).mockClear();
+    vi.mocked(paneIdentity).mockClear();
+    vi.mocked(typeLine).mockClear();
+    return { root, home, worktree };
+  }
+
+  it('verifies pending pane identity before capture', async () => {
+    const { root, home } = await setupIdentifiedPending();
+    vi.mocked(paneIdentity).mockResolvedValueOnce({ pid: 99, started: 'reused' });
+
+    await expect(continueProject(root, 'demo')).rejects.toThrow(/identity|stale|pending/);
+
+    expect(capturePane).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
+    expect((await readTeam(home)).agents.some((agent) => agent.orchestrator)).toBe(false);
+  });
+
+  it('rejects a pending pane whose identity changes before the locked registration', async () => {
+    const { root, home } = await setupIdentifiedPending();
+    vi.mocked(paneIdentity)
+      .mockResolvedValueOnce({ pid: 7, started: 'pending' })
+      .mockResolvedValueOnce({ pid: 99, started: 'reused' });
+
+    await expect(continueProject(root, 'demo')).rejects.toThrow(/identity|stale|pending/);
+
+    expect(paneIdentity).toHaveBeenCalledTimes(2);
+    expect(typeLine).not.toHaveBeenCalled();
+    expect((await readTeam(home)).agents.some((agent) => agent.orchestrator)).toBe(false);
+  });
+
+  it('fences a legacy pending record without a verified identity', async () => {
+    const { root, home } = await setupIdentifiedPending();
+    const current = (await readPendingPane(root, 'demo'))!;
+    await writePendingPane(root, 'demo', {
+      ...current, pane_pid: undefined, pane_started: undefined,
+    });
+
+    await expect(continueProject(root, 'demo')).rejects.toThrow(/identity|migration|pending/);
+
+    expect(capturePane).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
+    expect((await readTeam(home)).agents.some((agent) => agent.orchestrator)).toBe(false);
+  });
+
+  it('refuses a pending worktree owned by another live agent', async () => {
+    const { root, home, worktree } = await setupIdentifiedPending();
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{ name: 'builder', worktree, pane: '%2', pane_pid: 22, pane_started: 'live' }],
+    });
+
+    await expect(continueProject(root, 'demo')).rejects.toThrow(/shared|worktree|in use/);
+
+    expect(typeLine).not.toHaveBeenCalled();
+    expect((await readTeam(home)).agents).toHaveLength(1);
+    expect((await readTeam(home)).agents[0].name).toBe('builder');
+  });
+
+  it('rejects duplicate orchestrators before pending capture or typing', async () => {
+    const { root, home, worktree } = await setupIdentifiedPending();
+    const agents = [1, 2].map((id) => ({
+      name: 'demo-orchestrator', orchestrator: true, worktree: path.join(worktree, `legacy-${id}`),
+      pane: `%${id}`, pane_pid: id, pane_started: `old-${id}`, model: 'kimi-code/k3.1-pro-highspeed',
+    }));
+    await writeJson(hivePath(home, 'team.json'), { agents });
+
+    await expect(continueProject(root, 'demo')).rejects.toThrow(/duplicate|ambiguous/);
+
+    expect(capturePane).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
+    expect((await readTeam(home)).agents).toEqual(agents);
+  });
+
+  it('rejects a distinct live orchestrator before pending capture or typing', async () => {
+    const { root, home, worktree } = await setupIdentifiedPending();
+    const orchestrator = {
+      name: 'demo-orchestrator', orchestrator: true, worktree,
+      pane: '%1', pane_pid: 11, pane_started: 'live', model: 'kimi-code/k3.1-pro-highspeed',
+    };
+    await writeJson(hivePath(home, 'team.json'), { agents: [orchestrator] });
+    vi.mocked(paneIs).mockImplementation(async () => true);
+
+    await expect(continueProject(root, 'demo')).rejects.toThrow(/live|already running|distinct/);
+
+    expect(capturePane).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
+    expect((await readTeam(home)).agents).toEqual([orchestrator]);
+  });
 
   it('rechecks a pause after the pending wait before typing', async () => {
     const root = await setupPending();
@@ -765,7 +887,7 @@ describe('continue sending claim', () => {
     const root = await setupPending();
     const at = new Date().toISOString();
     await writePendingPane(root, 'demo', {
-      pane: '%7', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at, typed: false, sending: true, line: 'You are demo-orchestrator.',
+      pane: '%7', pane_pid: 7, pane_started: 'pending', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, at, typed: false, sending: true, line: 'You are demo-orchestrator.',
     });
 
     await expect(continueProject(root, 'demo')).rejects.toThrow(/already sending/);
@@ -778,7 +900,7 @@ describe('continue sending claim', () => {
     const root = await setupPending();
     const staleAt = new Date(Date.now() - 11 * 60_000).toISOString();
     await writePendingPane(root, 'demo', {
-      pane: '%7', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: staleAt, typed: false, sending: true, line: 'You are demo-orchestrator.',
+      pane: '%7', pane_pid: 7, pane_started: 'pending', kind: 'start', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: staleAt, typed: false, sending: true, line: 'You are demo-orchestrator.',
     });
 
     await expect(continueProject(root, 'demo')).resolves.toBe('%7');
@@ -963,7 +1085,7 @@ describe('wake racing a cascade kill', () => {
       agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', model: 'kimi-code/k3.1-pro-highspeed' }],
     });
     await writePendingPane(root, 'demo', {
-      pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
+      pane: '%7', pane_pid: 7, pane_started: 'pending', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: 'You are demo-orchestrator.',
     });
     vi.mocked(waitIdle).mockImplementationOnce(async () => {
       await killAgent(root, 'demo');
@@ -972,6 +1094,95 @@ describe('wake racing a cascade kill', () => {
     await expect(continueProject(root, 'demo')).rejects.toThrow(/killed while its new pane came up/);
     expect(vi.mocked(killWindow).mock.calls.map((c) => c[0])).toEqual(['%7']);
     expect((await readTeam(home)).agents).toEqual([]);
+  });
+});
+
+describe('orchestrator registration failure', () => {
+  it('kills only the new pane with its verified identity', async () => {
+    const { root, home } = await setup();
+    const old = {
+      name: 'demo-orchestrator', orchestrator: true, worktree: hivePath(home, 'lanes', 'demo-orchestrator'),
+      pane: '%1', pane_pid: 11, pane_started: 'old', session_id: 'session_abc',
+      model: 'kimi-code/k3.1-pro-highspeed',
+    };
+    await fs.mkdir(old.worktree, { recursive: true });
+    await writeJson(hivePath(home, 'team.json'), { agents: [old] });
+    vi.mocked(paneIs).mockResolvedValueOnce(false);
+    const defaultTypeLine = vi.mocked(typeLine).getMockImplementation()!;
+    vi.mocked(typeLine).mockImplementationOnce(async () => {
+      await writeJson(hivePath(home, 'team.json'), {
+        agents: [{ ...old, session_id: 'session_replacement' }],
+      });
+    });
+    vi.mocked(killWindow).mockClear();
+    try {
+      await expect(wake(root, 'demo')).rejects.toThrow(/changed while its launch was being recorded/);
+    } finally {
+      vi.mocked(typeLine).mockImplementation(defaultTypeLine);
+    }
+
+    expect(vi.mocked(killWindow).mock.calls).toEqual([['%9', { pid: 1, started: 'x' }]]);
+    expect((await readTeam(home)).agents).toEqual([{ ...old, session_id: 'session_replacement' }]);
+  });
+});
+
+describe('stale orchestrator identity recovery', () => {
+  it('refuses another wake when a verified live replacement is already recorded', async () => {
+    const { root, home } = await setup();
+    const worktree = hivePath(home, 'lanes', 'demo-orchestrator');
+    await fs.mkdir(worktree, { recursive: true });
+    const old = {
+      name: 'demo-orchestrator', orchestrator: true, worktree,
+      pane: '%1', pane_pid: 11, pane_started: 'old', session_id: 'session_abc',
+      model: 'kimi-code/k3.1-pro-highspeed',
+    };
+    await writeJson(hivePath(home, 'team.json'), { agents: [old] });
+    await fs.writeFile(hivePath(home, 'manifest.jsonl'), `${[
+      { kind: 'tmux', at: '2026-11-23T00:00:00Z', pane: '%1', window: 'demo:demo-orchestrator', pane_pid: 11, pane_started: 'old' },
+      { kind: 'tmux', at: '2026-11-23T00:01:00Z', pane: '%2', window: 'demo:demo-orchestrator', pane_pid: 22, pane_started: 'replacement' },
+    ].map((record) => JSON.stringify(record)).join('\n')}\n`);
+    const defaultPaneIs = vi.mocked(paneIs).getMockImplementation()!;
+    vi.mocked(paneIs).mockImplementation(async (pane) => pane === '%2');
+    const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+    const killsBefore = vi.mocked(killWindow).mock.calls.length;
+    try {
+      await expect(wake(root, 'demo')).rejects.toThrow(/live replacement|already running|duplicate/);
+
+      expect(paneIs).toHaveBeenCalledWith('%2', { pid: 22, started: 'replacement' });
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
+      expect(vi.mocked(killWindow).mock.calls).toHaveLength(killsBefore);
+      expect((await readTeam(home)).agents).toEqual([old]);
+    } finally {
+      vi.mocked(paneIs).mockImplementation(defaultPaneIs);
+    }
+  });
+  it('checks every identity when a replacement reuses a pane id', async () => {
+    const { root, home } = await setup();
+    const worktree = hivePath(home, 'lanes', 'demo-orchestrator');
+    await fs.mkdir(worktree, { recursive: true });
+    const old = {
+      name: 'demo-orchestrator', orchestrator: true, worktree,
+      pane: '%1', pane_pid: 11, pane_started: 'old', session_id: 'session_abc',
+      model: 'kimi-code/k3.1-pro-highspeed',
+    };
+    await writeJson(hivePath(home, 'team.json'), { agents: [old] });
+    await fs.writeFile(hivePath(home, 'manifest.jsonl'), `${[
+      { kind: 'tmux', at: '2026-11-23T00:00:00Z', pane: '%1', window: 'demo:demo-orchestrator', pane_pid: 11, pane_started: 'old' },
+      { kind: 'tmux', at: '2026-11-23T00:01:00Z', pane: '%2', window: 'demo:demo-orchestrator', pane_pid: 22, pane_started: 'stale' },
+      { kind: 'tmux', at: '2026-11-23T00:02:00Z', pane: '%2', window: 'demo:demo-orchestrator', pane_pid: 23, pane_started: 'live' },
+    ].map((record) => JSON.stringify(record)).join('\n')}\n`);
+    const defaultPaneIs = vi.mocked(paneIs).getMockImplementation()!;
+    vi.mocked(paneIs).mockImplementation(async (pane, identity) => pane === '%2' && identity?.started === 'live');
+    const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+    try {
+      await expect(wake(root, 'demo')).rejects.toThrow(/live replacement|duplicate/);
+
+      expect(paneIs).toHaveBeenCalledWith('%2', { pid: 23, started: 'live' });
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
+      expect((await readTeam(home)).agents).toEqual([old]);
+    } finally {
+      vi.mocked(paneIs).mockImplementation(defaultPaneIs);
+    }
   });
 });
 
@@ -987,6 +1198,82 @@ describe('start after a cleanup stamp', () => {
     const team = await readTeam(home);
     expect(team.agents[0]).toMatchObject({ name: 'demo-orchestrator', pane: '%9' });
     expect(team.agents[0].closed_at).toBeUndefined();
+  });
+});
+
+describe('orchestrator workspace isolation', () => {
+  it.each(['git', 'empty-git', 'jj'] as const)('allocates an isolated lane for a fresh %s start', async (kind) => {
+    const { root, home } = await setup();
+    const task = await hubTask(root, 'demo', 'start the orchestrator');
+    const worktree = hivePath(home, 'lanes', 'demo-orchestrator');
+    const defaultRun = vi.mocked(run).getMockImplementation()!;
+    vi.mocked(run).mockImplementation(async (cmd, args) => {
+      if (kind === 'jj') return { code: 0, stdout: '', stderr: '' };
+      if (cmd === 'jj') return { code: 1, stdout: '', stderr: 'no jj here' };
+      if (cmd === 'git' && args[0] === 'rev-parse' && args[1] === '--verify') {
+        return kind === 'empty-git'
+          ? { code: 1, stdout: '', stderr: 'unknown revision' }
+          : { code: 0, stdout: 'base\n', stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    try {
+      await expect(startProject(root, 'demo', task)).resolves.toBe('%9');
+
+      expect(vi.mocked(newWindow).mock.calls.at(-1)?.[1]).toBe(worktree);
+      expect((await readTeam(home)).agents[0]).toMatchObject({
+        name: 'demo-orchestrator', orchestrator: true, worktree,
+      });
+      const add = vi.mocked(run).mock.calls.find((call) => call[2] === home && (kind === 'jj'
+        ? call[0] === 'jj' && call[1].includes('add')
+        : call[0] === 'git' && call[1][0] === 'worktree' && call[1][1] === 'add'));
+      expect(add?.[1]).toEqual(kind === 'jj'
+        ? ['-R', home, 'workspace', 'add', worktree, '-r', 'main@origin']
+        : kind === 'empty-git'
+          ? ['worktree', 'add', '-q', '--orphan', '-b', 'demo/demo-orchestrator', worktree]
+          : ['worktree', 'add', '-q', '-b', 'demo/demo-orchestrator', worktree, 'HEAD']);
+    } finally {
+      vi.mocked(run).mockImplementation(defaultRun);
+    }
+  }, 20_000);
+
+  it('reuses the recorded isolated worktree on wake', async () => {
+    const { root, home } = await setup();
+    const worktree = hivePath(home, 'lanes', 'demo-orchestrator');
+    await fs.mkdir(worktree, { recursive: true });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{
+        name: 'demo-orchestrator', orchestrator: true, worktree,
+        pane: '%1', pane_pid: 11, pane_started: 'old', session_id: 'session_abc',
+        model: 'kimi-code/k3.1-pro-highspeed',
+      }],
+    });
+    vi.mocked(paneIs).mockResolvedValueOnce(false);
+
+    await expect(wake(root, 'demo')).resolves.toBe('%9');
+
+    expect(vi.mocked(newWindow).mock.calls.at(-1)?.[1]).toBe(worktree);
+    expect((await readTeam(home)).agents[0].worktree).toBe(worktree);
+  }, 20_000);
+
+  it('keeps a live legacy external worktree unchanged', async () => {
+    const { root, home } = await setup();
+    const worktree = path.join(root, 'legacy-orchestrator');
+    await fs.mkdir(worktree, { recursive: true });
+    await writeJson(hivePath(home, 'team.json'), {
+      agents: [{
+        name: 'demo-orchestrator', orchestrator: true, worktree,
+        pane: '%1', pane_pid: 11, pane_started: 'live', session_id: 'session_abc',
+        model: 'kimi-code/k3.1-pro-highspeed',
+      }],
+    });
+    const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+
+    await expect(wake(root, 'demo')).rejects.toThrow(/already running/);
+
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
+    expect((await readTeam(home)).agents[0].worktree).toBe(worktree);
+    expect(await fs.stat(hivePath(home, 'lanes', 'demo-orchestrator')).catch(() => null)).toBeNull();
   });
 });
 
@@ -1070,13 +1357,37 @@ describe('wake after a cascade kill', () => {
   });
 });
 
+describe('ambiguous legacy orchestrators', () => {
+  it('refuses duplicate orchestrators without manifest records before launch', async () => {
+    const { root, home } = await setup();
+    const agents = [1, 2].map((id) => ({
+      name: 'demo-orchestrator', orchestrator: true, worktree: path.join(root, `legacy-${id}`),
+      pane: `%${id}`, pane_pid: id * 11, pane_started: `old-${id}`, session_id: `session_${id}`,
+      model: 'kimi-code/k3.1-pro-highspeed',
+    }));
+    await writeJson(hivePath(home, 'team.json'), { agents });
+    vi.mocked(paneIs).mockResolvedValue(false);
+    const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+    const killsBefore = vi.mocked(killWindow).mock.calls.length;
+    try {
+      await expect(wake(root, 'demo')).rejects.toThrow(/duplicate|ambiguous/);
+
+      expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
+      expect(vi.mocked(killWindow).mock.calls).toHaveLength(killsBefore);
+      expect((await readTeam(home)).agents).toEqual(agents);
+    } finally {
+      vi.mocked(paneIs).mockImplementation(async () => true);
+    }
+  });
+});
+
 describe('wake pending pane', () => {
   const LINE = 'You are demo-orchestrator, the orchestrator of project demo.';
 
   it('a stale pending record is cleared and the wake proceeds', async () => {
     const { root } = await setup();
     await writePendingPane(root, 'demo', {
-      pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date(Date.now() - 11 * 60_000).toISOString(), line: LINE,
+      pane: '%7', pane_pid: 7, pane_started: 'pending', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date(Date.now() - 11 * 60_000).toISOString(), line: LINE,
     });
     await expect(wake(root, 'demo')).rejects.toThrow(/not in team.json/);
     expect(await readPendingPane(root, 'demo')).toBeNull();
@@ -1084,11 +1395,43 @@ describe('wake pending pane', () => {
 
   it('a pending record whose pane died is cleared and the wake proceeds', async () => {
     const { root } = await setup();
-    await writePendingPane(root, 'demo', { pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), line: LINE });
+    await writePendingPane(root, 'demo', { pane: '%7', pane_pid: 7, pane_started: 'pending', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), line: LINE });
     vi.mocked(paneExists).mockImplementation(async (p) => p !== '%7');
     await expect(wake(root, 'demo')).rejects.toThrow(/not in team.json/);
     expect(await readPendingPane(root, 'demo')).toBeNull();
     vi.mocked(paneExists).mockImplementation(async () => true);
+  });
+
+  it.each(['start', 'wake'] as const)('fences a reused pending identity during the %s decision', async (kind) => {
+    const { root, home } = await setup();
+    const worktree = hivePath(home, 'lanes', 'demo-orchestrator');
+    await fs.mkdir(worktree, { recursive: true });
+    if (kind === 'wake') {
+      await writeJson(hivePath(home, 'team.json'), {
+        agents: [{
+          name: 'demo-orchestrator', orchestrator: true, worktree, session_id: 'session_abc',
+          model: 'kimi-code/k3.1-pro-highspeed',
+        }],
+      });
+    }
+    const task = kind === 'start' ? await hubTask(root, 'demo', 'start the orchestrator') : undefined;
+    await writePendingPane(root, 'demo', {
+      pane: '%7', pane_pid: 7, pane_started: 'pending', kind, launch_mode: 'ask', launch_scoped_auto: false,
+      model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), typed: false, line: LINE, worktree,
+    });
+    const original = await readPendingPane(root, 'demo');
+    vi.mocked(paneIdentity).mockResolvedValueOnce({ pid: 99, started: 'reused' });
+    vi.mocked(capturePane).mockClear();
+    vi.mocked(typeLine).mockClear();
+    const windowsBefore = vi.mocked(newWindow).mock.calls.length;
+
+    const operation = kind === 'start' ? startProject(root, 'demo', task!) : wake(root, 'demo');
+    await expect(operation).rejects.toThrow(/identity|stale|pending/);
+
+    expect(await readPendingPane(root, 'demo')).toEqual(original);
+    expect(capturePane).not.toHaveBeenCalled();
+    expect(typeLine).not.toHaveBeenCalled();
+    expect(vi.mocked(newWindow).mock.calls).toHaveLength(windowsBefore);
   });
 
   it('a live young pending pane routes through continue instead of refusing', async () => {
@@ -1097,7 +1440,7 @@ describe('wake pending pane', () => {
     await writeJson(hivePath(home, 'team.json'), {
       agents: [{ name: 'demo-orchestrator', orchestrator: true, session_id: 'session_abc', model: 'kimi-code/k3.1-pro-highspeed' }],
     });
-    await writePendingPane(root, 'demo', { pane: '%7', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), line: LINE });
+    await writePendingPane(root, 'demo', { pane: '%7', pane_pid: 7, pane_started: 'pending', kind: 'wake', launch_mode: 'ask', launch_scoped_auto: false, model: 'kimi-code/k3.1-pro-highspeed', at: new Date().toISOString(), line: LINE });
     vi.mocked(capturePane).mockImplementation(async () => IDLE);
     const pane = await wake(root, 'demo');
     expect(pane).toBe('%7');

@@ -382,8 +382,13 @@ async function handleDeath(
   const attempt = w.attempts + 1;
   wakes.set(key, { attempts: attempt, nextAt: Date.now() + Math.min(5000 * 2 ** (attempt - 1), 600_000) });
   try {
-    const pane = a.orchestrator ? await wake(root, project) : await wakeAgent(root, project, a.name);
-    const entry = (await readTeam(home)).agents.find((x) => x.name === a.name);
+    const pane = a.orchestrator ? await wake(root, project) : await wakeAgent(root, project, a.name, a);
+    const entries = (await readTeam(home)).agents.filter((x) => x.name === a.name
+      && x.worktree === a.worktree && Boolean(x.orchestrator) === Boolean(a.orchestrator));
+    if (entries.length !== 1) {
+      throw new Error(`wake returned ${pane} but the ${a.name} registration is duplicate or ambiguous`);
+    }
+    const entry = entries[0];
     if (entry?.pane !== pane) {
       throw new Error(`wake returned ${pane} but the team entry still points at ${entry?.pane ?? 'nothing'}`);
     }

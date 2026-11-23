@@ -15,6 +15,7 @@ import { evidenceAcceptanceBound } from './acceptance.js';
 import {
   allowsLeaseLessFallback, canonicalActor, evaluateAcceptanceLocked, evaluateRegisteredAcceptanceLocked, matchingEvidence,
 } from './evidence.js';
+import { verifiedPendingPaneIdentity } from './spawn.js';
 export { evaluateTaskPredicate, TASK_PREDICATES } from './evidence.js';
 
 export type TaskRevalidate = () => Promise<void>;
@@ -653,6 +654,7 @@ export async function settlePendingPane(root: string, project: string): Promise<
   const existing = await readPendingPane(root, project);
   if (!existing) return false;
   const live = await paneExists(existing.pane);
+  if (live) await verifiedPendingPaneIdentity(existing);
   if (live && Date.now() - Date.parse(existing.at) <= PENDING_STALE_MS) return true;
   await clearPendingPane(root, project);
   return false;

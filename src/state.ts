@@ -537,6 +537,7 @@ export async function manifestWrite(projectHome: string, recs: ManifestRecord[])
 export type PendingPane = {
   pane: string; kind: string; at: string;
   pane_pid?: number; pane_started?: string;
+  worktree?: string;
   typed?: boolean; sending?: boolean; claim_token?: string; question?: boolean; task?: string; line?: string;
   model?: string;
   launch_mode?: TeamEntry['launch_mode'];
