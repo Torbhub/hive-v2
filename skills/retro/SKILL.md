@@ -29,6 +29,9 @@ Look for:
 - **Skills**: a step the orchestrator reinvented means a skill is missing or
   wrong.
 
+If the task has a COE artifact, close the existing PR or issue artifact. Confirm prevention actions landed or have tracked owners, check recurrence of the same mechanism, and promote reusable deterministic checks into existing gates.
+Do not write a second retrospective document.
+
 Propose, never edit in place. The edits land as their own change through the
 same path as any work: gate, then the owner's word. Before a retro-driven
 edit lands, tag the current state with `tools/checkpoint.sh` (see

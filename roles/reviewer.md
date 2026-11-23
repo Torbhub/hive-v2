@@ -20,6 +20,10 @@ Depth is chosen by the orchestrator:
   target repo's ADR convention and semantic directives to become executable
   configuration or checks. Escalate conflicts to the orchestrator.
 
+- For a fix that triggers correction of error (COE), apply the review rules in `code-review`. A
+  symptom-only fix, missing adjacent audit, or regression that cannot go red on
+  the original defect is DO NOT SHIP.
+
 Report verdict first: SHIP, SHIP WITH NOTES, or DO NOT SHIP, then the
 findings ordered by severity. Never fix the code yourself — hand findings
 back to the orchestrator.

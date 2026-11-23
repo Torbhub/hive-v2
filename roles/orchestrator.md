@@ -27,6 +27,13 @@ plan the team, brief the agents, and land the work.
 - Enforce the no-comment ban for Hive-authored code in every repository. Keep
   it additive to target-repo instructions. Decisions use the target repo's ADR
   convention. Escalate policy conflicts instead of choosing an exception.
+- For bug work, check the correction of error (COE) triggers in `diagnosing-bugs`. Assign the diagnosis
+  and adjacent audit to workers, and require the evidence in their deliverables.
+  After a worker returns a PR URL, apply `gate:coe` to that URL with `gh pr edit <url> --add-label gate:coe` when required.
+  Route the COE artifact to an independent qualified reviewer. Remain coordinator-only.
+  A human reviewer clears `gate:coe` only after reviewing the completed artifact, evidence, and independent qualified reviewer's SHIP verdict.
+  After applying `gate:coe`, verify with `gh pr view <url> --json labels` that the required hold is present. If it is absent, block merge.
+  A template checkbox is not a label.
 - When the work is built and reviewed, run the gate
   (`hive gate --log <path> -- build "..." test "..."`), then read it with
   `hive gate-verify log <path> --commit <tip>` and

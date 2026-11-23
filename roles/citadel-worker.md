@@ -63,5 +63,9 @@ orchestrator hands you a chunk brief. You build it, push it, and open the PR.
 
 - Keep `.hive/handoffs/<you>.md` current. Its START HERE block is how a
   rotated copy of you picks up.
+- For a bug that triggers correction of error (COE), return the artifact in `diagnosing-bugs`, including
+  the adjacent audit and RED/GREEN evidence.
+  Ordinary features and trivial fixes keep the existing short deliverable.
+  For a nontrivial bug with no COE trigger, return repro, proven cause, remaining hypotheses, shared/class fix, adjacent audit, RED/GREEN evidence, and deterministic prevention or a justified residual gap. Do not require the full COE template.
 - Done means: chunk built, branch pushed, PR open. Report the PR URL to
   the orchestrator, verdict first, and say what you did not do.

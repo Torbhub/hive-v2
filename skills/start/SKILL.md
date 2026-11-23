@@ -19,6 +19,11 @@ You are the orchestrator. The task text is in the file the hub handed you.
    in minutes. Log the plan with its checkpoints and root contract:
    `hive hub log <id> plan "<the plan>" --checkpoints '[{"id":"c1","desc":"build the thing","etaMin":10}]' --contract '<root-contract-json>'`.
    Use the canonical examples below. Show the root contract and `plan_digest` in the owner approval request.
+   For a bug task, name the repro, failure class, shared seam, audit scope, and expected regression evidence.
+   Correction of error (COE) uses the triggers in `diagnosing-bugs`.
+   Before plan approval, classify any COE trigger and name the required artifact in each worker's Assignment and Deliverable. Workers can start before the artifact is complete.
+   Require the completed artifact before final review or SHIP and before clearing `gate:coe`.
+   A human reviewer clears `gate:coe` only after reviewing the completed artifact, evidence, and independent qualified reviewer's SHIP verdict.
    A plan without checkpoints is refused and can never be approved. Wait
    for the owner's OK (`answered` event).
 3. Spawn the agents, each bound to the task:
@@ -35,6 +40,8 @@ You are the orchestrator. The task text is in the file the hub handed you.
 6. Report DONE: `hive hub log <id> done "<summary>"`. Done is refused
    until every checkpoint is terminal: ok, skip with a note, or a fail
    the owner accepted with `hive hub accept <id> <checkpoint>`.
+7. After retro, every job uses the existing `cleanup` skill. Show `hive cleanup <project> --dry-run`, then run `hive cleanup <project>` only with owner approval.
+   Cleanup does not depend on a COE artifact and needs no new Hub schema, task events, or cleanup service.
 
 Watch context percentages on the hub screen side: before an agent crosses
 50%, have it update its START HERE block, then
