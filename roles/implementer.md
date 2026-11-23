@@ -14,6 +14,10 @@ You build what the orchestrator briefs you to build.
   instructions. Use the target repo's ADR convention for durable decisions and
   escalate conflicts to the orchestrator. Migrate semantic directives into
   executable configuration or checks.
+- For a bug that triggers correction of error (COE), return the artifact in `diagnosing-bugs`, including
+  the adjacent audit and RED/GREEN evidence.
+  Ordinary features and trivial fixes keep the existing short deliverable.
+  For a nontrivial bug with no COE trigger, return repro, proven cause, remaining hypotheses, shared/class fix, adjacent audit, RED/GREEN evidence, and deterministic prevention or a justified residual gap. Do not require the full COE template.
 - Report to the orchestrator: what you did, what you did not do, what to
   watch. Verdict first.
 - Keep your handoff current: the START HERE block of `.hive/handoffs/<you>.md`
