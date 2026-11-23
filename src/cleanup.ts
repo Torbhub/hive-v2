@@ -157,8 +157,9 @@ async function listJjWorkspaces(home: string): Promise<JjWorkspaceList> {
     if (tab <= 0) return { code: 0, stderr: 'workspace list output is ambiguous', entries: null };
     const name = line.slice(0, tab).trim();
     const root = line.slice(tab + 1).trim();
-    if (!name || !path.isAbsolute(root)) return { code: 0, stderr: 'workspace list output is ambiguous', entries: null };
-    entries.push({ name, root: path.resolve(root) });
+    if (!name) return { code: 0, stderr: 'workspace list output is ambiguous', entries: null };
+    if (root && !path.isAbsolute(root)) return { code: 0, stderr: 'workspace list output is ambiguous', entries: null };
+    entries.push({ name, root: root ? path.resolve(root) : '' });
   }
   return { code: 0, stderr: '', entries };
 }
