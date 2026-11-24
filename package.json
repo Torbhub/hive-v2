@@ -16,12 +16,17 @@
     "dev": "tsx src/cli.ts"
   },
   "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/material": "^9.6.0",
     "@radix-ui/react-toggle-group": "^1.2.1",
+    "@xyflow/react": "^13.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "ink": "^6.0.1",
     "lucide-react": "^1.56.0",
     "react": "^19.1.0",
+    "react-resizable-panels": "^4.24.1",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.7.0"
   },

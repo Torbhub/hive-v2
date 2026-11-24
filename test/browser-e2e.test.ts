@@ -230,8 +230,8 @@ class ChromePage {
   async evaluate(expression: string): Promise<unknown> {
     const result = await this.call('Runtime.evaluate', {
       expression, awaitPromise: true, returnByValue: true,
-    }) as { exceptionDetails?: { text: string }; result?: { value?: unknown } };
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+    }) as { exceptionDetails?: { text: string; exception?: { description?: string } }; result?: { value?: unknown } };
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
     return result.result?.value;
   }
 
@@ -456,6 +456,7 @@ afterAll(async () => {
 }, 30_000);
 
 async function click(selector: string): Promise<void> {
+  await cdp.waitFor(`document.querySelector(${JSON.stringify(selector)}) !== null`);
   const point = await cdp.evaluate(`(() => {
     const element = document.querySelector(${JSON.stringify(selector)});
     if (!element) throw new Error('missing pointer target: ${selector}');

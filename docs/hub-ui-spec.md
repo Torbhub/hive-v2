@@ -1,6 +1,6 @@
 # Hivehouse Hub Screen — Reimplementation Spec
 
-Source of truth: `hooks/hub.tsx` (the renderer), `types/index.d.ts` (the shapes), `bin/hh-hub` + `bin/hh-lib.sh` (the JSON producers). All visible strings below are verbatim from source.
+Source of truth: `hooks/hub.tsx` (the terminal renderer), `web/Dashboard.tsx` (the web shell), `web/project.tsx` (project content), `web/TeamMap.tsx` (the team graph), `types/index.d.ts` (the shapes), `bin/hh-hub` + `bin/hh-lib.sh` (the JSON producers). All visible strings below are verbatim from source.
 
 ## 0. Frame & global behavior
 
@@ -15,6 +15,16 @@ Source of truth: `hooks/hub.tsx` (the renderer), `types/index.d.ts` (the shapes)
 - If `status` fails, old data is kept and `error` is set to the exception message. If only `tasks` fails, projects still render and `error` is `` `tasks not read: ${lastLine}` `` (last line of stderr, with a leading `hivehouse: ` prefix stripped).
 - **One action at a time:** a press while another action runs is ignored (the `acting` atom).
 - Toasts (transient notifications, not part of the layout): see §7.
+
+### 0.1 Web dashboard shell
+
+- MUI owns the dark theme, application bar, permanent navigation drawer, buttons, chips, dialogs, and project cards. `react-resizable-panels` owns the split workspace. React Flow owns the team graph.
+- The shell fills one viewport and never makes the document a long page. The navigation, project workspace, and activity panel scroll independently.
+- The left drawer is 260 px wide. It shows the hive name and hub root, a **Projects** navigation list, and the existing add-project form. Each project row shows its name, agent count, and open-task count. Selecting a row shows only that project in the center. The first project is the default. A deleted or missing selection falls back to the first remaining project.
+- The application bar shows the selected project name, relay state, freshness clock, **Nexus**, **refresh**, and the **Questions** count when questions exist. **Nexus** links to `/`. Navigation and question buttons disable while an action runs. Refresh stays available.
+- `react-resizable-panels` splits the remaining height between the selected project (default 66%, minimum 35%) and the activity panel (default 34%, minimum 25%). The separator supports pointer and keyboard resizing.
+- The center renders only the selected project card. The activity panel contains errors, needs, question cards, the work tree when present, and decisions. Their content and actions keep the contracts below.
+- The terminal keeps the top-to-bottom layout in §1. The web uses those content sections inside this shell instead of rendering every project down one page.
 
 ## 1. Layout, top to bottom
 
@@ -118,6 +128,8 @@ Card = column, `marginTop: 1`.
 - If any agents are not running, a second line, **yellow**: `{ref} {state}` joined with `, ` (e.g. `fixer stopped, reviewer@/wt/repo unknown`).
 - Web only, a third line, gray, small: the tmux window name of every agent, `{project}:{agent name}` joined with `, `.
 - Web only, when any agent is running: a wrap line of **Interrupt {ref}** buttons, one per running agent (§13).
+
+**Team map** (web only, when the orchestrator is not `none` or any agent exists): a 360 px React Flow canvas below the agent row. The orchestrator is the top node. Agents appear below in three-column rows. Every node is a draggable MUI card with its name, state chip, and status-colored border and glow. Dashed violet edges connect the orchestrator to every agent. Running agent edges are animated. A dotted background covers the canvas. The initial view fits all nodes. Pan and zoom stay available. Dragging a node preserves its position across polling updates. The graph has no connection editing and no extra control buttons.
 
 **`tasks` row** — white, one string:
 `{open_tasks} open` then optional suffixes, in order:
