@@ -464,9 +464,17 @@ describe('cleanupProject tmux records', () => {
     const { root, home } = await setupTmux();
     const actions = await cleanupProject(root, 'proj', { dryRun: true });
     expect(actions[0].acted).toBe(false);
+    expect(actions[0].action).toBe('kill tmux window proj:builder');
     expect(killWindow).not.toHaveBeenCalled();
     const team = await readTeam(home);
     expect(team.agents[0].closed_at).toBeUndefined();
+  });
+
+  it('masks a pane id when a legacy record has no window name', async () => {
+    const { root, home } = await setup();
+    await manifestAdd(home, { ...tmuxRecord, window: undefined });
+    const actions = await cleanupProject(root, 'proj', { dryRun: true });
+    expect(actions[0].action).toBe('kill tmux window ?');
   });
 
   it('unstamps only the failed target when the kill fails', async () => {
@@ -519,6 +527,14 @@ describe('cleanupProject process records', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('masks pane ids in retained error text', async () => {
+    const { root } = await setupProcess();
+    vi.spyOn(tmux, 'processStartTime').mockRejectedValue(new Error('cannot inspect %8'));
+    const actions = await cleanupProject(root, 'proj', { dryRun: true });
+    expect(actions[0].action).toContain('cannot inspect ?');
+    expect(actions[0].action).not.toContain('%8');
   });
 
   it('removes the process record after SIGTERM and a verified exit', async () => {

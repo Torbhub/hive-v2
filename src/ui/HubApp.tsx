@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { HubAgent, HubDialog, HubProject, HubTask, HubView } from '../types.js';
-import { answerDialog, continueProject, planAnswer, wake } from '../hub.js';
+import { answerDialog, continueProject, currentOrchestratorName, planAnswer, wake } from '../hub.js';
 import {
-  ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, lastLine, withTimeout,
+  ACTION_TIMEOUT_MS, ANSWER_TIMEOUT_MS, buildView, displayLine, withTimeout,
 } from '../view.js';
 import {
   agentGlyph, agentRef, ago, buildNeeds, homeTilde, orchestratorLook, tasksLine, type Need,
@@ -200,7 +200,7 @@ export function HubApp({ root }: { root: string }) {
     try {
       setToast(await runAction());
     } catch (e) {
-      setToast(`${who}: ${lastLine(e)}`);
+      setToast(`${who}: ${displayLine(e)}`);
     } finally {
       actingRef.current = false;
       setActing(false);
@@ -211,15 +211,15 @@ export function HubApp({ root }: { root: string }) {
 
   const onWake = useCallback((project: string) => {
     void act(project, 'resuming', project, async () => {
-      const pane = await withTimeout(wake(root, project), ACTION_TIMEOUT_MS, 'wake');
-      return `${project}: its orchestrator is coming up; it reports back when its team is up (pane ${pane})`;
+      await withTimeout(wake(root, project), ACTION_TIMEOUT_MS, 'wake');
+      return `${project}: ${await currentOrchestratorName(root, project)} is coming up; it reports back when its team is up`;
     });
   }, [act, root]);
 
   const onContinue = useCallback((project: string) => {
     void act(project, 'continuing', project, async () => {
-      const pane = await withTimeout(continueProject(root, project), ACTION_TIMEOUT_MS, 'continue');
-      return `${project}: its first line was sent (pane ${pane})`;
+      await withTimeout(continueProject(root, project), ACTION_TIMEOUT_MS, 'continue');
+      return `${project}: ${await currentOrchestratorName(root, project)}'s first line was sent`;
     });
   }, [act, root]);
 
@@ -387,7 +387,6 @@ function ProjectCard({
       <Row label="orchestrator">
         <Box>
           <Text color="white">{orchName}</Text>
-          {o.state === 'unregistered' && o.pane && <Text color="gray">{`  pane ${o.pane}`}</Text>}
           {typeof o.context === 'number' && (
             <Text color={o.context_assumed ? 'gray' : o.context >= ROTATE_AT_PERCENT ? 'yellow' : 'green'}>
               {`  ${o.context}%`}

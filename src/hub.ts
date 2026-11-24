@@ -5,16 +5,9 @@ import type {
 } from './types.js';
 import { APPROVALS_MODES, CLOSED_STATES, PROJECT_MODES } from './types.js';
 import type { Approvals, ProjectMode } from './types.js';
-import {
-  capturePane, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep,
-  type PaneIdentity,
-} from './tmux.js';
+import { capturePane, paneExists, paneIdentity, paneIs, run, sendArrow, sendEnter, sendEscape, sendLiteral, sleep, type PaneIdentity } from './tmux.js';
 import { lines, parseDialog, scrapeContext } from './screen.js';
-import {
-  appendDecision, appendTaskEvent, clearPendingPane, extractCommand, foldTasks, hivePath, hubPath,
-  nextTaskId, readPendingPane, readProjects, readTaskEvents, readTeam, Refusal, withHubLock, writePendingPane,
-  writeProjects, writeJson, readJson, type ProjectsFile,
-} from './state.js';
+import { appendDecision, appendTaskEvent, clearPendingPane, extractCommand, foldTasks, hivePath, hubPath, nextTaskId, readPendingPane, readProjects, readTaskEvents, readTeam, Refusal, withHubLock, writePendingPane, writeProjects, writeJson, readJson, type ProjectsFile } from './state.js';
 import { addProject } from './project.js';
 import { listOpenQuestionBatches } from './questions.js';
 import type { QuestionBatch } from './types.js';
@@ -137,6 +130,12 @@ async function folderStatus(root: string, folder: string): Promise<HubFolder> {
 }
 
 type ProjectEntry = ProjectsFile['projects'][number];
+
+export async function currentOrchestratorName(root: string, project: string): Promise<string> {
+  const entry = (await readProjects(root)).projects.find((candidate) => candidate.name === project);
+  if (!entry) throw new Refusal(`unknown project: ${project}`);
+  return (await readTeam(entry.home)).agents.find((agent) => agent.orchestrator)?.name ?? orchestratorName(project);
+}
 
 async function projectStatus(
   root: string, p: ProjectEntry, tasks: HubTask[], batches: QuestionBatch[],

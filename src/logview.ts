@@ -7,6 +7,7 @@ import { findSessionDir, SessionNotFoundError } from './death-bundle.js';
 import { checkName } from './names.js';
 import { readProjects, readTeam, Refusal } from './state.js';
 import type { TeamEntry } from './types.js';
+import { displayText } from './window-name.js';
 
 export type LogEntryKind = 'think' | 'text' | 'tool' | 'prompt';
 
@@ -45,7 +46,7 @@ export function redactSecrets(text: string): string {
 }
 
 function capText(text: string): string {
-  const clean = redactSecrets(text).trim();
+  const clean = displayText(redactSecrets(text)).trim();
   return clean.length <= TEXT_CAP ? clean : `${clean.slice(0, TEXT_CAP)}…`;
 }
 

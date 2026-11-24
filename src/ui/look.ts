@@ -1,6 +1,7 @@
 import type { Checkpoint, HubAgent, HubOrchestrator, HubTask, HubView, RootContract } from '../types.js';
+import { orchestratorName, withoutPaneIds } from '../window-name.js';
 
-export { windowName as windowLabel } from '../window-name.js';
+export { orchestratorName, windowName as windowLabel } from '../window-name.js';
 
 export const ROTATE_AT_PERCENT = 50;
 
@@ -213,7 +214,7 @@ export function buildNeeds(view: HubView, now: number): Need[] {
       action: t.state === 'plan' ? 'plan' : 'resolve',
       project: t.project,
       taskId: t.id,
-      detail: t.last_note?.trim() ? t.last_note : 'no reason recorded',
+      detail: t.last_note?.trim() ? withoutPaneIds(t.last_note) : 'no reason recorded',
       checkpoints: t.state === 'plan' ? t.checkpoints ?? [] : undefined,
       contract: t.state === 'plan' ? t.contract ?? null : undefined,
       planDigest: t.state === 'plan' ? t.plan_digest ?? null : undefined,
@@ -238,11 +239,12 @@ export function buildNeeds(view: HubView, now: number): Need[] {
     }
     const s = p.orchestrator.starting;
     if (s && !s.typed && !s.sending) {
+      const name = p.orchestrator.name ?? orchestratorName(p.name);
       needs.push({
         key: `starting-${p.name}`, glyph: '?', color: 'yellow', who: p.name,
         words: s.question
-          ? `a question on the screen of pane ${s.pane}: answer it, then Continue`
-          : `waiting in pane ${s.pane} for its first line`,
+          ? `${name} has a question on its screen: answer it, then Continue`
+          : `waiting for ${name}'s first line`,
         when: ago(s.at, now),
         dialogKey: s.question ? p.name : undefined,
         action: 'continue', project: p.name,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { windowName } from '../src/tmux.js';
+import { withoutPaneIds } from '../src/window-name.js';
 import type { HubTask, HubView } from '../src/types.js';
 import {
   agentRef, ago, buildNeeds, homeTilde, orchestratorLook, staleTask,
@@ -83,11 +84,12 @@ describe('buildNeeds', () => {
       ...taskBase,
       tasks: [{
         id: 'demo-1', project: 'demo', asked: '2026-10-13T10:00:00Z', state: 'plan',
-        updated: '2026-10-13T11:00:00Z', last_note: null, needs_owner: true,
+        updated: '2026-10-13T11:00:00Z', last_note: 'blocked on pane %7', needs_owner: true,
       }],
     }, NOW);
     expect(needs[0]).toMatchObject({
       key: 'task-demo-1', glyph: '▲', color: 'magenta', who: 'demo-1', words: 'plan to approve', when: '1h',
+      detail: 'blocked on pane ?',
     });
   });
   it('starting orchestrator need carries the continue action', () => {
@@ -100,7 +102,7 @@ describe('buildNeeds', () => {
     }, NOW);
     expect(needs[0]).toMatchObject({
       key: 'starting-demo', action: 'continue', project: 'demo',
-      words: 'waiting in pane %7 for its first line', when: '30m',
+      words: "waiting for demo-orchestrator's first line", when: '30m',
     });
   });
   it('a plan task absorbs the orchestrator question into one card', () => {
@@ -263,5 +265,10 @@ describe('windowLabel', () => {
       expect(windowLabel(project, agent)).toBe(expected);
       expect(windowName(project, agent)).toBe(expected);
     }
+  });
+
+  it('masks raw pane ids without changing ordinary percentages', () => {
+    expect(withoutPaneIds('wake returned %9 but %10 vanished; 100% remains'))
+      .toBe('wake returned ? but ? vanished; 100% remains');
   });
 });

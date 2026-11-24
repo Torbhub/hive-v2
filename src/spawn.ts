@@ -26,11 +26,9 @@ import { requireAgentCredential } from './collaboration-credentials.js';
 import { assertExecutionAllowed } from './rollout.js';
 import { redactSecrets } from './logview.js';
 import { assertModelConfigured } from './model-config.js';
+import { orchestratorName } from './window-name.js';
 export { assertEntryAlive } from './kill.js';
-
-export function orchestratorName(project: string): string {
-  return `${project}-orchestrator`;
-}
+export { orchestratorName };
 
 export function packageRoot(): string {
   let dir = path.dirname(fileURLToPath(import.meta.url));

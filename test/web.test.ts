@@ -57,6 +57,7 @@ import { sendOwnerMessage } from '../src/message.js';
 import { typeLine } from '../src/spawn.js';
 import { capturePane, paneExists, paneIs, run, sendEnter, sendLiteral, sleep } from '../src/tmux.js';
 import { createServer } from '../web/server.js';
+import { errorResponse } from '../web/authorized.js';
 import { appendTaskEvent, contractDigest, foldTasks, hivePath, hubPath, readProjects, readTaskEvents, Refusal, valueDigest, writeJson } from '../src/state.js';
 import { authHeaders, configureSecurity } from './security-fixture.js';
 import { taskContract } from './task-contract.js';
@@ -334,6 +335,24 @@ describe('request hardening', () => {
   });
 });
 
+describe('web error display', () => {
+  it('masks pane ids in process errors and refusal details', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = { writeHead: vi.fn(), end: vi.fn() };
+    try {
+      errorResponse(res as never, new Error('tmux failed for %9'));
+      expect(errors).toHaveBeenCalledWith('hive web:', expect.stringContaining('tmux failed for ?'));
+      expect(String(errors.mock.calls[0][1])).not.toContain('%9');
+      expect(res.end).toHaveBeenCalledWith(JSON.stringify({ ok: false, detail: 'internal error' }));
+
+      errorResponse(res as never, new Refusal('tmux refused for %9'));
+      expect(res.end).toHaveBeenLastCalledWith(JSON.stringify({ ok: false, detail: 'tmux refused for ?' }));
+    } finally {
+      errors.mockRestore();
+    }
+  });
+});
+
 describe('action serialization', () => {
   it('two wakes for the same project never overlap; different projects run freely', async () => {
     let active = 0;
@@ -352,9 +371,16 @@ describe('action serialization', () => {
       ]);
       expect(r1.status).toBe(200);
       expect(r2.status).toBe(200);
-      expect((await r1.json()).pane).toBe('%1');
+      expect(await r1.json()).toMatchObject({ pane: '%1', name: 'demo-orchestrator' });
       expect(maxActive).toBe(1);
 
+      const other = path.join(root, 'other');
+      await fs.mkdir(other);
+      const projects = await readProjects(root);
+      await writeJson(hubPath(root, 'projects.json'), {
+        projects: [...projects.projects, { name: 'other', home: other, repos: [{ folder: other }] }],
+      });
+      await writeJson(hivePath(other, 'team.json'), { agents: [{ name: 'other-orchestrator', orchestrator: true }] });
       const [r3, r4] = await Promise.all([
         post('/api/wake', { project: 'demo' }),
         post('/api/wake', { project: 'other' }),
@@ -517,7 +543,7 @@ describe('POST /api/start', () => {
     vi.mocked(sendOwnerMessage).mockResolvedValueOnce({ typed: 'Owner: task' });
     const r = await post('/api/start', { project: 'demo', task: 'demo-1' });
     expect(r.status).toBe(200);
-    expect(await r.json()).toEqual({ ok: true, typed: 'Owner: task' });
+    expect(await r.json()).toEqual({ ok: true, typed: 'Owner: task', name: 'demo-orchestrator' });
     expect(startProject).toHaveBeenCalledTimes(1);
     expect(sendOwnerMessage).toHaveBeenCalledWith(
       root, 'demo', undefined,

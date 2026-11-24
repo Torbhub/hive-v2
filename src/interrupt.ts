@@ -61,5 +61,5 @@ export async function interruptAgent(
 
 export async function interruptLine(root: string, project: string, agentRef?: string): Promise<string> {
   const r = await interruptAgent(root, project, agentRef);
-  return `hive: interrupted ${r.target} (pane ${r.pane})`;
+  return `hive: interrupted ${r.target}`;
 }

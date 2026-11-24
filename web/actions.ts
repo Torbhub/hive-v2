@@ -1,5 +1,5 @@
 import type http from 'node:http';
-import { Refusal, answerDialog, continueProject, hubTask, listTasks, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
+import { Refusal, answerDialog, continueProject, currentOrchestratorName, hubTask, listTasks, planAnswer, setProjectApprovals, setProjectMode, startProject, wake } from '../src/hub.js';
 import { hubPath } from '../src/state.js';
 export { storedAgentTask } from '../src/agent-target.js';
 import { storedAgentTask } from '../src/agent-target.js';
@@ -118,10 +118,12 @@ export async function handlePost(root: string, pathname: string, body: Record<st
       return { ok: true, approvals };
     }
     if (pathname === '/api/wake') {
-      return { ok: true, pane: await wake(root, project) };
+      const pane = await wake(root, project);
+      return { ok: true, pane, name: await currentOrchestratorName(root, project) };
     }
     if (pathname === '/api/continue') {
-      return { ok: true, pane: await continueProject(root, project) };
+      const pane = await continueProject(root, project);
+      return { ok: true, pane, name: await currentOrchestratorName(root, project) };
     }
     if (pathname === '/api/task') {
       const text = String(body.text ?? '');
@@ -134,14 +136,15 @@ export async function handlePost(root: string, pathname: string, body: Record<st
     if (pathname === '/api/start') {
       const task = String(body.task ?? '');
       try {
-        return { ok: true, pane: await startProject(root, project, task) };
+        const pane = await startProject(root, project, task);
+        return { ok: true, pane, name: await currentOrchestratorName(root, project) };
       } catch (e) {
         if (!(e instanceof Refusal) || e.message !== `${project}'s orchestrator is already running`) throw e;
         const r = await sendOwnerMessage(
           root, project, undefined,
           `New task ${task}: read ${hubPath(root, 'tasks', `${task}.md`)} and take it from there.`,
         );
-        return { ok: true, typed: r.typed };
+        return { ok: true, typed: r.typed, name: await currentOrchestratorName(root, project) };
       }
     }
     if (pathname === '/api/message') {

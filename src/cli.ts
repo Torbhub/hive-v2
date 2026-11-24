@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 import path from 'node:path';
-import {
-  answerDialog, buildStatus, continueProject, hubAdd, hubInit, hubTask, ledgerCommand,
-  listTasks, planAnswer, readDialogFor, redactDialog, startProject, wake,
-} from './hub.js';
+import { answerDialog, buildStatus, continueProject, currentOrchestratorName, hubAdd, hubInit, hubTask, ledgerCommand, listTasks, planAnswer, readDialogFor, redactDialog, startProject, wake } from './hub.js';
 import { closeAgent, respawnAgent, spawnAgent } from './spawn.js';
+import { windowName, withoutPaneIds } from './window-name.js';
 import { parseSteps, runGate, verifyCommits, verifyLog } from './gate.js';
 import { cleanupCommand } from './cleanup-cli.js';
 import { memoryCommand } from './memory-cli.js';
@@ -37,7 +35,7 @@ const USAGE = `usage:
   hive push <remote> <sha> <branch>
   hive land <remote> <sha> <branch> [--title t] [--body b] | --bookmark <name> [--title t] [--body b]
   hive cleanup <project> [--dry-run] [--reclaim-trash --owner-approved]
-  hive interrupt <project> [agent] | hive kill <project> [agent] | hive compact <project> [agent] on|off
+  hive attach <project> | hive interrupt <project> [agent] | hive kill <project> [agent] | hive compact <project> [agent] on|off
   hive doctor | ui | watch | web [--port N] | handy-bridge [--origin URL] | mcp
   hive memory propose <project> <text...> | ls <project> | promote <project> <id> | hive branch create|status|refresh|result|reconcile ... | hive daydream mine|verify|recover|status|automation|reconcile|prune ...`;
 const VALUELESS_FLAGS = new Set(['json', 'no-body']);
@@ -103,7 +101,7 @@ async function hubCommand(args: string[]): Promise<void> {
     case 'tasks': {
       const tasks = await listTasks(root);
       if (args.includes('--json')) console.log(JSON.stringify(tasks, null, 2));
-      else for (const t of tasks) console.log(`${t.id} ${t.state}${t.needs_owner ? ' (needs you)' : ''} ${t.last_note ?? ''}`);
+      else for (const t of tasks) console.log(`${t.id} ${t.state}${t.needs_owner ? ' (needs you)' : ''} ${withoutPaneIds(t.last_note ?? '')}`);
       return;
     }
     case 'task': {
@@ -157,7 +155,8 @@ async function hubCommand(args: string[]): Promise<void> {
     case 'continue': {
       if (!args[1] || (sub === 'start' && !args[2])) throw new UsageError(`usage: hive hub ${sub} <project>${sub === 'start' ? ' <task-id>' : ''}`);
       const p = validName('project', args[1]);
-      console.log(await (sub === 'wake' ? wake(root, p) : sub === 'start' ? startProject(root, p, String(args[2])) : continueProject(root, p)));
+      await (sub === 'wake' ? wake(root, p) : sub === 'start' ? startProject(root, p, String(args[2])) : continueProject(root, p));
+      console.log(windowName(p, await currentOrchestratorName(root, p)));
       return;
     }
     default:
@@ -186,10 +185,9 @@ async function spawnCommand(args: string[]): Promise<void> {
     return;
   }
   const contract = { assignment: str(f.assignment), deliverable: str(f.deliverable) };
-  const pane = sub === 'respawn'
-    ? await respawnAgent(root, project, agent, { ...contract, model: str(f.model) })
-    : await spawnAgent(root, project, { agent, role: str(f.role), worktree: str(f.worktree), task: str(f.task), model: str(f.model), ...contract });
-  console.log(pane);
+  if (sub === 'respawn') await respawnAgent(root, project, agent, { ...contract, model: str(f.model) });
+  else await spawnAgent(root, project, { agent, role: str(f.role), worktree: str(f.worktree), task: str(f.task), model: str(f.model), ...contract });
+  console.log(windowName(project, agent));
 }
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -251,6 +249,11 @@ async function main(): Promise<void> {
       render(createElement(HubApp, { root: hubRoot() }));
       return;
     }
+    case 'attach': {
+      if (!args[1] || args[2]) throw new UsageError('usage: hive attach <project>');
+      await (await import('./attach.js')).attachProject(hubRoot(), validName('project', args[1]));
+      return;
+    }
     case 'interrupt':
     case 'kill': {
       if (!args[1]) throw new UsageError(`usage: hive ${cmd} <project> [agent]`);
@@ -290,6 +293,6 @@ main().catch((err: unknown) => {
     console.error(USAGE);
     process.exit(64);
   }
-  console.error(`hive: ${err instanceof Error ? err.message : String(err)}`);
+  console.error(`hive: ${withoutPaneIds(err instanceof Error ? err.message : String(err))}`);
   process.exit(1);
 });

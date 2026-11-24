@@ -3,7 +3,7 @@ import React, {
 } from 'react';
 import { Toaster, toast } from 'sonner';
 import type { Approvals, HubView, ProjectMode, QuestionAnswer, QuestionBatch } from '../src/types';
-import { ago, buildNeeds, homeTilde } from '../src/ui/look';
+import { ago, buildNeeds, homeTilde, orchestratorName } from '../src/ui/look';
 import { StretchText } from './Stretch';
 import { ActionContext, Btn } from './action';
 import { Branches } from './branches';
@@ -99,14 +99,14 @@ export function App() {
   const onWake = useCallback((project: string) => {
     void act(`wake-${project}`, project, 'resuming', project, async () => {
       const j = await post('api/wake', { project });
-      return `${project}: its orchestrator is coming up; it reports back when its team is up (pane ${j.pane})`;
+      return `${project}: ${typeof j.name === 'string' ? j.name : orchestratorName(project)} is coming up; it reports back when its team is up`;
     });
   }, [act]);
 
   const onContinue = useCallback((project: string) => {
     void act(`continue-${project}`, project, 'continuing', project, async () => {
       const j = await post('api/continue', { project });
-      return `${project}: its first line was sent (pane ${j.pane})`;
+      return `${project}: ${typeof j.name === 'string' ? j.name : orchestratorName(project)}'s first line was sent`;
     });
   }, [act]);
 
@@ -122,8 +122,8 @@ export function App() {
     return act(`start-${project}`, project, 'starting', project, async () => {
       const t = await post('api/task', { project, text });
       const j = await post('api/start', { project, task: t.id });
-      if (j.typed) return `${project}: ${t.id} was sent to its running orchestrator`;
-      return `${project}: its orchestrator is coming up on ${t.id}; it reports back when its team is up (pane ${j.pane})`;
+      if (j.typed) return `${project}: ${t.id} was sent to ${typeof j.name === 'string' ? j.name : orchestratorName(project)}`;
+      return `${project}: ${typeof j.name === 'string' ? j.name : orchestratorName(project)} is coming up on ${t.id}; it reports back when its team is up`;
     });
   }, [act]);
 

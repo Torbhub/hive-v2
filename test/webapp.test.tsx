@@ -217,7 +217,8 @@ describe('instant click feedback', () => {
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, pane: '%1' }), { status: 200 }));
     });
-    expect(container.textContent).toContain('its orchestrator is coming up');
+    expect(container.textContent).toContain('demo-orchestrator is coming up');
+    expect(container.textContent).not.toContain('%1');
   });
 
   it('a typed task enables Start task, and clicking it swaps the row to starting… before the fetch resolves', async () => {
@@ -241,7 +242,8 @@ describe('instant click feedback', () => {
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, pane: '%1' }), { status: 200 }));
     });
-    expect(container.textContent).toContain('coming up on demo-1');
+    expect(container.textContent).toContain('demo-orchestrator is coming up on demo-1');
+    expect(container.textContent).not.toContain('%1');
   });
 
   it('a task sent to a running orchestrator clears the draft and registers once', async () => {
@@ -260,7 +262,7 @@ describe('instant click feedback', () => {
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, typed: true }), { status: 200 }));
     });
-    expect(container.textContent).toContain('demo-1 was sent to its running orchestrator');
+    expect(container.textContent).toContain('demo-1 was sent to demo-orchestrator');
     expect((container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement).value).toBe('');
     expect(vi.mocked(fetch).mock.calls.filter(([i]) => String(i).endsWith('api/task'))).toHaveLength(1);
     expect(vi.mocked(fetch).mock.calls.filter(([i]) => String(i).endsWith('api/start'))).toHaveLength(1);
@@ -684,7 +686,48 @@ describe('needs-ui', () => {
     expect(container.textContent).not.toContain('select-pane');
   });
 
-  it('attaches to the verified live pane for an aliased project', async () => {
+  it('continue message names the orchestrator without a pane id', async () => {
+    mountWith({
+      ...VIEW,
+      projects: [{
+        ...VIEW.projects[0],
+        orchestrator: {
+          state: 'none', name: 'demo-orchestrator',
+          starting: { pane: '%9', kind: 'start', at: new Date().toISOString() },
+        },
+      }],
+    });
+    await repoll();
+    act(() => button('Continue').click());
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({ ok: true, pane: '%9' }), { status: 200 }));
+    });
+    expect(container.textContent).toContain("demo-orchestrator's first line was sent");
+    expect(container.textContent).not.toContain('%9');
+  });
+
+  it('wake toast uses the orchestrator name registered by the action', async () => {
+    mountWith({
+      ...VIEW,
+      projects: [{
+        ...VIEW.projects[0],
+        name: 'simplification-agent',
+        orchestrator: { state: 'stopped', question: false, name: 'citadel-orchestrator', session_id: 'session_x' },
+      }],
+    });
+    await repoll();
+    act(() => resumeButton().click());
+    await act(async () => {
+      resolveAction!(new Response(JSON.stringify({
+        ok: true, pane: '%15', name: 'simplification-agent-orchestrator',
+      }), { status: 200 }));
+    });
+    const toast = container.querySelector('[data-sonner-toast]');
+    expect(toast?.textContent).toContain('simplification-agent-orchestrator');
+    expect(toast?.textContent).not.toContain('citadel-orchestrator');
+  });
+
+  it('attaches to the named window for an aliased project', async () => {
     mountWith({
       ...VIEW,
       projects: [{
@@ -695,9 +738,22 @@ describe('needs-ui', () => {
     });
     await repoll();
     const hints = [...container.querySelectorAll('div')].map((el) => el.textContent)
-      .filter((text) => text?.startsWith('attach: tmux'));
-    expect(hints).toEqual(['attach: tmux -L hive-v2 attach -t hive \\; select-window -t %15 \\; select-pane -t %15']);
-    expect(container.textContent).not.toContain('hive:simplification-agent:citadel-orchestrator');
+      .filter((text) => text?.startsWith('attach:'));
+    expect(hints).toEqual(['attach: hive attach simplification-agent']);
+    expect(container.textContent).not.toContain('%15');
+  });
+
+  it('unregistered orchestrator label omits the pane id', async () => {
+    mountWith({
+      ...VIEW,
+      projects: [{
+        ...VIEW.projects[0],
+        orchestrator: { state: 'unregistered', question: false, name: 'demo-orchestrator', pane: '%11' },
+      }],
+    });
+    await repoll();
+    expect(container.textContent).toContain('demo-orchestrator');
+    expect(container.textContent).not.toContain('%11');
   });
 
   it.each(['unknown', 'stopped'] as const)('uses the generic attach hint for a %s pane', async (state) => {

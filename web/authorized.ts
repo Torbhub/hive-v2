@@ -9,7 +9,8 @@ import {
   AuthenticationError, AuthorizationError, authorize, authorizeExact, bearerFromRequest,
   exactGrant, publicAgentIdentity, revoked, type Principal,
 } from '../src/security.js';
-import { buildView, lastLine } from '../src/view.js';
+import { buildView, displayLine } from '../src/view.js';
+import { withoutPaneIds } from '../src/window-name.js';
 import {
   BODY_CAP, checkBrowserHeaders, handlePost, isExecutionApprovalAnswer, postAction, postScope, readBody, storedAgentTask,
 } from './actions.js';
@@ -385,7 +386,7 @@ export function errorResponse(res: http.ServerResponse, error: unknown): void {
   }
   if (error instanceof HttpError) return sendJson(res, error.code, { ok: false, detail: error.message });
   if (error instanceof RolloutPaused) return sendJson(res, 409, { ok: false, detail: error.message });
-  if (error instanceof Refusal) return sendJson(res, 400, { ok: false, detail: lastLine(error) });
-  console.error('hive web:', error);
+  if (error instanceof Refusal) return sendJson(res, 400, { ok: false, detail: displayLine(error) });
+  console.error('hive web:', withoutPaneIds(error instanceof Error ? error.stack ?? error.message : String(error)));
   sendJson(res, 500, { ok: false, detail: 'internal error' });
 }
