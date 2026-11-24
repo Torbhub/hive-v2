@@ -16,6 +16,26 @@ describe('Hive question guard', () => {
     }).status).toBe(2);
     expect(execFileSync(GUARD, { env: { ...process.env, HIVE_AGENT: '' }, stdio: 'pipe' })).toHaveLength(0);
   });
+
+  it('blocks local ffmpeg commands only for Hive agents', () => {
+    const runBash = (command: string, agent = 'builder') => spawnSync(GUARD, {
+      input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }),
+      env: { ...process.env, HIVE_AGENT: agent }, stdio: 'pipe',
+    });
+    for (const command of [
+      'ffmpeg -i input.mov output.mp4',
+      'sudo /usr/bin/ffmpeg -i input.mov output.mp4',
+      'printf start && ffmpeg -i input.mov output.mp4',
+      'printf start\nffmpeg -i input.mov output.mp4',
+      "bash -lc 'ffmpeg -i input.mov output.mp4'",
+    ]) {
+      const result = runBash(command);
+      expect(result.status).toBe(2);
+      expect(result.stderr.toString()).toContain('Rent a compute machine');
+    }
+    expect(runBash('printf ok').status).toBe(0);
+    expect(runBash('ffmpeg -i input.mov output.mp4', '').status).toBe(0);
+  });
 });
 
 describe('question hook provisioning', () => {
@@ -28,6 +48,7 @@ describe('question hook provisioning', () => {
     const merged = readFileSync(file, 'utf8');
     expect(merged).toContain(original);
     expect(merged).toContain('matcher = "AskUserQuestion"');
+    expect(merged).toContain('matcher = "Bash"');
     expect(merged).toContain('command = "/opt/node22/bin/node /opt/hive-v2/question-guard.mjs"');
     execFileSync(MERGE, [file]);
     expect(readFileSync(file, 'utf8')).toBe(merged);
