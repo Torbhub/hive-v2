@@ -142,7 +142,7 @@ describe('stretchtext decisions', () => {
 });
 
 describe('task presets', () => {
-  it('lists the five workflows and explains why Encord and SieveData are disabled', () => {
+  it('lists the six workflows and explains why Encord and SieveData are disabled', () => {
     const summary = [...container.querySelectorAll('summary')].find((item) => item.textContent === 'Preset');
     expect(summary).toBeDefined();
     act(() => summary!.click());
@@ -151,10 +151,11 @@ describe('task presets', () => {
       'Appen — mostly processedProcess selected recordings into Appen’s processed MCAP episode drop under a chosen destination. Optionally force task difficulty to hard.',
       'Turing / OpenAIBuild and validate a Turing delivery drop with registry-issued sequential episode IDs, configured chunking, and any required calibration packages.',
       'PixelsTwo — raw session transferCopy complete selected sessions—all raw MCAP files plus session.json—to the configured PixelsTwo R2 destination. Do not annotate or rebake.',
+      'Shrink anythingRun verified cuts on a GitHub-hosted runner after approval. Open a pull request and upload the report and judgment task.',
       'Encord — sample curationHistorical workflow for selecting and reviewing 20–30 minute clips and preparing transcode/crop work. Requires a source set, destination, and output contract.',
       'SieveDataNot configured. No job contract is defined yet.',
     ]);
-    expect(options.map((option) => option.disabled)).toEqual([false, false, false, true, true]);
+    expect(options.map((option) => option.disabled)).toEqual([false, false, false, false, true, true]);
   });
 
   it.each([
@@ -173,6 +174,14 @@ describe('task presets', () => {
       profile: '',
       placeholders: ['[REQUIRED SOURCE]', '[REQUIRED R2 DESTINATION]'],
     },
+    {
+      label: 'Shrink anything',
+      profile: '',
+      placeholders: [
+        '[REQUIRED OWNER/REPOSITORY]', '[REQUIRED BASE BRANCH]',
+        '[REQUIRED 40-CHARACTER COMMIT]', '[REQUIRED CHECK COMMAND]',
+      ],
+    },
   ])('inserts $label as an editable draft without submitting it', ({ label, profile, placeholders }) => {
     act(() => {
       ([...container.querySelectorAll('summary')].find((item) => item.textContent === 'Preset') as HTMLElement).click();
@@ -183,6 +192,11 @@ describe('task presets', () => {
     const input = container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement;
     for (const placeholder of placeholders) expect(input.value).toContain(placeholder);
     if (profile) expect(input.value).toContain(`minipipe profile ${profile}`);
+    if (label === 'Shrink anything') {
+      expect(input.value).toContain('@el4cteo/shrink-anything from the published npm package');
+      expect(input.value).toContain('Do not vendor upstream source.');
+      expect(input.value).toContain('Do not merge the target pull request without my approval.');
+    }
     expect(input.value).toContain('First present a plan for my approval.');
     expect(input.value).toContain('After approval, use normal Hive execution.');
     expect(document.activeElement).toBe(input);

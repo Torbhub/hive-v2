@@ -22,6 +22,11 @@ const TASK_PRESETS = [
     prompt: 'Copy complete selected sessions—all raw MCAP files plus session.json—to the configured PixelsTwo R2 destination. Do not annotate or rebake. Source: [REQUIRED SOURCE]. R2 destination: [REQUIRED R2 DESTINATION].',
   },
   {
+    label: 'Shrink anything',
+    description: 'Run verified cuts on a GitHub-hosted runner after approval. Open a pull request and upload the report and judgment task.',
+    prompt: 'Use the shrink-anything workflow as a normal Hive run. Target repository: [REQUIRED OWNER/REPOSITORY]. Base branch: [REQUIRED BASE BRANCH]. Exact reviewed target commit: [REQUIRED 40-CHARACTER COMMIT]. Target check: [REQUIRED CHECK COMMAND]. Setup command: [OPTIONAL SETUP COMMAND]. After approval, dispatch the shrink-anything GitHub workflow on the rented GitHub-hosted runner. Use @el4cteo/shrink-anything from the published npm package. Do not vendor upstream source. Require the environment approval. Return the branch, pull request, workflow run, report, and .shrink/TASK.md for orchestrator judgment. Do not merge the target pull request without my approval.',
+  },
+  {
     label: 'Encord — sample curation',
     description: 'Historical workflow for selecting and reviewing 20–30 minute clips and preparing transcode/crop work. Requires a source set, destination, and output contract.',
   },
