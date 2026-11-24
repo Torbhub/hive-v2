@@ -1,9 +1,9 @@
 {
   "version": 1,
   "files": {
-    "web/App.tsx": 373,
-    "src/hub.ts": 489,
-    "src/ui/HubApp.tsx": 443,
+    "web/App.tsx": 275,
+    "src/hub.ts": 488,
+    "src/ui/HubApp.tsx": 442,
     "src/cli.ts": 298,
     "web/server.ts": 36
   },

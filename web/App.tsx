@@ -3,19 +3,12 @@ import React, {
 } from 'react';
 import { Toaster, toast } from 'sonner';
 import type { Approvals, HubView, ProjectMode, QuestionAnswer, QuestionBatch } from '../src/types';
-import { ago, buildNeeds, homeTilde, orchestratorName } from '../src/ui/look';
-import { StretchText } from './Stretch';
-import { ActionContext, Btn } from './action';
+import { orchestratorName } from '../src/ui/look';
+import { ActionContext } from './action';
 import { Branches } from './branches';
 import { LogView } from './logview';
-import { ProjectCard, StatusDot } from './project';
-import { NeedCard } from './needs';
-import { BatchCard, Questions } from './questions';
-import { AddProjectRow } from './rows';
-import { WorkTreeView } from './WorkTree';
-import { Button } from './components/ui/button';
-import { Badge } from './components/ui/badge';
-import { Separator } from './components/ui/separator';
+import { Questions } from './questions';
+import { Dashboard } from './Dashboard';
 
 const EVERY_MS = 20_000;
 
@@ -250,123 +243,32 @@ export function App() {
     );
   }
 
-  const now = Date.now();
-  const where = homeTilde(view.root, '');
-  const clock = view.updatedAt ? new Date(view.updatedAt).toTimeString().slice(0, 5) : 'reading…';
-  const needs = buildNeeds(view, now);
-  const sources = [...new Set(view.projects.flatMap((p) =>
-    p.repos.filter((r) => r.kind === 'repo' || r.kind === 'worktree').map((r) => r.folder),
-  ))];
-
   return (
     <ActionContext.Provider value={{ acting, pressed }}>
-      <div className="min-h-screen bg-zinc-950">
-        <div className="mx-auto flex max-w-2xl flex-col gap-5 px-4 py-8">
-          <header className="flex items-baseline justify-between gap-3">
-            <div className="flex min-w-0 items-baseline gap-2.5">
-              <span className="text-lg font-semibold tracking-tight text-white">hive</span>
-              {where !== '' && <span className="truncate font-mono text-xs text-zinc-500">{where}</span>}
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {view.updatedAt !== 0 && <Badge>relay</Badge>}
-              <span className="text-xs text-zinc-500 tabular">{clock}</span>
-            </div>
-          </header>
-          <Separator />
-
-          {view.questions.length > 0 && (
-            <section className="flex flex-col gap-3">
-              <div>
-                <Btn id="questions-open" onPress={() => setQuestionsOpen(true)}>
-                  Questions {view.questionsTotal ?? view.questions.length}
-                </Btn>
-              </div>
-              {view.questions.map((batch) => (
-                <BatchCard key={batch.id} batch={batch} onAnswer={onQuestionAnswer} onCancel={onQuestionCancel} />
-              ))}
-            </section>
-          )}
-
-          {view.error !== '' && (
-            <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-              {view.error}
-            </div>
-          )}
-
-          {needs.length > 0 && (
-            <section className="flex flex-col gap-2">
-              <div className="text-xs font-medium uppercase tracking-widest text-fuchsia-400">Needs you</div>
-              {needs.map((n) => (
-                <NeedCard
-                  key={n.key}
-                  need={n}
-                  view={view}
-                  busy={busy}
-                  onAnswer={onAnswer}
-                  onContinue={onContinue}
-                  onPlanAnswer={onPlanAnswer}
-                  onResolve={onResolve}
-                  onNudge={onNudge}
-                />
-              ))}
-            </section>
-          )}
-
-          {view.updatedAt !== 0 && view.projects.length === 0 && view.error === '' && (
-            <div className="text-sm text-zinc-500">No projects yet: tell the hub which folders make up a project.</div>
-          )}
-
-          {view.decisions.length > 0 && (
-            <section className="flex flex-col gap-1.5">
-              <div className="text-xs font-medium uppercase tracking-widest text-zinc-500">Decisions</div>
-              {view.decisions.map((d, i) => (
-                <div key={`${d.at}-${i}`} className="flex items-baseline justify-between gap-3 text-sm">
-                  <div className="flex min-w-0 items-baseline gap-2">
-                    <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-600" />
-                    <span className="shrink-0 font-medium text-zinc-100">{d.task ?? d.project}</span>
-                    <StretchText text={d.summary} pane={d.task ?? d.project} className="text-zinc-400" />
-                  </div>
-                  <span className="shrink-0 text-xs text-zinc-500 tabular">{ago(d.at, now)}</span>
-                </div>
-              ))}
-            </section>
-          )}
-
-          {view.workTree && <WorkTreeView tree={view.workTree} onChanged={refresh} />}
-
-          {view.projects.map((p) => (
-            <ProjectCard
-              key={p.name}
-              project={p}
-              view={view}
-              now={now}
-              busy={busy}
-              onWake={onWake}
-              onStartTask={onStartTask}
-              onSetMode={onSetMode}
-              onSetApprovals={onSetApprovals}
-              onMessage={onMessage}
-              onNudge={onNudge}
-              onInterrupt={onInterrupt}
-              onLogs={onLogs}
-              onBranches={onBranches}
-              onKill={onKill}
-              onDelete={onDelete}
-            />
-          ))}
-
-          <AddProjectRow sources={sources} onAddProject={onAddProject} />
-
-          <footer className="flex items-center justify-between pt-1">
-            <span className="flex items-center gap-3 text-xs text-zinc-500">
-              <span className="flex items-center gap-1.5"><StatusDot color="green" />running</span>
-              <span className="flex items-center gap-1.5"><StatusDot color="yellow" />stopped</span>
-              <span className="flex items-center gap-1.5"><StatusDot color="gray" />no team</span>
-            </span>
-            <Button variant="ghost" size="sm" onClick={() => void refresh()}>refresh</Button>
-          </footer>
-        </div>
-      </div>
+      <Dashboard
+        view={view}
+        busy={busy}
+        refresh={refresh}
+        onQuestionsOpen={() => setQuestionsOpen(true)}
+        onWake={onWake}
+        onStartTask={onStartTask}
+        onSetMode={onSetMode}
+        onSetApprovals={onSetApprovals}
+        onMessage={onMessage}
+        onNudge={onNudge}
+        onAnswer={onAnswer}
+        onContinue={onContinue}
+        onPlanAnswer={onPlanAnswer}
+        onResolve={onResolve}
+        onInterrupt={onInterrupt}
+        onLogs={onLogs}
+        onBranches={onBranches}
+        onKill={onKill}
+        onDelete={onDelete}
+        onAddProject={onAddProject}
+        onQuestionAnswer={onQuestionAnswer}
+        onQuestionCancel={onQuestionCancel}
+      />
       <Toaster theme="dark" position="bottom-right" />
     </ActionContext.Provider>
   );

@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import process from 'node:process';
 import { COUNTED_INPUT_FIELDS, countedInput } from './policy.js';
 
-const BASE = 'http://127.0.0.1:8765';
+const BASE = process.env.HERMES_COUNT_BASE_URL ?? 'http://127.0.0.1:8765';
 const PROVIDER_COUNT_STATUSES = new Set(['provider_input_accounting_unverified']);
 const PROVIDER_COUNT_ERROR_TYPES = new Set([
   'invalid_request_error', 'authentication_error', 'rate_limit_error', 'api_error', 'unknown',

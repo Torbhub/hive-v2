@@ -73,11 +73,16 @@ async function runProbe(countStatus = 200, revokeStatus = 200, countResponse: Re
     }
     response.writeHead(404).end();
   });
-  await new Promise<void>((resolve) => server.listen(8765, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   closers.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('count probe listener has no port');
   const root = await mkdtemp(join(tmpdir(), 't01-count-probe-'));
   const output = join(root, 'count.json');
-  const child = spawn(runner, [probe, output], { env: { PATH: process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(runner, [probe, output], {
+    env: { PATH: process.env.PATH, HERMES_COUNT_BASE_URL: `http://127.0.0.1:${address.port}` },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; });

@@ -5,6 +5,11 @@ import type { HubView, QuestionBatch, RootContract } from '../src/types.js';
 import { taskContract } from './task-contract.js';
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+(globalThis as Record<string, unknown>).ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
 
 const VIEW: HubView = {
   root: '/r',
@@ -440,7 +445,9 @@ describe('needs-ui', () => {
     expect(input).not.toBeNull();
     expect(button('Send').disabled).toBe(true);
     typeInto(input, 'use the staging key');
-    const send = button('Send');
+    expect(input.value).toBe('use the staging key');
+    const send = [...input.closest('form')!.querySelectorAll('button')]
+      .find((b) => b.textContent === 'Send') as HTMLButtonElement;
     expect(send.disabled).toBe(false);
     act(() => {
       send.click();
@@ -1369,5 +1376,35 @@ describe('operator questions', () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'r' }));
     });
     expect(container.textContent).toContain(BATCH.context);
+  });
+});
+
+
+describe('dashboard shell', () => {
+  it('shows one project at a time with navigation and a team graph', async () => {
+    const projects = ['alpha', 'beta'].map((name) => ({
+      ...VIEW.projects[0], name, home: `/r/${name}`,
+      orchestrator: { state: 'running' as const, question: false, name: `${name}-orchestrator`, session_id: `session_${name}` },
+      agents: [{ name: 'builder', state: 'running' as const, ref: 'builder', session_id: `session_${name}_builder` }],
+    }));
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      if (String(input).endsWith('api/view')) {
+        return Promise.resolve(new Response(JSON.stringify({ ...VIEW, projects }), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
+    });
+    expect(container.querySelector('[data-testid="project-nav"]')).not.toBeNull();
+    expect(container.querySelectorAll('[data-testid^="project-card-"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="project-card-alpha"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="team-map"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="team-map"]')?.textContent).toContain('builder');
+    const beta = [...container.querySelectorAll('[data-testid="project-nav"] [role="button"]')]
+      .find((b) => b.textContent?.includes('beta')) as HTMLButtonElement;
+    await act(async () => beta.click());
+    expect(container.querySelectorAll('[data-testid^="project-card-"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="project-card-beta"]')).not.toBeNull();
   });
 });

@@ -10,8 +10,10 @@ import { KillControl } from './kill';
 import { DeleteProjectControl } from './delete';
 import { ProgressRow } from './needs';
 import { MessageRow, NewTaskRow } from './rows';
-import { Card, CardContent, CardHeader } from './components/ui/card';
-import { ToggleGroup, ToggleGroupItem } from './components/ui/toggle-group';
+import {
+  Box, Card, CardContent, CardHeader, Stack, ToggleButton, ToggleButtonGroup, Typography,
+} from '@mui/material';
+import { TeamMap } from './TeamMap';
 
 export function StatusDot({ color, className }: { color: string; className?: string }) {
   const cls = { green: 'bg-emerald-500', yellow: 'bg-amber-400', red: 'bg-red-500', gray: 'bg-zinc-600', cyan: 'bg-sky-400', magenta: 'bg-fuchsia-400' }[color] ?? 'bg-zinc-600';
@@ -20,10 +22,10 @@ export function StatusDot({ color, className }: { color: string; className?: str
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex gap-3 text-sm">
-      <span className="w-24 shrink-0 text-zinc-500">{label}</span>
-      <span className="min-w-0 flex-1">{children}</span>
-    </div>
+    <Box sx={{ display: 'grid', gridTemplateColumns: '96px minmax(0, 1fr)', gap: 2 }}>
+      <Typography variant="body2" color="text.secondary">{label}</Typography>
+      <Box sx={{ minWidth: 0 }}>{children}</Box>
+    </Box>
   );
 }
 
@@ -62,15 +64,12 @@ export function ProjectCard({
   );
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <StatusDot color={look.color} />
-          <span className="font-medium text-white">{p.name}</span>
-        </div>
-        <span className="text-xs text-zinc-500">{look.word}</span>
-      </CardHeader>
-      <CardContent>
+    <Card data-testid={`project-card-${p.name}`} variant="outlined">
+      <CardHeader
+        title={<Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}><StatusDot color={look.color} /><span>{p.name}</span></Stack>}
+        subheader={look.word}
+      />
+      <CardContent component={Stack} spacing={2}>
         <Row label="orchestrator">
           <span>
             <span className="text-zinc-100">{orchName}</span>
@@ -139,6 +138,7 @@ export function ProjectCard({
             </span>
           )}
         </Row>
+        {(o.state !== 'none' || p.agents.length > 0) && <TeamMap project={p} />}
         <Row label="tasks">
           <span className="text-zinc-100">{tasksLine(view.tasks, p.name, p.open_tasks, now)}</span>
         </Row>
@@ -161,34 +161,36 @@ export function ProjectCard({
           </span>
         </Row>
         <Row label="mode">
-          <ToggleGroup
-            type="single"
+          <ToggleButtonGroup
+            exclusive
+            size="small"
             value={p.mode ?? 'ask'}
             disabled={acting}
-            onValueChange={(m) => {
+            onChange={(_, m) => {
               if (m) onSetMode(p.name, m as ProjectMode);
             }}
             aria-label={`permission mode for ${p.name}`}
           >
             {PROJECT_MODES.map((m) => (
-              <ToggleGroupItem key={m} value={m}>{m}</ToggleGroupItem>
+              <ToggleButton key={m} value={m}>{m}</ToggleButton>
             ))}
-          </ToggleGroup>
+          </ToggleButtonGroup>
         </Row>
         <Row label="approvals">
-          <ToggleGroup
-            type="single"
+          <ToggleButtonGroup
+            exclusive
+            size="small"
             value={p.approvals ?? 'manual'}
             disabled={acting}
-            onValueChange={(m) => {
+            onChange={(_, m) => {
               if (m) onSetApprovals(p.name, m as Approvals);
             }}
             aria-label={`permission mode for ${p.name}`}
           >
             {APPROVALS_MODES.map((m) => (
-              <ToggleGroupItem key={m} value={m}>{m}</ToggleGroupItem>
+              <ToggleButton key={m} value={m}>{m}</ToggleButton>
             ))}
-          </ToggleGroup>
+          </ToggleButtonGroup>
         </Row>
         {canResume && (
           <div className="pt-1.5">
