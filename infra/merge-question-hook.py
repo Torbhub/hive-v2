@@ -13,6 +13,11 @@ event = "PreToolUse"
 matcher = "AskUserQuestion"
 command = "/opt/node22/bin/node /opt/hive-v2/question-guard.mjs"
 timeout = 5
+[[hooks]]
+event = "PreToolUse"
+matcher = "Bash"
+command = "/opt/node22/bin/node /opt/hive-v2/question-guard.mjs"
+timeout = 5
 {END}
 """
 

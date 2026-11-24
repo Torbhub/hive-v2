@@ -258,9 +258,13 @@ hive ui                                  — the hub screen
   `disallowedTools` contains `AskUserQuestion`. Interactive Kimi 2.3.1 ignores
   profile-selection flags, so a conditional `PreToolUse` hook enforces the same
   rule when `HIVE_AGENT` is set. The hook returns exit 2 and directs the agent
-  to `mcp__hive-operator__ask_operator`. Non-Hive sessions return exit 0. If the
-  hook misses a dialog, the watchdog detects its exact footer, sends Escape once,
-  and types one MCP redirect. It never selects a native answer.
+  to `mcp__hive-operator__ask_operator`. Non-Hive sessions return exit 0.
+  A second matcher runs the same guard before Bash. It returns exit 2 when
+  the command contains an `ffmpeg` token and tells the agent to rent a compute
+  machine. Other Bash calls return exit 0. Fresh profiles and pickup lines
+  also forbid heavy local compute. If the hook misses a dialog, the watchdog
+  detects its exact footer, sends Escape once, and types one MCP redirect.
+  It never selects a native answer.
   The project's `mode` in projects.json (`ask`/`yolo`/`auto`, default `ask`)
   maps to no flag for `ask` and managed `auto`, and `-y` only for explicit
   `yolo`, on fresh starts and resumes alike. Derived `ask` plus `safe` or
