@@ -16,6 +16,9 @@
 
 ## Box compute (HARD)
 
+- Never run `ffmpeg` or other heavy compute on this box. Rent a compute
+  machine for media processing, rendering, ML, bulk data work, and similar
+  jobs. This applies to every Hive orchestrator, worker, and subworker.
 - Do not run ad-hoc or parallel builds and test suites on this box. The
   pre-push hook runs one bounded full gate before a push. CI verifies the
   same gate again on the PR.

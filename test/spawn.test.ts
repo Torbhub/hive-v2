@@ -1367,6 +1367,25 @@ describe('Hive no-comment policy', () => {
   });
 });
 
+describe('Hive compute policy', () => {
+  it('adds the remote-compute rule to every fresh agent profile', async () => {
+    const { root } = await setup({ name: 'builder' });
+    await spawn(root, { agent: 'builder2' });
+    const command = vi.mocked(newWindow).mock.calls.at(-1)?.[2];
+    const profile = command?.match(/--agent-file '([^']+)'/)?.[1];
+    expect(profile).toBeDefined();
+    const text = await fs.readFile(profile!, 'utf8');
+    expect(text).toContain('Never run ffmpeg or other heavy compute on this host');
+    expect(text).toContain('Rent a compute machine');
+  }, 20_000);
+
+  it.each(['builder', 'demo-orchestrator'])('adds the remote-compute rule to the %s pickup line', (agent) => {
+    const text = pickupLine('/tmp/hive-hub', 'demo', agent);
+    expect(text).toContain('Never run ffmpeg or other heavy compute on this host');
+    expect(text).toContain('Rent a compute machine');
+  });
+});
+
 describe('launchCommand', () => {
   it('builds the teamkimi run line per mode, resume included, K3.1 Pro by default', () => {
     expect(launchCommand(undefined, 'ask')).toBe("KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_CODE_SESSION_LOCK=0 exec teamkimi run -- -m 'kimi-code/k3.1-pro-highspeed'");

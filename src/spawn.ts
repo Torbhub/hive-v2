@@ -48,13 +48,14 @@ export async function preflight(model: string): Promise<void> {
 }
 
 const COMMENT_POLICY = 'Write no comments in any repository. This rule is additive to target-repo instructions. Record durable decisions with the target repo\'s ADR convention. Escalate conflicts to the orchestrator.';
+const COMPUTE_POLICY = 'Never run ffmpeg or other heavy compute on this host. Rent a compute machine for that work and run it there. Keep this server for orchestration and light checks only.';
 
 export function pickupLine(root: string, project: string, agent: string, handoff?: string): string {
   const decisions = ` Decisions so far: read ${hubPath(root, 'decisions.jsonl')} — they are permanent.`;
   if (agent === orchestratorName(project)) {
-    return `You are ${agent}, the orchestrator of project ${project}. Read .hive/handoffs/${agent}.md from the top: its START HERE block is your prompt. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. The owner talks to you only through the hub: report plans, questions, blockers and finished work to it.${decisions} ${COMMENT_POLICY}`;
+    return `You are ${agent}, the orchestrator of project ${project}. Read .hive/handoffs/${agent}.md from the top: its START HERE block is your prompt. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. The owner talks to you only through the hub: report plans, questions, blockers and finished work to it.${decisions} ${COMMENT_POLICY} ${COMPUTE_POLICY}`;
   }
-  return `You are ${agent} of project ${project}. Read ${handoff ?? `.hive/handoffs/${agent}.md`} from the top. Start with the Assignment and Deliverable in START HERE. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. Report the required deliverable to the orchestrator.${decisions} ${COMMENT_POLICY}`;
+  return `You are ${agent} of project ${project}. Read ${handoff ?? `.hive/handoffs/${agent}.md`} from the top. Start with the Assignment and Deliverable in START HERE. Your role: .hive/team/${agent}/role.md. The rules: .hive/team/${agent}/RULES.md. Report the required deliverable to the orchestrator.${decisions} ${COMMENT_POLICY} ${COMPUTE_POLICY}`;
 }
 
 export async function ensureAgentFiles(projectHome: string, agent: string, role: string): Promise<void> {
@@ -184,7 +185,7 @@ export function launchCommand(
 
 async function ensureAgentProfile(cwd: string, agent: string): Promise<string> {
   const file = hivePath(cwd, 'team', agent, 'agent.md');
-  await writeNoFollow(file, `---\nname: hive-${agent}\ndescription: Hive-managed agent with structured operator questions\ndisallowedTools:\n  - AskUserQuestion\n---\n\n\${base_prompt}\n\nYou are a Hive agent. Do not use AskUserQuestion. Use mcp__hive-operator__ask_operator for every operator decision. Harness faults are Hive-owned errors to repair or degrade. Do not turn them into owner questions.\n${COMMENT_POLICY}\n`, cwd);
+  await writeNoFollow(file, `---\nname: hive-${agent}\ndescription: Hive-managed agent with structured operator questions\ndisallowedTools:\n  - AskUserQuestion\n---\n\n\${base_prompt}\n\nYou are a Hive agent. Do not use AskUserQuestion. Use mcp__hive-operator__ask_operator for every operator decision. Harness faults are Hive-owned errors to repair or degrade. Do not turn them into owner questions.\n${COMMENT_POLICY} ${COMPUTE_POLICY}\n`, cwd);
   return file;
 }
 
