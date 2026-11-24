@@ -376,6 +376,14 @@ lives in `infra/` (one CloudFormation stack plus the committed box config)
 and every push to main deploys through `.github/workflows/deploy.yml` over
 SSM. Bootstrap steps and the drift-adoption story: `infra/README.md`.
 
+## Shrink anything
+
+The `shrink-anything` workflow runs the published `@el4cteo/shrink-anything@0.1.0` package on a GitHub-hosted runner. Manual dispatch starts from `main`. The `shrink-anything` environment requires operator approval. The run uses the target project's own check and opens a pull request with verified cuts. It uploads `report.md`, `report.svg`, and `.shrink/TASK.md` when the tool produces a judgment task. The target pull request stays open for review.
+
+The environment secret `SHRINK_ANYTHING_TOKEN` holds a fine-grained access token. Limit the token to the selected target repositories. Grant only **Contents: read and write** and **Pull requests: read and write**. The workflow gives its automatic `GITHUB_TOKEN` no permissions. The environment limits deployments to `main` and requires an operator reviewer.
+
+Dispatch requires the target repository, base branch, exact reviewed commit, and target check. The commit must equal the current base branch head. An optional setup command installs target dependencies. The run does not execute `.shrink/TASK.md`. The orchestrator reviews that task and decides the next action.
+
 ## The bench
 
 `bench/` holds small canary tasks about hive's own code. Each task in

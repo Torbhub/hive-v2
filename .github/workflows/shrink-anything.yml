@@ -1,0 +1,113 @@
+name: shrink-anything
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Target repository in owner/name form
+        required: true
+        type: string
+      base_branch:
+        description: Target branch for the pull request
+        required: true
+        type: string
+      target_sha:
+        description: Full reviewed commit at the current base branch head
+        required: true
+        type: string
+      setup_command:
+        description: Optional command that installs target dependencies
+        required: false
+        type: string
+      check_command:
+        description: Target project's own passing check
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: shrink-anything-${{ inputs.repository }}
+  cancel-in-progress: false
+
+jobs:
+  shrink:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    environment: shrink-anything
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions: {}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.target_sha }}
+          token: ${{ secrets.SHRINK_ANYTHING_TOKEN }}
+          persist-credentials: false
+      - name: Verify the reviewed target
+        env:
+          GH_TOKEN: ${{ secrets.SHRINK_ANYTHING_TOKEN }}
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          EXPECTED_TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$BASE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]
+          [[ "$EXPECTED_TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git check-ref-format --branch "$BASE_BRANCH" >/dev/null
+          [ "$(git rev-parse HEAD)" = "$EXPECTED_TARGET_SHA" ]
+          BASE_HEAD="$(gh api "repos/$TARGET_REPOSITORY/git/ref/heads/$BASE_BRANCH" --jq .object.sha)"
+          [ "$BASE_HEAD" = "$EXPECTED_TARGET_SHA" ]
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Install target dependencies
+        if: ${{ inputs.setup_command != '' }}
+        env:
+          SETUP_COMMAND: ${{ inputs.setup_command }}
+        run: bash -euo pipefail -c "$SETUP_COMMAND"
+      - name: Run the published shrink-anything package
+        env:
+          TARGET_CHECK: ${{ inputs.check_command }}
+        run: |
+          set -euo pipefail
+          npm exec --yes --package=@el4cteo/shrink-anything@0.1.0 -- shrink-anything go -- "$TARGET_CHECK"
+          npm exec --yes --package=@el4cteo/shrink-anything@0.1.0 -- shrink-anything verify
+          npm exec --yes --package=@el4cteo/shrink-anything@0.1.0 -- shrink-anything report
+          test -f .shrink/report.md
+          test -f .shrink/report.svg
+      - name: Upload the report and judgment task
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shrink-anything-${{ github.run_id }}
+          path: |
+            .shrink/report.md
+            .shrink/report.svg
+            .shrink/TASK.md
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Open the verified cuts pull request
+        id: create_pr
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676
+        with:
+          token: ${{ secrets.SHRINK_ANYTHING_TOKEN }}
+          branch: shrink-anything/${{ github.run_id }}
+          base: ${{ inputs.base_branch }}
+          delete-branch: true
+          add-paths: |
+            '*'
+            ':(exclude).shrink/**'
+          commit-message: 'chore: keep only verified shrink-anything cuts'
+          title: 'chore: verified shrink-anything cuts'
+          body: |
+            ## Verified cuts
+
+            `@el4cteo/shrink-anything@0.1.0` ran against `${{ inputs.target_sha }}`.
+
+            Check: `${{ inputs.check_command }}`
+
+            [Workflow run and judgment artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            The artifact contains `report.md`, `report.svg`, and `.shrink/TASK.md` when the tool produces a judgment task.

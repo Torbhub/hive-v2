@@ -593,15 +593,16 @@ The existing cross-process team lock serializes the complete owner and MCP deliv
 
 The Ink screen has no message row: messaging a live agent stays a web flow, the TUI stays a monitor.
 
-Each new-task row has a **Preset** disclosure beside its input. It contains five buttons. Each button shows its label and description:
+Each new-task row has a **Preset** disclosure beside its input. It contains six buttons. Each button shows its label and description:
 
 - **Appen — mostly processed**: enabled. `Process selected recordings into Appen’s processed MCAP episode drop under a chosen destination. Optionally force task difficulty to hard.`
 - **Turing / OpenAI**: enabled. `Build and validate a Turing delivery drop with registry-issued sequential episode IDs, configured chunking, and any required calibration packages.`
 - **PixelsTwo — raw session transfer**: enabled. `Copy complete selected sessions—all raw MCAP files plus session.json—to the configured PixelsTwo R2 destination. Do not annotate or rebake.`
+- **Shrink anything**: enabled. `Run verified cuts on a GitHub-hosted runner after approval. Open a pull request and upload the report and judgment task.`
 - **Encord — sample curation**: disabled. `Historical workflow for selecting and reviewing 20–30 minute clips and preparing transcode/crop work. Requires a source set, destination, and output contract.`
 - **SieveData**: disabled. `Not configured. No job contract is defined yet.`
 
-An enabled choice appends its prompt to the current draft, closes the disclosure, and focuses the input. Existing draft text stays unchanged. The operator can edit the complete prompt. Appen names the minipipe profile `sellable_raw_mostly_processed`. Turing / OpenAI names `turing_openai`. PixelsTwo includes `[REQUIRED SOURCE]` and `[REQUIRED R2 DESTINATION]` placeholders. Every prompt requires a plan, operator approval, and normal Hive execution before any real operation. Choosing a preset does not call an endpoint, execute AWS work, or create a job. Only the existing **Start task** button or Enter submits the draft. The Ink screen has no preset control.
+An enabled choice appends its prompt to the current draft, closes the disclosure, and focuses the input. Existing draft text stays unchanged. The operator can edit the complete prompt. Appen names the minipipe profile `sellable_raw_mostly_processed`. Turing / OpenAI names `turing_openai`. PixelsTwo includes `[REQUIRED SOURCE]` and `[REQUIRED R2 DESTINATION]` placeholders. Shrink anything requires the target repository, base branch, exact reviewed commit, and target check. Its prompt uses the published npm package, the GitHub-hosted workflow, environment approval, and orchestrator judgment. It forbids vendored source and target pull request merges without approval. Every prompt requires a plan, operator approval, and normal Hive execution before any real operation. Choosing a preset does not call an endpoint, execute AWS work, or create a job. Only the existing **Start task** button or Enter submits the draft. The Ink screen has no preset control.
 
 ## 12. Decisions feed (web UI only)
 
