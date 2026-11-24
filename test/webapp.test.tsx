@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HubView, QuestionBatch, RootContract } from '../src/types.js';
 import { taskContract } from './task-contract.js';
+import { readRoute, routeUrl } from '../web/routes';
+import { apiPath } from '../web/api';
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 (globalThis as Record<string, unknown>).ResizeObserver ??= class {
@@ -36,7 +38,12 @@ let root: ReturnType<typeof createRoot>;
 let resolveAction: ((v: Response) => void) | null;
 
 beforeEach(async () => {
+  window.history.replaceState({}, '', '/');
   resolveAction = null;
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => ({
+    matches: false, media: query, onchange: null,
+    addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; },
+  })));
   vi.stubGlobal('fetch', vi.fn((input: unknown) => {
     if (String(input).endsWith('api/view')) {
       return Promise.resolve(new Response(JSON.stringify(VIEW), { status: 200 }));
@@ -65,6 +72,24 @@ function resumeButton(): HTMLButtonElement {
     .find((b) => b.textContent === 'Resume · 1 session');
   if (!btn) throw new Error('no Resume button rendered');
   return btn;
+}
+
+async function openProject(name = 'demo', tab?: 'Activity' | 'Team' | 'Settings'): Promise<void> {
+  const link = container.querySelector(`[data-project-name="${name}"]`) as HTMLAnchorElement;
+  await act(async () => link.click());
+  if (tab) {
+    const trigger = [...container.querySelectorAll('button')].find((button) => button.textContent === tab.toLowerCase());
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+      trigger?.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+      trigger?.click();
+    });
+  }
+}
+
+async function openHome(): Promise<void> {
+  const link = [...container.querySelectorAll('a')].find((candidate) => candidate.textContent === 'Needs you');
+  await act(async () => link?.click());
 }
 
 describe('stretchtext decisions', () => {
@@ -102,6 +127,7 @@ describe('stretchtext decisions', () => {
       [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
     });
     expect(stretchSpan('why').getAttribute('aria-expanded')).toBe('false');
+    expect(stretchSpan('why').parentElement?.classList.contains('truncate')).toBe(false);
     expect(container.textContent).not.toContain('it fits the relational brief');
 
     act(() => {
@@ -142,6 +168,7 @@ describe('stretchtext decisions', () => {
 });
 
 describe('task presets', () => {
+  beforeEach(async () => openProject());
   it('lists the six workflows and explains why Encord and SieveData are disabled', () => {
     const summary = [...container.querySelectorAll('summary')].find((item) => item.textContent === 'Preset');
     expect(summary).toBeDefined();
@@ -189,7 +216,7 @@ describe('task presets', () => {
     act(() => {
       (container.querySelector(`button[data-task-preset="${label}"]`) as HTMLButtonElement).click();
     });
-    const input = container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement;
+    const input = container.querySelector('textarea[aria-label="new task for demo"]') as HTMLInputElement;
     for (const placeholder of placeholders) expect(input.value).toContain(placeholder);
     if (profile) expect(input.value).toContain(`minipipe profile ${profile}`);
     if (label === 'Shrink anything') {
@@ -204,8 +231,8 @@ describe('task presets', () => {
   });
 
   it('preserves arbitrary task text when a preset is inserted', () => {
-    const input = container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement;
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+    const input = container.querySelector('textarea[aria-label="new task for demo"]') as HTMLTextAreaElement;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!;
     act(() => {
       setter.call(input, 'keep this arbitrary task');
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -222,6 +249,7 @@ describe('task presets', () => {
 });
 
 describe('instant click feedback', () => {
+  beforeEach(async () => openProject());
   it('the moment Resume is clicked the card shows resuming… and all other action buttons disable', async () => {
     const startBtn = [...container.querySelectorAll('button')]
       .find((b) => b.textContent === 'Start task') as HTMLButtonElement;
@@ -232,7 +260,8 @@ describe('instant click feedback', () => {
     });
     expect(resolveAction).not.toBeNull();
     expect(container.textContent).toContain('resuming…');
-    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1);
+    expect([...container.querySelectorAll('button')].find((button) => button.textContent === 'refresh')?.disabled).toBe(false);
+    expect(startBtn.disabled).toBe(true);
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, pane: '%1' }), { status: 200 }));
     });
@@ -241,8 +270,8 @@ describe('instant click feedback', () => {
   });
 
   it('a typed task enables Start task, and clicking it swaps the row to starting… before the fetch resolves', async () => {
-    const input = container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement;
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+    const input = container.querySelector('textarea[aria-label="new task for demo"]') as HTMLTextAreaElement;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!;
     act(() => {
       setter.call(input, 'write the docs');
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -254,7 +283,7 @@ describe('instant click feedback', () => {
       startBtn.click();
     });
     expect(container.textContent).toContain('starting…');
-    expect(container.querySelector('input[aria-label="new task for demo"]')).toBeNull();
+    expect(container.querySelector('textarea[aria-label="new task for demo"]')).toBeNull();
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, id: 'demo-1' }), { status: 200 }));
     });
@@ -265,9 +294,9 @@ describe('instant click feedback', () => {
     expect(container.textContent).not.toContain('%1');
   });
 
-  it('a task sent to a running orchestrator clears the draft and registers once', async () => {
-    const input = container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement;
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+  it('a task sent to a running orchestrator opens a durable result and registers once', async () => {
+    const input = container.querySelector('textarea[aria-label="new task for demo"]') as HTMLTextAreaElement;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!;
     act(() => {
       setter.call(input, 'write the docs');
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -282,7 +311,11 @@ describe('instant click feedback', () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, typed: true }), { status: 200 }));
     });
     expect(container.textContent).toContain('demo-1 was sent to demo-orchestrator');
-    expect((container.querySelector('input[aria-label="new task for demo"]') as HTMLInputElement).value).toBe('');
+    expect(container.querySelector('[data-testid="task-view-demo-1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="task-delivery-state"]')?.textContent).toContain('The running orchestrator received the task.');
+    expect(container.textContent).toContain('write the docs');
+    expect(container.querySelector('textarea[aria-label="new task for demo"]')).toBeNull();
+    expect(window.location.pathname).toBe('/projects/demo/tasks/demo-1');
     expect(vi.mocked(fetch).mock.calls.filter(([i]) => String(i).endsWith('api/task'))).toHaveLength(1);
     expect(vi.mocked(fetch).mock.calls.filter(([i]) => String(i).endsWith('api/start'))).toHaveLength(1);
   });
@@ -314,6 +347,7 @@ describe('instant click feedback', () => {
     await act(async () => {
       [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
     });
+    await openHome();
     const option = [...container.querySelectorAll('button')]
       .find((b) => b.textContent?.includes(longLabel));
     if (!option) throw new Error('no dialog option button rendered');
@@ -410,18 +444,20 @@ describe('needs-ui', () => {
     expect(container.textContent).toContain('blocked');
     expect(container.textContent).toContain('no API key in the vault');
     button('Rebrief');
-    button('Cancel');
+    button('Cancel task');
   });
 
   it('Cancel posts task-resolve and toasts; the card gates while busy', async () => {
     mountWith({ ...VIEW, tasks: [blockedTask] });
     await repoll();
-    act(() => {
-      button('Cancel').click();
-    });
+    act(() => button('Cancel task').click());
+    expect(resolveAction).toBeNull();
+    expect(container.textContent).toContain('Cancellation closes this task.');
+    act(() => button('Cancel demo-1?').click());
     expect(resolveAction).not.toBeNull();
-    expect(container.textContent).toContain('resolving…');
-    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1);
+    expect(container.textContent).toContain('resolving · demo');
+    expect(button('refresh').disabled).toBe(false);
+    expect(container.querySelector('[data-project-name="demo"]')).not.toBeNull();
     const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/task-resolve'));
     expect(JSON.parse(String(call![1]?.body))).toEqual({
       project: 'demo', task: 'demo-1', action: 'cancel',
@@ -439,13 +475,13 @@ describe('needs-ui', () => {
       button('Rebrief').click();
     });
     expect(container.querySelector('input[aria-label="new brief for demo-1"]')).not.toBeNull();
-    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Cancel')).toBe(false);
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Cancel task')).toBe(false);
     act(() => {
       button('Back').click();
     });
     expect(container.querySelector('input[aria-label="new brief for demo-1"]')).toBeNull();
     button('Rebrief');
-    button('Cancel');
+    button('Cancel task');
     expect(vi.mocked(fetch).mock.calls.some(([i]) => String(i).endsWith('api/task-resolve'))).toBe(false);
   });
 
@@ -476,7 +512,7 @@ describe('needs-ui', () => {
     expect(container.textContent).toContain('back to asked');
   });
 
-  it('a plan need renders its checkpoint list above the verdict buttons', async () => {
+  it('a plan need renders verdict actions before expandable checkpoints', async () => {
     mountWith({
       ...VIEW,
       tasks: [{
@@ -491,11 +527,30 @@ describe('needs-ui', () => {
     expect(checkpoints?.querySelectorAll('li')).toHaveLength(2);
     expect(checkpoints?.querySelector('[data-checkpoint-id="a"] [data-checkpoint-description]')?.textContent).toBe('write it');
     expect(checkpoints?.querySelector('[data-checkpoint-id="b"] [data-checkpoint-estimate]')?.textContent).toBe('~10m');
-    expect(checkpoints!.compareDocumentPosition(button('Approve plan')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelector('[data-plan-summary]')).not.toBeNull();
+    expect(container.querySelector('[data-plan-disclosure]')?.hasAttribute('open')).toBe(false);
+    expect(button('Approve plan').compareDocumentPosition(checkpoints!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     button('Send back');
   });
 
-  it('shows every build contract field and the stored digest before approval', async () => {
+  it('returns from send-back feedback without losing the draft', async () => {
+    mountWith({
+      ...VIEW,
+      tasks: [{
+        id: 'demo-2', project: 'demo', asked: iso(30), state: 'plan', updated: iso(20),
+        last_note: 'ship the docs', needs_owner: true, checkpoints: [],
+      }],
+    });
+    await repoll();
+    act(() => button('Send back').click());
+    const input = container.querySelector('input[placeholder="what should change? (optional)"]') as HTMLInputElement;
+    typeInto(input, 'add more evidence');
+    act(() => button('Back').click());
+    act(() => button('Send back').click());
+    expect((container.querySelector('input[placeholder="what should change? (optional)"]') as HTMLInputElement).value).toBe('add more evidence');
+  });
+
+  it('keeps every build contract field and the stored digest in expandable detail', async () => {
     const base = taskContract('/r/demo', ['src', 'docs'], 'Return the bounded artifact.');
     const contract: RootContract = {
       ...base,
@@ -547,7 +602,7 @@ describe('needs-ui', () => {
       'Delegated adapters: tmux, native', 'Required children: demo-4, demo-5',
       'Preflight snapshot: preflight-v3', 'Defect fingerprint: repo:base:gate:1',
     ]) expect(block.textContent).toContain(text);
-    expect(block.compareDocumentPosition(button('Approve plan')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(button('Approve plan').compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('shows research provenance and explicit empty scopes before approval', async () => {
@@ -587,7 +642,7 @@ describe('needs-ui', () => {
       'Write scope: (none)', 'Action scope: (none)',
     ]) expect(block.textContent).toContain(text);
     expect(block.textContent).not.toContain('Repository:');
-    expect(block.compareDocumentPosition(button('Approve plan')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(button('Approve plan').compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('marks a legacy plan with no contract and still shows its stored digest', async () => {
@@ -602,7 +657,7 @@ describe('needs-ui', () => {
 
     expect(container.querySelector('[data-contract-empty]')?.textContent).toBe('No root contract is recorded.');
     expect(container.querySelector('[data-root-contract]')?.textContent).toContain(`Plan digest: ${'f'.repeat(64)}`);
-    expect(container.querySelector('[data-root-contract]')!.compareDocumentPosition(button('Approve plan'))
+    expect(button('Approve plan').compareDocumentPosition(container.querySelector('[data-root-contract]')!)
       & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -660,7 +715,7 @@ describe('needs-ui', () => {
     act(() => {
       button('Nudge').click();
     });
-    expect(container.textContent).toContain('nudging…');
+    expect(container.textContent).toContain('nudging · demo');
     const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/message'));
     expect(JSON.parse(String(call![1]?.body))).toEqual({
       project: 'demo', text: 'demo-1: owner asks for status',
@@ -697,10 +752,12 @@ describe('needs-ui', () => {
       }],
     });
     await repoll();
+    await openProject();
     expect(container.textContent).toContain('1/2 checkpoints');
     expect(container.textContent).toContain('on b');
     expect(container.textContent).toContain('failed: a');
-    expect(container.textContent).not.toContain('demo-4');
+    expect(container.textContent).toContain('demo-4');
+    await openProject('demo', 'Team');
     expect(container.textContent).toContain('demo:demo-orchestrator');
     expect(container.textContent).toContain('demo:fixer');
     expect(container.textContent).toContain('attach: tmux -L hive-v2 attach');
@@ -737,6 +794,7 @@ describe('needs-ui', () => {
       }],
     });
     await repoll();
+    await openProject('simplification-agent');
     act(() => resumeButton().click());
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({
@@ -758,6 +816,7 @@ describe('needs-ui', () => {
       }],
     });
     await repoll();
+    await openProject('simplification-agent', 'Team');
     const hints = [...container.querySelectorAll('div')].map((el) => el.textContent)
       .filter((text) => text?.startsWith('attach:'));
     expect(hints).toEqual(['attach: hive attach simplification-agent']);
@@ -773,6 +832,7 @@ describe('needs-ui', () => {
       }],
     });
     await repoll();
+    await openProject();
     expect(container.textContent).toContain('demo-orchestrator');
     expect(container.textContent).not.toContain('%11');
   });
@@ -786,6 +846,11 @@ describe('needs-ui', () => {
       }],
     });
     await repoll();
+    await openProject('demo', 'Team');
+    if (state === 'unknown') {
+      expect(container.textContent).toContain('Orchestrator state unknown');
+      button('Copy tmux attach');
+    }
     const hints = [...container.querySelectorAll('div')].map((el) => el.textContent)
       .filter((text) => text?.startsWith('attach: tmux'));
     expect(hints).toEqual(['attach: tmux -L hive-v2 attach']);
@@ -804,8 +869,10 @@ describe('needs-ui', () => {
       }],
     });
     await repoll();
+    await openProject();
     expect(container.textContent).not.toContain('0/5 checkpoints');
     expect(container.textContent).not.toContain('Nudge');
+    await openProject('demo', 'Team');
     const hints = [...container.querySelectorAll('div')].map((el) => el.textContent)
       .filter((text) => text?.startsWith('attach: tmux'));
     expect(hints).toEqual(['attach: tmux -L hive-v2 attach']);
@@ -826,7 +893,7 @@ describe('add project row', () => {
   };
 
   function button(text: string): HTMLButtonElement {
-    return [...container.querySelectorAll('button')].find((b) => b.textContent === text) as HTMLButtonElement;
+    return [...document.querySelectorAll('button')].filter((b) => b.textContent === text).at(-1) as HTMLButtonElement;
   }
 
   function typeInto(input: HTMLInputElement, text: string): void {
@@ -847,16 +914,24 @@ describe('add project row', () => {
     await act(async () => {
       button('refresh').click();
     });
+    act(() => button('Add project').click());
   });
 
   it('offers registered repositories and submits a name with an empty source by default', async () => {
-    const source = container.querySelector('select[aria-label="new project source"]') as HTMLSelectElement;
+    const source = document.querySelector('select[aria-label="new project source"]') as HTMLSelectElement;
     expect([...source.options].map((o) => o.textContent)).toEqual([
       'empty Git repository', '/r/demo', '/r/demo-lane',
     ]);
     expect(source.value).toBe('');
-    typeInto(container.querySelector('input[aria-label="new project name"]') as HTMLInputElement, 'fresh');
+    expect(document.querySelector('label[for="new-project-name"]')?.textContent).toBe('Name');
+    expect(document.querySelector('label[for="new-project-path"]')?.textContent).toBe('Absolute path');
+    expect(document.querySelector('label[for="new-project-source"]')?.textContent).toBe('Source');
+    expect(document.querySelectorAll('[data-slot="dialog-title"]')).toHaveLength(1);
+    expect(document.querySelector('[data-slot="dialog-title"]')?.textContent).toBe('Add project');
+    expect(document.querySelector('[data-slot="field-legend"]')).toBeNull();
+    typeInto(document.querySelector('input[aria-label="new project name"]') as HTMLInputElement, 'fresh');
     expect(button('Add project').disabled).toBe(false);
+    expect(button('Add project').getAttribute('data-variant')).toBe('default');
     act(() => button('Add project').click());
     const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/project'));
     expect(JSON.parse(String(call![1]?.body))).toEqual({ name: 'fresh', path: '', source: '' });
@@ -864,13 +939,14 @@ describe('add project row', () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, name: 'fresh', home: '/r/fresh' }), { status: 200 }));
     });
     expect(container.textContent).toContain('fresh: project added (/r/fresh)');
-    expect((container.querySelector('input[aria-label="new project name"]') as HTMLInputElement).value).toBe('');
+    expect(document.querySelector('input[aria-label="new project name"]')).toBeNull();
+    expect(window.location.pathname).toBe('/projects/fresh');
   });
 
   it('keeps explicit-path submission unchanged and hides the source selector', async () => {
-    typeInto(container.querySelector('input[aria-label="new project name"]') as HTMLInputElement, 'existing');
-    typeInto(container.querySelector('input[aria-label="new project path"]') as HTMLInputElement, '/r/existing');
-    expect(container.querySelector('select[aria-label="new project source"]')).toBeNull();
+    typeInto(document.querySelector('input[aria-label="new project name"]') as HTMLInputElement, 'existing');
+    typeInto(document.querySelector('input[aria-label="new project path"]') as HTMLInputElement, '/r/existing');
+    expect(document.querySelector('select[aria-label="new project source"]')).toBeNull();
     act(() => button('Add project').click());
     const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/project'));
     expect(JSON.parse(String(call![1]?.body))).toEqual({ name: 'existing', path: '/r/existing' });
@@ -880,9 +956,9 @@ describe('add project row', () => {
   });
 
   it('keeps the name, path, and source draft after an error', async () => {
-    const name = container.querySelector('input[aria-label="new project name"]') as HTMLInputElement;
-    const folder = container.querySelector('input[aria-label="new project path"]') as HTMLInputElement;
-    const source = container.querySelector('select[aria-label="new project source"]') as HTMLSelectElement;
+    const name = document.querySelector('input[aria-label="new project name"]') as HTMLInputElement;
+    const folder = document.querySelector('input[aria-label="new project path"]') as HTMLInputElement;
+    const source = document.querySelector('select[aria-label="new project source"]') as HTMLSelectElement;
     typeInto(name, 'fresh');
     act(() => {
       source.value = '/r/demo-lane';
@@ -900,6 +976,7 @@ describe('add project row', () => {
 });
 
 describe('project delete button', () => {
+  beforeEach(async () => openProject('demo', 'Settings'));
   const noTeamView: HubView = {
     ...VIEW,
     projects: [{ ...VIEW.projects[0], orchestrator: { state: 'none', question: false } }],
@@ -933,11 +1010,11 @@ describe('project delete button', () => {
   it('appears only for a no-team project with no agents and no pending launch', async () => {
     mount();
     await repoll();
-    button('Delete');
+    button('Remove project from Hive');
 
     current = { ...noTeamView, projects: [{ ...noTeamView.projects[0], agents: [{ name: 'builder', state: 'stopped' }] }] };
     await repoll();
-    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Delete')).toBe(false);
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Remove project from Hive')).toBe(false);
 
     current = {
       ...noTeamView,
@@ -947,20 +1024,21 @@ describe('project delete button', () => {
       }],
     };
     await repoll();
-    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Delete')).toBe(false);
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Remove project from Hive')).toBe(false);
 
     current = VIEW;
     await repoll();
-    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Delete')).toBe(false);
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Remove project from Hive')).toBe(false);
   });
 
   it('requires confirmation, shows busy state, refreshes, and removes the card', async () => {
     mount();
     await repoll();
-    act(() => button('Delete').click());
+    act(() => button('Remove project from Hive').click());
     expect(vi.mocked(fetch).mock.calls.some(([i]) => String(i).endsWith('api/project-delete'))).toBe(false);
-    act(() => button('Delete project?').click());
-    expect(container.textContent).toContain('deleting…');
+    expect(container.textContent).toContain('Local Git files and task records remain untouched.');
+    act(() => button('Remove from Hive?').click());
+    expect(container.textContent).toContain('removing from Hive…');
     const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/project-delete'));
     expect(JSON.parse(String(call![1]?.body))).toEqual({ project: 'demo' });
     current = { ...noTeamView, projects: [] };
@@ -974,18 +1052,21 @@ describe('project delete button', () => {
   it('shows the server error and refreshes without removing the card', async () => {
     mount();
     await repoll();
-    act(() => button('Delete').click());
-    act(() => button('Delete project?').click());
+    act(() => button('Remove project from Hive').click());
+    act(() => button('Remove from Hive?').click());
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: false, detail: 'demo\'s team is not empty' }), { status: 400 }));
     });
     expect(container.textContent).toContain('demo: demo\'s team is not empty');
+    await openProject();
     expect(container.textContent).toContain('none yet');
-    button('Delete');
+    await openProject('demo', 'Settings');
+    button('Remove project from Hive');
   });
 });
 
 describe('interrupt buttons', () => {
+  beforeEach(async () => openProject());
   const runningView: HubView = {
     ...VIEW,
     projects: [{
@@ -1024,7 +1105,9 @@ describe('interrupt buttons', () => {
   it('running rows render Interrupt buttons, stopped rows do not', async () => {
     mountRunning();
     await repoll();
+    await openProject('demo', 'Team');
     interruptButton('Interrupt');
+    await openProject();
     interruptButton('Interrupt builder');
     expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'Interrupt fixer')).toBe(false);
   });
@@ -1032,13 +1115,15 @@ describe('interrupt buttons', () => {
   it('the orchestrator Interrupt posts without an agent and gates while busy', async () => {
     mountRunning();
     await repoll();
+    await openProject('demo', 'Team');
     act(() => {
       interruptButton('Interrupt').click();
     });
     expect(resolveAction).not.toBeNull();
     const call = vi.mocked(fetch).mock.calls.find(([i]) => String(i).endsWith('api/interrupt'));
     expect(JSON.parse(String(call![1]?.body))).toEqual({ project: 'demo' });
-    expect(container.querySelectorAll('button:not(:disabled)')).toHaveLength(1);
+    expect([...container.querySelectorAll('button')].find((button) => button.textContent === 'refresh')?.disabled).toBe(false);
+    expect(interruptButton('Interrupt').disabled).toBe(true);
     await act(async () => {
       resolveAction!(new Response(JSON.stringify({ ok: true, target: 'demo-orchestrator', pane: '%1' }), { status: 200 }));
     });
@@ -1061,6 +1146,7 @@ describe('interrupt buttons', () => {
 });
 
 describe('kill button', () => {
+  beforeEach(async () => openProject('demo', 'Team'));
   const killView: HubView = {
     ...VIEW,
     projects: [{
@@ -1394,11 +1480,173 @@ describe('operator questions', () => {
 });
 
 
+describe('journey states', () => {
+  it('round-trips deep links and keeps production API paths under Hive', () => {
+    window.history.replaceState({}, '', '/hive/projects/demo/tasks/demo-1');
+    expect(readRoute()).toEqual({ name: 'task', project: 'demo', task: 'demo-1' });
+    expect(routeUrl({ name: 'project', project: 'demo', tab: 'team' })).toBe('/hive/projects/demo?tab=team');
+    expect(apiPath('api/view')).toBe('/hive/api/view');
+    expect(apiPath('/api/task')).toBe('/hive/api/task');
+  });
+
+  it('uses a branded loading shell and replaces an initial failure with Retry', async () => {
+    act(() => root.unmount());
+    vi.mocked(fetch).mockImplementation(() => Promise.reject(new Error('connection refused')));
+    const { App } = await import('../web/App');
+    root = createRoot(container);
+    await act(async () => root.render(<App />));
+    expect(container.querySelector('[data-testid="hive-error-shell"]')).not.toBeNull();
+    expect(container.textContent).toContain('Could not load projects');
+    expect(container.textContent).toContain('connection refused');
+    expect(container.textContent).not.toContain('Reading projects…');
+    expect(container.textContent).toContain('hive');
+    expect(container.textContent).toContain('Opening through Nexus');
+    expect([...container.querySelectorAll('a')].some((link) => link.textContent === 'Back to Nexus')).toBe(true);
+    expect([...container.querySelectorAll('button')].some((button) => button.textContent === 'Retry')).toBe(true);
+  });
+
+  it('labels retained data as stale after a failed refresh', async () => {
+    vi.mocked(fetch).mockImplementation(() => Promise.reject(new Error('relay offline')));
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'refresh')!.click();
+    });
+    expect(container.querySelector('[aria-label="Stale data"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Live data"]')).toBeNull();
+    expect(container.textContent).toContain('Showing data from');
+    expect(container.textContent).toContain('relay offline');
+    expect([...container.querySelectorAll('button')].some((button) => button.textContent === 'Retry')).toBe(true);
+  });
+
+  it('disables messaging without a running orchestrator and explains why', async () => {
+    await openProject('demo', 'Activity');
+    const input = container.querySelector('input[aria-label="message for demo"]') as HTMLInputElement;
+    expect(input.disabled).toBe(true);
+    expect(container.textContent).toContain('Start or resume the orchestrator to send a message.');
+  });
+
+  it('links every project task, including tasks without checkpoints', async () => {
+    const tasks: HubView['tasks'] = [{
+      id: 'demo-plain', project: 'demo', asked: new Date().toISOString(), state: 'asked', updated: new Date().toISOString(),
+      brief: 'Ship the unplanned task', last_note: null, needs_owner: false,
+    }, {
+      id: 'demo-planned', project: 'demo', asked: new Date().toISOString(), state: 'handed', updated: new Date().toISOString(),
+      last_note: null, needs_owner: false, checkpoints: [{ id: 'build', desc: 'Build it', etaMin: 2 }],
+    }];
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      if (String(input).endsWith('api/view')) return Promise.resolve(new Response(JSON.stringify({ ...VIEW, tasks }), { status: 200 }));
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'refresh')!.click();
+    });
+    await openProject();
+    const inventory = container.querySelector('[data-testid="task-inventory"]')!;
+    expect(inventory.querySelectorAll('[data-task-id]')).toHaveLength(2);
+    expect(inventory.querySelector('[data-task-id="demo-plain"]')?.getAttribute('href')).toBe('/projects/demo/tasks/demo-plain');
+    expect(inventory.textContent).toContain('Ship the unplanned task');
+    expect(inventory.textContent).toContain('No checkpoints recorded');
+    expect(inventory.textContent).toContain('No agent recorded');
+    expect(container.textContent).toContain('Permissions ask · Approvals manual');
+    const search = container.querySelector('input[aria-label="Search tasks for demo"]') as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+    act(() => {
+      setter.call(search, 'demo-planned');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container.querySelectorAll('[data-testid="task-inventory"] [data-task-id]')).toHaveLength(1);
+    expect(container.querySelector('[data-task-id="demo-plain"]')).toBeNull();
+  });
+
+  it('answers raw question choices directly through the existing message API', async () => {
+    const questionView: HubView = {
+      ...VIEW,
+      tasks: [{
+        id: 'demo-question', project: 'demo', asked: new Date().toISOString(), state: 'question', updated: new Date().toISOString(),
+        last_note: 'Options: A) close the old task. B) run the scan anyway. Which?', needs_owner: true,
+      }],
+    };
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      if (String(input).endsWith('api/view')) return Promise.resolve(new Response(JSON.stringify(questionView), { status: 200 }));
+      return new Promise<Response>((resolve) => { resolveAction = resolve; });
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'refresh')!.click();
+    });
+    const option = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('Option A'));
+    expect(option?.textContent).toContain('close the old task');
+    act(() => option!.click());
+    const call = vi.mocked(fetch).mock.calls.find(([input]) => String(input).endsWith('api/message'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({ project: 'demo', text: 'demo-question: A' });
+    await act(async () => resolveAction!(new Response(JSON.stringify({ ok: true }), { status: 200 })));
+  });
+
+  it('uses verified supersession to close approval and open the replacement', async () => {
+    const tasks: HubView['tasks'] = [{
+      id: 'demo-old', project: 'demo', asked: new Date().toISOString(), state: 'superseded', updated: new Date().toISOString(),
+      last_note: null, needs_owner: false, superseded_by: 'demo-new',
+    }, {
+      id: 'demo-new', project: 'demo', asked: new Date().toISOString(), state: 'asked', updated: new Date().toISOString(),
+      brief: 'Replacement task', last_note: null, needs_owner: false,
+    }];
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      if (String(input).endsWith('api/view')) return Promise.resolve(new Response(JSON.stringify({ ...VIEW, tasks }), { status: 200 }));
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'refresh')!.click();
+    });
+    await openProject();
+    await act(async () => (container.querySelector('[data-task-id="demo-old"]') as HTMLAnchorElement).click());
+    expect(container.querySelector('[data-testid="superseded-task"]')?.textContent).toContain('Superseded by demo-new. Approval is closed.');
+    expect(container.textContent).not.toContain('Approve plan');
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'Open replacement')!.click();
+    });
+    expect(window.location.pathname).toBe('/projects/demo/tasks/demo-new');
+    expect(container.textContent).toContain('Replacement task');
+  });
+
+  it('guards stale archive and posts only the selected stale task IDs', async () => {
+    const old = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+    const staleBatch: QuestionBatch = {
+      id: 'stale-batch', project: 'demo', agent: 'builder', context: 'old question', createdAt: old, status: 'open', questions: [],
+    };
+    const staleView: HubView = {
+      ...VIEW,
+      tasks: [{
+        id: 'demo-stale', project: 'demo', asked: old, state: 'plan', updated: old,
+        last_note: 'old plan', needs_owner: true, checkpoints: [{ id: 'a', desc: 'old work', etaMin: 1 }],
+      }],
+      questions: [staleBatch],
+    };
+    vi.mocked(fetch).mockImplementation((input: unknown) => {
+      if (String(input).endsWith('api/view')) return Promise.resolve(new Response(JSON.stringify(staleView), { status: 200 }));
+      return Promise.resolve(new Response(JSON.stringify({ ok: true, archived: ['demo-stale'] }), { status: 200 }));
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'refresh')!.click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'stale')!.click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'Archive stale')!.click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'Archive 2 stale items?')!.click();
+    });
+    const call = vi.mocked(fetch).mock.calls.find(([input]) => String(input).endsWith('api/tasks-archive'));
+    expect(JSON.parse(String(call![1]?.body))).toEqual({ project: 'demo', tasks: ['demo-stale'] });
+    const questionCall = vi.mocked(fetch).mock.calls.find(([input]) => String(input).endsWith('api/questions/cancel'));
+    expect(JSON.parse(String(questionCall![1]?.body))).toEqual({ id: staleBatch.id });
+  });
+});
+
 describe('dashboard shell', () => {
   it('shows one project at a time with navigation and a team graph', async () => {
     const projects = ['alpha', 'beta'].map((name) => ({
       ...VIEW.projects[0], name, home: `/r/${name}`,
-      orchestrator: { state: 'running' as const, question: false, name: `${name}-orchestrator`, session_id: `session_${name}` },
+      orchestrator: { state: 'running' as const, question: false, name: `${name}-orchestrator`, session_id: `session_${name}`, context: 3 },
       agents: [{ name: 'builder', state: 'running' as const, ref: 'builder', session_id: `session_${name}_builder` }],
     }));
     vi.mocked(fetch).mockImplementation((input: unknown) => {
@@ -1410,15 +1658,31 @@ describe('dashboard shell', () => {
     await act(async () => {
       [...container.querySelectorAll('button')].find((b) => b.textContent === 'refresh')!.click();
     });
+    expect(container.querySelector('[data-testid="needs-home"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="project-nav"]')).not.toBeNull();
+    expect(container.querySelectorAll('[data-testid^="project-card-"]')).toHaveLength(0);
+    const alpha = container.querySelector('[data-project-name="alpha"]') as HTMLAnchorElement;
+    const beta = container.querySelector('[data-project-name="beta"]') as HTMLAnchorElement;
+    expect(alpha.getAttribute('data-active')).toBe('false');
+    expect(beta.getAttribute('data-active')).toBe('false');
+    await act(async () => alpha.click());
     expect(container.querySelectorAll('[data-testid^="project-card-"]')).toHaveLength(1);
     expect(container.querySelector('[data-testid="project-card-alpha"]')).not.toBeNull();
+    expect(alpha.getAttribute('data-active')).toBe('true');
+    await openProject('alpha', 'Team');
     expect(container.querySelector('[data-testid="team-map"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="team-map"]')?.textContent).toContain('builder');
-    const beta = [...container.querySelectorAll('[data-testid="project-nav"] [role="button"]')]
-      .find((b) => b.textContent?.includes('beta')) as HTMLButtonElement;
+    expect(container.textContent).toContain('3% context');
     await act(async () => beta.click());
     expect(container.querySelectorAll('[data-testid^="project-card-"]')).toHaveLength(1);
     expect(container.querySelector('[data-testid="project-card-beta"]')).not.toBeNull();
+    expect(alpha.getAttribute('data-active')).toBe('false');
+    expect(beta.getAttribute('data-active')).toBe('true');
+    expect(window.location.pathname).toBe('/projects/beta');
+    await act(async () => {
+      window.history.back();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.querySelector('[data-testid="project-card-alpha"]')).not.toBeNull();
   });
 });

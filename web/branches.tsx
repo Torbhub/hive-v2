@@ -4,6 +4,7 @@ import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
 import { Card, CardContent, CardHeader } from './components/ui/card';
 import { Separator } from './components/ui/separator';
+import { apiPath } from './api';
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -35,23 +36,23 @@ function BranchDetail({
   const canRejoin = Boolean(actionable && detail.review && busy === null);
   return (
     <Card>
-      <CardHeader>
-        <span className="font-medium text-white">{detail.purpose}</span>
+      <CardHeader className="flex items-center justify-between gap-3">
+        <span className="min-w-0 break-words font-medium text-white">{detail.purpose}</span>
         <Badge>{detail.status}</Badge>
       </CardHeader>
       <CardContent>
         <div className="flex flex-col gap-4" data-branch-detail>
           <dl className="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-1 text-sm">
-            <dt className="text-zinc-500">agent</dt><dd>{detail.agent}</dd>
-            <dt className="text-zinc-500">task</dt><dd>{detail.task}</dd>
-            <dt className="text-zinc-500">created</dt><dd>{detail.createdAt}</dd>
-            <dt className="text-zinc-500">updated</dt><dd>{detail.updatedAt}</dd>
+            <dt className="text-zinc-400">agent</dt><dd>{detail.agent}</dd>
+            <dt className="text-zinc-400">task</dt><dd>{detail.task}</dd>
+            <dt className="text-zinc-400">created</dt><dd>{detail.createdAt}</dd>
+            <dt className="text-zinc-400">updated</dt><dd>{detail.updatedAt}</dd>
           </dl>
           {detail.error && <div className="text-sm text-amber-300">{detail.error}</div>}
 
           <section className="flex flex-col gap-3" aria-label="branch findings">
-            <div className="text-xs font-medium uppercase tracking-widest text-zinc-500">Findings</div>
-            {detail.findings.length === 0 && <div className="text-sm text-zinc-500">No result findings.</div>}
+            <div className="text-xs font-medium uppercase tracking-widest text-zinc-400">Findings</div>
+            {detail.findings.length === 0 && <div className="text-sm text-zinc-400">No result findings.</div>}
             {detail.findings.map((finding) => (
               <label key={finding.id} className="flex cursor-pointer items-start gap-2 text-sm">
                 <input
@@ -65,7 +66,7 @@ function BranchDetail({
                 <span className="min-w-0 flex-1">
                   <span className="block whitespace-pre-wrap text-zinc-100">{finding.answer}</span>
                   <span className="mt-1 block whitespace-pre-wrap text-zinc-300">{finding.recommendation}</span>
-                  <span className="mt-1 block whitespace-pre-wrap text-zinc-500">{finding.uncertainty}</span>
+                  <span className="mt-1 block whitespace-pre-wrap text-zinc-400">{finding.uncertainty}</span>
                 </span>
               </label>
             ))}
@@ -73,10 +74,10 @@ function BranchDetail({
 
           {detail.review && (
             <section className="flex flex-col gap-2" aria-label="reviewed rejoin prompt">
-              <div className="text-xs font-medium uppercase tracking-widest text-zinc-500">Reviewed prompt</div>
-              <div className="break-all font-mono text-xs text-zinc-500">{detail.review.digest}</div>
-              <div className="break-all font-mono text-xs text-zinc-500">{detail.review.promptId}</div>
-              <div className="text-xs text-zinc-500">{`${detail.review.createdAt} · expires ${detail.review.expiresAt}`}</div>
+              <div className="text-xs font-medium uppercase tracking-widest text-zinc-400">Reviewed prompt</div>
+              <div className="break-all font-mono text-xs text-zinc-400">{detail.review.digest}</div>
+              <div className="break-all font-mono text-xs text-zinc-400">{detail.review.promptId}</div>
+              <div className="text-xs text-zinc-400">{`${detail.review.createdAt} · expires ${detail.review.expiresAt}`}</div>
               <pre data-branch-prompt className="max-w-full overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-zinc-800 bg-zinc-900 p-3 font-mono text-xs text-zinc-300">{detail.review.prompt}</pre>
             </section>
           )}
@@ -110,7 +111,7 @@ function BranchDetail({
                 Rejoin
               </Button>
             ) : (
-              <Button variant="primary" size="sm" disabled={busy !== null} onClick={onRejoin}>
+              <Button size="sm" disabled={busy !== null} onClick={onRejoin}>
                 {busy === 'rejoin' ? 'Rejoining…' : 'Confirm rejoin'}
               </Button>
             )}
@@ -122,7 +123,7 @@ function BranchDetail({
   );
 }
 
-export function Branches({ project, onBack }: { project: string; onBack: () => void }) {
+export function Branches({ project, branchId, onBack, onSelect }: { project: string; branchId?: string; onBack: () => void; onSelect?: (branch: string) => void }) {
   const [items, setItems] = useState<NativeBranchSummary[] | null>(null);
   const [detail, setDetail] = useState<NativeBranchDetail | null>(null);
   const [findingIds, setFindingIds] = useState<string[]>([]);
@@ -134,7 +135,7 @@ export function Branches({ project, onBack }: { project: string; onBack: () => v
   const loadList = useCallback(async () => {
     setBusy('list');
     try {
-      const response = await fetch(`/api/branches?project=${encodeURIComponent(project)}`);
+      const response = await fetch(apiPath(`api/branches?project=${encodeURIComponent(project)}`));
       const body = await json<{ branches: NativeBranchSummary[] }>(response);
       setItems(body.branches);
       setError('');
@@ -154,7 +155,7 @@ export function Branches({ project, onBack }: { project: string; onBack: () => v
     setBusy('detail');
     setArmedDigest(null);
     try {
-      const response = await fetch(`/api/branch?project=${encodeURIComponent(project)}&branch=${encodeURIComponent(id)}`);
+      const response = await fetch(apiPath(`api/branch?project=${encodeURIComponent(project)}&branch=${encodeURIComponent(id)}`));
       const body = await json<{ branch: NativeBranchDetail }>(response);
       if (request !== detailRequest.current) return;
       setDetail(body.branch);
@@ -171,6 +172,10 @@ export function Branches({ project, onBack }: { project: string; onBack: () => v
   }
 
   function selectBranch(id: string) {
+    if (onSelect) {
+      onSelect(id);
+      return;
+    }
     setDetail(null);
     setFindingIds([]);
     setArmedDigest(null);
@@ -189,7 +194,7 @@ export function Branches({ project, onBack }: { project: string; onBack: () => v
     setBusy('review');
     setArmedDigest(null);
     try {
-      const response = await fetch('/api/branch-review', {
+      const response = await fetch(apiPath('api/branch-review'), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ project, branch: detail.id, findingIds }),
@@ -209,7 +214,7 @@ export function Branches({ project, onBack }: { project: string; onBack: () => v
     if (!detail || armedDigest === null) return;
     setBusy('rejoin');
     try {
-      const response = await fetch('/api/branch-rejoin', {
+      const response = await fetch(apiPath('api/branch-rejoin'), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ project, branch: detail.id, reviewDigest: armedDigest }),
@@ -224,6 +229,10 @@ export function Branches({ project, onBack }: { project: string; onBack: () => v
       setBusy(null);
     }
   }
+
+  useEffect(() => {
+    if (branchId) void loadDetail(branchId);
+  }, [branchId, project]);
 
   return (
     <div className="min-h-screen bg-zinc-950">
@@ -241,10 +250,13 @@ export function Branches({ project, onBack }: { project: string; onBack: () => v
         <Separator />
 
         {error !== '' && (
-          <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</div>
+          <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+            <p>{error}</p>
+            <Button variant="outline" size="sm" className="mt-3" onClick={() => void (branchId ? loadDetail(branchId) : loadList())}>Retry</Button>
+          </div>
         )}
-        {items === null && error === '' && <div className="text-sm text-zinc-500">reading branches…</div>}
-        {items?.length === 0 && <div className="text-sm text-zinc-500">No native branches.</div>}
+        {items === null && error === '' && <div className="text-sm text-zinc-400">reading branches…</div>}
+        {items?.length === 0 && <div className="text-sm text-zinc-400">No native branches.</div>}
 
         {items && items.length > 0 && (
           <section className="flex flex-col gap-2" aria-label="native branches">
@@ -260,13 +272,13 @@ export function Branches({ project, onBack }: { project: string; onBack: () => v
                   <span className="font-medium text-zinc-100">{item.purpose}</span>
                   <Badge>{item.status}</Badge>
                 </span>
-                <span className="mt-1 block text-xs text-zinc-500">{`${item.agent} · ${item.task}`}</span>
+                <span className="mt-1 block text-xs text-zinc-400">{`${item.agent} · ${item.task}`}</span>
               </button>
             ))}
           </section>
         )}
 
-        {busy === 'detail' && detail === null && error === '' && <div className="text-sm text-zinc-500">reading branch detail…</div>}
+        {busy === 'detail' && detail === null && error === '' && <div className="text-sm text-zinc-400">reading branch detail…</div>}
 
         {detail && (
           <BranchDetail

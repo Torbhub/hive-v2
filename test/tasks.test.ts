@@ -24,6 +24,36 @@ describe('foldTasks', () => {
     expect(tasks[0].needs_owner).toBe(true);
   });
 
+  it('keeps the brief for task destinations and updates it on rebrief', () => {
+    const tasks = foldTasks([
+      ev('demo-1', 'asked', '2026-10-13T01:00:00Z', 'write the docs'),
+      ev('demo-1', 'handed', '2026-10-13T02:00:00Z'),
+      ev('demo-1', 'asked', '2026-10-13T03:00:00Z', 'write the API docs'),
+    ]);
+    expect(tasks[0].brief).toBe('write the API docs');
+  });
+
+  it('retains the original plan text after later notes', () => {
+    const tasks = foldTasks([
+      ev('demo-1', 'asked', '2026-10-13T01:00:00Z', 'write the docs'),
+      ev('demo-1', 'plan', '2026-10-13T02:00:00Z', 'AUDIT read first. BUILD write next.'),
+      ev('demo-1', 'note', '2026-10-13T03:00:00Z', 'later status'),
+    ]);
+    expect(tasks[0].plan_text).toBe('AUDIT read first. BUILD write next.');
+    expect(tasks[0].last_note).toBe('later status');
+  });
+
+  it('uses only the verified outcome replacement for superseded links', () => {
+    const tasks = foldTasks([
+      ev('demo-1', 'asked', '2026-10-13T01:00:00Z', 'original'),
+      ev('demo-1', 'superseded', '2026-10-13T02:00:00Z', 'prose is not authority', {
+        outcome: { actor: 'owner', replacement_id: 'demo-2' },
+      }),
+    ]);
+    expect(tasks[0].superseded_by).toBe('demo-2');
+    expect(tasks[0].needs_owner).toBe(false);
+  });
+
   it('needs_owner only for plan/question/blocked', () => {
     const tasks = foldTasks([
       ev('a-1', 'asked', '2026-10-13T01:00:00Z'),

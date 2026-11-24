@@ -54,7 +54,7 @@ no arguments.
 ## The web screen
 
 `hive web` serves the same hub screen in a browser: `http://127.0.0.1:7684`
-(port from `--port N` or `HIVE_WEB_PORT`, loopback only). It reads and acts
+(port from `--port N` or `HIVE_WEB_PORT`, loopback only). The default **Needs you** queue puts plan verdicts and owner questions first. Projects have **Tasks**, **Activity**, **Team**, and **Settings** tabs. Every task has a durable route with its brief, delivery state, evidence, and activity. Project, task, question, log, and branch routes support copied links and browser Back. Task inventories include search, outcomes, and agent attribution. Question cards accept direct answers. Stale cleanup uses guarded archive writes. Project setup uses a full-width dialog. Initial loading, stale data, and failures name their state and offer the matching next action. The UI reads and acts
 exactly like the Ink screen — same view assembly, same fingerprint-checked
 dialog answers, one action at a time. It is a plain foreground process, so a
 systemd unit is one `ExecStart=/path/to/hive web` line away. Set

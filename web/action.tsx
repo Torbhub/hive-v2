@@ -1,5 +1,6 @@
 import React, { createContext, useContext } from 'react';
 import { Button } from './components/ui/button';
+import { cn } from './lib/utils';
 
 export const ActionContext = createContext<{ acting: boolean; pressed: string | null }>({
   acting: false,
@@ -20,12 +21,14 @@ export function Btn({
   const { acting, pressed } = useContext(ActionContext);
   return (
     <Button
-      variant={variant}
+      id={id}
+      type="button"
+      variant={variant === 'primary' ? 'default' : variant}
       size={size}
-      pressed={pressed === id}
+      data-pressed={pressed === id ? 'true' : undefined}
       disabled={disabled || acting}
       onClick={onPress}
-      className={className}
+      className={cn('max-sm:min-h-10 data-[pressed=true]:bg-primary/80', className)}
     >
       {children}
     </Button>

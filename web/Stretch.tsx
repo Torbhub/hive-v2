@@ -1,9 +1,10 @@
 import React, { useMemo, useState } from 'react';
 import { isOpenable, parse, type Segment, type Stretch } from '../src/stretch';
 import { cn } from './lib/utils';
+import { apiPath } from './api';
 
 function recordOpen(short: string, pane: string): void {
-  void fetch('api/stretch-opened', {
+  void fetch(apiPath('api/stretch-opened'), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ short, pane }),
@@ -74,7 +75,7 @@ export function StretchText({ text, pane, className }: { text: string; pane: str
     });
   };
   return (
-    <span className={cn(className, open.size === 0 && 'truncate')}>
+    <span className={cn('block min-w-0 max-w-full whitespace-pre-wrap break-words', className)}>
       {renderSegments(segments, open, onToggle)}
     </span>
   );

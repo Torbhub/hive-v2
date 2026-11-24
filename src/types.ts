@@ -285,6 +285,9 @@ export type HubTask = {
   asked: string;
   state: string;
   updated: string;
+  brief?: string;
+  plan_text?: string | null;
+  superseded_by?: string | null;
   last_note: string | null;
   needs_owner: boolean;
   decisions?: { at: string; reason: string }[];

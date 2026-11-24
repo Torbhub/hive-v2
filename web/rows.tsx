@@ -1,6 +1,11 @@
 import React, { useContext, useRef, useState } from 'react';
 import { ActionContext, Btn } from './action';
 import { Input } from './components/ui/input';
+import { Field, FieldDescription, FieldGroup, FieldLabel, FieldSet } from './components/ui/field';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog';
+import { NativeSelect, NativeSelectOption } from './components/ui/native-select';
+import { Textarea } from './components/ui/textarea';
+import type { Approvals, ProjectMode } from '../src/types';
 import { DictationControl, type DictationEngine } from './dictation';
 
 const PRESET_REVIEW = 'First present a plan for my approval. Do not perform AWS work, transfer data, or create a job before approval. After approval, use normal Hive execution.';
@@ -38,13 +43,13 @@ const TASK_PRESETS = [
 
 function PresetMenu({ onSelect, inputRef }: {
   onSelect: (prompt: string) => void;
-  inputRef: React.RefObject<HTMLInputElement | null>;
+  inputRef: React.RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
 }) {
   const { acting } = useContext(ActionContext);
   const detailsRef = useRef<HTMLDetailsElement>(null);
   return (
     <details ref={detailsRef} className="relative">
-      <summary className="cursor-pointer list-none rounded-md border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-xs font-medium text-zinc-100 hover:bg-zinc-900">Preset</summary>
+      <summary className="inline-flex min-h-9 cursor-pointer list-none items-center rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent max-sm:min-h-10">Preset</summary>
       <div className="absolute left-0 z-20 mt-1 w-80 max-w-[80vw] overflow-hidden rounded-md border border-zinc-700 bg-zinc-950 shadow-lg">
         {TASK_PRESETS.map((preset) => (
           <button
@@ -70,15 +75,17 @@ function PresetMenu({ onSelect, inputRef }: {
 }
 
 export function NewTaskRow({
-  project, busy, onStartTask, dictationEngine,
+  project, busy, onStartTask, dictationEngine, mode = 'ask', approvals = 'manual',
 }: {
   project: string;
   busy: { project: string; what: string } | null;
   onStartTask: (project: string, text: string) => Promise<boolean>;
   dictationEngine?: DictationEngine;
+  mode?: ProjectMode;
+  approvals?: Approvals;
 }) {
   const [text, setText] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   if (busy?.project === project && busy.what === 'starting') {
     return (
       <div className="mt-2 border-t border-zinc-800 pt-2.5 text-xs text-sky-400">starting…</div>
@@ -90,16 +97,16 @@ export function NewTaskRow({
     if (await onStartTask(project, t)) setText('');
   };
   return (
-    <div className="mt-2 flex flex-wrap gap-2 border-t border-zinc-800 pt-2.5">
-      <Input
+    <div className="flex flex-wrap gap-2 border-t pt-4">
+      <Textarea
         ref={inputRef}
-        className="font-mono text-xs"
+        className="min-h-24 w-full flex-1 basis-full font-mono text-sm"
         value={text}
         placeholder="describe the task…"
         aria-label={`new task for ${project}`}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
             void submit();
           }
@@ -116,17 +123,19 @@ export function NewTaskRow({
       <Btn id={`start-${project}`} variant="primary" disabled={!text.trim()} onPress={() => void submit()}>
         Start task
       </Btn>
+      <span className="basis-full text-xs text-muted-foreground">{`Permissions ${mode} · Approvals ${approvals} · Ctrl/Cmd+Enter to submit`}</span>
     </div>
   );
 }
 
 export function MessageRow({
-  project, busy, onMessage, dictationEngine,
+  project, busy, onMessage, dictationEngine, disabled = false,
 }: {
   project: string;
   busy: { project: string; what: string } | null;
   onMessage: (project: string, text: string) => Promise<boolean>;
   dictationEngine?: DictationEngine;
+  disabled?: boolean;
 }) {
   const [text, setText] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -137,17 +146,18 @@ export function MessageRow({
   }
   const submit = async () => {
     const t = text.trim();
-    if (!t) return;
+    if (!t || disabled) return;
     if (await onMessage(project, t)) setText('');
   };
   return (
-    <div className="mt-2 flex flex-wrap gap-2 border-t border-zinc-800 pt-2.5">
+    <div className="flex flex-wrap gap-2 border-t pt-4">
       <Input
         ref={inputRef}
-        className="font-mono text-xs"
+        className="min-w-0 flex-1 basis-48 font-mono text-sm"
         value={text}
         placeholder="message the orchestrator…"
         aria-label={`message for ${project}`}
+        disabled={disabled}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
@@ -158,9 +168,9 @@ export function MessageRow({
       />
       <DictationControl
         inputRef={inputRef} value={text} onChange={setText} label={`message for ${project}`}
-        dictationEngine={dictationEngine}
+        dictationEngine={dictationEngine} disabled={disabled}
       />
-      <Btn id={`message-${project}`} disabled={!text.trim()} onPress={() => void submit()}>
+      <Btn id={`message-${project}`} disabled={disabled || !text.trim()} onPress={() => void submit()}>
         Send
       </Btn>
     </div>
@@ -168,22 +178,30 @@ export function MessageRow({
 }
 
 export function AddProjectRow({
-  sources, onAddProject,
+  sources, onAddProject, onAdded,
 }: {
   sources: string[];
   onAddProject: (name: string, path: string, source: string) => Promise<boolean>;
+  onAdded?: () => void;
 }) {
   const [name, setName] = useState('');
   const [folder, setFolder] = useState('');
   const [source, setSource] = useState('');
+  const [adding, setAdding] = useState(false);
   const submit = async () => {
     const n = name.trim();
     const p = folder.trim();
-    if (!n) return;
-    if (await onAddProject(n, p, p ? '' : source)) {
-      setName('');
-      setFolder('');
-      setSource('');
+    if (!n || adding) return;
+    setAdding(true);
+    try {
+      if (await onAddProject(n, p, p ? '' : source)) {
+        setName('');
+        setFolder('');
+        setSource('');
+        onAdded?.();
+      }
+    } finally {
+      setAdding(false);
     }
   };
   const onEnter = (e: React.KeyboardEvent) => {
@@ -193,42 +211,84 @@ export function AddProjectRow({
     }
   };
   return (
-    <div className="mt-2 flex flex-wrap gap-2 border-t border-zinc-800 pt-2.5">
-      <Input
-        className="w-36 font-mono text-xs"
-        value={name}
-        placeholder="name"
-        aria-label="new project name"
-        onChange={(e) => setName(e.target.value)}
-        onKeyDown={onEnter}
-      />
-      <Input
-        className="flex-1 font-mono text-xs"
-        value={folder}
-        placeholder="/absolute/path or blank"
-        aria-label="new project path"
-        onChange={(e) => setFolder(e.target.value)}
-        onKeyDown={onEnter}
-      />
-      {!folder.trim() && (
-        <select
-          className="flex-1 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-xs text-zinc-100"
-          value={source}
-          aria-label="new project source"
-          onChange={(e) => setSource(e.target.value)}
+    <FieldSet className="w-full min-w-0 gap-3" data-testid="add-project-form">
+      <FieldGroup className="gap-3">
+        <Field className="gap-1.5">
+          <FieldLabel htmlFor="new-project-name" className="text-xs font-medium">Name</FieldLabel>
+          <FieldDescription className="text-xs">Lowercase letters, numbers, and hyphens. Start with a letter. Use at most 32 characters.</FieldDescription>
+          <Input
+            id="new-project-name"
+            className="h-9 w-full px-3 font-mono text-sm"
+            value={name}
+            placeholder="name"
+            aria-label="new project name"
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={onEnter}
+          />
+        </Field>
+        <Field className="gap-1.5">
+          <FieldLabel htmlFor="new-project-path" className="text-xs font-medium">Absolute path</FieldLabel>
+          <FieldDescription className="text-xs">Leave blank to create a project from a source or an empty Git repository.</FieldDescription>
+          <Input
+            id="new-project-path"
+            className="h-9 w-full px-3 font-mono text-sm"
+            value={folder}
+            placeholder="/absolute/path or blank"
+            aria-label="new project path"
+            onChange={(e) => setFolder(e.target.value)}
+            onKeyDown={onEnter}
+          />
+        </Field>
+        {!folder.trim() && (
+          <Field className="gap-1.5 [&_[data-slot=native-select-wrapper]]:w-full">
+            <FieldLabel htmlFor="new-project-source" className="text-xs font-medium">Source</FieldLabel>
+            <FieldDescription className="text-xs">Choose an existing repository or worktree, or create an empty Git repository.</FieldDescription>
+            <NativeSelect
+              id="new-project-source"
+              className="h-9 w-full px-3 font-mono text-xs"
+              value={source}
+              aria-label="new project source"
+              onChange={(e) => setSource(e.target.value)}
+            >
+              <NativeSelectOption value="" className="bg-popover text-popover-foreground">empty Git repository</NativeSelectOption>
+              {sources.map((item) => (
+                <NativeSelectOption key={item} value={item} className="bg-popover text-popover-foreground">{item}</NativeSelectOption>
+              ))}
+            </NativeSelect>
+          </Field>
+        )}
+        <Btn
+          id="add-project"
+          variant="primary"
+          size="default"
+          className="mt-1 w-full disabled:bg-primary/60 disabled:text-primary-foreground disabled:opacity-100"
+          disabled={adding || !name.trim()}
+          onPress={() => void submit()}
         >
-          <option value="">empty Git repository</option>
-          {sources.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-      )}
-      <Btn
-        id="add-project"
-        variant="primary"
-        disabled={!name.trim()}
-        onPress={() => void submit()}
-      >
+          {adding ? 'Adding project…' : 'Add project'}
+        </Btn>
+      </FieldGroup>
+    </FieldSet>
+  );
+}
+
+export function AddProjectDialog({ sources, onAddProject }: {
+  sources: string[];
+  onAddProject: (name: string, path: string, source: string) => Promise<boolean>;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Btn id="add-project-open" variant="outline" size="default" className="w-full" onPress={() => setOpen(true)}>
         Add project
       </Btn>
-    </div>
+      <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Add project</DialogTitle>
+          <DialogDescription>Register an existing folder or create a project from a repository source.</DialogDescription>
+        </DialogHeader>
+        <AddProjectRow sources={sources} onAddProject={onAddProject} onAdded={() => setOpen(false)} />
+      </DialogContent>
+    </Dialog>
   );
 }

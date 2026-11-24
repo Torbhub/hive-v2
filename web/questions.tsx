@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader } from './components/ui/card';
 import { Input } from './components/ui/input';
 import { Separator } from './components/ui/separator';
 import { DictationControl, type DictationEngine } from './dictation';
+import { routeUrl } from './routes';
 
 type Draft = { choice: string; text: string };
 
@@ -87,7 +88,7 @@ function DecisionDetails({ question, now }: { question: OperatorQuestion; now: n
       <div>
         <p className="text-sm text-zinc-200">{card.overview}</p>
         {card.overviewSource === 'model' && (
-          <p className="mt-1 text-xs text-zinc-500">Model overview. The verified facts and choices below stay authoritative.</p>
+          <p className="mt-1 text-xs text-zinc-400">Model overview. The verified facts and choices below stay authoritative.</p>
         )}
       </div>
       {card.missing.length > 0 && (
@@ -96,13 +97,13 @@ function DecisionDetails({ question, now }: { question: OperatorQuestion; now: n
       <dl className="grid grid-cols-1 gap-x-3 gap-y-2 text-xs sm:grid-cols-[8rem_minmax(0,1fr)]">
         {facts.map(([label, value]) => (
           <div key={label} className="contents">
-            <dt className="text-zinc-500">{label}</dt>
+            <dt className="text-zinc-400">{label}</dt>
             <dd className="break-words text-zinc-300">{value}</dd>
           </div>
         ))}
         {card.facts.files && card.facts.files.length > 0 && (
           <div className="contents">
-            <dt className="text-zinc-500">Changed files</dt>
+            <dt className="text-zinc-400">Changed files</dt>
             <dd className="break-words text-zinc-300">{card.facts.files.join(', ')}</dd>
           </div>
         )}
@@ -152,12 +153,14 @@ function CancelBatch({ batch, onCancel }: { batch: QuestionBatch; onCancel: () =
 }
 
 export function BatchCard({
-  batch, onAnswer, onCancel, dictationEngine,
+  batch, onAnswer, onCancel, dictationEngine, batchLink, onOpenBatch,
 }: {
   batch: QuestionBatch;
   onAnswer: (batch: QuestionBatch, answers: QuestionAnswer[]) => void;
   onCancel: (batch: QuestionBatch) => void;
   dictationEngine?: DictationEngine;
+  batchLink?: string;
+  onOpenBatch?: () => void;
 }) {
   const now = useDecisionNow(batch.questions.some((q) => q.decision !== undefined));
   const [notice, setNotice] = useState('');
@@ -205,14 +208,27 @@ export function BatchCard({
     onAnswer(batch, answers);
   };
   return (
-    <Card>
-      <CardHeader className="flex-col items-start gap-1">
-        <span className="font-medium text-white">{`Agent context (untrusted): ${batch.context}`}</span>
+    <Card className="w-full min-w-0 max-w-full">
+      <CardHeader className="flex min-w-0 flex-col items-start gap-2">
+        <span className="min-w-0 max-w-full break-words font-medium text-white">{`Agent context (untrusted): ${batch.context}`}</span>
         {batch.questions.some((q) => q.decision) && (
           <span className="text-xs text-sky-300">Review each requested action separately. No approval happens automatically.</span>
         )}
         <span className="text-xs text-zinc-400">{`${batch.project} · ${batch.agent}`}</span>
-        <time className="text-xs text-zinc-500" dateTime={batch.createdAt}>{batch.createdAt}</time>
+        <time className="text-xs text-zinc-400" dateTime={batch.createdAt}>{batch.createdAt}</time>
+        {batchLink && (
+          <a
+            href={batchLink}
+            className="text-xs font-medium text-sky-300 underline-offset-4 hover:underline"
+            onClick={(event) => {
+              if (!onOpenBatch || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              event.preventDefault();
+              onOpenBatch();
+            }}
+          >
+            Open review link
+          </a>
+        )}
         <span role="status" aria-live="polite" aria-atomic="true" className="text-xs text-amber-300">{notice}</span>
       </CardHeader>
       <CardContent>
@@ -220,12 +236,12 @@ export function BatchCard({
           {questions.map((q) => {
             const draft = drafts[q.id];
             return (
-              <fieldset key={q.id} className="rounded-md border border-zinc-800 p-3">
-                <legend className="flex items-center gap-2 px-1 text-sm font-medium text-zinc-100">
+              <fieldset key={q.id} className="min-w-0 rounded-md border border-zinc-800 p-3">
+                <legend className="flex max-w-full items-center gap-2 px-1 text-sm font-medium text-zinc-100">
                   <Badge>{`P${q.priority}`}</Badge>
-                  <span>{q.question}</span>
+                  <span className="min-w-0 break-words">{q.question}</span>
                 </legend>
-                <p className="mb-3 text-xs text-zinc-500">{q.context}</p>
+                <p className="mb-3 text-xs text-zinc-400">{q.context}</p>
                 <DecisionDetails question={q} now={now} />
                 <div className="flex flex-col gap-3">
                   {q.choices.map((choice) => {
@@ -247,10 +263,10 @@ export function BatchCard({
                         <label htmlFor={id} className="text-sm text-zinc-200">
                           <span className="flex flex-wrap items-center gap-2">
                             {choice.label}
-                            {q.recommended === choice.id && <Badge variant="cyan">Recommended</Badge>}
-                            {disabled && <Badge variant="amber">Approval unavailable</Badge>}
+                            {q.recommended === choice.id && <Badge variant="outline" className="border-sky-500/40 text-sky-300">Recommended</Badge>}
+                            {disabled && <Badge variant="outline" className="border-amber-400/40 text-amber-300">Approval unavailable</Badge>}
                           </span>
-                          <span className="mt-0.5 block text-xs text-zinc-500">{choice.description}</span>
+                          <span className="mt-0.5 block text-xs text-zinc-400">{choice.description}</span>
                         </label>
                       </div>
                     );
@@ -280,16 +296,19 @@ export function BatchCard({
 }
 
 export function Questions({
-  batches, total, onBack, onAnswer, onCancel,
+  batches, total, batchId, onBack, onAnswer, onCancel, onOpenBatch,
 }: {
   batches: QuestionBatch[];
   total?: number;
+  batchId?: string;
   onBack: () => void;
   onAnswer: (batch: QuestionBatch, answers: QuestionAnswer[]) => void;
   onCancel: (batch: QuestionBatch) => void;
+  onOpenBatch?: (batch: QuestionBatch) => void;
 }) {
-  const ordered = [...batches].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  const open = total ?? batches.length;
+  const ordered = [...batches].filter((batch) => !batchId || batch.id === batchId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const open = batchId ? ordered.length : total ?? batches.length;
   return (
     <div className="min-h-screen bg-zinc-950">
       <div className="mx-auto flex max-w-2xl flex-col gap-5 px-4 py-8">
@@ -302,11 +321,18 @@ export function Questions({
         </header>
         <Separator />
         {open > batches.length && (
-          <div className="text-sm text-zinc-500">{`Showing the oldest ${batches.length} of ${open}. Answer or cancel these to see the rest.`}</div>
+          <div className="text-sm text-zinc-400">{`Showing the oldest ${batches.length} of ${open}. Answer or cancel these to see the rest.`}</div>
         )}
-        {ordered.length === 0 && <div className="text-sm text-zinc-500">No open questions.</div>}
+        {ordered.length === 0 && <div className="text-sm text-zinc-400">{batchId ? 'Question batch not found.' : 'No open questions.'}</div>}
         {ordered.map((batch) => (
-          <BatchCard key={batch.id} batch={batch} onAnswer={onAnswer} onCancel={onCancel} />
+          <BatchCard
+            key={batch.id}
+            batch={batch}
+            onAnswer={onAnswer}
+            onCancel={onCancel}
+            batchLink={onOpenBatch ? routeUrl({ name: 'questions', batch: batch.id }) : undefined}
+            onOpenBatch={onOpenBatch ? () => onOpenBatch(batch) : undefined}
+          />
         ))}
       </div>
     </div>
