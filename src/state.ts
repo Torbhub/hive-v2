@@ -215,6 +215,7 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
       byId.set(ev.id, t);
     }
     t.updated = ev.at;
+    if (ev.event === 'asked' && ev.note) t.brief = ev.note;
     if (ev.lease_epoch !== undefined) t.lease_epoch = ev.lease_epoch;
     if (ev.event === 'admission') {
       if (ev.admission) {
@@ -285,6 +286,7 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         t.unblock_condition = ev.note;
       }
       if (ev.event === 'plan') {
+        t.plan_text = ev.note ?? null;
         previousContracts.set(ev.id, t.contract);
         previousDeadlines.set(ev.id, t.expires_at);
         t.checkpoints = validCheckpoints(ev.checkpoints) ?? [];
@@ -315,10 +317,12 @@ export function foldTasks(events: TaskEvent[]): HubTask[] {
         t.receipt_actor = null;
         t.last_receipt_sequence = 0;
         t.last_receipt = null;
+        t.superseded_by = null;
         t.admitted_at = null;
         t.expires_at = null;
       }
       if (ev.event === 'cancelled' || ev.event === 'superseded') {
+        if (ev.event === 'superseded') t.superseded_by = ev.outcome?.replacement_id ?? null;
         t.lease_epoch = (t.lease_epoch ?? 1) + 1;
         t.lease_revoked = true;
       }

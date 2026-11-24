@@ -999,6 +999,34 @@ describe('POST /api/task-resolve', () => {
   });
 });
 
+describe('POST /api/tasks-archive', () => {
+  beforeAll(async () => {
+    const old = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+    await appendTaskEvent(root, { id: 'stale-archive', project: 'demo', event: 'asked', at: old });
+    await appendTaskEvent(root, {
+      id: 'stale-archive', project: 'demo', event: 'plan', at: old,
+      checkpoints: [{ id: 'a', desc: 'review stale work', etaMin: 1 }],
+    });
+    await appendTaskEvent(root, { id: 'fresh-archive', project: 'demo', event: 'asked', at: new Date().toISOString() });
+    await appendTaskEvent(root, {
+      id: 'fresh-archive', project: 'demo', event: 'blocked', at: new Date().toISOString(), note: 'fresh blocker',
+    });
+  });
+
+  it('cancels only current stale owner decisions and preserves their records', async () => {
+    const response = await post('/api/tasks-archive', { project: 'demo', tasks: ['stale-archive'] });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, archived: ['stale-archive'] });
+    const view = await (await fetch(`${base}/api/view`)).json();
+    const archived = view.tasks.find((task: { id: string }) => task.id === 'stale-archive');
+    expect(archived.state).toBe('cancelled');
+    expect(archived.last_note).toBe('archived stale owner decision');
+    const fresh = await post('/api/tasks-archive', { project: 'demo', tasks: ['fresh-archive'] });
+    expect(fresh.status).toBe(400);
+    expect((await fresh.json()).detail).toContain('not a current stale owner decision');
+  });
+});
+
 describe('POST /api/progress', () => {
   beforeAll(async () => {
     await appendTaskEvent(root, { id: 'demo-10', project: 'demo', event: 'asked', at: new Date().toISOString() });

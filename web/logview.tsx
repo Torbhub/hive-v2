@@ -5,6 +5,7 @@ import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
 import { Card, CardContent, CardHeader } from './components/ui/card';
 import { Separator } from './components/ui/separator';
+import { apiPath } from './api';
 
 const EVERY_MS = 20_000;
 
@@ -13,7 +14,7 @@ const KIND_LABEL: Record<LogEntry['kind'], string> = {
 };
 
 const KIND_TEXT: Record<LogEntry['kind'], string> = {
-  think: 'text-zinc-500',
+  think: 'text-zinc-400',
   text: 'text-zinc-200',
   tool: 'font-mono text-xs text-zinc-400',
   prompt: 'text-sky-300',
@@ -27,8 +28,8 @@ function clockOf(at: string): string {
 function EntryRow({ entry }: { entry: LogEntry }) {
   return (
     <div className="flex gap-2 py-0.5 text-sm" data-log-entry={entry.id} tabIndex={-1}>
-      <span className="shrink-0 text-xs text-zinc-600 tabular">{clockOf(entry.at)}</span>
-      <span className="w-10 shrink-0 text-right text-xs text-zinc-600">{KIND_LABEL[entry.kind]}</span>
+      <span className="shrink-0 text-xs text-zinc-400 tabular">{clockOf(entry.at)}</span>
+      <span className="w-10 shrink-0 text-right text-xs text-zinc-400">{KIND_LABEL[entry.kind]}</span>
       <span className={cn('min-w-0 flex-1 whitespace-pre-wrap break-words', KIND_TEXT[entry.kind])}>
         {entry.text}
       </span>
@@ -78,8 +79,8 @@ function mergeOlder(current: AgentLog | null, older: AgentLog): AgentLog | null 
 }
 
 function logUrl(project: string, agent?: string, before?: string): string {
-  return `api/log?project=${encodeURIComponent(project)}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`
-    + `${before ? `&before=${encodeURIComponent(before)}` : ''}`;
+  return apiPath(`api/log?project=${encodeURIComponent(project)}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`
+    + `${before ? `&before=${encodeURIComponent(before)}` : ''}`);
 }
 
 export function LogView({
@@ -91,6 +92,7 @@ export function LogView({
 }) {
   const [log, setLog] = useState<AgentLog | null>(null);
   const [error, setError] = useState('');
+  const [updatedAt, setUpdatedAt] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [announcement, setAnnouncement] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -116,11 +118,12 @@ export function LogView({
       const r = await fetch(logUrl(project, agent), { signal });
       const j = (await r.json()) as AgentLog & { ok?: boolean; detail?: string };
       if (sequence !== requestSequenceRef.current) return;
-      if (!r.ok || j.ok === false) {
-        setError(j.detail ?? `HTTP ${r.status}`);
+      if (!r.ok || j.ok === false || !Array.isArray(j.agents)) {
+        setError(j.detail ?? (r.ok ? 'Invalid log response' : `HTTP ${r.status}`));
         return;
       }
       setError('');
+      setUpdatedAt(Date.now());
       if (atBottomRef.current) pendingScrollRef.current = 'tail';
       setLog((current) => mergeLatest(current, j));
     } catch (e) {
@@ -139,13 +142,13 @@ export function LogView({
       const r = await fetch(logUrl(project, agent, log.olderCursor), { signal });
       const j = (await r.json()) as AgentLog & { ok?: boolean; detail?: string };
       if (sequence !== requestSequenceRef.current) return;
-      if (!r.ok || j.ok === false) {
+      if (!r.ok || j.ok === false || !Array.isArray(j.agents)) {
         if (r.status === 400) {
           setLog(null);
           setError('');
           await refresh();
         } else {
-          setError(j.detail ?? `HTTP ${r.status}`);
+          setError(j.detail ?? (r.ok ? 'Invalid log response' : `HTTP ${r.status}`));
         }
         return;
       }
@@ -210,6 +213,7 @@ export function LogView({
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {log && <Badge>{`${log.agents.reduce((n, a) => n + a.entries.length, 0)} entries`}</Badge>}
+            {updatedAt > 0 && <span className="hidden font-mono text-xs text-muted-foreground sm:inline">{`Updated ${new Date(updatedAt).toISOString().slice(11, 19)} UTC`}</span>}
             <Button variant="ghost" size="sm" onClick={onBack}>back</Button>
           </div>
         </header>
@@ -218,16 +222,17 @@ export function LogView({
 
         {error !== '' && (
           <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-            {error}
+            <p>{error}</p>
+            <Button variant="outline" size="sm" className="mt-3" onClick={() => void refresh()}>Retry</Button>
           </div>
         )}
 
         {log === null && error === '' && (
-          <div className="text-sm text-zinc-500">reading the wire log…</div>
+          <div className="text-sm text-zinc-400">reading the wire log…</div>
         )}
 
         {log !== null && log.agents.length === 0 && error === '' && (
-          <div className="text-sm text-zinc-500">
+          <div className="text-sm text-zinc-400">
             {`no thinking recorded yet under session ${log.session_id}`}
           </div>
         )}
@@ -256,7 +261,7 @@ export function LogView({
               <Card key={a.agentId}>
                 <CardHeader>
                   <span className="font-medium text-white">{a.agentId}</span>
-                  <span className="text-xs text-zinc-500">{`${a.entries.length} entries, newest last`}</span>
+                  <span className="text-xs text-zinc-400">{`${a.entries.length} entries, newest last`}</span>
                 </CardHeader>
                 <CardContent>
                   <div className="flex flex-col divide-y divide-zinc-900">

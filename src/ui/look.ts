@@ -76,7 +76,7 @@ export function orchestratorLook(o: HubOrchestrator): OrchestratorLook {
   switch (o.state) {
     case 'running': return { dot: '●', word: 'running', color: 'green' };
     case 'stopped': return { dot: '○', word: 'stopped', color: 'yellow' };
-    case 'unknown': return { dot: '?', word: 'cannot tell', color: 'red' };
+    case 'unknown': return { dot: '?', word: 'state unknown', color: 'red' };
     case 'none': return { dot: '◌', word: 'no team', color: 'gray' };
     case 'unregistered': return { dot: '◑', word: 'not registered', color: 'magenta' };
     case 'resumable': return { dot: '○', word: 'stopped, not registered', color: 'yellow' };
@@ -214,7 +214,8 @@ export function buildNeeds(view: HubView, now: number): Need[] {
       action: t.state === 'plan' ? 'plan' : 'resolve',
       project: t.project,
       taskId: t.id,
-      detail: t.last_note?.trim() ? withoutPaneIds(t.last_note) : 'no reason recorded',
+      detail: t.state === 'plan' && t.plan_text?.trim() ? withoutPaneIds(t.plan_text)
+        : t.last_note?.trim() ? withoutPaneIds(t.last_note) : 'no reason recorded',
       checkpoints: t.state === 'plan' ? t.checkpoints ?? [] : undefined,
       contract: t.state === 'plan' ? t.contract ?? null : undefined,
       planDigest: t.state === 'plan' ? t.plan_digest ?? null : undefined,

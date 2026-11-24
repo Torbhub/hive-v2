@@ -34,14 +34,15 @@ function button(text: string): HTMLButtonElement {
   return found as HTMLButtonElement;
 }
 
-function input(label: string): HTMLInputElement {
-  const found = container.querySelector(`input[aria-label="${label}"]`);
+function input(label: string): HTMLInputElement | HTMLTextAreaElement {
+  const found = container.querySelector(`input[aria-label="${label}"], textarea[aria-label="${label}"]`);
   if (!found) throw new Error(`No input named ${label}`);
-  return found as HTMLInputElement;
+  return found as HTMLInputElement | HTMLTextAreaElement;
 }
 
-function typeInto(field: HTMLInputElement, value: string): void {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+function typeInto(field: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  const prototype = field instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(prototype, 'value')!.set!;
   act(() => {
     setter.call(field, value);
     field.dispatchEvent(new Event('input', { bubbles: true }));

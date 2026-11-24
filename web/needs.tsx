@@ -4,9 +4,17 @@ import { ago, contractLines, staleTask, taskProgress, type Need } from '../src/u
 import { cn } from './lib/utils';
 import { Btn } from './action';
 import { Input } from './components/ui/input';
+import { Card, CardContent } from './components/ui/card';
+import { Badge } from './components/ui/badge';
 import { DictationControl, type DictationEngine } from './dictation';
 
 const NEED_ACCENT: Record<string, string> = { magenta: 'border-l-fuchsia-400', yellow: 'border-l-amber-400', red: 'border-l-red-500' };
+
+function questionChoices(detail: string): { id: string; label: string }[] {
+  return [...detail.matchAll(/\b([A-Z])\)\s*(.*?)(?=\s+[A-Z]\)|\s*Which\?|$)/gm)]
+    .map((match) => ({ id: match[1], label: match[2].trim() }))
+    .filter((choice) => choice.label !== '');
+}
 
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
@@ -47,7 +55,7 @@ function DialogBlock({
         </div>
       )}
       {offered.filter((o) => o.detail !== '').map((o) => (
-        <div key={o.n} className="text-xs text-zinc-500 truncate">{`${o.n}. ${o.label} ${o.detail}`}</div>
+        <div key={o.n} className="text-xs text-zinc-400 truncate">{`${o.n}. ${o.label} ${o.detail}`}</div>
       ))}
       {(notOffered.length > 0 || offered.length === 0) && (
         <div className="text-xs text-amber-300">
@@ -111,20 +119,20 @@ function parsePlan(detail: string) {
 function PlanDetail({ detail, checkpoints }: { detail: string; checkpoints: Need['checkpoints'] }) {
   const { sections, guardrails, fallback } = parsePlan(detail);
   return (
-    <div data-plan className="mt-2 flex flex-col gap-3 text-xs">
+    <div data-plan className="mt-2 flex flex-col gap-3 text-sm">
       {sections.map((section, index) => (
         <section
           key={`${section.heading ?? 'prose'}-${index}`}
           data-plan-section={section.heading}
           data-plan-fallback={fallback ? '' : undefined}
         >
-          {section.heading && <h3 className="text-[11px] font-semibold tracking-wide text-zinc-300">{section.heading}</h3>}
+          {section.heading && <h3 className="text-xs font-semibold tracking-wide text-zinc-300">{section.heading}</h3>}
           <p data-plan-prose className="mt-0.5 whitespace-pre-wrap break-words text-zinc-400">{section.text}</p>
         </section>
       ))}
       {guardrails.length > 0 && (
         <section data-plan-guardrails>
-          <h3 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-300">Guardrails</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-300">Guardrails</h3>
           <div className="mt-0.5 flex flex-col gap-1 text-zinc-400">
             {guardrails.map((sentence, index) => <p key={index} className="whitespace-pre-wrap break-words">{sentence}</p>)}
           </div>
@@ -132,7 +140,7 @@ function PlanDetail({ detail, checkpoints }: { detail: string; checkpoints: Need
       )}
       {checkpoints && checkpoints.length > 0 && (
         <section data-plan-checkpoints>
-          <h3 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-300">Checkpoints</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-300">Checkpoints</h3>
           <ol className="mt-1 flex flex-col gap-1.5">
             {checkpoints.map((checkpoint, index) => (
               <li
@@ -140,12 +148,12 @@ function PlanDetail({ detail, checkpoints }: { detail: string; checkpoints: Need
                 data-checkpoint-id={checkpoint.id}
                 className="grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-baseline gap-x-2"
               >
-                <span data-checkpoint-number aria-hidden="true" className="text-zinc-500">{index + 1}.</span>
+                <span data-checkpoint-number aria-hidden="true" className="text-zinc-400">{index + 1}.</span>
                 <span data-checkpoint-id={checkpoint.id} className="font-mono text-zinc-300">{checkpoint.id}</span>
                 <span data-checkpoint-description className="min-w-0 whitespace-normal break-words text-zinc-400">
                   {checkpoint.desc}
                 </span>
-                <span data-checkpoint-estimate className="text-right text-zinc-500 tabular">~{checkpoint.etaMin}m</span>
+                <span data-checkpoint-estimate className="text-right text-zinc-400 tabular">~{checkpoint.etaMin}m</span>
               </li>
             ))}
           </ol>
@@ -155,8 +163,51 @@ function PlanDetail({ detail, checkpoints }: { detail: string; checkpoints: Need
   );
 }
 
+export function PlanContractDetails({ need }: { need: Need }) {
+  return (
+    <details data-plan-disclosure className="mt-3 rounded-md border bg-background/40 p-3">
+      <summary className="cursor-pointer text-sm font-medium text-foreground">Full plan, checkpoints, and root contract</summary>
+      <PlanDetail detail={need.detail ?? ''} checkpoints={need.checkpoints} />
+      <section data-root-contract className="mt-3 flex flex-col gap-0.5 font-mono text-sm text-zinc-400">
+        {contractLines(need).map((line, index) => (
+          <div
+            key={index}
+            data-contract-empty={line === 'No root contract is recorded.' ? '' : undefined}
+            className={index === 0 ? 'font-sans font-semibold text-zinc-300' : 'whitespace-pre-wrap break-words'}
+          >
+            {line}
+          </div>
+        ))}
+      </section>
+    </details>
+  );
+}
+
+function PlanSummary({ need }: { need: Need }) {
+  const parsed = parsePlan(need.detail ?? '');
+  const contract = need.contract;
+  return (
+    <div data-plan-summary className="mt-3 flex flex-col gap-2 text-sm">
+      {contract ? (
+        <dl className="grid gap-2 sm:grid-cols-[6rem_minmax(0,1fr)]">
+          <dt className="text-sm text-muted-foreground">Objective</dt><dd className="break-words">{contract.objective}</dd>
+          <dt className="text-sm text-muted-foreground">Consumer</dt><dd className="break-words">{contract.consumer}</dd>
+          <dt className="text-sm text-muted-foreground">Deliverable</dt><dd className="break-words">{contract.deliverable}</dd>
+        </dl>
+      ) : (
+        <p className="text-muted-foreground">Review the proposed plan and its safety facts.</p>
+      )}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
+        <span>{`${need.checkpoints?.length ?? 0} checkpoints`}</span>
+        <span>{`${parsed.guardrails.length} guardrail statements`}</span>
+        <span>{need.when ? `Last update ${need.when} ago` : 'Current review'}</span>
+      </div>
+    </div>
+  );
+}
+
 export function NeedCard({
-  need, view, busy, onAnswer, onContinue, onPlanAnswer, onResolve, onNudge, dictationEngine,
+  need, view, busy, onAnswer, onContinue, onPlanAnswer, onResolve, onNudge, dictationEngine, taskLink, onOpenTask, onReply,
 }: {
   need: Need;
   view: HubView;
@@ -167,6 +218,9 @@ export function NeedCard({
   onResolve: (project: string, taskId: string, action: 'cancel' | 'rebrief', note?: string) => void;
   onNudge: (project: string, taskId: string) => void;
   dictationEngine?: DictationEngine;
+  taskLink?: string;
+  onOpenTask?: () => void;
+  onReply?: (project: string, taskId: string, text: string) => void;
 }) {
   const accent = NEED_ACCENT[need.color] ?? 'border-l-zinc-600';
   const continuing = need.action === 'continue' && need.project
@@ -174,88 +228,140 @@ export function NeedCard({
   const nudging = need.taskId !== undefined
     && busy?.what === 'nudging' && busy.who === need.taskId;
   return (
-    <div className={cn('rounded-md border border-zinc-800 border-l-2 bg-zinc-900/60 px-3 py-2', accent)}>
-      <div className="flex items-baseline justify-between gap-3">
-        <div className="min-w-0 text-sm">
-          <span className="font-medium text-white">{need.who}</span>
-          <span className="text-zinc-300">{`  ${need.words}`}</span>
-          {need.stale && <span className="text-amber-300">{`  stale`}</span>}
-        </div>
-        {need.when !== '' && <span className="shrink-0 text-xs text-zinc-500 tabular">{need.when}</span>}
-      </div>
-      {need.action === 'plan' ? (
-        <>
-          <PlanDetail detail={need.detail ?? ''} checkpoints={need.checkpoints} />
-          <section data-root-contract className="mt-2 flex flex-col gap-0.5 font-mono text-xs text-zinc-400">
-            {contractLines(need).map((line, index) => (
-              <div
-                key={index}
-                data-contract-empty={line === 'No root contract is recorded.' ? '' : undefined}
-                className={index === 0 ? 'font-sans font-semibold text-zinc-300' : 'whitespace-pre-wrap break-words'}
+    <Card data-need-key={need.key} className={cn('gap-3 border-l-2 py-4 shadow-none', accent)}>
+      <CardContent className="px-3">
+        <div className="flex items-baseline justify-between gap-3">
+          <div className="min-w-0 text-sm">
+            {need.project && <Badge variant="outline" className="mr-2 font-mono text-xs">{need.project}</Badge>}
+            {taskLink ? (
+              <a
+                href={taskLink}
+                className="font-medium text-foreground underline-offset-4 hover:underline"
+                onClick={(event) => {
+                  if (!onOpenTask || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                  event.preventDefault();
+                  onOpenTask();
+                }}
               >
-                {line}
+                {need.who}
+              </a>
+            ) : <span className="font-medium text-foreground">{need.who}</span>}
+            <span className="text-zinc-300">{`  ${need.words}`}</span>
+            {need.stale && <span className="text-amber-300">  stale</span>}
+          </div>
+          {need.when !== '' && <span className="shrink-0 text-sm text-muted-foreground tabular">{need.when}</span>}
+        </div>
+        {need.action === 'plan' ? <PlanSummary need={need} /> : (
+          <>
+            {need.detail && <div className="mt-2 text-sm text-muted-foreground">{need.detail}</div>}
+            {need.checkpoints && need.checkpoints.length > 0 && (
+              <div className="mt-2 flex flex-col text-xs text-muted-foreground">
+                {need.checkpoints.map((checkpoint) => (
+                  <span key={checkpoint.id} className="truncate">{`${checkpoint.id}: ${checkpoint.desc} (~${checkpoint.etaMin}m)`}</span>
+                ))}
               </div>
-            ))}
-          </section>
-        </>
-      ) : (
-        <>
-          {need.detail && <div className="mt-1 text-xs text-zinc-500">{need.detail}</div>}
-          {need.checkpoints && need.checkpoints.length > 0 && (
-            <div className="mt-1 flex flex-col text-xs text-zinc-400">
-              {need.checkpoints.map((c) => (
-                <span key={c.id} className="truncate">{`${c.id}: ${c.desc} (~${c.etaMin}m)`}</span>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-      {need.dialogKey && (
-        <NeedDialog dialogKey={need.dialogKey} dialogs={view.dialogs} busy={busy} onAnswer={onAnswer} />
-      )}
-      {need.action === 'plan' && need.project && need.taskId && !need.dialogKey && (
-        <PlanActions need={need} busy={busy} onPlanAnswer={onPlanAnswer} dictationEngine={dictationEngine} />
-      )}
-      {need.action === 'resolve' && need.project && need.taskId && (
-        <ResolveActions need={need} busy={busy} onResolve={onResolve} dictationEngine={dictationEngine} />
-      )}
-      {need.action === 'continue' && need.project && (
-        <div className="mt-2">
-          {continuing
-            ? <span className="text-xs text-sky-400">continuing…</span>
-            : <Btn id={`continue-${need.project}`} onPress={() => onContinue(need.project!)}>Continue</Btn>}
-        </div>
-      )}
-      {need.stale && need.project && need.taskId && (
-        <div className="mt-2">
-          {nudging
-            ? <span className="text-xs text-sky-400">nudging…</span>
-            : (
-              <Btn id={`nudge-${need.taskId}`} onPress={() => onNudge(need.project!, need.taskId!)}>
-                Nudge
-              </Btn>
             )}
-        </div>
-      )}
-    </div>
+          </>
+        )}
+        {need.dialogKey && (
+          <NeedDialog dialogKey={need.dialogKey} dialogs={view.dialogs} busy={busy} onAnswer={onAnswer} />
+        )}
+        {need.action === 'plan' && need.project && need.taskId && !need.dialogKey && (
+          <PlanActions need={need} busy={busy} onPlanAnswer={onPlanAnswer} dictationEngine={dictationEngine} />
+        )}
+        {need.action === 'resolve' && need.project && need.taskId && (
+          <ResolveActions need={need} busy={busy} onResolve={onResolve} onReply={onReply} dictationEngine={dictationEngine} />
+        )}
+        {need.action === 'continue' && need.project && (
+          <div className="mt-3">
+            {continuing
+              ? <span className="text-xs text-sky-400">continuing…</span>
+              : <Btn id={`continue-${need.project}`} onPress={() => onContinue(need.project!)}>Continue</Btn>}
+          </div>
+        )}
+        {need.stale && need.project && need.taskId && (
+          <div className="mt-3">
+            {nudging
+              ? <span className="text-xs text-sky-400">nudging…</span>
+              : <Btn id={`nudge-${need.taskId}`} onPress={() => onNudge(need.project!, need.taskId!)}>Nudge</Btn>}
+          </div>
+        )}
+        {need.action === 'plan' && <PlanContractDetails need={need} />}
+      </CardContent>
+    </Card>
+  );
+}
+
+function QuestionReply({ need, onReply }: {
+  need: Need;
+  onReply?: (project: string, taskId: string, text: string) => void;
+}) {
+  const [text, setText] = useState('');
+  if (need.words !== 'question' || !onReply || !need.project || !need.taskId) return null;
+  const project = need.project;
+  const taskId = need.taskId;
+  const choices = questionChoices(need.detail ?? '');
+  const send = () => {
+    if (text.trim()) onReply(project, taskId, text.trim());
+  };
+  return (
+    <section className="mt-3 flex flex-col gap-2" aria-label={`Answer ${taskId}`}>
+      {choices.map((choice) => (
+        <Btn
+          key={choice.id}
+          id={`answer-${taskId}-${choice.id}`}
+          className="h-auto max-w-full whitespace-normal text-left"
+          onPress={() => onReply(project, taskId, choice.id)}
+        >
+          {`Option ${choice.id} — ${choice.label}`}
+        </Btn>
+      ))}
+      <div className="flex flex-wrap gap-2">
+        <Input
+          value={text}
+          aria-label={`answer for ${taskId}`}
+          placeholder="write a direct answer"
+          className="min-w-0 flex-1 basis-48"
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              send();
+            }
+          }}
+        />
+        <Btn id={`answer-send-${taskId}`} variant="primary" disabled={!text.trim()} onPress={send}>Send answer</Btn>
+      </div>
+    </section>
   );
 }
 
 function ResolveActions({
-  need, busy, onResolve, dictationEngine,
+  need, busy, onResolve, onReply, dictationEngine,
 }: {
   need: Need;
   busy: { project: string; what: string; who?: string } | null;
   onResolve: (project: string, taskId: string, action: 'cancel' | 'rebrief', note?: string) => void;
+  onReply?: (project: string, taskId: string, text: string) => void;
   dictationEngine?: DictationEngine;
 }) {
   const [rebriefing, setRebriefing] = useState(false);
+  const [cancelArming, setCancelArming] = useState(false);
   const [brief, setBrief] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   const project = need.project!;
   const taskId = need.taskId!;
   if (busy?.what === 'resolving' && busy.who === taskId) {
     return <div className="mt-2 text-xs text-sky-400">resolving…</div>;
+  }
+  if (cancelArming) {
+    return (
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span className="w-full text-xs text-muted-foreground">Cancellation closes this task.</span>
+        <Btn id={`cancel-go-${taskId}`} onPress={() => onResolve(project, taskId, 'cancel')}>{`Cancel ${taskId}?`}</Btn>
+        <Btn id={`cancel-back-${taskId}`} onPress={() => setCancelArming(false)}>Keep task</Btn>
+      </div>
+    );
   }
   if (rebriefing) {
     return (
@@ -288,10 +394,13 @@ function ResolveActions({
     );
   }
   return (
-    <div className="mt-2 flex flex-wrap gap-1.5">
-      <Btn id={`rebrief-${taskId}`} onPress={() => setRebriefing(true)}>Rebrief</Btn>
-      <Btn id={`cancel-${taskId}`} onPress={() => onResolve(project, taskId, 'cancel')}>Cancel</Btn>
-    </div>
+    <>
+      <QuestionReply need={need} onReply={onReply} />
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <Btn id={`rebrief-${taskId}`} onPress={() => setRebriefing(true)}>Rebrief</Btn>
+        <Btn id={`cancel-${taskId}`} onPress={() => setCancelArming(true)}>Cancel task</Btn>
+      </div>
+    </>
   );
 }
 
@@ -341,6 +450,7 @@ function PlanActions({
           <Btn id={`plan-sendback-go-${taskId}`} onPress={() => onPlanAnswer(project, taskId, 'sendback', feedback.trim() || undefined)}>
             Send
           </Btn>
+          <Btn id={`plan-sendback-back-${taskId}`} onPress={() => setSendingBack(false)}>Back</Btn>
         </form>
       )}
     </div>
@@ -363,7 +473,7 @@ export function ProgressRow({
       <span className="font-medium text-zinc-100">{t.id}</span>
       <span className="text-zinc-300">{`${prog.done}/${prog.total} checkpoints`}</span>
       {prog.current && <span className="text-zinc-300">{`on ${prog.current}`}</span>}
-      <span className="text-zinc-500">
+      <span className="text-zinc-400">
         {prog.lastAt ? `last progress ${ago(prog.lastAt, now)} ago` : 'no progress yet'}
       </span>
       {prog.failed.length > 0 && (

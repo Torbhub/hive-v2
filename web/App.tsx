@@ -2,60 +2,85 @@ import React, {
   useCallback, useEffect, useRef, useState,
 } from 'react';
 import { Toaster, toast } from 'sonner';
-import type { Approvals, HubView, ProjectMode, QuestionAnswer, QuestionBatch } from '../src/types';
-import { orchestratorName } from '../src/ui/look';
+import type { HubView } from '../src/types';
 import { ActionContext } from './action';
 import { Branches } from './branches';
 import { LogView } from './logview';
 import { Questions } from './questions';
 import { Dashboard } from './Dashboard';
+import { LoadErrorShell, LoadingShell } from './LoadingShell';
+import { readRoute, routeUrl, type Route } from './routes';
+import type { CreatedTask } from './task';
+import { apiPath } from './api';
+import { useHubActions } from './useHubActions';
 
 const EVERY_MS = 20_000;
 
 const EMPTY_VIEW: HubView = { root: '', hubName: '', projects: [], tasks: [], dialogs: {}, decisions: [], questions: [], updatedAt: 0, error: '' };
 
-async function post(pathname: string, body: unknown): Promise<Record<string, unknown>> {
-  const r = await fetch(pathname, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const j = (await r.json()) as { ok?: boolean; detail?: string } & Record<string, unknown>;
-  if (!r.ok || j.ok === false) throw new Error(j.detail ?? `HTTP ${r.status}`);
-  return j;
-}
-
 export function App() {
   const [view, setView] = useState<HubView>(EMPTY_VIEW);
+  const [route, setRoute] = useState<Route>(readRoute);
+  const [createdTask, setCreatedTask] = useState<CreatedTask>();
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadingStage, setLoadingStage] = useState<'access' | 'projects'>('access');
   const [acting, setActing] = useState(false);
   const [busy, setBusy] = useState<{ project: string; what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting' | 'killing' | 'deleting'; who?: string } | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
-  const [logs, setLogs] = useState<{ project: string; agent?: string } | null>(null);
-  const [branchesFor, setBranchesFor] = useState<string | null>(null);
-  const [questionsOpen, setQuestionsOpen] = useState(false);
   const actingRef = useRef(false);
+  const refreshPromiseRef = useRef<Promise<void> | null>(null);
 
-  const refresh = useCallback(async () => {
-    let next: HubView;
-    try {
-      const r = await fetch('api/view');
-      next = (await r.json()) as HubView;
-    } catch (e) {
-      setView((v) => ({ ...v, error: e instanceof Error ? e.message : String(e) }));
-      return;
-    }
-    setView((v) => (next.updatedAt === 0 && next.error ? { ...v, error: next.error } : next));
+  const navigate = useCallback((next: Route, replace = false) => {
+    window.history[replace ? 'replaceState' : 'pushState']({ hive: true }, '', routeUrl(next));
+    setRoute(next);
+  }, []);
+
+  useEffect(() => {
+    window.history.replaceState({ hive: true }, '', window.location.href);
+    const onPopState = () => setRoute(readRoute());
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (view.updatedAt !== 0 || view.error) return;
+    const timer = setTimeout(() => setLoadingStage('projects'), 350);
+    return () => clearTimeout(timer);
+  }, [view.updatedAt, view.error]);
+
+  const refresh = useCallback(() => {
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+    const pending = (async () => {
+      setRefreshing(true);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8_000);
+      try {
+        const response = await fetch(apiPath('api/view'), { signal: controller.signal });
+        const body = await response.json() as HubView & { detail?: string };
+        if (!response.ok) throw new Error(body.detail ?? `HTTP ${response.status}`);
+        setView((current) => (body.updatedAt === 0 && body.error ? { ...current, error: body.error } : body));
+      } catch (error) {
+        const message = error instanceof Error && error.name === 'AbortError' ? 'The read timed out after 8 seconds.' : error instanceof Error ? error.message : String(error);
+        setView((current) => ({ ...current, error: message }));
+      } finally {
+        clearTimeout(timeout);
+        setRefreshing(false);
+        refreshPromiseRef.current = null;
+      }
+    })();
+    refreshPromiseRef.current = pending;
+    return pending;
   }, []);
 
   useEffect(() => {
     void refresh();
-    const t = setInterval(() => void refresh(), EVERY_MS);
-    return () => clearInterval(t);
+    const timer = setInterval(() => void refresh(), EVERY_MS);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.altKey) void refresh();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'r' && !event.metaKey && !event.ctrlKey && !event.altKey) void refresh();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -64,7 +89,7 @@ export function App() {
   const act = useCallback(async (
     id: string,
     project: string,
-    what: 'resuming' | 'continuing' | 'answering' | 'starting' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting' | 'killing' | 'deleting',
+    what: 'resuming' | 'continuing' | 'starting' | 'answering' | 'adding' | 'messaging' | 'resolving' | 'nudging' | 'interrupting' | 'killing' | 'deleting',
     who: string,
     runAction: () => Promise<string>,
     busyWho?: string,
@@ -77,198 +102,65 @@ export function App() {
     try {
       toast(await runAction());
       return true;
-    } catch (e) {
-      toast(`${who}: ${e instanceof Error ? e.message.split('\n').pop() : String(e)}`);
+    } catch (error) {
+      toast(`${who}: ${error instanceof Error ? error.message.split('\n').pop() : String(error)}`);
       return false;
     } finally {
       actingRef.current = false;
       setActing(false);
       setBusy(null);
       setPressed(null);
-      void refresh();
+      await refresh();
     }
   }, [refresh]);
 
-  const onWake = useCallback((project: string) => {
-    void act(`wake-${project}`, project, 'resuming', project, async () => {
-      const j = await post('api/wake', { project });
-      return `${project}: ${typeof j.name === 'string' ? j.name : orchestratorName(project)} is coming up; it reports back when its team is up`;
-    });
-  }, [act]);
+  const actions = useHubActions({ act, navigate, onCreatedTask: setCreatedTask });
 
-  const onContinue = useCallback((project: string) => {
-    void act(`continue-${project}`, project, 'continuing', project, async () => {
-      const j = await post('api/continue', { project });
-      return `${project}: ${typeof j.name === 'string' ? j.name : orchestratorName(project)}'s first line was sent`;
-    });
-  }, [act]);
+  if (view.updatedAt === 0 && !view.error) return <LoadingShell stage={loadingStage} />;
+  if (view.updatedAt === 0 && view.error) return <LoadErrorShell error={view.error} retry={refresh} />;
 
-  const onAnswer = useCallback((project: string, agentRefArg: string | undefined, seen: string, choice: string, id: string) => {
-    const who = agentRefArg ? `${project} · ${agentRefArg}` : project;
-    void act(id, project, 'answering', who, async () => {
-      const j = await post('api/answer', { project, agent: agentRefArg, choice, fingerprint: seen });
-      return `${who}: answered "${j.option}"${j.dialog_gone ? '' : ' (the dialog is still on its screen)'}`;
-    }, agentRefArg);
-  }, [act]);
-
-  const onStartTask = useCallback(async (project: string, text: string): Promise<boolean> => {
-    return act(`start-${project}`, project, 'starting', project, async () => {
-      const t = await post('api/task', { project, text });
-      const j = await post('api/start', { project, task: t.id });
-      if (j.typed) return `${project}: ${t.id} was sent to ${typeof j.name === 'string' ? j.name : orchestratorName(project)}`;
-      return `${project}: ${typeof j.name === 'string' ? j.name : orchestratorName(project)} is coming up on ${t.id}; it reports back when its team is up`;
-    });
-  }, [act]);
-
-  const onSetMode = useCallback((project: string, mode: ProjectMode) => {
-    void act(`mode-${project}-${mode}`, project, 'answering', project, async () => {
-      await post('api/mode', { project, mode });
-      return `${project}: permission mode is ${mode} (applies to the next launch)`;
-    });
-  }, [act]);
-
-  const onSetApprovals = useCallback((project: string, approvals: Approvals) => {
-    void act(`approvals-${project}-${approvals}`, project, 'answering', project, async () => {
-      await post('api/approvals', { project, approvals });
-      return `${project}: approvals are ${approvals}`;
-    });
-  }, [act]);
-
-  const onPlanAnswer = useCallback((project: string, taskId: string, verdict: 'approve' | 'sendback', feedback?: string) => {
-    void act(`plan-${taskId}-${verdict}`, project, 'answering', taskId, async () => {
-      await post('api/plan-answer', { project, task: taskId, verdict, feedback });
-      return verdict === 'approve' ? `${taskId}: plan approved` : `${taskId}: plan sent back`;
-    }, taskId);
-  }, [act]);
-
-  const onResolve = useCallback((project: string, taskId: string, action: 'cancel' | 'rebrief', note?: string) => {
-    void act(`resolve-${taskId}-${action}`, project, 'resolving', taskId, async () => {
-      await post('api/task-resolve', { project, task: taskId, action, note });
-      return action === 'cancel' ? `${taskId}: cancelled` : `${taskId}: back to asked with the new brief`;
-    }, taskId);
-  }, [act]);
-
-  const onNudge = useCallback((project: string, taskId: string) => {
-    void act(`nudge-${taskId}`, project, 'nudging', taskId, async () => {
-      await post('api/message', { project, text: `${taskId}: owner asks for status` });
-      return `${taskId}: the orchestrator was asked for status`;
-    }, taskId);
-  }, [act]);
-
-  const onInterrupt = useCallback((project: string, ref?: string) => {
-    const who = ref ? `${project} · ${ref}` : project;
-    void act(`interrupt-${who}`, project, 'interrupting', who, async () => {
-      const j = await post('api/interrupt', { project, agent: ref });
-      return `interrupted ${String(j.target)}`;
-    }, ref);
-  }, [act]);
-
-  const onKill = useCallback((project: string) => {
-    void act(`kill-${project}`, project, 'killing', project, async () => {
-      const j = await post('api/kill', { project });
-      return String(j.summary);
-    });
-  }, [act]);
-
-  const onDelete = useCallback((project: string) => {
-    void act(`delete-${project}`, project, 'deleting', project, async () => {
-      await post('api/project-delete', { project });
-      return `${project}: project deleted`;
-    });
-  }, [act]);
-
-  const onAddProject = useCallback(async (name: string, folder: string, source: string): Promise<boolean> => {
-    return act('add-project', name, 'adding', name, async () => {
-      const body = folder ? { name, path: folder } : { name, path: '', source };
-      const j = await post('api/project', body);
-      return `${name}: project added (${String(j.home)})`;
-    });
-  }, [act]);
-
-  const onMessage = useCallback(async (project: string, text: string): Promise<boolean> => {
-    return act(`message-${project}`, project, 'messaging', project, async () => {
-      await post('api/message', { project, text });
-      return `${project}: the message was typed to its orchestrator`;
-    });
-  }, [act]);
-
-  const onLogs = useCallback((project: string, agent?: string) => setLogs({ project, agent }), []);
-  const onBranches = useCallback((project: string) => setBranchesFor(project), []);
-
-  const onQuestionAnswer = useCallback((batch: QuestionBatch, answers: QuestionAnswer[]) => {
-    const who = `${batch.project} · ${batch.agent}`;
-    void act(`question-answer-${batch.id}`, batch.project, 'answering', who, async () => {
-      await post('api/questions/answer', { id: batch.id, answers });
-      return `${batch.project}: question batch answered`;
-    });
-  }, [act]);
-
-  const onQuestionCancel = useCallback((batch: QuestionBatch) => {
-    const who = `${batch.project} · ${batch.agent}`;
-    void act(`question-cancel-${batch.id}`, batch.project, 'answering', who, async () => {
-      await post('api/questions/cancel', { id: batch.id });
-      return `${batch.project}: question batch cancelled`;
-    });
-  }, [act]);
-
-  if (branchesFor) {
-    return (
-      <ActionContext.Provider value={{ acting, pressed }}>
-        <Branches project={branchesFor} onBack={() => setBranchesFor(null)} />
-        <Toaster theme="dark" position="bottom-right" />
-      </ActionContext.Provider>
+  let content: React.ReactNode;
+  if (route.name === 'branches') {
+    content = (
+      <Branches
+        project={route.project}
+        branchId={route.branch}
+        onBack={() => navigate({ name: 'project', project: route.project, tab: 'team' })}
+        onSelect={(branch) => navigate({ name: 'branches', project: route.project, branch })}
+      />
     );
-  }
-
-  if (logs) {
-    return (
-      <ActionContext.Provider value={{ acting, pressed }}>
-        <LogView project={logs.project} agent={logs.agent} onBack={() => setLogs(null)} />
-        <Toaster theme="dark" position="bottom-right" />
-      </ActionContext.Provider>
+  } else if (route.name === 'logs') {
+    content = <LogView project={route.project} agent={route.agent} onBack={() => navigate({ name: 'project', project: route.project, tab: 'tasks' })} />;
+  } else if (route.name === 'questions') {
+    content = (
+      <Questions
+        batches={view.questions}
+        total={view.questionsTotal ?? view.questions.length}
+        batchId={route.batch}
+        onBack={() => navigate({ name: 'home', filter: 'all' })}
+        onAnswer={actions.onQuestionAnswer}
+        onCancel={actions.onQuestionCancel}
+        onOpenBatch={(batch) => navigate({ name: 'questions', batch: batch.id })}
+      />
     );
-  }
-
-  if (questionsOpen) {
-    return (
-      <ActionContext.Provider value={{ acting, pressed }}>
-        <Questions
-          batches={view.questions} total={view.questionsTotal ?? view.questions.length}
-          onBack={() => setQuestionsOpen(false)}
-          onAnswer={onQuestionAnswer}
-          onCancel={onQuestionCancel}
-        />
-        <Toaster theme="dark" position="bottom-right" />
-      </ActionContext.Provider>
+  } else {
+    content = (
+      <Dashboard
+        view={view}
+        route={route}
+        createdTask={createdTask}
+        busy={busy}
+        refreshing={refreshing}
+        refresh={refresh}
+        onNavigate={navigate}
+        {...actions}
+      />
     );
   }
 
   return (
     <ActionContext.Provider value={{ acting, pressed }}>
-      <Dashboard
-        view={view}
-        busy={busy}
-        refresh={refresh}
-        onQuestionsOpen={() => setQuestionsOpen(true)}
-        onWake={onWake}
-        onStartTask={onStartTask}
-        onSetMode={onSetMode}
-        onSetApprovals={onSetApprovals}
-        onMessage={onMessage}
-        onNudge={onNudge}
-        onAnswer={onAnswer}
-        onContinue={onContinue}
-        onPlanAnswer={onPlanAnswer}
-        onResolve={onResolve}
-        onInterrupt={onInterrupt}
-        onLogs={onLogs}
-        onBranches={onBranches}
-        onKill={onKill}
-        onDelete={onDelete}
-        onAddProject={onAddProject}
-        onQuestionAnswer={onQuestionAnswer}
-        onQuestionCancel={onQuestionCancel}
-      />
+      {content}
       <Toaster theme="dark" position="bottom-right" />
     </ActionContext.Provider>
   );

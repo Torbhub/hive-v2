@@ -245,13 +245,14 @@ const STATUS: Record<Exclude<Phase, 'idle'>, string> = {
 };
 
 export function DictationControl({
-  inputRef, value, onChange, label, dictationEngine,
+  inputRef, value, onChange, label, dictationEngine, disabled = false,
 }: {
-  inputRef: React.RefObject<HTMLInputElement | null>;
+  inputRef: React.RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
   value: string;
   onChange: (next: string) => void;
   label: string;
   dictationEngine?: DictationEngine;
+  disabled?: boolean;
 }) {
   const { acting } = useContext(ActionContext);
   const [phase, setPhase] = useState<Phase>('idle');
@@ -393,7 +394,7 @@ export function DictationControl({
           </Button>
         </>
       ) : (
-        <Button type="button" variant="ghost" size="sm" disabled={acting || cancelUnconfirmed} aria-label={`Start dictation for ${label}`} onClick={() => void start()}>
+        <Button type="button" variant="ghost" size="sm" disabled={disabled || acting || cancelUnconfirmed} aria-label={`Start dictation for ${label}`} onClick={() => void start()}>
           Dictate
         </Button>
       )}
@@ -413,7 +414,7 @@ export function DictationControl({
             autoComplete="off"
             className="h-7 min-w-48 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-xs text-zinc-100"
           />
-          <Button type="button" variant="outline" size="sm" disabled={acting} onClick={connect}>Connect and dictate</Button>
+          <Button type="button" variant="outline" size="sm" disabled={disabled || acting} onClick={connect}>Connect and dictate</Button>
         </>
       )}
       {phase !== 'idle' && (

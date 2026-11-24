@@ -220,7 +220,7 @@ describe('MediaRecorder adapter', () => {
     await act(async () => button('Stop').click());
     expect(status()).toBe('unavailable');
     expect(track.stopped).toBe(true);
-    expect(container.querySelector('input')!.value).toBe('');
+    expect(container.querySelector('textarea')!.value).toBe('');
   });
 });
 

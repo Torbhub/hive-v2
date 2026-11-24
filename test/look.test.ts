@@ -36,7 +36,7 @@ describe('orchestratorLook', () => {
       .toEqual({ dot: '◐', word: 'waiting on you', color: 'magenta' });
     expect(orchestratorLook({ state: 'running' })).toEqual({ dot: '●', word: 'running', color: 'green' });
     expect(orchestratorLook({ state: 'stopped' })).toEqual({ dot: '○', word: 'stopped', color: 'yellow' });
-    expect(orchestratorLook({ state: 'unknown' })).toEqual({ dot: '?', word: 'cannot tell', color: 'red' });
+    expect(orchestratorLook({ state: 'unknown' })).toEqual({ dot: '?', word: 'state unknown', color: 'red' });
     expect(orchestratorLook({ state: 'none' })).toEqual({ dot: '◌', word: 'no team', color: 'gray' });
     expect(orchestratorLook({ state: 'unregistered' })).toEqual({ dot: '◑', word: 'not registered', color: 'magenta' });
     expect(orchestratorLook({ state: 'resumable' })).toEqual({ dot: '○', word: 'stopped, not registered', color: 'yellow' });

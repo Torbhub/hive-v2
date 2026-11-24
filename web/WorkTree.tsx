@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { WorkTree, WorkTreeNode } from '../src/types';
 import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
+import { Card, CardContent } from './components/ui/card';
+import { apiPath } from './api';
 
 type Row = { node: WorkTreeNode; depth: number };
 
@@ -70,7 +72,7 @@ export function WorkTreeView({ tree, onChanged }: { tree: WorkTree; onChanged: (
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch('api/task-outcome', {
+      const response = await fetch(apiPath('api/task-outcome'), {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           project: node.project, task: node.task, outcome: 'done', plan_digest: node.planDigest, epoch: node.epoch,
@@ -90,10 +92,11 @@ export function WorkTreeView({ tree, onChanged }: { tree: WorkTree; onChanged: (
   return (
     <section className="flex flex-col gap-3" aria-label="Work tree section">
       <div className="flex items-center gap-2">
-        <div className="text-xs font-medium uppercase tracking-widest text-zinc-500">Work tree</div>
+        <div className="text-xs font-medium uppercase tracking-widest text-zinc-400">Work tree</div>
         {tree.truncated && <Badge>bounded view</Badge>}
       </div>
-      <div className="flex flex-col gap-3 rounded-md border border-zinc-800 p-3 sm:flex-row">
+      <Card className="gap-0 py-0 shadow-none">
+        <CardContent className="flex flex-col gap-3 p-3 sm:flex-row">
         <ul role="tree" aria-label="Work tree" className="min-w-0 flex-1" data-work-tree>
           {visible.map(({ node, depth }, index) => (
             <li
@@ -117,7 +120,7 @@ export function WorkTreeView({ tree, onChanged }: { tree: WorkTree; onChanged: (
                 <span className="min-w-0 break-words font-medium text-zinc-100">{node.recordId}</span>
                 <span className="shrink-0 text-xs text-zinc-400">{stateLabel(node)}</span>
               </div>
-              <div className="text-xs text-zinc-500">{node.kind} · {node.adapter}</div>
+              <div className="text-xs text-zinc-400">{node.kind} · {node.adapter}</div>
             </li>
           ))}
         </ul>
@@ -125,21 +128,21 @@ export function WorkTreeView({ tree, onChanged }: { tree: WorkTree; onChanged: (
           <aside className="min-w-0 flex-1 border-t border-zinc-800 pt-3 text-xs sm:border-l sm:border-t-0 sm:pl-3 sm:pt-0" aria-live="polite" data-work-tree-details>
             <div className="mb-2 font-medium text-zinc-100">{current.recordId}</div>
             <dl className="flex flex-col gap-1 text-zinc-400">
-              <div><dt className="inline text-zinc-500">task: </dt><dd className="inline break-words">{current.task}</dd></div>
-              {current.externalId && <div><dt className="inline text-zinc-500">external ID: </dt><dd className="inline break-words">{current.externalId}</dd></div>}
-              {current.planDigest && <div><dt className="inline text-zinc-500">plan: </dt><dd className="inline break-all">{current.planDigest}</dd></div>}
-              {current.lineageId && <div><dt className="inline text-zinc-500">lineage: </dt><dd className="inline break-words">{current.lineageId}</dd></div>}
-              {current.attempts !== undefined && <div><dt className="inline text-zinc-500">attempts: </dt><dd className="inline">{current.attempts}</dd></div>}
-              {current.scope.length > 0 && <div><dt className="inline text-zinc-500">scope: </dt><dd className="inline break-words">{current.scope.join(', ')}</dd></div>}
+              <div><dt className="inline text-zinc-400">task: </dt><dd className="inline break-words">{current.task}</dd></div>
+              {current.externalId && <div><dt className="inline text-zinc-400">external ID: </dt><dd className="inline break-words">{current.externalId}</dd></div>}
+              {current.planDigest && <div><dt className="inline text-zinc-400">plan: </dt><dd className="inline break-all">{current.planDigest}</dd></div>}
+              {current.lineageId && <div><dt className="inline text-zinc-400">lineage: </dt><dd className="inline break-words">{current.lineageId}</dd></div>}
+              {current.attempts !== undefined && <div><dt className="inline text-zinc-400">attempts: </dt><dd className="inline">{current.attempts}</dd></div>}
+              {current.scope.length > 0 && <div><dt className="inline text-zinc-400">scope: </dt><dd className="inline break-words">{current.scope.join(', ')}</dd></div>}
               {current.details.filter((item) => item.label !== 'pane').map((item) => (
-                <div key={item.label}><dt className="inline text-zinc-500">{item.label}: </dt><dd className="inline break-words">{item.value}</dd></div>
+                <div key={item.label}><dt className="inline text-zinc-400">{item.label}: </dt><dd className="inline break-words">{item.value}</dd></div>
               ))}
             </dl>
             {current.acceptance.length > 0 && (
               <div className="mt-3 overflow-x-auto">
                 <table className="w-full text-left text-xs" aria-label="Acceptance evidence" data-acceptance-evidence>
                   <caption className="mb-2 text-left font-medium text-zinc-100">Acceptance evidence</caption>
-                  <thead className="text-zinc-500">
+                  <thead className="text-zinc-400">
                     <tr>
                       <th scope="col" className="pr-2 font-normal">acceptance</th>
                       <th scope="col" className="pr-2 font-normal">predicate</th>
@@ -188,7 +191,8 @@ export function WorkTreeView({ tree, onChanged }: { tree: WorkTree; onChanged: (
             {error?.nodeId === current.id && <p role="alert" className="mt-2 text-red-300">{error.message}</p>}
           </aside>
         )}
-      </div>
+        </CardContent>
+      </Card>
     </section>
   );
 }

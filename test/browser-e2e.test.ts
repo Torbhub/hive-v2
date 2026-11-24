@@ -325,6 +325,49 @@ beforeAll(async () => {
             })().catch(next);
             return;
           }
+          if (req.url?.startsWith('/api/log')) {
+            res.setHeader('content-type', 'application/json');
+            res.end(JSON.stringify({ session_id: 'session_alpha', fileGeneration: 1, agents: [], hasOlder: false, olderCursor: null }));
+            return;
+          }
+          if (req.url === '/api/project' && req.method === 'POST') {
+            void (async () => {
+              let raw = '';
+              for await (const chunk of req) raw += chunk;
+              const body = JSON.parse(raw) as { name: string };
+              submissions.push(req.url!);
+              const projects = VIEW.projects.filter((project) => project.name !== body.name);
+              Object.assign(VIEW, {
+                projects: [...projects, {
+                  name: body.name, home: `/r/${body.name}`, repos: [], mode: 'ask', approvals: 'manual',
+                  orchestrator: { state: 'none', question: false }, agents: [], open_tasks: 0,
+                }],
+                updatedAt: Date.now(),
+              });
+              res.setHeader('content-type', 'application/json');
+              res.end(JSON.stringify({ ok: true, name: body.name, home: `/r/${body.name}` }));
+            })().catch(next);
+            return;
+          }
+          if (req.url === '/api/task' && req.method === 'POST') {
+            void (async () => {
+              let raw = '';
+              for await (const chunk of req) raw += chunk;
+              const body = JSON.parse(raw) as { project: string; text: string };
+              const id = `${body.project}-99`;
+              submissions.push(req.url!);
+              Object.assign(VIEW, {
+                tasks: [...VIEW.tasks, {
+                  id, project: body.project, asked: new Date().toISOString(), state: 'asked', updated: new Date().toISOString(),
+                  brief: body.text, last_note: null, needs_owner: false,
+                }],
+                updatedAt: Date.now(),
+              });
+              res.setHeader('content-type', 'application/json');
+              res.end(JSON.stringify({ ok: true, id }));
+            })().catch(next);
+            return;
+          }
           if (req.url === '/api/task-outcome' && req.method === 'POST') {
             void (async () => {
               let raw = '';
@@ -384,7 +427,8 @@ beforeAll(async () => {
     check: async () => {},
     transcribe: async () => TRANSCRIPT,
   });
-  await new Promise<void>((resolve) => bridge.listen(HANDY_PORT, '127.0.0.1', resolve));
+  const handyPort = Number(process.env.HIVE_TEST_HANDY_PORT ?? HANDY_PORT);
+  await new Promise<void>((resolve) => bridge.listen(handyPort, '127.0.0.1', resolve));
 
   profile = await fs.mkdtemp(path.join(tmpdir(), 'hive-chrome-e2e-'));
   const launched = await launchChrome(await chromeExecutable(), profile);
@@ -429,8 +473,11 @@ beforeAll(async () => {
       };
     `,
   });
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   await cdp.call('Page.navigate', { url: origin });
-  await cdp.waitFor(`document.querySelector('input[aria-label="new task for demo"]')`);
+  await cdp.waitFor(`document.querySelector('[data-testid="needs-home"]')`);
+  await selectProject('demo');
+  await cdp.waitFor(`document.querySelector('textarea[aria-label="new task for demo"]')`);
 }, 90_000);
 
 async function stopChrome(): Promise<void> {
@@ -457,6 +504,14 @@ afterAll(async () => {
 
 async function click(selector: string): Promise<void> {
   await cdp.waitFor(`document.querySelector(${JSON.stringify(selector)}) !== null`);
+  await cdp.waitFor(`(() => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    if (!element) return false;
+    element.scrollIntoView({ block: 'center', inline: 'center' });
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return hit === element || element.contains(hit);
+  })()`);
   const point = await cdp.evaluate(`(() => {
     const element = document.querySelector(${JSON.stringify(selector)});
     if (!element) throw new Error('missing pointer target: ${selector}');
@@ -479,13 +534,16 @@ async function click(selector: string): Promise<void> {
 
 async function clickButton(text: string, includes = false): Promise<void> {
   await cdp.evaluate(`(() => {
-    const button = [...document.querySelectorAll('button')].find((candidate) =>
-      ${includes ? `candidate.textContent.includes(${JSON.stringify(text)})` : `candidate.textContent === ${JSON.stringify(text)}`});
+    const button = [...document.querySelectorAll('button')].filter((candidate) =>
+      ${includes ? `candidate.textContent.includes(${JSON.stringify(text)})` : `candidate.textContent === ${JSON.stringify(text)}`}).at(-1);
     if (!button) throw new Error('missing button: ${text}');
     button.setAttribute('data-pointer-button', ${JSON.stringify(text)});
   })()`);
   await click(`[data-pointer-button=${JSON.stringify(text)}]`);
   await cdp.evaluate(`document.querySelector('[data-pointer-button]')?.removeAttribute('data-pointer-button')`);
+  if (text === 'refresh') {
+    await cdp.waitFor(`[...document.querySelectorAll('button')].some((button) => button.textContent === 'refresh')`);
+  }
 }
 
 async function fill(selector: string, value: string): Promise<void> {
@@ -524,6 +582,397 @@ async function captureViewport(width: number, height: number, label: string): Pr
   await fs.writeFile(path.join(directory, `${label}-${width}x${height}.png`), Buffer.from(screenshot.data, 'base64'));
 }
 
+function installDashboardFixture(): void {
+  Object.assign(VIEW, {
+    projects: ['alpha', 'beta'].map((name) => ({
+      name,
+      home: `/r/${name}`,
+      repos: [{ folder: `/r/${name}`, kind: 'repo', changed: name === 'alpha' ? 2 : 0 }],
+      mode: 'ask',
+      approvals: 'manual',
+      orchestrator: {
+        state: 'running', question: false, name: `${name}-orchestrator`, session_id: `session_${name}`,
+        pane: '%1', context: 38,
+      },
+      agents: [
+        { name: 'builder', state: 'running', ref: 'builder', session_id: `session_${name}_builder` },
+        { name: 'reviewer', state: 'stopped', ref: 'reviewer' },
+      ],
+      open_tasks: 4,
+    })),
+    tasks: [{
+      id: 'alpha-1', project: 'alpha', asked: new Date(Date.now() - 500_000).toISOString(), state: 'plan',
+      updated: new Date(Date.now() - 60_000).toISOString(), needs_owner: true,
+      brief: 'Ship the journey-driven dashboard',
+      last_note: 'Plan: AUDIT Review the dashboard and preserve every safety fact. DESIGN: Ship clear task outcomes and accessible controls. No push or deploy before independent review.',
+      checkpoints: [{ id: 'audit', desc: 'Review the dashboard and preserve every safety fact', etaMin: 5 }, { id: 'build', desc: 'Ship clear task outcomes', etaMin: 10 }],
+      contract: { ...taskContract('/r/alpha', ['web'], 'A reviewed dashboard with task evidence.'), objective: 'Improve the operator task workflow.', consumer: 'Hive operator' },
+      plan_digest: 'd'.repeat(64),
+    }, {
+      id: 'alpha-2', project: 'alpha', asked: new Date(Date.now() - 400_000).toISOString(), state: 'handed',
+      updated: new Date(Date.now() - 50_000).toISOString(), needs_owner: false,
+      brief: 'Verify every task stays reachable without checkpoints', last_note: null,
+    }, {
+      id: 'alpha-question', project: 'alpha', asked: new Date(Date.now() - 30 * 86_400_000).toISOString(), state: 'question',
+      updated: new Date(Date.now() - 30 * 86_400_000).toISOString(), needs_owner: true,
+      brief: 'Resolve the old daily scan question',
+      last_note: 'Options: A) close the old scan. B) run a second scan anyway. Which?',
+    }, {
+      id: 'alpha-0', project: 'alpha', asked: new Date(Date.now() - 800_000).toISOString(), state: 'done',
+      updated: new Date(Date.now() - 200_000).toISOString(), needs_owner: false,
+      brief: 'Completed task with a retained outcome', last_note: null, receipt_actor: 'builder',
+    }, {
+      id: 'beta-1', project: 'beta', asked: new Date(Date.now() - 300_000).toISOString(), state: 'asked',
+      updated: new Date(Date.now() - 40_000).toISOString(), needs_owner: false,
+      brief: 'Wait for the beta orchestrator', last_note: null,
+    }],
+    dialogs: {},
+    decisions: Array.from({ length: 10 }, (_, index) => ({
+      at: new Date(Date.now() - index * 60_000).toISOString(),
+      project: 'alpha',
+      task: `alpha-${index + 1}`,
+      by: 'watch',
+      summary: `Reviewed checkpoint ${index + 1} and kept the existing action contract.`,
+    })),
+    questions: [{
+      id: 'dashboard-batch', project: 'alpha', agent: 'builder', context: 'Review the dashboard browser check.',
+      createdAt: new Date().toISOString(), status: 'open', questions: [{
+        id: 'q1', question: 'Continue the browser check?', context: 'This fixture does not request an approval.',
+        priority: 1, recommended: 'c1', choices: [{ id: 'c1', label: 'Continue', description: 'Return to the dashboard.' }],
+      }],
+    }],
+    updatedAt: Date.now(),
+    error: '',
+    workTree: undefined,
+  });
+}
+
+function resetDashboardFixture(): void {
+  Object.assign(VIEW, {
+    projects: [{
+      name: 'demo', home: '/r/demo', repos: [], mode: 'ask', orchestrator: {
+        state: 'stopped', question: false, name: 'demo-orchestrator', session_id: 'session_x',
+      }, agents: [], open_tasks: 0,
+    }],
+    tasks: [], dialogs: {}, decisions: [], questions: [], updatedAt: Date.now(), error: '', workTree: undefined,
+  });
+}
+
+async function selectProject(name: string): Promise<void> {
+  if (!await cdp.evaluate(`document.querySelector('[data-project-name=${JSON.stringify(name)}]') !== null`)) {
+    await click('[data-sidebar="trigger"]');
+  }
+  await cdp.waitFor(`document.querySelector('[data-project-name=${JSON.stringify(name)}]') !== null`);
+  await cdp.evaluate(`(() => {
+    const button = document.querySelector('[data-project-name=${JSON.stringify(name)}]');
+    if (!button) throw new Error('missing project ${name}');
+    button.setAttribute('data-browser-project', ${JSON.stringify(name)});
+  })()`);
+  await cdp.waitFor(`(() => {
+    const element = document.querySelector('[data-browser-project=${JSON.stringify(name)}]');
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return hit === element || element.contains(hit);
+  })()`);
+  await click(`[data-browser-project=${JSON.stringify(name)}]`);
+  await cdp.evaluate(`document.querySelector('[data-browser-project]')?.removeAttribute('data-browser-project')`);
+}
+
+async function selectHome(): Promise<void> {
+  if (!await cdp.evaluate(`[...document.querySelectorAll('a')].some((candidate) => candidate.textContent === 'Needs you')`)) {
+    await click('[data-sidebar="trigger"]');
+  }
+  await cdp.evaluate(`(() => {
+    const link = [...document.querySelectorAll('a')].find((candidate) => candidate.textContent === 'Needs you');
+    if (!link) throw new Error('missing Needs you link');
+    link.setAttribute('data-browser-home', 'true');
+  })()`);
+  await cdp.waitFor(`(() => {
+    const element = document.querySelector('[data-browser-home="true"]');
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return hit === element || element.contains(hit);
+  })()`);
+  await click('[data-browser-home="true"]');
+  await cdp.evaluate(`document.querySelector('[data-browser-home]')?.removeAttribute('data-browser-home')`);
+}
+
+async function drag(selector: string, dx: number, dy: number): Promise<void> {
+  const point = await cdp.evaluate(`(() => {
+    const rect = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`) as { x: number; y: number };
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x + dx / 2, y: point.y + dy / 2, button: 'left', buttons: 1 });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x + dx, y: point.y + dy, button: 'left', buttons: 1 });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x + dx, y: point.y + dy, button: 'left', clickCount: 1 });
+}
+
+describe('real Chrome dashboard E2E', () => {
+  it('supports operator journeys and captures responsive layouts', async () => {
+    installDashboardFixture();
+    submissions = [];
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await cdp.call('Page.navigate', { url: origin });
+    await cdp.waitFor(`document.querySelector('[data-testid="needs-home"]')`);
+    expect(await cdp.evaluate(`(() => {
+      const summary = [...document.querySelectorAll('[data-testid="activity-scroll"] span')]
+        .find((span) => span.textContent === 'Reviewed checkpoint 1 and kept the existing action contract.');
+      return summary !== undefined && getComputedStyle(summary).whiteSpace === 'pre-wrap';
+    })()`)).toBe(true);
+    expect(await cdp.evaluate(`document.querySelector('[data-plan-summary]') !== null`)).toBe(true);
+    expect(await cdp.evaluate(`document.querySelector('[data-plan-disclosure]').open`)).toBe(false);
+    expect(await cdp.evaluate(`document.querySelector('[data-plan-summary]').compareDocumentPosition(document.querySelector('#plan-approve-alpha-1')) & Node.DOCUMENT_POSITION_FOLLOWING`)).toBeTruthy();
+    expect(await cdp.evaluate(`document.querySelector('#plan-approve-alpha-1').compareDocumentPosition(document.querySelector('[data-plan-disclosure]')) & Node.DOCUMENT_POSITION_FOLLOWING`)).toBeTruthy();
+
+    await clickButton('questions');
+    await cdp.waitFor(`[...document.querySelectorAll('button')].some((button) => button.textContent.startsWith('Option A'))`);
+    await captureViewport(1440, 900, 'DASHBOARD-questions');
+    await clickButton('Option A — close the old scan.');
+    await cdp.waitFor(`window.__fetchTrace.some((entry) => entry[0] === '/api/message')`);
+    await clickButton('stale');
+    await cdp.waitFor(`document.querySelector('[data-testid="stale-cleanup"]')`);
+    await captureViewport(1440, 900, 'DASHBOARD-stale-cleanup');
+    await clickButton('Archive stale');
+    await clickButton('Archive 1 stale item?');
+    await cdp.waitFor(`window.__fetchTrace.some((entry) => entry[0] === '/api/tasks-archive')`);
+    await clickButton('all');
+    await cdp.waitFor(`document.querySelector('[data-plan-summary]')`);
+
+    await selectProject('beta');
+    await cdp.waitFor(`document.querySelector('[data-testid="project-card-beta"]')`);
+    expect(await cdp.evaluate(`document.querySelector('[data-project-name="beta"]').getAttribute('data-active')`)).toBe('true');
+    await selectProject('alpha');
+    await cdp.waitFor(`document.querySelector('[data-testid="project-card-alpha"]')`);
+
+    await clickButton('Add project');
+    await cdp.waitFor(`document.querySelector('#new-project-name')`);
+    await cdp.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await captureViewport(1440, 900, 'PROJECT-add-dialog');
+    const formWidth = await cdp.evaluate(`(() => {
+      const form = document.querySelector('[data-testid="add-project-form"]').getBoundingClientRect();
+      const input = document.querySelector('#new-project-name').getBoundingClientRect();
+      return { form: form.width, input: input.width, padding: input.left - form.left };
+    })()`) as { form: number; input: number; padding: number };
+    expect(formWidth.input).toBe(formWidth.form);
+    expect(formWidth.padding).toBe(0);
+    await fill('#new-project-name', 'browser-project');
+    await cdp.evaluate(`(() => {
+      const select = document.querySelector('#new-project-source');
+      select.value = '/r/beta';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    expect(await cdp.evaluate(`document.querySelector('#new-project-source').value`)).toBe('/r/beta');
+    await clickButton('Add project');
+    await cdp.waitFor(`document.querySelector('[data-testid="project-card-browser-project"]')`);
+    expect(await cdp.evaluate('window.location.pathname')).toBe('/projects/browser-project');
+    await cdp.evaluate(`[...document.querySelectorAll('button')].filter((button) => button.textContent === 'Add project').at(-1).click()`);
+    await cdp.waitFor(`document.querySelector('#new-project-path')`);
+    await fill('#new-project-path', '/tmp/browser-project');
+    await cdp.waitFor(`document.querySelector('#new-project-source') === null`);
+    await cdp.evaluate(`(() => {
+      const input = document.querySelector('#new-project-path');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await cdp.waitFor(`document.querySelector('#new-project-source') !== null`);
+
+    await selectProject('alpha');
+    expect(await cdp.evaluate(`document.querySelectorAll('[data-testid="task-inventory"] [data-task-id]').length`)).toBe(4);
+    expect(await cdp.evaluate(`document.body.innerText.includes('Permissions ask · Approvals manual')`)).toBe(true);
+    await fill('input[aria-label="Search tasks for alpha"]', 'alpha-2');
+    await cdp.waitFor(`document.querySelectorAll('[data-testid="task-inventory"] [data-task-id]').length === 1`);
+    await cdp.evaluate(`(() => {
+      const input = document.querySelector('input[aria-label="Search tasks for alpha"]');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await cdp.waitFor(`document.querySelectorAll('[data-testid="task-inventory"] [data-task-id]').length === 4`);
+    await click('[data-task-id="alpha-2"]');
+    await cdp.waitFor(`document.querySelector('[data-testid="task-view-alpha-2"]')`);
+    expect(await cdp.evaluate('window.location.pathname')).toBe('/projects/alpha/tasks/alpha-2');
+    await clickButton('Back');
+    await cdp.waitFor(`document.querySelector('[data-testid="task-inventory"]')`);
+    await fill('textarea[aria-label="new task for alpha"]', 'Verify the durable task result');
+    await clickButton('Start task');
+    await cdp.waitFor(`document.querySelector('[data-testid="task-view-alpha-99"]')`);
+    expect(await cdp.evaluate('window.location.pathname')).toBe('/projects/alpha/tasks/alpha-99');
+    expect(await cdp.evaluate(`document.querySelector('[data-testid="task-view-alpha-99"]').textContent.includes('Verify the durable task result')`)).toBe(true);
+    expect(await cdp.evaluate(`document.querySelector('[data-testid="task-delivery-state"]').textContent.includes('Delivery state')`)).toBe(true);
+    await clickButton('Copy link');
+    await cdp.waitFor(`document.querySelector('[data-testid="task-view-alpha-99"]').textContent.match(/Link copied|Copy the URL/)`);
+    await clickButton('Back');
+    await cdp.waitFor(`document.querySelector('[data-task-id="alpha-99"]')`);
+
+    await clickButton('team');
+    await cdp.waitFor(`document.querySelector('[data-testid="team-map"]')`);
+    const beforeNode = await cdp.evaluate(`document.querySelector('.react-flow__node').style.transform`);
+    await drag('.react-flow__node', 40, 20);
+    const afterNode = await cdp.evaluate(`document.querySelector('.react-flow__node').style.transform`);
+    expect(afterNode).not.toBe(beforeNode);
+    await clickButton('refresh');
+    expect(await cdp.evaluate(`document.querySelector('.react-flow__node').style.transform`)).toBe(afterNode);
+    await drag('[data-testid="workspace-divider"]', -64, 0);
+    await cdp.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
+    expect(await cdp.evaluate(`(() => {
+      const canvas = document.querySelector('[data-testid="team-map"]').getBoundingClientRect();
+      return [...document.querySelectorAll('.react-flow__node')].every((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.left >= canvas.left - 1 && rect.right <= canvas.right + 1;
+      });
+    })()`)).toBe(true);
+    await clickButton('tasks');
+    await cdp.evaluate(`document.querySelector('#logs-alpha').click()`);
+    await cdp.waitFor(`document.body.innerText.includes('no thinking recorded yet')`);
+    expect(await cdp.evaluate('window.location.pathname')).toBe('/projects/alpha/logs');
+    await cdp.evaluate('window.history.back()');
+    await cdp.waitFor(`document.querySelector('[data-testid="task-inventory"]')`);
+    await cdp.evaluate(`document.querySelector('#branches-alpha').click()`);
+    await cdp.waitFor(`document.body.innerText.includes('Review the transport boundary')`);
+    await clickButton('Review the transport boundary', true);
+    await cdp.waitFor(`window.location.pathname.includes('/branches/${BRANCH_ID}')`);
+    await cdp.evaluate('window.history.back()');
+    await cdp.waitFor(`window.location.pathname.endsWith('/branches')`);
+    await cdp.evaluate('window.history.back()');
+    await cdp.waitFor(`document.querySelector('[data-testid="task-inventory"]')`);
+
+    await selectHome();
+    await clickButton('Questions 1');
+    await cdp.waitFor(`document.querySelector('#questions-back')`);
+    expect(await cdp.evaluate('window.location.pathname')).toBe('/questions');
+    await clickButton('back');
+    await cdp.waitFor(`document.querySelector('[data-testid="needs-home"]')`);
+    await cdp.evaluate(`(() => {
+      window.__nexusClicks = 0;
+      document.querySelector('header a[href="/"]').addEventListener('click', (event) => {
+        window.__nexusClicks += 1;
+        event.preventDefault();
+      }, { once: true });
+    })()`);
+    await click('header a[href="/"]');
+    expect(await cdp.evaluate('window.__nexusClicks')).toBe(1);
+
+    Object.assign(VIEW, { error: 'relay offline' });
+    await clickButton('refresh');
+    await cdp.waitFor(`document.body.innerText.includes('Refresh failed')`);
+    expect(await cdp.evaluate(`document.querySelector('[aria-label="Stale data"]') !== null`)).toBe(true);
+    expect(await cdp.evaluate(`document.querySelector('[aria-label="Live data"]') === null`)).toBe(true);
+    expect(await cdp.evaluate(`document.body.innerText.includes('Showing data from')`)).toBe(true);
+    Object.assign(VIEW, { error: '' });
+    await clickButton('Retry');
+    await cdp.waitFor(`document.querySelector('[aria-label="Live data"]')`);
+
+    const beforePointer = await cdp.evaluate(`document.querySelectorAll('[data-slot="resizable-panel"]')[0].getBoundingClientRect().width`) as number;
+    await drag('[data-testid="workspace-divider"]', 64, 0);
+    const afterPointer = await cdp.evaluate(`document.querySelectorAll('[data-slot="resizable-panel"]')[0].getBoundingClientRect().width`) as number;
+    expect(afterPointer).toBeGreaterThan(beforePointer + 20);
+    await cdp.evaluate(`document.querySelector('[data-testid="workspace-divider"]').focus()`);
+    await press('ArrowLeft');
+    const afterKeyboard = await cdp.evaluate(`document.querySelectorAll('[data-slot="resizable-panel"]')[0].getBoundingClientRect().width`) as number;
+    expect(afterKeyboard).toBeLessThan(afterPointer);
+    const scrolling = await cdp.evaluate(`(() => {
+      const viewport = document.querySelector('[data-testid="project-scroll"] [data-slot="scroll-area-viewport"]');
+      const canScroll = viewport.scrollHeight > viewport.clientHeight;
+      viewport.scrollTop = 120;
+      return { canScroll, top: viewport.scrollTop, documentTop: window.scrollY };
+    })()`) as { canScroll: boolean; top: number; documentTop: number };
+    expect(scrolling.canScroll).toBe(true);
+    expect(scrolling.top).toBeGreaterThan(0);
+    expect(scrolling.documentTop).toBe(0);
+
+    Object.assign(VIEW, { updatedAt: 0, error: '' });
+    await cdp.call('Page.reload', { ignoreCache: true });
+    await cdp.waitFor(`document.querySelector('[data-testid="hive-loading-shell"]')`);
+    await captureViewport(1280, 800, 'DASHBOARD-loading');
+    Object.assign(VIEW, { updatedAt: 0, error: 'connection refused' });
+    await cdp.call('Page.reload', { ignoreCache: true });
+    await cdp.waitFor(`document.querySelector('[data-testid="hive-error-shell"]')`);
+    expect(await cdp.evaluate(`document.body.innerText.includes('Reading projects…')`)).toBe(false);
+    await captureViewport(1280, 800, 'DASHBOARD-initial-error');
+    installDashboardFixture();
+    await clickButton('Retry');
+    await cdp.waitFor(`document.querySelector('[data-testid="needs-home"]')`);
+
+    installDashboardFixture();
+    for (const [width, height] of [[1600, 900], [1440, 900], [1280, 800], [1024, 768], [900, 900], [768, 1024], [390, 844]]) {
+      await cdp.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+      await cdp.call('Page.reload', { ignoreCache: true });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await cdp.waitFor(`document.querySelector('[data-testid="needs-home"]')`);
+      await captureViewport(width, height, 'DASHBOARD');
+      if (width >= 900) {
+        const expectedDirection = width >= 1024 ? 'row' : 'column';
+        await cdp.waitFor(`getComputedStyle(document.querySelector('[data-slot="resizable-panel-group"]')).flexDirection === '${expectedDirection}'`);
+        expect(await cdp.evaluate(`document.querySelector('[data-testid="workspace-divider"]').getBoundingClientRect().width > 0`)).toBe(true);
+      } else {
+        await cdp.waitFor(`document.querySelector('[data-testid="mobile-workspace-tabs"]')`);
+      }
+      expect(await cdp.evaluate('document.documentElement.scrollWidth <= window.innerWidth && document.body.scrollWidth <= window.innerWidth')).toBe(true);
+      expect(await cdp.evaluate(`[...document.querySelectorAll('[data-slot="scroll-area-viewport"]')].filter((viewport) => viewport.clientWidth > 0).every((viewport) => viewport.scrollWidth <= viewport.clientWidth)`)).toBe(true);
+      expect(await cdp.evaluate(`document.querySelector('#plan-approve-alpha-1').getBoundingClientRect().height > 0`)).toBe(true);
+      expect(await cdp.evaluate(`document.querySelector('#plan-approve-alpha-1').getBoundingClientRect().bottom <= window.innerHeight`)).toBe(true);
+      expect(await cdp.evaluate(`document.querySelector('[data-plan-disclosure]').open`)).toBe(false);
+    }
+
+    await click('[data-sidebar="trigger"]');
+    await cdp.waitFor(`document.querySelector('[data-mobile="true"]')`);
+    expect(await cdp.evaluate(`document.querySelector('[data-mobile="true"]').contains(document.activeElement)`)).toBe(true);
+    for (let index = 0; index < 8; index += 1) await press('Tab');
+    expect(await cdp.evaluate(`document.querySelector('[data-mobile="true"]').contains(document.activeElement)`)).toBe(true);
+    await press('Escape');
+    await cdp.waitFor(`document.querySelector('[data-mobile="true"]') === null`);
+    expect(await cdp.evaluate(`document.activeElement?.getAttribute('data-sidebar')`)).toBe('trigger');
+    await click('[data-sidebar="trigger"]');
+    await cdp.waitFor(`document.querySelector('[data-mobile="true"]')`);
+    await selectProject('beta');
+    await cdp.waitFor(`document.querySelector('[data-mobile="true"]') === null`);
+    await cdp.waitFor(`document.querySelector('[data-testid="project-card-beta"]')`);
+    await click('[data-sidebar="trigger"]');
+    await selectHome();
+    await cdp.waitFor(`document.querySelector('[data-mobile="true"]') === null`);
+    await captureViewport(390, 844, 'DASHBOARD-final');
+
+    const mobileActions = await cdp.evaluate(`[...document.querySelectorAll('header a, header button')].map((element) => {
+      const rect = element.getBoundingClientRect();
+      return { text: element.textContent, height: rect.height, left: rect.left, right: rect.right };
+    })`) as { text: string; height: number; left: number; right: number }[];
+    for (const text of ['Nexus', 'refresh', 'Questions 1']) expect(mobileActions.some((action) => action.text === text)).toBe(true);
+    for (const action of mobileActions) {
+      expect(action.height).toBeGreaterThanOrEqual(40);
+      expect(action.left).toBeGreaterThanOrEqual(0);
+      expect(action.right).toBeLessThanOrEqual(390);
+    }
+
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await selectProject('alpha');
+    await cdp.waitFor(`document.querySelector('[data-mobile="true"]') === null`);
+    await cdp.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
+    await captureViewport(1280, 800, 'PROJECT-tasks');
+    await click('[data-task-id="alpha-1"]');
+    await captureViewport(1280, 800, 'TASK-plan');
+    await click('summary');
+    await captureViewport(1280, 800, 'TASK-plan-expanded');
+    await clickButton('Back');
+    await clickButton('team');
+    await captureViewport(1280, 800, 'PROJECT-team');
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+    await cdp.call('Page.reload', { ignoreCache: true });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await cdp.waitFor(`document.querySelector('[data-testid="team-map"]')`);
+    await captureViewport(390, 844, 'PROJECT-team');
+
+    resetDashboardFixture();
+    submissions = [];
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await cdp.call('Page.navigate', { url: origin });
+    await cdp.waitFor(`document.querySelector('[data-testid="needs-home"]')`);
+    await selectProject('demo');
+    await cdp.waitFor(`document.querySelector('textarea[aria-label="new task for demo"]')`);
+  }, 120_000);
+});
+
 describe('real Chrome dictation E2E', () => {
   it('uses real loopback HTTP, stops tracks, inserts for review, and never submits', async () => {
     await click('button[aria-label="Start dictation for new task for demo"]');
@@ -533,7 +982,7 @@ describe('real Chrome dictation E2E', () => {
     await cdp.waitFor(`document.querySelector('[data-dictation-state="recording"]')`);
     await click('button[aria-label="Stop dictation for new task for demo"]');
     await cdp.waitFor(`document.querySelector('[data-dictation-state="success"]')`);
-    expect(await cdp.evaluate(`document.querySelector('input[aria-label="new task for demo"]').value`)).toBe(TRANSCRIPT);
+    expect(await cdp.evaluate(`document.querySelector('textarea[aria-label="new task for demo"]').value`)).toBe(TRANSCRIPT);
     expect(await cdp.evaluate('window.__trackStops')).toBe(1);
     expect(submissions).toEqual([]);
 
@@ -542,7 +991,7 @@ describe('real Chrome dictation E2E', () => {
     await click('button[aria-label="Cancel dictation for new task for demo"]');
     await cdp.waitFor(`document.querySelector('[data-dictation-state="cancelled"]')`);
     expect(await cdp.evaluate('window.__trackStops')).toBe(2);
-    expect(await cdp.evaluate(`document.querySelector('input[aria-label="new task for demo"]').value`)).toBe(TRANSCRIPT);
+    expect(await cdp.evaluate(`document.querySelector('textarea[aria-label="new task for demo"]').value`)).toBe(TRANSCRIPT);
     expect(submissions).toEqual([]);
   }, 30_000);
 });
@@ -715,13 +1164,18 @@ describe('real Chrome work tree E2E', () => {
     });
     Object.assign(VIEW, { questions: open });
     await clickButton('refresh');
+    if (await cdp.evaluate(`document.querySelector('[data-testid="mobile-workspace-tabs"]') !== null`)) {
+      await clickButton('Activity');
+    }
     await cdp.waitFor(`document.body.innerText.includes('Approve a new root contract for demo-1?')`);
     expect(await cdp.evaluate(`[...document.querySelectorAll('button')].filter((button) => button.textContent === 'Questions 1').length`)).toBe(1);
     expect(await cdp.evaluate(`[...document.querySelectorAll('button')].filter((button) => button.textContent === 'Submit').length`)).toBe(1);
     expect(await cdp.evaluate(`document.body.innerText.includes('child delta')`)).toBe(false);
     await captureViewport(1280, 900, 'PROCESS_TREE_MONITOR-production-root-delta-desktop');
     await captureViewport(390, 844, 'PROCESS_TREE_MONITOR-production-root-delta-narrow');
-
+    if (await cdp.evaluate(`document.querySelector('[data-testid="mobile-workspace-tabs"]') !== null`)) {
+      await clickButton('Activity');
+    }
     await click(`input[value="c2"]`);
     await clickButton('Submit');
     await cdp.waitFor(`![...document.querySelectorAll('button')].some((button) => button.textContent.startsWith('Questions'))`);
@@ -735,6 +1189,9 @@ describe('real Chrome work tree E2E', () => {
     expect(await listOpenQuestionBatches(root)).toEqual([]);
     deltaRoot = null;
     installTree([]);
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await selectProject('demo');
+    await cdp.waitFor(`document.querySelector('[data-testid="task-inventory"], [data-testid="empty-tasks"]')`);
   }, 60_000);
 });
 

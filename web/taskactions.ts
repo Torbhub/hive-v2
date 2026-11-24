@@ -1,6 +1,7 @@
 import {
-  Refusal, hubLog, hubProgress, hubResolve, recordHumanAcceptance, recordTaskEvidence, recordTaskOutcome, recordTaskReceipt,
+  Refusal, hubLog, hubProgress, hubResolve, listTasks, recordHumanAcceptance, recordTaskEvidence, recordTaskOutcome, recordTaskReceipt,
 } from '../src/hub.js';
+import { staleTask } from '../src/ui/look.js';
 import type { TaskRevalidate } from '../src/taskgate.js';
 import type { Principal } from '../src/security.js';
 import type { Checkpoint, RootContract, TaskEvidenceOutcome, TaskOutcome, TaskReceipt } from '../src/types.js';
@@ -29,6 +30,33 @@ async function taskResolve(
   }
   await hubResolve(root, project, taskId, action, brief, revalidate);
   return { ok: true };
+}
+
+async function taskArchive(
+  root: string,
+  project: string,
+  body: Record<string, unknown>,
+  revalidate?: TaskRevalidate,
+): Promise<{ ok: true; archived: string[] }> {
+  const raw = body.tasks;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 20 || raw.some((id) => typeof id !== 'string' || !id.trim())) {
+    throw new Refusal('archive needs 1 to 20 task IDs');
+  }
+  const ids = [...new Set(raw as string[])];
+  const verify = async (id: string) => {
+    const task = (await listTasks(root)).find((candidate) => candidate.id === id && candidate.project === project);
+    if (!task || !task.needs_owner || !staleTask(task, Date.now())) {
+      throw new Refusal(`${id} is not a current stale owner decision`);
+    }
+  };
+  for (const id of ids) await verify(id);
+  for (const id of ids) {
+    await hubResolve(root, project, id, 'cancel', 'archived stale owner decision', async () => {
+      await revalidate?.();
+      await verify(id);
+    });
+  }
+  return { ok: true, archived: ids };
 }
 
 async function taskPlan(
@@ -139,6 +167,7 @@ export async function handleTaskAction(
   revalidateReconciler?: TaskRevalidate,
 ): Promise<unknown | null> {
   if (pathname === '/api/task-resolve') return taskResolve(root, project, body, revalidate);
+  if (pathname === '/api/tasks-archive') return taskArchive(root, project, body, revalidate);
   if (pathname === '/api/task-plan') return taskPlan(root, project, body, revalidate);
   if (pathname === '/api/progress') return recordProgress(root, project, body, revalidate);
   if (pathname === '/api/task-receipt') {
